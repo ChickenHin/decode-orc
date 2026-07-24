@@ -96,6 +96,39 @@ DropoutAnalysisSinkStage::get_parameter_descriptors(
                                                true,
                                                std::nullopt}});
 
+  descriptors.push_back(ParameterDescriptor{
+      "write_report", "Write Dropout Report",
+      "Enable writing a per-dropout detail report (one entry per dropout run) "
+      "at trigger time.",
+      ParameterType::BOOL,
+      ParameterConstraints{std::nullopt,
+                           std::nullopt,
+                           ParameterValue(false),
+                           {},
+                           false,
+                           std::nullopt}});
+
+  descriptors.push_back(ParameterDescriptor{
+      "report_path", "Report Output Path",
+      "Destination file for the per-dropout detail report. Leave empty to skip "
+      "report output.",
+      ParameterType::FILE_PATH,
+      ParameterConstraints{
+          std::nullopt, std::nullopt, std::string(""), {}, false, std::nullopt},
+      ".csv"});
+
+  descriptors.push_back(ParameterDescriptor{
+      "report_format", "Report Format",
+      "Format of the per-dropout detail report: machine-readable CSV or "
+      "human-readable text grouped by frame.",
+      ParameterType::STRING,
+      ParameterConstraints{std::nullopt,
+                           std::nullopt,
+                           std::string("csv"),
+                           {"csv", "text"},
+                           true,
+                           std::nullopt}});
+
   return descriptors;
 }
 
@@ -142,6 +175,26 @@ DropoutAnalysisSinkStage::ParsedConfig DropoutAnalysisSinkStage::parse_config(
                    : DropoutAnalysisMode::FULL_FIELD;
   }
 
+  auto report_it = parameters.find("write_report");
+  if (report_it != parameters.end() &&
+      std::holds_alternative<bool>(report_it->second)) {
+    cfg.write_report = std::get<bool>(report_it->second);
+  }
+
+  auto report_path_it = parameters.find("report_path");
+  if (report_path_it != parameters.end() &&
+      std::holds_alternative<std::string>(report_path_it->second)) {
+    cfg.report_path = std::get<std::string>(report_path_it->second);
+  }
+
+  auto format_it = parameters.find("report_format");
+  if (format_it != parameters.end() &&
+      std::holds_alternative<std::string>(format_it->second)) {
+    cfg.report_format = (std::get<std::string>(format_it->second) == "text")
+                            ? DropoutReportFormat::TEXT
+                            : DropoutReportFormat::CSV;
+  }
+
   return cfg;
 }
 
@@ -179,6 +232,10 @@ bool DropoutAnalysisSinkStage::trigger(
     compute_options.output_path = cfg.output_path;
     compute_options.write_csv = cfg.write_csv;
     compute_options.mode = cfg.mode;
+    // Only pay the per-run detail collection cost when a report will be
+    // written.
+    compute_options.collect_detail =
+        cfg.write_report && !cfg.report_path.empty();
 
     const DropoutAnalysisComputeResult result = deps->compute_and_analyze(
         vfr.get(), observation_context, compute_options);
@@ -203,6 +260,15 @@ bool DropoutAnalysisSinkStage::trigger(
       if (!deps->write_csv(cfg.output_path, frame_stats_)) {
         ORC_LOG_WARN("DropoutAnalysisSink: Failed to write CSV to {}",
                      cfg.output_path);
+      }
+    }
+
+    if (compute_options.collect_detail) {
+      if (!deps->write_report(cfg.report_path, result.detail_records,
+                              cfg.report_format)) {
+        ORC_LOG_WARN(
+            "DropoutAnalysisSink: Failed to write dropout report to {}",
+            cfg.report_path);
       }
     }
 

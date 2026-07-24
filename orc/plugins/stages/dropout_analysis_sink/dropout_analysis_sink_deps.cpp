@@ -32,7 +32,10 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
   (void)observation_context;
 
   if (!representation) {
-    return {false, "Input representation is null", {}, 0};
+    DropoutAnalysisComputeResult err;
+    err.success = false;
+    err.message = "Input representation is null";
+    return err;
   }
 
   DropoutAnalysisComputeResult result;
@@ -87,13 +90,15 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
     for (const auto& run : runs) {
       bool include = true;
 
-      if (options.mode == DropoutAnalysisMode::VISIBLE_AREA) {
-        // Approximate frame-flat line of this run's start position.
-        const int32_t approx_line = static_cast<int32_t>(
-            run.sample_start / static_cast<uint64_t>(nominal_spl));
-        const int32_t approx_sample = static_cast<int32_t>(
-            run.sample_start % static_cast<uint64_t>(nominal_spl));
+      // Approximate frame-flat line/sample of this run's start position using
+      // the recording's nominal samples-per-line. Used both for visible-area
+      // filtering and for per-dropout detail records.
+      const int32_t approx_line = static_cast<int32_t>(
+          run.sample_start / static_cast<uint64_t>(nominal_spl));
+      const int32_t approx_sample = static_cast<int32_t>(
+          run.sample_start % static_cast<uint64_t>(nominal_spl));
 
+      if (options.mode == DropoutAnalysisMode::VISIBLE_AREA) {
         // Filter by active frame line range.
         if (video_params && video_params->first_active_frame_line >= 0 &&
             video_params->last_active_frame_line >= 0) {
@@ -116,13 +121,12 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
 
       if (include) {
         uint64_t length = run.sample_count;
+        int32_t rec_sample_start = approx_sample;
 
         // Clamp to active_video_start / active_video_end within the line.
         if (options.mode == DropoutAnalysisMode::VISIBLE_AREA && video_params &&
             video_params->active_video_start >= 0 &&
             video_params->active_video_end >= 0) {
-          const int32_t approx_sample = static_cast<int32_t>(
-              run.sample_start % static_cast<uint64_t>(nominal_spl));
           const int32_t clamped_start =
               std::max(approx_sample, video_params->active_video_start);
           const int32_t clamped_end =
@@ -130,10 +134,24 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
                        video_params->active_video_end);
           length =
               static_cast<uint64_t>(std::max(0, clamped_end - clamped_start));
+          rec_sample_start = clamped_start;
         }
 
         frame_dropout_length += static_cast<int64_t>(length);
         frame_dropout_count++;
+
+        // Per-dropout detail record (full-resolution, independent of graph
+        // decimation). sample_end is inclusive; a zero-length clamp emits no
+        // record.
+        if (options.collect_detail && length > 0) {
+          DropoutDetailRecord rec;
+          rec.frame_number = frame_num;
+          rec.line_number = approx_line;
+          rec.sample_start = rec_sample_start;
+          rec.sample_end = rec_sample_start + static_cast<int32_t>(length) - 1;
+          rec.length_samples = static_cast<int64_t>(length);
+          result.detail_records.push_back(rec);
+        }
       }
     }
 
@@ -188,6 +206,78 @@ bool DropoutAnalysisSinkStageDeps::write_csv(
 
   logger_.debug("DropoutAnalysisSinkDeps: Wrote {} rows to: {}",
                 frame_stats.size(), path);
+  return true;
+}
+
+void DropoutAnalysisSinkStageDeps::write_report_csv(
+    std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records) {
+  // One row per dropout run. Coordinates are frame-flat 0-based line and
+  // sample-within-line; sample_end is inclusive; units live in the header.
+  os << "frame_number,line_number,sample_start,sample_end,length_samples\n";
+  for (const auto& rec : detail_records) {
+    os << rec.frame_number << ',' << rec.line_number << ',' << rec.sample_start
+       << ',' << rec.sample_end << ',' << rec.length_samples << '\n';
+  }
+}
+
+void DropoutAnalysisSinkStageDeps::write_report_text(
+    std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records) {
+  // Human-readable, grouped by frame. Records are captured in frame order, so a
+  // single pass groups consecutive records sharing a frame_number. Each group
+  // opens with a heading (dropout count + total length) and lists every run's
+  // line/sample extent — the "map of where they are in the frame" from #214.
+  size_t i = 0;
+  while (i < detail_records.size()) {
+    const int32_t frame = detail_records[i].frame_number;
+    size_t j = i;
+    int64_t total_length = 0;
+    while (j < detail_records.size() &&
+           detail_records[j].frame_number == frame) {
+      total_length += detail_records[j].length_samples;
+      ++j;
+    }
+    const size_t count = j - i;
+
+    os << "Frame " << frame << ": " << count << " dropout"
+       << (count == 1 ? "" : "s") << ", " << total_length << " samples total\n";
+    for (size_t k = i; k < j; ++k) {
+      const auto& rec = detail_records[k];
+      os << "  line " << rec.line_number << ", samples " << rec.sample_start
+         << "-" << rec.sample_end << " (" << rec.length_samples
+         << " samples)\n";
+    }
+    i = j;
+  }
+}
+
+bool DropoutAnalysisSinkStageDeps::write_report(
+    const std::string& path,
+    const std::vector<DropoutDetailRecord>& detail_records,
+    DropoutReportFormat format) {
+  if (detail_records.empty()) {
+    logger_.warn("DropoutAnalysisSinkDeps: No dropout detail to report");
+    return false;
+  }
+
+  logger_.debug("DropoutAnalysisSinkDeps: Writing dropout report to: {}", path);
+
+  std::ofstream report(path, std::ios::out | std::ios::trunc);
+  if (!report.is_open()) {
+    logger_.error("DropoutAnalysisSinkDeps: Failed to open file: {}", path);
+    return false;
+  }
+
+  switch (format) {
+    case DropoutReportFormat::TEXT:
+      write_report_text(report, detail_records);
+      break;
+    case DropoutReportFormat::CSV:
+      write_report_csv(report, detail_records);
+      break;
+  }
+
+  logger_.debug("DropoutAnalysisSinkDeps: Wrote {} dropout detail rows to: {}",
+                detail_records.size(), path);
   return true;
 }
 

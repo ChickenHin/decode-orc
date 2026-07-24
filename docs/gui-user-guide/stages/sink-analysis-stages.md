@@ -93,10 +93,23 @@ It does **not** perform dropout detection or correction itself.
     - Enable writing results to CSV at trigger time.
 * `mode` (choice: `full`, `visible`, default `full`)
     - `full` counts dropouts across the whole field; `visible` restricts the count to the active picture area.
+* `write_report` (bool)
+    - Enable writing a per-dropout detail report at trigger time (one entry per dropout run).
+* `report_path` (file path)
+    - Destination file for the detail report. Leave empty to skip report output.
+* `report_format` (choice: `csv`, `text`, default `csv`)
+    - `csv` writes one row per dropout run; `text` writes a human-readable report grouped by frame.
 
 **CSV columns**
 
 `frame_number, dropout_count, dropout_length_samples` — one row for **every** frame (the sink analyses every frame). A zero row means the frame was analysed and had no dropouts; an absent frame number means the frame was not analysed.
+
+**Per-dropout detail report**
+
+Separate from the per-frame CSV, the detail report records *where* each individual dropout sits within its frame. It is written only when `write_report` is enabled with a `report_path`, is always full-resolution (never decimated), and honours the same `mode`. Coordinates are frame-flat: `line_number` is a 0-based line within the frame and `sample_start` / `sample_end` are 0-based, inclusive sample indices within that line, derived from the nominal samples-per-line (PAL 1135, NTSC 910). Unlike the per-frame CSV, **frames with no dropouts do not appear**.
+
+* `csv` — one row per run: `frame_number, line_number, sample_start, sample_end, length_samples`.
+* `text` — grouped by frame, e.g. `Frame 1: 2 dropouts, 50 samples total` followed by one indented `line N, samples A-B (L samples)` line per run.
 
 **Stage tools**
 

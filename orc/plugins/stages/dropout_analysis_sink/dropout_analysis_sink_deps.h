@@ -41,6 +41,20 @@ class DropoutAnalysisSinkStageDeps : public IDropoutAnalysisSinkStageDeps {
   void write_csv(std::ostream& os,
                  const std::vector<FrameDropoutStats>& frame_stats);
 
+  bool write_report(const std::string& path,
+                    const std::vector<DropoutDetailRecord>& detail_records,
+                    DropoutReportFormat format) override;
+
+  // Filesystem-free per-dropout report formatters. CSV emits one row per run
+  // (frame_number,line_number,sample_start,sample_end,length_samples); TEXT is
+  // human-readable, grouped by frame. Frames with no dropouts never appear.
+  // Not part of the deps interface so they can be unit-tested directly against
+  // an std::ostringstream.
+  void write_report_csv(std::ostream& os,
+                        const std::vector<DropoutDetailRecord>& detail_records);
+  void write_report_text(
+      std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records);
+
  private:
   class SpdlogLoggerAdapter {
    public:
