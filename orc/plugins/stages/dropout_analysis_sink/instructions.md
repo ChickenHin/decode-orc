@@ -49,6 +49,18 @@ frame_number,dropout_count,dropout_length_samples
 3,1,20
 ```
 
+## Where the analysis reads its data
+
+The analysis reports the dropout state **at this sink's input** — the dropout
+hints visible on the representation connected to it. To include edits made in
+the **Dropout Map** stage (added or removed dropout regions), connect this sink
+**downstream of the `dropout_map` stage**. A sink wired upstream of, or on a
+branch that bypasses, `dropout_map` sees only the original sidecar hints.
+
+Editing the dropout map and re-triggering the sink re-analyses from scratch, so
+the graph and CSV always reflect the latest map edits — they never show
+pre-edit data after a re-trigger.
+
 ## Tools
 
 ### Dropout Analysis

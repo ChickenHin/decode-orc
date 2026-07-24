@@ -18,8 +18,10 @@
 #include <vector>
 
 #include "../../../../orc/plugins/stages/dropout_analysis_sink/dropout_analysis_sink_deps_interface.h"
+#include "../../../../orc/plugins/stages/dropout_map/dropout_map_stage.h"
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
+#include "../../mocks/mock_video_frame_representation.h"
 
 namespace orc_unit_test {
 using testing::_;
@@ -197,6 +199,62 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
   EXPECT_TRUE(stage.has_results());
   EXPECT_EQ(stage.total_frames(), 8);
   EXPECT_FALSE(stage.is_trigger_in_progress());
+}
+
+// Freshness after a dropout_map edit (issue #216, plan Phase 3 Task 3.3): the
+// sink re-analyses its input on every trigger, so a "trigger → edit map →
+// trigger" sequence must yield updated stats and never leak pre-edit data.
+// The map edit is modelled by swapping the input
+// DropoutMappedFrameRepresentation (which is what the DAG rebuilds when the
+// dropout_map parameter changes).
+TEST(DropoutAnalysisSinkStageTest, Trigger_ReflectsMapEditOnRetrigger) {
+  // NTSC source with one sidecar dropout run: line 10, samples 100-200 →
+  // flat start 9200, count 101.
+  auto source = std::make_shared<NiceMock<MockVideoFrameRepresentation>>();
+  ON_CALL(*source, frame_range())
+      .WillByDefault(Return(orc::FrameIDRange{0u, 0u}));
+  ON_CALL(*source, frame_count()).WillByDefault(Return(1u));
+  orc::FrameDescriptor desc;
+  desc.frame_id = 0;
+  desc.system = orc::VideoSystem::NTSC;
+  desc.height = 525;
+  desc.samples_total = 525u * 910u;
+  desc.samples_per_line_nominal = 910;
+  ON_CALL(*source, get_frame_descriptor(orc::FrameID{0}))
+      .WillByDefault(Return(desc));
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::NTSC;
+  params.frame_width_nominal = 910;
+  params.frame_height = 525;
+  ON_CALL(*source, get_video_parameters()).WillByDefault(Return(params));
+  ON_CALL(*source, get_dropout_hints(orc::FrameID{0}))
+      .WillByDefault(
+          Return(std::vector<orc::DropoutRun>{{0u, 9200u, 101u, 128}}));
+
+  orc::DropoutAnalysisSinkStage stage;  // real deps (no override)
+  orc::ObservationContext ctx;
+
+  // First trigger: empty map — the source run is reported.
+  std::map<uint64_t, orc::FrameDropoutMapEntry> empty_map;
+  auto rep1 = std::make_shared<orc::DropoutMappedFrameRepresentation>(
+      source, empty_map);
+  ASSERT_TRUE(stage.trigger({rep1}, {}, ctx));
+  ASSERT_EQ(stage.frame_stats().size(), 1u);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_count, 1);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_length_samples, 101);
+
+  // Edit the map to remove that run, then re-trigger with the rebuilt input.
+  orc::FrameDropoutMapEntry entry;
+  entry.frame_id = 0;
+  entry.removals.push_back({10u, 100u, 200u});
+  std::map<uint64_t, orc::FrameDropoutMapEntry> removal_map{{0, entry}};
+  auto rep2 = std::make_shared<orc::DropoutMappedFrameRepresentation>(
+      source, removal_map);
+  ASSERT_TRUE(stage.trigger({rep2}, {}, ctx));
+  ASSERT_EQ(stage.frame_stats().size(), 1u);
+  // Fresh result — the removed run must not survive from the first trigger.
+  EXPECT_EQ(stage.frame_stats()[0].dropout_count, 0);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_length_samples, 0);
 }
 
 }  // namespace orc_unit_test

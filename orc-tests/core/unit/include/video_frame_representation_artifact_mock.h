@@ -46,6 +46,8 @@ class MockVideoFrameRepresentationArtifact
               (const, override));
 
   // Hints
+  MOCK_METHOD((std::vector<orc::DropoutRun>), get_dropout_hints, (orc::FrameID),
+              (const, override));
   MOCK_METHOD((std::optional<orc::SourceParameters>), get_video_parameters, (),
               (const, override));
 

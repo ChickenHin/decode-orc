@@ -102,6 +102,10 @@ It does **not** perform dropout detection or correction itself.
 
 * **Dropout Analysis** — displays dropout frequency, size, and distribution charts. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
 
+**Where the analysis reads its data**
+
+The analysis reports the dropout state **at the sink's input** — the dropout hints visible on the representation connected to it. To include edits made in the **Dropout Map** stage (added or removed dropout regions), the sink must be connected **downstream of the `dropout_map` stage**. A sink placed upstream of, or on a branch that bypasses, `dropout_map` sees only the original sidecar hints. Editing the map and re-triggering re-analyses from scratch, so the chart and CSV never show pre-edit data after a re-trigger.
+
 **Notes**
 
 * Results depend on the quality of upstream dropout detection.
