@@ -137,12 +137,13 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `10` (the concrete observer classes and the `Observer` base
-were removed from the plugin SDK — they are host-internal and reached through
-the `IObservationService` added in ABI 9. The deprecated pre-tier observation
-include-path shims were removed with them). The authoritative per-version change
-log is `orc/sdk/abi_history.yaml`, rendered as the version-history table in
-[plugin-sdk.md](plugin-sdk.md#version-history).
+**Current value:** `11` (`FrameDescriptor` dropped the `colour_frame_index`,
+`frame_number`, and `timecode` fields — colour-sequence phase is measured via
+the host `colour_frame_phase` observer through
+`<orc/stage/observation/colour_frame_phase_query.h>`, and VBI picture numbers /
+timecodes come from the `biphase` observer's interpreted `vbi.*` keys). The
+authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
+the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
 Bumped when any of the following change:
 - `StagePluginDescriptor` field order or alignment
@@ -160,7 +161,7 @@ Controls the stage contract: the `DAGStage` virtual interface,
 `ParameterizedStage`, `TriggerableStage`, `ArtifactPtr`, `ObservationContext`,
 and `NodeTypeInfo` semantics.
 
-**Current value:** `2`
+**Current value:** `3`
 
 Bumped when any of the following change:
 - A `DAGStage` virtual method is added, removed, or reordered
