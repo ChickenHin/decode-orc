@@ -543,7 +543,12 @@ std::vector<ArtifactPtr> StackerStage::execute(
   {
     std::lock_guard<std::mutex> lk(execute_mutex_);
 
-    if (!parameters.empty()) {
+    // Only invalidate the cached stacked representation when the parameters
+    // actually change. The DAG passes the node's stored parameters on every
+    // execute(); resetting unconditionally discards the wrapper — and its warm
+    // per-frame stack cache — on each call, forcing every analysis-sink sweep
+    // to re-stack the whole source from scratch.
+    if (!parameters.empty() && parameters != parameters_) {
       set_parameters(parameters);
       cached_output_.reset();
     }
