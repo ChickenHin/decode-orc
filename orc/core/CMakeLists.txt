@@ -35,7 +35,10 @@ add_library(orc-core SHARED
     # Analysis framework
     analysis/analysis_registry.cpp
     analysis/analysis_init.cpp
-    
+
+    # Shared display decimation for analysis-sink graph paths
+    analysis/analysis_series_decimator.cpp
+
     # Vectorscope analysis
     analysis/vectorscope/vectorscope_analysis.cpp
     

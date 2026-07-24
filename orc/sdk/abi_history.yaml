@@ -153,6 +153,7 @@ history:
     cause: data-contract-swap
     contracts:
       - orc/stage/frame_descriptor.h
+      - orc/stage/common_types.h
     summary: >-
       `FrameDescriptor` drops the `colour_frame_index`, `frame_number`, and
       `timecode` fields. Signal-measured facts are no longer baked in by
@@ -164,5 +165,13 @@ history:
       `measure_colour_frame_index()`), and VBI picture numbers / timecodes
       come from the host `biphase` observer's interpreted `vbi.*` keys (the
       dropped `frame_number`/`timecode` fields were never populated by any
-      source). Layout- and source-breaking for any plugin reading the removed
-      fields.
+      source). The analysis-sink result types in `<orc/stage/common_types.h>`
+      also become canonical per-frame records: the aggregated-per-bucket fields
+      are removed (`FrameDropoutStats` now carries integer `dropout_count` and
+      `dropout_length_samples` in place of the double
+      `dropout_count`/`total_dropout_length`; `FrameSNRStats` drops
+      `field_count`/`white_snr_count`/`black_psnr_count`; `FrameBurstLevelStats`
+      drops `field_count`), each record now representing exactly one analysed
+      frame with display bucketing moved to a host-side decimation utility.
+      Layout- and source-breaking for any plugin reading the removed fields or
+      these result structs.

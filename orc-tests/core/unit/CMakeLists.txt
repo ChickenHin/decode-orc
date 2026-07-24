@@ -151,7 +151,16 @@ orc_add_core_unit_tests(
         stages/cvbs_sink/cvbs_sink_stage_test.cpp
         stages/dropout_analysis_sink/dropout_analysis_sink_stage_test.cpp
         stages/snr_analysis_sink/snr_analysis_sink_stage_test.cpp
+        stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
+        stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
+)
+
+orc_add_core_unit_tests(
+        orc-core-unit-tests-analysis
+        "unit"
+
+        analysis/analysis_series_decimator_test.cpp
 )
 
 orc_add_core_unit_tests(

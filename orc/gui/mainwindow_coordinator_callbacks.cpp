@@ -491,7 +491,8 @@ void MainWindow::onDropoutDataReady(
   // Add all data points
   for (const auto& stats : frame_stats) {
     if (stats.has_data) {
-      dialog->addDataPoint(stats.frame_number, stats.total_dropout_length);
+      dialog->addDataPoint(stats.frame_number,
+                           static_cast<double>(stats.dropout_length_samples));
     }
   }
 

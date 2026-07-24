@@ -109,6 +109,7 @@ class SNRAnalysisSinkStage : public DAGStage,
     std::string output_path;
     bool write_csv = false;
     SNRAnalysisMode mode = SNRAnalysisMode::BOTH;
+    int32_t frame_interval = 1;
   };
 
   ParsedConfig parse_config(

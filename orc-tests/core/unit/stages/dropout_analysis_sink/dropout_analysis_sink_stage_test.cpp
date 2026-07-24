@@ -108,8 +108,8 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   std::vector<orc::FrameDropoutStats> expected_stats;
   orc::FrameDropoutStats stat{};
   stat.frame_number = 12;
-  stat.total_dropout_length = 128.0;
-  stat.dropout_count = 3.0;
+  stat.dropout_length_samples = 128;
+  stat.dropout_count = 3;
   stat.has_data = true;
   expected_stats.push_back(stat);
 
@@ -126,8 +126,8 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   EXPECT_TRUE(stage.has_results());
   ASSERT_EQ(stage.frame_stats().size(), 1u);
   EXPECT_EQ(stage.frame_stats()[0].frame_number, 12);
-  EXPECT_DOUBLE_EQ(stage.frame_stats()[0].total_dropout_length, 128.0);
-  EXPECT_DOUBLE_EQ(stage.frame_stats()[0].dropout_count, 3.0);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_length_samples, 128);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_count, 3);
   EXPECT_EQ(stage.total_frames(), 240);
   EXPECT_FALSE(stage.is_trigger_in_progress());
 }
@@ -167,8 +167,8 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
   std::vector<orc::FrameDropoutStats> expected_stats;
   orc::FrameDropoutStats stat{};
   stat.frame_number = 4;
-  stat.total_dropout_length = 64.0;
-  stat.dropout_count = 2.0;
+  stat.dropout_length_samples = 64;
+  stat.dropout_count = 2;
   stat.has_data = true;
   expected_stats.push_back(stat);
 
@@ -183,8 +183,8 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
             EXPECT_EQ(path, "out.csv");
             EXPECT_EQ(frame_stats.size(), 1u);
             EXPECT_EQ(frame_stats[0].frame_number, 4);
-            EXPECT_DOUBLE_EQ(frame_stats[0].total_dropout_length, 64.0);
-            EXPECT_DOUBLE_EQ(frame_stats[0].dropout_count, 2.0);
+            EXPECT_EQ(frame_stats[0].dropout_length_samples, 64);
+            EXPECT_EQ(frame_stats[0].dropout_count, 2);
             return true;
           }));
 

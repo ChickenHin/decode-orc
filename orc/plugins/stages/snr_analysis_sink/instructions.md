@@ -18,6 +18,16 @@ Destination CSV file for the SNR metrics. Leave empty to skip file output.
 ### write_csv (bool)
 Enable writing the results to CSV at trigger time. Default: `false`.
 
+### mode (choice: white, black, both)
+Selects which SNR metrics to measure. Default: `both`.
+
+### frame_interval (integer)
+Analyse every Nth frame. `1` (the default) analyses every frame; higher values
+sample fewer frames — `10` analyses frames 1, 11, 21, … Each analysed frame is
+recorded with its true frame number. Increasing the interval reduces analysis
+wall-clock time on long recordings in proportion to the interval, at the cost of
+graph and CSV resolution. Minimum `1`.
+
 ## Tools
 
 ### SNR Analysis

@@ -63,25 +63,26 @@ SNRAnalysisComputeResult SNRAnalysisSinkStageDeps::compute_and_analyze(
         "observations skipped");
   }
 
-  // Bucket-sampled analysis: divide the recording into at most kDefaultBuckets
-  // display points and, within each bucket, analyze at most kSamplesPerBucket
-  // evenly-spaced frames.  For small sources (bucket size <= kSamplesPerBucket)
-  // every frame in the bucket is analyzed.  This keeps wall-clock time near-
-  // constant regardless of recording length.
-  constexpr uint64_t kDefaultBuckets = 1000;
-  constexpr uint64_t kSamplesPerBucket = 1;
-  const uint64_t bucket_count =
-      (total_frames < kDefaultBuckets) ? total_frames : kDefaultBuckets;
+  // Canonical per-frame capture: analyse frames at first, first + N, … where
+  // N = frame_interval, and record each analysed frame's true frame number.
+  // Display bucketing is applied downstream by the shared decimation utility
+  // (orc/core/analysis/analysis_series_decimator), not here.
+  const uint64_t interval = options.frame_interval > 0
+                                ? static_cast<uint64_t>(options.frame_interval)
+                                : 1U;
+  const uint64_t analysed_count = (total_frames + interval - 1U) / interval;
 
   logger_.debug(
-      "SNRAnalysisSinkDeps: {} frames → {} buckets (~{} samples/bucket)",
-      total_frames, bucket_count, kSamplesPerBucket);
+      "SNRAnalysisSinkDeps: {} frames, interval {} → {} analysed frames",
+      total_frames, interval, analysed_count);
 
-  result.frame_stats.reserve(static_cast<size_t>(bucket_count));
+  result.frame_stats.reserve(static_cast<size_t>(analysed_count));
 
-  for (uint64_t b = 0; b < bucket_count; ++b) {
+  uint64_t analysed = 0;
+  for (uint64_t offset = 0; offset < total_frames; offset += interval) {
     if (cancel_requested_ && cancel_requested_->load()) {
-      logger_.warn("SNRAnalysisSinkDeps: Cancel requested at bucket {}", b);
+      logger_.warn("SNRAnalysisSinkDeps: Cancel requested at frame offset {}",
+                   offset);
       result.success = false;
       result.message = "Cancelled by user";
       result.frame_stats.clear();
@@ -89,90 +90,53 @@ SNRAnalysisComputeResult SNRAnalysisSinkStageDeps::compute_and_analyze(
       return result;
     }
 
-    // Inclusive frame range for this bucket (no frame is missed or counted
-    // twice across adjacent buckets).
-    const FrameID bucket_start =
-        frame_rng.first + (b * total_frames) / bucket_count;
-    const FrameID bucket_end =
-        frame_rng.first + ((b + 1) * total_frames) / bucket_count - 1;
-    const uint64_t bucket_size = bucket_end - bucket_start + 1;
-    const uint64_t n_samples =
-        (kSamplesPerBucket < bucket_size) ? kSamplesPerBucket : bucket_size;
+    const FrameID fid = frame_rng.first + offset;
 
-    double white_sum = 0.0;
-    double black_sum = 0.0;
-    size_t white_count = 0;
-    size_t black_count = 0;
-
-    for (uint64_t s = 0; s < n_samples; ++s) {
-      // Evenly distribute sample frames across the bucket so the first and last
-      // frames are always included.
-      const FrameID fid =
-          (n_samples == 1U)
-              ? bucket_start
-              : bucket_start + (s * (bucket_size - 1U)) / (n_samples - 1U);
-
-      if (white_snr_handle && (options.snr_mode == SNRAnalysisMode::WHITE ||
-                               options.snr_mode == SNRAnalysisMode::BOTH)) {
-        white_snr_handle->process_frame(*representation, fid,
-                                        observation_context);
-      }
-      if (black_psnr_handle && (options.snr_mode == SNRAnalysisMode::BLACK ||
-                                options.snr_mode == SNRAnalysisMode::BOTH)) {
-        black_psnr_handle->process_frame(*representation, fid,
-                                         observation_context);
-      }
-
-      const FieldID frame_fid(fid * 2U);
-
-      auto white_val =
-          observation_context.get(frame_fid, "white_snr", "snr_db");
-      if (white_val && std::holds_alternative<double>(*white_val)) {
-        white_sum += std::get<double>(*white_val);
-        ++white_count;
-      }
-
-      auto black_val =
-          observation_context.get(frame_fid, "black_psnr", "psnr_db");
-      if (black_val && std::holds_alternative<double>(*black_val)) {
-        black_sum += std::get<double>(*black_val);
-        ++black_count;
-      }
-
-      observation_context.clear_field(frame_fid);
+    if (white_snr_handle && (options.snr_mode == SNRAnalysisMode::WHITE ||
+                             options.snr_mode == SNRAnalysisMode::BOTH)) {
+      white_snr_handle->process_frame(*representation, fid,
+                                      observation_context);
     }
+    if (black_psnr_handle && (options.snr_mode == SNRAnalysisMode::BLACK ||
+                              options.snr_mode == SNRAnalysisMode::BOTH)) {
+      black_psnr_handle->process_frame(*representation, fid,
+                                       observation_context);
+    }
+
+    const FieldID frame_fid(fid * 2U);
 
     FrameSNRStats frame_stat;
-    // Use the center frame of the bucket as the representative frame number
-    // (1-based for display).
-    frame_stat.frame_number =
-        static_cast<int32_t>(bucket_start + (bucket_end - bucket_start) / 2U) +
-        1;
+    frame_stat.frame_number = static_cast<int32_t>(fid) + 1;
 
-    if (white_count > 0) {
-      frame_stat.white_snr = white_sum / static_cast<double>(white_count);
-      frame_stat.white_snr_count = white_count;
+    auto white_val = observation_context.get(frame_fid, "white_snr", "snr_db");
+    if (white_val && std::holds_alternative<double>(*white_val)) {
+      frame_stat.white_snr = std::get<double>(*white_val);
       frame_stat.has_white_snr = true;
     }
-    if (black_count > 0) {
-      frame_stat.black_psnr = black_sum / static_cast<double>(black_count);
-      frame_stat.black_psnr_count = black_count;
+
+    auto black_val =
+        observation_context.get(frame_fid, "black_psnr", "psnr_db");
+    if (black_val && std::holds_alternative<double>(*black_val)) {
+      frame_stat.black_psnr = std::get<double>(*black_val);
       frame_stat.has_black_psnr = true;
     }
-    frame_stat.has_data = frame_stat.has_white_snr || frame_stat.has_black_psnr;
-    frame_stat.field_count = std::max(white_count, black_count);
 
+    observation_context.clear_field(frame_fid);
+
+    frame_stat.has_data = frame_stat.has_white_snr || frame_stat.has_black_psnr;
     result.frame_stats.push_back(frame_stat);
 
-    if (progress_callback_ && (b % 50 == 0 || b + 1 == bucket_count)) {
-      progress_callback_(b + 1, bucket_count,
-                         "Analysing bucket " + std::to_string(b + 1) + "/" +
-                             std::to_string(bucket_count));
+    ++analysed;
+    if (progress_callback_ &&
+        (analysed % 50 == 0 || analysed == analysed_count)) {
+      progress_callback_(analysed, analysed_count,
+                         "Analysing frame " + std::to_string(analysed) + "/" +
+                             std::to_string(analysed_count));
     }
   }
 
   result.total_frames = static_cast<int32_t>(total_frames);
-  logger_.debug("SNRAnalysisSinkDeps: Complete — {} buckets from {} frames",
+  logger_.debug("SNRAnalysisSinkDeps: Complete — {} analysed frames from {}",
                 result.frame_stats.size(), total_frames);
 
   return result;

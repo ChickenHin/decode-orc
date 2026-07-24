@@ -109,8 +109,6 @@ TEST(SNRAnalysisSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   stat.frame_number = 10;
   stat.white_snr = 24.5;
   stat.black_psnr = 33.1;
-  stat.white_snr_count = 2;
-  stat.black_psnr_count = 2;
   stat.has_white_snr = true;
   stat.has_black_psnr = true;
   stat.has_data = true;
@@ -179,8 +177,6 @@ TEST(SNRAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
   stat.frame_number = 4;
   stat.white_snr = 22.0;
   stat.black_psnr = 31.0;
-  stat.white_snr_count = 2;
-  stat.black_psnr_count = 2;
   stat.has_white_snr = true;
   stat.has_black_psnr = true;
   stat.has_data = true;

@@ -26,6 +26,10 @@ struct SNRAnalysisComputeOptions {
   std::string output_path;
   bool write_csv{false};
   SNRAnalysisMode snr_mode{SNRAnalysisMode::BOTH};
+  // Analyse every Nth frame (1 = every frame). Analysed frames are
+  // first, first + N, first + 2N, … and each record carries its true frame
+  // number. Values < 1 are treated as 1.
+  int32_t frame_interval{1};
 };
 
 struct SNRAnalysisComputeResult {

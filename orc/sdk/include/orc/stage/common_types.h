@@ -219,14 +219,18 @@ struct FieldDropoutStats {
 };
 
 /**
- * @brief Dropout statistics aggregated for a frame (two fields)
+ * @brief Dropout statistics for a single analysed frame
+ *
+ * One record represents exactly one analysed frame. Counts and lengths are the
+ * integer totals measured in that frame; no aggregation across frames occurs at
+ * capture time (display decimation is applied separately by the graph path).
  */
 struct FrameDropoutStats {
-  int32_t frame_number;  ///< Frame number (1-based)
-  double total_dropout_length =
-      0.0;  ///< Total dropout length summed in this bucket (samples)
-  double dropout_count = 0.0;  ///< Total dropout count summed in this bucket
-  bool has_data = false;       ///< True if at least one frame contributed data
+  int32_t frame_number = 0;   ///< Analysed frame number (1-based)
+  int32_t dropout_count = 0;  ///< Number of dropout runs in this frame
+  int64_t dropout_length_samples =
+      0;                  ///< Total dropout length in this frame (samples)
+  bool has_data = false;  ///< True if this frame contained one or more dropouts
 };
 
 /**
@@ -243,20 +247,19 @@ struct FieldSNRStats {
 };
 
 /**
- * @brief SNR statistics aggregated for a frame (two fields)
+ * @brief SNR statistics for a single analysed frame
+ *
+ * One record represents exactly one analysed frame. Values are that frame's
+ * white SNR / black PSNR (averaged across the frame's two fields); no
+ * aggregation across frames occurs at capture time.
  */
 struct FrameSNRStats {
-  int32_t frame_number = 0;     ///< Frame number (1-based)
-  double white_snr = 0.0;       ///< Average white SNR (dB)
-  double black_psnr = 0.0;      ///< Average black PSNR (dB)
+  int32_t frame_number = 0;     ///< Analysed frame number (1-based)
+  double white_snr = 0.0;       ///< White SNR for this frame (dB)
+  double black_psnr = 0.0;      ///< Black PSNR for this frame (dB)
   bool has_white_snr = false;   ///< True if white SNR data is available
   bool has_black_psnr = false;  ///< True if black PSNR data is available
-  bool has_data = false;        ///< True if at least one field had data
-  size_t field_count = 0;       ///< Number of fields with data (for averaging)
-  size_t white_snr_count =
-      0;  ///< Number of fields that contributed to white SNR
-  size_t black_psnr_count =
-      0;  ///< Number of fields that contributed to black PSNR
+  bool has_data = false;        ///< True if any SNR data was captured
 };
 
 /**
@@ -272,14 +275,17 @@ struct FieldBurstLevelStats {
 };
 
 /**
- * @brief Burst level statistics aggregated for a frame (two fields)
+ * @brief Burst level statistics for a single analysed frame
+ *
+ * One record represents exactly one analysed frame. The value is that frame's
+ * median burst amplitude (averaged across the frame's two fields); no
+ * aggregation across frames occurs at capture time.
  */
 struct FrameBurstLevelStats {
-  int32_t frame_number = 0;  ///< Frame number (1-based)
+  int32_t frame_number = 0;  ///< Analysed frame number (1-based)
   double median_burst_10bit =
-      0.0;  ///< Average burst amplitude from both fields (10-bit sample units)
-  bool has_data = false;   ///< True if at least one field had data
-  size_t field_count = 0;  ///< Number of fields with data (for averaging)
+      0.0;  ///< Median burst amplitude for this frame (10-bit sample units)
+  bool has_data = false;  ///< True if burst level data was captured
 };
 
 }  // namespace orc
