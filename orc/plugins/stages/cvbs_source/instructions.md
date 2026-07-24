@@ -21,7 +21,7 @@ The `lock_audio` parameter has been removed: the pipeline no longer has a free-r
 
 ## What it does
 
-With **Sample Encoding** at its default (`From metadata`), the stage opens the `.meta` sidecar at execute time and reads the video standard, sample encoding, and signal state. If the signal state is not `STANDARD_TBC_LOCKED`, or the video standard does not match the stage, the stage reports a configuration error and stops.
+With **Sample Encoding** at its default (`From metadata`), the stage opens the `.meta` sidecar at execute time and reads the video standard, sample encoding, signal state, frame count, NTSC-J black level, and decode provenance (the upstream decoder name and its git branch/commit, passed through unchanged to downstream stages). If the signal state is not `STANDARD_TBC_LOCKED`, or the video standard does not match the stage, the stage reports a configuration error and stops.
 
 When a sample encoding is selected manually the `.meta` sidecar is ignored (it need not exist). The video standard comes from the stage itself, the signal is assumed to be TBC-locked, the frame count is measured from the file size, and audio channel pairs carry derived names (the `audio_channel_pair` metadata table is not read).
 

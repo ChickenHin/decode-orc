@@ -859,6 +859,37 @@ TEST(CVBSSourceParamsTest, PALM_FrameWidthIs909) {
   EXPECT_EQ(p->frame_width_nominal, kPalMSamplesPerLine);
 }
 
+TEST(CVBSSourceParamsTest, ProvenanceFieldsComeFromMetadata) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.decoder = "vhs-decode";
+  deps->metadata_record.git_branch = "main";
+  deps->metadata_record.git_commit = "abc1234";
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_EQ(p->decoder, "vhs-decode");
+  EXPECT_EQ(p->git_branch, "main");
+  EXPECT_EQ(p->git_commit, "abc1234");
+}
+
+TEST(CVBSSourceParamsTest, ProvenanceFieldsEmptyWhenMetadataOmitsThem) {
+  // The source must not invent provenance: absent .meta columns yield empty
+  // fields, and the CVBS format has no tape_format / is_mapped equivalents.
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_TRUE(p->decoder.empty());
+  EXPECT_TRUE(p->git_branch.empty());
+  EXPECT_TRUE(p->git_commit.empty());
+  EXPECT_TRUE(p->tape_format.empty());
+  EXPECT_FALSE(p->is_mapped);
+}
+
 TEST(CVBSSourceParamsTest, FrameCountMatchesMetadata) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   deps->metadata_record.number_of_sequential_frames = 3;

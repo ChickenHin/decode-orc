@@ -20,11 +20,14 @@ namespace orc {
 
 // Metadata describing a single decoded frame in the CVBS_U10_4FSC domain.
 //
-// Colour-sequence phase is deliberately NOT part of this descriptor: it is a
-// property of the burst signal, not of source-side metadata, so stages that
-// need it measure it uniformly (for TBC and CVBS sources) via the host
-// "colour_frame_phase" observer.  See
-// orc/stage/observation/colour_frame_phase_query.h.
+// Signal-measured facts are deliberately NOT part of this descriptor:
+// - Colour-sequence phase is a property of the burst signal, not of
+//   source-side metadata, so stages that need it measure it uniformly (for
+//   TBC and CVBS sources) via the host "colour_frame_phase" observer.  See
+//   orc/stage/observation/colour_frame_phase_query.h.
+// - VBI picture numbers and VITC/LTC timecodes are likewise measured from the
+//   signal by the host "biphase" observer (interpreted "vbi.*" keys), not
+//   baked in by source stages.
 struct FrameDescriptor {
   FrameID frame_id = 0;
   VideoSystem system = VideoSystem::Unknown;
@@ -39,12 +42,6 @@ struct FrameDescriptor {
   // PAL frames may have up to 4 lines with one extra sample; this field
   // holds the base/nominal value.
   size_t samples_per_line_nominal = 0;
-
-  // VBI-derived frame number, if available.
-  std::optional<int32_t> frame_number;
-
-  // VITC/LTC timecode, if available.
-  std::optional<uint32_t> timecode;
 
   // NTSC-J non-standard black level in the CVBS_U10_4FSC 10-bit domain.
   // Present only when the source metadata carries an explicit black-level

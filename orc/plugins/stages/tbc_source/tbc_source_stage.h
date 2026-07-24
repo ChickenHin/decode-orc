@@ -51,6 +51,7 @@ struct TBCVideoParams {
   std::string git_branch;
   std::string git_commit;
   bool is_widescreen = false;
+  bool is_mapped = false;
   int32_t active_video_start = -1;
   int32_t active_video_end = -1;
   int32_t first_active_frame_line = -1;

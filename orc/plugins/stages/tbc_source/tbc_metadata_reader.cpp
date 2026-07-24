@@ -19,6 +19,8 @@
 #include <mutex>
 #include <stdexcept>
 
+#include "tbc_level_derivation.h"
+
 // Windows compatibility for strcasecmp
 #ifdef _WIN32
 #define strcasecmp _stricmp
@@ -259,14 +261,17 @@ TBCMetadataSqliteReader::read_tbc_domain_levels() {
   if (!is_open_) return std::nullopt;
 
   const char* sql_with_blanking =
-      "SELECT blanking_16b_ire, white_16b_ire FROM capture WHERE capture_id = "
-      "?";
+      "SELECT blanking_16b_ire, white_16b_ire, black_16b_ire FROM capture "
+      "WHERE capture_id = ?";
   sqlite3_stmt* stmt = nullptr;
   int rc = sqlite3_prepare_v2(impl_->db, sql_with_blanking, -1, &stmt, nullptr);
+  bool has_blanking_column = true;
 
   if (rc != SQLITE_OK) {
     const char* sql_without_blanking =
-        "SELECT black_16b_ire, white_16b_ire FROM capture WHERE capture_id = ?";
+        "SELECT black_16b_ire, white_16b_ire, system FROM capture WHERE "
+        "capture_id = ?";
+    has_blanking_column = false;
     rc =
         sqlite3_prepare_v2(impl_->db, sql_without_blanking, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return std::nullopt;
@@ -276,8 +281,21 @@ TBCMetadataSqliteReader::read_tbc_domain_levels() {
 
   TbcDomainLevels levels;
   if (sqlite3_step(stmt) == SQLITE_ROW) {
-    levels.blanking_16b = sqlite3_column_int(stmt, 0);
-    levels.white_16b = sqlite3_column_int(stmt, 1);
+    if (has_blanking_column) {
+      levels.blanking_16b = sqlite3_column_int(stmt, 0);
+      levels.white_16b = sqlite3_column_int(stmt, 1);
+      if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) {
+        levels.black_16b = sqlite3_column_int(stmt, 2);
+      }
+    } else {
+      // Pre-blanking-column schema: only picture black and white are stored.
+      // Derive the 0 IRE blanking (setup subtraction / NTSC-J detection) the
+      // same way as the JSON reader — see tbc_level_derivation.h.
+      const VideoSystem system =
+          video_system_from_string(impl_->get_string(stmt, 2));
+      levels = derive_tbc_domain_levels(system, sqlite3_column_int(stmt, 0),
+                                        sqlite3_column_int(stmt, 1));
+    }
   } else {
     sqlite3_finalize(stmt);
     return std::nullopt;

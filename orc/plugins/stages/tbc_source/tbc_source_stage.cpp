@@ -31,6 +31,7 @@
 #include "ntsc_tbc_converter.h"
 #include "pal_m_tbc_converter.h"
 #include "pal_tbc_converter.h"
+#include "tbc_level_derivation.h"
 #include "tbc_metadata_json_reader.h"
 #include "tbc_metadata_reader.h"
 #include "tbc_metadata_types.h"
@@ -47,6 +48,7 @@ SourceParameters build_source_params(const TBCVideoParams& tvp,
   sp.system = tvp.system;
   sp.number_of_sequential_frames = frame_count;
   sp.is_widescreen = tvp.is_widescreen;
+  sp.is_mapped = tvp.is_mapped;
   sp.decoder = tvp.decoder;
   sp.tape_format = tvp.tape_format;
   sp.git_branch = tvp.git_branch;
@@ -902,6 +904,7 @@ std::optional<TBCVideoParams> build_tvp_from_reader(
   tvp.git_branch = sp->git_branch;
   tvp.git_commit = sp->git_commit;
   tvp.is_widescreen = sp->is_widescreen;
+  tvp.is_mapped = sp->is_mapped;
   // Read actual ld-decode 16-bit domain levels from the metadata.
   // These are the 0 IRE blanking and 100 IRE white levels in the TBC 16-bit
   // domain (CVBS_U10_4FSC × 64); using them gives accurate CVBS_U10_4FSC
@@ -915,6 +918,14 @@ std::optional<TBCVideoParams> build_tvp_from_reader(
                          : (is_ntsc_like ? kTbcNtscBlanking : kTbcPalBlanking);
   tvp.white_16b = tbc_levels ? tbc_levels->white_16b
                              : (is_ntsc_like ? kTbcNtscWhite : kTbcPalWhite);
+  // NTSC-J: picture black stored at the 0 IRE blanking level instead of the
+  // SMPTE 170M 7.5 IRE setup pedestal.  Detected from the metadata levels so
+  // SourceParameters/FrameDescriptor carry the black-level override exactly
+  // as a CVBS source would (see tbc_level_derivation.h).
+  if (tvp.system == VideoSystem::NTSC && tbc_levels &&
+      is_ntsc_j_black_level(*tbc_levels)) {
+    tvp.ntsc_j_black_level_16b = tbc_levels->black_16b;
+  }
   tvp.number_of_fields = sp->number_of_sequential_frames * 2;
   tvp.field_width = sp->frame_width_nominal;
   // Field heights: both stored at max height in the TBC file.

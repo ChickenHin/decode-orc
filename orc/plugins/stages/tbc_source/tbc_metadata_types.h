@@ -141,6 +141,12 @@ struct TbcDomainLevels {
   int32_t blanking_16b = 0;  ///< 0 IRE blanking in ld-decode 16-bit domain
   int32_t white_16b = 0;     ///< 100 IRE white in ld-decode 16-bit domain
 
+  /// Picture-black level, when the metadata distinguishes it from blanking.
+  /// Standard NTSC puts it on the 7.5 IRE setup pedestal; an NTSC-J capture
+  /// stores it at the 0 IRE blanking level (see is_ntsc_j_black_level() in
+  /// tbc_level_derivation.h).
+  std::optional<int32_t> black_16b;
+
   bool is_valid() const { return white_16b > blanking_16b; }
 };
 

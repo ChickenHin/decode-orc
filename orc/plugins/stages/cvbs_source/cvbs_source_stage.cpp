@@ -129,9 +129,9 @@ SourceParameters build_source_parameters(VideoSystem system,
   SourceParameters sp;
   sp.system = system;
   sp.number_of_sequential_frames = frame_count;
-  sp.is_mapped = false;
-  sp.tape_format = "cvbs";
-  sp.decoder = "cvbs-source";
+  // Provenance (decoder / git_branch / git_commit) is applied by the caller
+  // from the .meta cvbs_file row when present.  The CVBS format carries no
+  // is_mapped or tape_format equivalents, so those keep their defaults.
 
   switch (system) {
     case VideoSystem::PAL:
@@ -562,15 +562,27 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
 
     constexpr const char* kSql =
         "SELECT preset, sample_encoding_preset, signal_state_preset, "
+        "signal_type, number_of_sequential_frames, black_level, decoder, "
+        "git_branch, git_commit "
+        "FROM cvbs_file ORDER BY cvbs_file_id LIMIT 1";
+
+    // Fallback for files predating the provenance columns.
+    constexpr const char* kSqlNoProvenance =
+        "SELECT preset, sample_encoding_preset, signal_state_preset, "
         "signal_type, number_of_sequential_frames, black_level "
         "FROM cvbs_file ORDER BY cvbs_file_id LIMIT 1";
 
     sqlite3_stmt* stmt = nullptr;
+    bool has_provenance_columns = true;
     if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
-      error_message = "Failed to query cvbs_file from '" + meta_path +
-                      "': " + sqlite3_errmsg(db);
-      sqlite3_close(db);
-      return std::nullopt;
+      has_provenance_columns = false;
+      if (sqlite3_prepare_v2(db, kSqlNoProvenance, -1, &stmt, nullptr) !=
+          SQLITE_OK) {
+        error_message = "Failed to query cvbs_file from '" + meta_path +
+                        "': " + sqlite3_errmsg(db);
+        sqlite3_close(db);
+        return std::nullopt;
+      }
     }
 
     if (sqlite3_step(stmt) != SQLITE_ROW) {
@@ -597,6 +609,12 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
 
     if (sqlite3_column_type(stmt, 5) != SQLITE_NULL) {
       rec.ntsc_j_black_level = sqlite3_column_int(stmt, 5);
+    }
+
+    if (has_provenance_columns) {
+      rec.decoder = col_str(6);
+      rec.git_branch = col_str(7);
+      rec.git_commit = col_str(8);
     }
 
     sqlite3_finalize(stmt);
@@ -1025,6 +1043,9 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   std::string signal_type;
   int32_t meta_frame_count = 0;
   std::optional<int32_t> ntsc_j_black_level;
+  std::string meta_decoder;
+  std::string meta_git_branch;
+  std::string meta_git_commit;
 
   if (use_metadata) {
     // --- Load and validate metadata ---
@@ -1064,6 +1085,9 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     signal_type = meta.signal_type;
     meta_frame_count = meta.number_of_sequential_frames;
     ntsc_j_black_level = meta.ntsc_j_black_level;
+    meta_decoder = meta.decoder;
+    meta_git_branch = meta.git_branch;
+    meta_git_commit = meta.git_commit;
   } else {
     // Manual mode: no .meta sidecar required. The video standard is fixed by
     // the stage choice and the signal is assumed STANDARD_TBC_LOCKED; the
@@ -1128,6 +1152,9 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   const int32_t ntsc_j = ntsc_j_black_level.value_or(-1);
   SourceParameters src_params =
       build_source_parameters(system_, frame_count, ntsc_j);
+  src_params.decoder = meta_decoder;
+  src_params.git_branch = meta_git_branch;
+  src_params.git_commit = meta_git_commit;
   if (is_yc) {
     // CVBS file format spec §3.1: for all YC encoding presets, after
     // normalize_to_cvbs_u10(), chroma zero (DC) maps to 512 in the
