@@ -51,6 +51,10 @@ class IBurstLevelAnalysisSinkStageDeps {
       IObservationContext& observation_context,
       BurstAnalysisComputeOptions options) = 0;
 
+  // Thin path-opening wrapper: opens `path` for truncation and writes the
+  // canonical per-frame CSV. Returns false if there is no data or the file
+  // cannot be opened. The concrete deps expose a filesystem-free
+  // write_csv(std::ostream&, …) formatter for unit testing.
   virtual bool write_csv(
       const std::string& path,
       const std::vector<FrameBurstLevelStats>& frame_stats) = 0;

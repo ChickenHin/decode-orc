@@ -15,6 +15,8 @@
 
 #include <atomic>
 #include <memory>
+#include <sstream>
+#include <vector>
 
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/observation_service_interface_mock.h"
@@ -123,6 +125,53 @@ TEST(BurstLevelAnalysisSinkDepsTest, EmptyRangeYieldsNoRecords) {
   ASSERT_TRUE(result.success);
   EXPECT_TRUE(result.frame_stats.empty());
   EXPECT_EQ(result.total_frames, 0);
+}
+
+// ----- CSV writer (stream formatter) -----
+
+TEST(BurstLevelAnalysisSinkCsvTest, HeaderIsSelfDescribing) {
+  orc::BurstLevelAnalysisSinkStageDeps deps(nullptr);
+  std::ostringstream os;
+  deps.write_csv(os, {});
+  EXPECT_EQ(os.str(), "frame_number,median_burst_10bit\n");
+}
+
+TEST(BurstLevelAnalysisSinkCsvTest, WritesOneRowPerAnalysedFrame) {
+  orc::BurstLevelAnalysisSinkStageDeps deps(nullptr);
+  std::vector<orc::FrameBurstLevelStats> stats;
+  orc::FrameBurstLevelStats a{};
+  a.frame_number = 1;
+  a.median_burst_10bit = 200.0;
+  a.has_data = true;
+  orc::FrameBurstLevelStats b{};
+  b.frame_number = 7;
+  b.median_burst_10bit = 205.5;
+  b.has_data = true;
+  stats.push_back(a);
+  stats.push_back(b);
+
+  std::ostringstream os;
+  deps.write_csv(os, stats);
+  EXPECT_EQ(os.str(),
+            "frame_number,median_burst_10bit\n"
+            "1,200\n"
+            "7,205.5\n");
+}
+
+TEST(BurstLevelAnalysisSinkCsvTest, AbsentValueSerialisesAsEmptyField) {
+  orc::BurstLevelAnalysisSinkStageDeps deps(nullptr);
+  std::vector<orc::FrameBurstLevelStats> stats;
+  orc::FrameBurstLevelStats missing{};
+  missing.frame_number = 3;
+  missing.has_data = false;  // no burst level captured
+  stats.push_back(missing);
+
+  std::ostringstream os;
+  deps.write_csv(os, stats);
+  EXPECT_EQ(os.str(),
+            "frame_number,median_burst_10bit\n"
+            "3,\n");
+  EXPECT_EQ(os.str().find("nan"), std::string::npos);
 }
 
 }  // namespace orc_unit_test

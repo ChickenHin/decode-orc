@@ -11,9 +11,9 @@
 
 #include <orc/stage/field_id.h>
 
-#include <cmath>
 #include <fstream>
 #include <memory>
+#include <ostream>
 #include <utility>
 #include <variant>
 
@@ -142,6 +142,21 @@ SNRAnalysisComputeResult SNRAnalysisSinkStageDeps::compute_and_analyze(
   return result;
 }
 
+void SNRAnalysisSinkStageDeps::write_csv(
+    std::ostream& os, const std::vector<FrameSNRStats>& frame_stats) {
+  // Canonical per-frame schema. One row per analysed frame; an absent metric is
+  // written as an empty field (never the string "nan"). Units live in the
+  // header names (dB); values are plain numbers.
+  os << "frame_number,white_snr_db,black_psnr_db\n";
+  for (const auto& fs : frame_stats) {
+    os << fs.frame_number << ',';
+    if (fs.has_white_snr) os << fs.white_snr;
+    os << ',';
+    if (fs.has_black_psnr) os << fs.black_psnr;
+    os << '\n';
+  }
+}
+
 bool SNRAnalysisSinkStageDeps::write_csv(
     const std::string& path, const std::vector<FrameSNRStats>& frame_stats) {
   if (frame_stats.empty()) {
@@ -158,19 +173,10 @@ bool SNRAnalysisSinkStageDeps::write_csv(
     return false;
   }
 
-  csv << "frame_number,white_snr_db,black_psnr_db\n";
-  size_t rows_written = 0;
-  for (const auto& fs : frame_stats) {
-    if (fs.has_data) {
-      csv << fs.frame_number << ','
-          << (fs.has_white_snr ? fs.white_snr : std::nan("")) << ','
-          << (fs.has_black_psnr ? fs.black_psnr : std::nan("")) << '\n';
-      rows_written++;
-    }
-  }
+  write_csv(csv, frame_stats);
 
   logger_.debug("SNRAnalysisSinkDeps: Successfully wrote {} data rows to: {}",
-                rows_written, path);
+                frame_stats.size(), path);
   return true;
 }
 }  // namespace orc

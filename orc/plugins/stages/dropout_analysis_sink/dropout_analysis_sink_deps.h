@@ -13,6 +13,7 @@
 #include <orc/support/logging.h>
 
 #include <atomic>
+#include <iosfwd>
 #include <utility>
 
 #include "dropout_analysis_sink_deps_interface.h"
@@ -32,6 +33,13 @@ class DropoutAnalysisSinkStageDeps : public IDropoutAnalysisSinkStageDeps {
 
   bool write_csv(const std::string& path,
                  const std::vector<FrameDropoutStats>& frame_stats) override;
+
+  // Filesystem-free formatter. Writes the canonical per-frame CSV to `os`:
+  // frame_number,dropout_count,dropout_length_samples — one row per analysed
+  // frame, including zero-dropout frames. Not part of the deps interface so it
+  // can be unit-tested directly against an std::ostringstream.
+  void write_csv(std::ostream& os,
+                 const std::vector<FrameDropoutStats>& frame_stats);
 
  private:
   class SpdlogLoggerAdapter {

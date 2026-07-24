@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <memory>
+#include <sstream>
 #include <vector>
 
 #include "../../include/observation_context_interface_mock.h"
@@ -149,6 +150,67 @@ TEST(SNRAnalysisSinkDepsTest, EmptyRangeYieldsNoRecords) {
   ASSERT_TRUE(result.success);
   EXPECT_TRUE(result.frame_stats.empty());
   EXPECT_EQ(result.total_frames, 0);
+}
+
+// ----- CSV writer (stream formatter) -----
+
+TEST(SNRAnalysisSinkCsvTest, HeaderIsSelfDescribing) {
+  orc::SNRAnalysisSinkStageDeps deps(nullptr);
+  std::ostringstream os;
+  deps.write_csv(os, {});
+  EXPECT_EQ(os.str(), "frame_number,white_snr_db,black_psnr_db\n");
+}
+
+TEST(SNRAnalysisSinkCsvTest, WritesOneRowPerAnalysedFrameWithBothMetrics) {
+  orc::SNRAnalysisSinkStageDeps deps(nullptr);
+  std::vector<orc::FrameSNRStats> stats;
+  orc::FrameSNRStats a{};
+  a.frame_number = 1;
+  a.white_snr = 42.5;
+  a.has_white_snr = true;
+  a.black_psnr = 38.0;
+  a.has_black_psnr = true;
+  a.has_data = true;
+  stats.push_back(a);
+
+  std::ostringstream os;
+  deps.write_csv(os, stats);
+  EXPECT_EQ(os.str(),
+            "frame_number,white_snr_db,black_psnr_db\n"
+            "1,42.5,38\n");
+}
+
+TEST(SNRAnalysisSinkCsvTest, AbsentMetricsSerialiseAsEmptyFields) {
+  orc::SNRAnalysisSinkStageDeps deps(nullptr);
+  std::vector<orc::FrameSNRStats> stats;
+  // White only.
+  orc::FrameSNRStats white_only{};
+  white_only.frame_number = 2;
+  white_only.white_snr = 40.0;
+  white_only.has_white_snr = true;
+  white_only.has_data = true;
+  stats.push_back(white_only);
+  // Black only.
+  orc::FrameSNRStats black_only{};
+  black_only.frame_number = 3;
+  black_only.black_psnr = 30.0;
+  black_only.has_black_psnr = true;
+  black_only.has_data = true;
+  stats.push_back(black_only);
+  // Neither metric captured for this analysed frame.
+  orc::FrameSNRStats neither{};
+  neither.frame_number = 4;
+  neither.has_data = false;
+  stats.push_back(neither);
+
+  std::ostringstream os;
+  deps.write_csv(os, stats);
+  EXPECT_EQ(os.str(),
+            "frame_number,white_snr_db,black_psnr_db\n"
+            "2,40,\n"
+            "3,,30\n"
+            "4,,\n");
+  EXPECT_EQ(os.str().find("nan"), std::string::npos);
 }
 
 }  // namespace orc_unit_test

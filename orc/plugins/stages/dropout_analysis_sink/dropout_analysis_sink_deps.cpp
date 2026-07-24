@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <ostream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -154,6 +155,19 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
   return result;
 }
 
+void DropoutAnalysisSinkStageDeps::write_csv(
+    std::ostream& os, const std::vector<FrameDropoutStats>& frame_stats) {
+  // Canonical per-frame schema. One row per analysed frame, including
+  // zero-dropout frames: a zero row is genuine data ("analysed, no dropouts"),
+  // whereas a missing row means the frame was not analysed. Units live in the
+  // header names; values are plain integers.
+  os << "frame_number,dropout_count,dropout_length_samples\n";
+  for (const auto& fs : frame_stats) {
+    os << fs.frame_number << ',' << fs.dropout_count << ','
+       << fs.dropout_length_samples << '\n';
+  }
+}
+
 bool DropoutAnalysisSinkStageDeps::write_csv(
     const std::string& path,
     const std::vector<FrameDropoutStats>& frame_stats) {
@@ -170,17 +184,10 @@ bool DropoutAnalysisSinkStageDeps::write_csv(
     return false;
   }
 
-  csv << "frame_number,dropout_length_samples,dropout_count\n";
-  size_t rows = 0;
-  for (const auto& fs : frame_stats) {
-    if (fs.has_data) {
-      csv << fs.frame_number << ',' << fs.dropout_length_samples << ','
-          << fs.dropout_count << '\n';
-      rows++;
-    }
-  }
+  write_csv(csv, frame_stats);
 
-  logger_.debug("DropoutAnalysisSinkDeps: Wrote {} rows to: {}", rows, path);
+  logger_.debug("DropoutAnalysisSinkDeps: Wrote {} rows to: {}",
+                frame_stats.size(), path);
   return true;
 }
 

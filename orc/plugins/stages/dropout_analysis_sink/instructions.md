@@ -18,6 +18,37 @@ Destination CSV file for the dropout metrics. Leave empty to skip file output.
 ### write_csv (bool)
 Enable writing the results to CSV at trigger time. Default: `false`.
 
+### mode (choice: full, visible)
+Selects full-field or visible-area dropout analysis. In `visible` mode, dropout
+runs outside the active picture area are excluded and partially-visible runs are
+clamped to the active sample range. Default: `full`.
+
+## CSV output
+
+The CSV is written from the canonical per-frame dataset — **one row per analysed
+frame**. The dropout sink analyses every frame, so the row count equals the
+recording's frame count. A zero row is genuine data (the frame was analysed and
+had no dropouts); a *missing* frame number means that frame was not analysed.
+The CSV always contains full-resolution per-frame data and is never affected by
+the display decimation used to draw the graph.
+
+Columns (units are carried in the header names; values are plain numbers):
+
+| Column | Unit | Meaning |
+|--------|------|---------|
+| `frame_number` | — | Analysed frame number (1-based) |
+| `dropout_count` | count | Number of dropout runs in the frame |
+| `dropout_length_samples` | samples | Total dropout length in the frame |
+
+Example (frame 2 was analysed and had no dropouts):
+
+```csv
+frame_number,dropout_count,dropout_length_samples
+1,3,128
+2,0,0
+3,1,20
+```
+
 ## Tools
 
 ### Dropout Analysis

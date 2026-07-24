@@ -14,6 +14,7 @@
 #include <orc/support/logging.h>
 
 #include <atomic>
+#include <iosfwd>
 #include <memory>
 #include <utility>
 
@@ -40,6 +41,13 @@ class BurstLevelAnalysisSinkStageDeps
 
   bool write_csv(const std::string& path,
                  const std::vector<FrameBurstLevelStats>& frame_stats) override;
+
+  // Filesystem-free formatter. Writes the canonical per-frame CSV to `os`:
+  // frame_number,median_burst_10bit — one row per analysed frame, with an
+  // absent value as an empty field. Not part of the deps interface so it can be
+  // unit-tested directly against an std::ostringstream.
+  void write_csv(std::ostream& os,
+                 const std::vector<FrameBurstLevelStats>& frame_stats);
 
  private:
   class SpdlogLoggerAdapter {

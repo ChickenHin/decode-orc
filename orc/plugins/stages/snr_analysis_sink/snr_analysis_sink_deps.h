@@ -14,6 +14,7 @@
 #include <orc/support/logging.h>
 
 #include <atomic>
+#include <iosfwd>
 #include <memory>
 #include <utility>
 
@@ -38,6 +39,13 @@ class SNRAnalysisSinkStageDeps : public ISNRAnalysisSinkStageDeps {
 
   bool write_csv(const std::string& path,
                  const std::vector<FrameSNRStats>& frame_stats) override;
+
+  // Filesystem-free formatter. Writes the canonical per-frame CSV to `os`:
+  // frame_number,white_snr_db,black_psnr_db — one row per analysed frame, with
+  // absent metrics as empty fields. Not part of the deps interface so it can be
+  // unit-tested directly against an std::ostringstream.
+  void write_csv(std::ostream& os,
+                 const std::vector<FrameSNRStats>& frame_stats);
 
  private:
   class SpdlogLoggerAdapter {

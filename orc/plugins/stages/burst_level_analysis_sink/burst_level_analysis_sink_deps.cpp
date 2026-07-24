@@ -12,9 +12,9 @@
 #include <orc/stage/field_id.h>
 #include <orc/support/logging.h>
 
-#include <cmath>
 #include <fstream>
 #include <memory>
+#include <ostream>
 #include <utility>
 #include <variant>
 
@@ -126,6 +126,19 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
   return result;
 }
 
+void BurstLevelAnalysisSinkStageDeps::write_csv(
+    std::ostream& os, const std::vector<FrameBurstLevelStats>& frame_stats) {
+  // Canonical per-frame schema. One row per analysed frame; an absent value is
+  // written as an empty field (never the string "nan"). Units live in the
+  // header name (10-bit sample units); values are plain numbers.
+  os << "frame_number,median_burst_10bit\n";
+  for (const auto& fs : frame_stats) {
+    os << fs.frame_number << ',';
+    if (fs.has_data) os << fs.median_burst_10bit;
+    os << '\n';
+  }
+}
+
 bool BurstLevelAnalysisSinkStageDeps::write_csv(
     const std::string& path,
     const std::vector<FrameBurstLevelStats>& frame_stats) {
@@ -144,17 +157,11 @@ bool BurstLevelAnalysisSinkStageDeps::write_csv(
     return false;
   }
 
-  csv << "frame_number,median_burst_10bit\n";
-  size_t rows_written = 0;
-  for (const auto& fs : frame_stats) {
-    csv << fs.frame_number << ','
-        << (fs.has_data ? fs.median_burst_10bit : std::nan("")) << '\n';
-    rows_written++;
-  }
+  write_csv(csv, frame_stats);
 
   logger_.debug(
       "BurstLevelAnalysisSinkDeps: Successfully wrote {} data rows to: {}",
-      rows_written, path);
+      frame_stats.size(), path);
   return true;
 }
 }  // namespace orc

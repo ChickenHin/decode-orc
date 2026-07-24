@@ -16,6 +16,8 @@ They are typically used to:
 
 All three analysis sinks work the same way: trigger the stage to compute the dataset, after which the matching analysis chart dialog opens automatically. The dataset is cached in the stage and the chart can be re-opened at any time from the **Stage Tools** menu.
 
+**CSV output format.** Each CSV is written from the full-resolution, canonical per-frame dataset — **one row per analysed frame**, with the frame's true (1-based) frame number in the first column. Units are carried in the header names (`_samples`, `_db`, `_10bit`) and values are plain numbers. A metric that was not measured for a frame is written as an **empty field** (never the string `nan`). The CSV is independent of the display decimation used to draw the chart, so it always contains every analysed frame regardless of the on-screen point count.
+
 ---
 
 ## Burst Level Analysis Sink
@@ -43,6 +45,12 @@ This stage measures the amplitude of the colour burst for each field and generat
     - Destination CSV file for burst metrics. Leave empty to skip file output.
 * `write_csv` (bool)
     - Enable writing results to CSV at trigger time.
+* `frame_interval` (integer, default `1`)
+    - Analyse every Nth frame. Higher values sample fewer frames and reduce analysis time in proportion, at the cost of resolution. Minimum `1`.
+
+**CSV columns**
+
+`frame_number, median_burst_10bit` — median colour-burst amplitude (10-bit sample units) per analysed frame; the value column is empty when not measured.
 
 **Stage tools**
 
@@ -83,6 +91,12 @@ It does **not** perform dropout detection or correction itself.
     - Destination CSV file for dropout metrics. Leave empty to skip file output.
 * `write_csv` (bool)
     - Enable writing results to CSV at trigger time.
+* `mode` (choice: `full`, `visible`, default `full`)
+    - `full` counts dropouts across the whole field; `visible` restricts the count to the active picture area.
+
+**CSV columns**
+
+`frame_number, dropout_count, dropout_length_samples` — one row for **every** frame (the sink analyses every frame). A zero row means the frame was analysed and had no dropouts; an absent frame number means the frame was not analysed.
 
 **Stage tools**
 
@@ -121,6 +135,14 @@ This stage estimates signal-to-noise ratio using spatial and temporal analysis o
     - Destination CSV file for SNR metrics. Leave empty to skip file output.
 * `write_csv` (bool)
     - Enable writing results to CSV at trigger time.
+* `mode` (choice: `white`, `black`, `both`, default `both`)
+    - Selects which SNR metrics to measure.
+* `frame_interval` (integer, default `1`)
+    - Analyse every Nth frame. Higher values sample fewer frames and reduce analysis time in proportion, at the cost of resolution. Minimum `1`.
+
+**CSV columns**
+
+`frame_number, white_snr_db, black_psnr_db` — white SNR and black PSNR (dB) per analysed frame. A column is empty when that metric was not measured (for example, `mode = white` leaves `black_psnr_db` empty).
 
 **Stage tools**
 
