@@ -23,18 +23,27 @@
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context_interface.h>
 
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "frame_provenance.h"
 
 namespace orc {
+
+// Defined in observation_persistence.h (included only where the store's
+// persistence hooks are used) to avoid a circular include.
+class IObservationPersistence;
 
 /**
  * @brief Identity of one stored observation record.
@@ -97,6 +106,10 @@ class ObservationStore {
   explicit ObservationStore(
       std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes);
 
+  // Stops the write-behind thread (flushing anything pending) before the store
+  // is destroyed.
+  ~ObservationStore();
+
   // Non-copyable, non-movable (holds a mutex).
   ObservationStore(const ObservationStore&) = delete;
   ObservationStore& operator=(const ObservationStore&) = delete;
@@ -138,6 +151,39 @@ class ObservationStore {
   /// Remove all records (budget unchanged).
   void clear();
 
+  // --- Durable sidecar persistence (Phase 6) --------------------------------
+  //
+  // Persistence is optional: without it the store is a pure in-memory cache
+  // (its default state, unchanged from earlier phases). When enabled, records
+  // written by put() are streamed to durable storage behind the interactive
+  // path, and a project can start warm from a previous session.
+
+  /// Enable (or, with nullptr, disable) write-behind persistence. Records
+  /// passed to put() after this call are queued and flushed to @p persistence
+  /// on a background writer thread. Passing nullptr flushes and stops the
+  /// writer. Not thread-safe with concurrent put()/warm_start(); call during
+  /// store wiring.
+  void set_persistence(std::shared_ptr<IObservationPersistence> persistence);
+
+  /// Populate the in-memory store from persistence for every record whose
+  /// fingerprint is in @p keep. Loaded records are NOT re-queued for writing.
+  /// No-op without persistence.
+  void warm_start(const std::unordered_set<NodeFingerprint>& keep);
+
+  /// Block until every queued write-behind record has been handed to
+  /// persistence. No-op without persistence.
+  void flush();
+
+  /// Forward garbage collection to persistence: drop persisted records whose
+  /// fingerprint is not in @p keep. No-op without persistence.
+  void gc_persistence(const std::unordered_set<NodeFingerprint>& keep);
+
+  /// Forward an observer-version purge to persistence: drop persisted records
+  /// for @p observer_id whose version differs from @p current_version. No-op
+  /// without persistence.
+  void purge_observer_version(const std::string& observer_id,
+                              const std::string& current_version);
+
  private:
   struct Hash {
     std::size_t operator()(const ObservationRecordKey& key) const noexcept;
@@ -161,6 +207,18 @@ class ObservationStore {
   // keeping at least @p keep_at_least entries. Caller holds mutex_.
   void evict_to_budget(std::size_t keep_at_least);
 
+  // Insert or replace @p record for @p key in the in-memory LRU structure
+  // without queuing it for persistence. Caller holds mutex_. Shared by put()
+  // (which additionally queues) and warm_start() (which must not re-persist).
+  void put_in_memory(const ObservationRecordKey& key, ObservationRecord record);
+
+  // Write-behind worker loop: drains queued records to persistence_ in
+  // batches until stopped.
+  void writer_loop();
+
+  // Stop the write-behind thread, flushing anything still queued.
+  void stop_writer();
+
   mutable std::mutex mutex_;
   std::size_t budget_bytes_;
   std::size_t usage_bytes_ = 0;
@@ -171,6 +229,23 @@ class ObservationStore {
   mutable std::unordered_map<ObservationRecordKey, std::list<Entry>::iterator,
                              Hash>
       index_;
+
+  // --- Write-behind persistence state ---------------------------------------
+  // persistence_ is set once during wiring and read by the writer thread; it
+  // is not re-assigned while the writer runs. The queue and its counters are
+  // guarded by wb_mutex_ (a separate lock from mutex_ so database I/O never
+  // blocks in-memory reads). queued_ counts every record handed to put();
+  // flushed_ counts every record actually written, so flush() waits for
+  // flushed_ == queued_.
+  std::shared_ptr<IObservationPersistence> persistence_;
+  std::mutex wb_mutex_;
+  std::condition_variable wb_cv_;
+  std::vector<ObservationRecordKey> pending_keys_;
+  std::vector<ObservationRecord> pending_records_;
+  std::thread writer_;
+  bool writer_stop_ = false;
+  std::uint64_t queued_ = 0;
+  std::uint64_t flushed_ = 0;
 };
 
 }  // namespace orc

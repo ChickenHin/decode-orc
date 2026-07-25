@@ -22,10 +22,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 #include "../core/include/core_observation_service.h"
@@ -40,6 +42,7 @@
 #include "../core/include/preview_view_registry.h"
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
+#include "../core/include/sqlite_observation_persistence.h"
 #include "../core/include/vbi_decoder.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
@@ -184,6 +187,10 @@ std::vector<orc::presenters::BurstLevelDisplayPoint> decimate_burst_series(
 // Observer::process_frame() and DAGFrameRenderer's store keying.
 constexpr orc::FieldID::value_type kFieldsPerFrame = 2;
 
+// Filename of the durable observation sidecar, stored in the project root
+// directory beside the project file.
+constexpr char kObservationSidecarName[] = "observations.orc-obs.sqlite";
+
 // True iff the store already holds every observer's record for both fields of
 // @p frame at @p fingerprint (an empty record still counts as present).
 bool store_has_frame(const orc::ObservationStore& store,
@@ -253,6 +260,12 @@ class RenderPresenter::Impl {
   // folds source-file identity into SOURCE-node fingerprints.
   std::shared_ptr<orc::ObservationStore> obs_store_;
   orc::FilesystemFileIdentityProvider file_identity_provider_;
+
+  // Phase 6: durable SQLite sidecar stored beside the project. Created lazily
+  // once alongside the store when the project has an on-disk location, so
+  // observations survive application restarts. Absent for unsaved projects.
+  std::shared_ptr<orc::IObservationPersistence> obs_persistence_;
+  bool warm_started_ = false;
 
   // Phase 3: previous fingerprint map + undo retention window drive change
   // propagation (invalidation notifications) and store garbage collection.
@@ -485,6 +498,28 @@ class RenderPresenter::Impl {
     // Create the shared observation store once; it persists across rebuilds.
     if (!obs_store_) {
       obs_store_ = std::make_shared<orc::ObservationStore>();
+
+      // Attach a durable SQLite sidecar beside the project so observations
+      // survive application restarts. A saved project has an on-disk root;
+      // unsaved projects run in-memory only. A sidecar problem must never fail
+      // project open, so recover by logging and continuing without it.
+      const std::string& project_root = project_->get_project_root();
+      if (!project_root.empty()) {
+        try {
+          const std::string db_path =
+              (std::filesystem::path(project_root) / kObservationSidecarName)
+                  .string();
+          obs_persistence_ =
+              std::make_shared<orc::SqliteObservationPersistence>(db_path);
+          obs_store_->set_persistence(obs_persistence_);
+        } catch (const std::exception& e) {
+          ORC_LOG_WARN(
+              "RenderPresenter: observation sidecar unavailable ({}); "
+              "continuing in-memory only",
+              e.what());
+          obs_persistence_.reset();
+        }
+      }
     }
 
     // Diff against the previous fingerprint map to drive change propagation and
@@ -502,12 +537,36 @@ class RenderPresenter::Impl {
     prev_fingerprints_ = new_fingerprints;
     have_prev_fingerprints_ = true;
 
+    // On the first build with a durable sidecar, purge records for observers
+    // whose version changed (their old records share a still-reachable
+    // fingerprint, so fingerprint GC alone would not remove them) and warm the
+    // in-memory store from persistence so the GUI starts populated. Fingerprint
+    // mismatch (edited pipeline or changed source file) naturally loads nothing
+    // for affected nodes.
+    if (obs_persistence_ && !warm_started_) {
+      for (const auto& observer : obs_service_.available_observers()) {
+        obs_store_->purge_observer_version(observer.id, observer.version);
+      }
+      std::unordered_set<orc::NodeFingerprint> reachable;
+      reachable.reserve(new_fingerprints.size());
+      for (const auto& [node_id, fp] : new_fingerprints) {
+        reachable.insert(fp);
+      }
+      obs_store_->warm_start(reachable);
+      warm_started_ = true;
+    }
+
     // Garbage-collect the store: retain everything reachable now, plus the
     // bounded window of recently-unreachable fingerprints so an undo reuses
     // stored observations. Records outside the retain set are evicted by
-    // budget.
-    obs_store_->retain_only(retention_window_.retain_set(new_fingerprints),
-                            obs_store_->memory_budget_bytes());
+    // budget. The persistent sidecar is GC'd against the same set so undo
+    // within the retention window still finds durable records.
+    const std::unordered_set<orc::NodeFingerprint> retain_set =
+        retention_window_.retain_set(new_fingerprints);
+    obs_store_->retain_only(retain_set, obs_store_->memory_budget_bytes());
+    if (obs_persistence_) {
+      obs_store_->gc_persistence(retain_set);
+    }
 
     // Rebuild renderers
     obs_cache_ =

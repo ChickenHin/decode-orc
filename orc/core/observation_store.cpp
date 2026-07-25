@@ -12,6 +12,8 @@
 #include <utility>
 #include <variant>
 
+#include "observation_persistence.h"
+
 namespace orc {
 
 namespace {
@@ -51,6 +53,8 @@ std::size_t ObservationStore::Hash::operator()(
 
 ObservationStore::ObservationStore(std::size_t memory_budget_bytes)
     : budget_bytes_(memory_budget_bytes) {}
+
+ObservationStore::~ObservationStore() { stop_writer(); }
 
 std::size_t ObservationStore::estimate_bytes(const ObservationRecordKey& key,
                                              const ObservationRecord& record) {
@@ -94,9 +98,8 @@ std::optional<ObservationRecord> ObservationStore::get(
   return it->second->record;
 }
 
-void ObservationStore::put(const ObservationRecordKey& key,
-                           ObservationRecord record) {
-  std::lock_guard<std::mutex> lock(mutex_);
+void ObservationStore::put_in_memory(const ObservationRecordKey& key,
+                                     ObservationRecord record) {
   const std::size_t bytes = estimate_bytes(key, record);
 
   auto existing = index_.find(key);
@@ -115,6 +118,23 @@ void ObservationStore::put(const ObservationRecordKey& key,
 
   // Never evict the record just inserted/updated (it is at the front).
   evict_to_budget(/*keep_at_least=*/1);
+}
+
+void ObservationStore::put(const ObservationRecordKey& key,
+                           ObservationRecord record) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    put_in_memory(key, record);  // copy retained in memory
+  }
+
+  // Queue a copy for durable storage behind the interactive path. Only when
+  // persistence is enabled; otherwise the store is a pure in-memory cache.
+  std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+  if (!persistence_) return;
+  pending_keys_.push_back(key);
+  pending_records_.push_back(std::move(record));
+  ++queued_;
+  wb_cv_.notify_one();
 }
 
 bool ObservationStore::load_into(const ObservationRecordKey& key,
@@ -171,6 +191,116 @@ void ObservationStore::clear() {
   lru_.clear();
   index_.clear();
   usage_bytes_ = 0;
+}
+
+// --- Write-behind persistence ------------------------------------------------
+
+void ObservationStore::set_persistence(
+    std::shared_ptr<IObservationPersistence> persistence) {
+  // Tear down any existing writer (flushing pending work) before switching.
+  stop_writer();
+
+  std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+  persistence_ = std::move(persistence);
+  pending_keys_.clear();
+  pending_records_.clear();
+  queued_ = 0;
+  flushed_ = 0;
+  writer_stop_ = false;
+  if (persistence_) {
+    writer_ = std::thread(&ObservationStore::writer_loop, this);
+  }
+}
+
+void ObservationStore::writer_loop() {
+  for (;;) {
+    std::vector<ObservationRecordKey> keys;
+    std::vector<ObservationRecord> records;
+    {
+      std::unique_lock<std::mutex> wb_lock(wb_mutex_);
+      wb_cv_.wait(wb_lock,
+                  [this] { return writer_stop_ || !pending_keys_.empty(); });
+      if (pending_keys_.empty()) {
+        if (writer_stop_) return;
+        continue;
+      }
+      keys.swap(pending_keys_);
+      records.swap(pending_records_);
+    }
+
+    // Build the batch and hand it to persistence outside every lock.
+    std::vector<PersistedObservation> batch;
+    batch.reserve(keys.size());
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      batch.push_back(
+          PersistedObservation{std::move(keys[i]), std::move(records[i])});
+    }
+    if (persistence_) {
+      persistence_->save(batch);
+    }
+
+    {
+      std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+      flushed_ += batch.size();
+    }
+    wb_cv_.notify_all();  // wake any flush() waiters
+  }
+}
+
+void ObservationStore::stop_writer() {
+  {
+    std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+    if (!writer_.joinable()) return;
+    writer_stop_ = true;
+  }
+  wb_cv_.notify_all();
+  writer_.join();
+}
+
+void ObservationStore::flush() {
+  std::unique_lock<std::mutex> wb_lock(wb_mutex_);
+  if (!persistence_) return;
+  wb_cv_.wait(wb_lock, [this] { return flushed_ == queued_; });
+}
+
+void ObservationStore::warm_start(
+    const std::unordered_set<NodeFingerprint>& keep) {
+  std::shared_ptr<IObservationPersistence> persistence;
+  {
+    std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+    persistence = persistence_;
+  }
+  if (!persistence) return;
+
+  // Loaded records are inserted straight into memory and must NOT be re-queued
+  // for writing (they are already durable).
+  persistence->load_matching(
+      keep, [this](ObservationRecordKey key, ObservationRecord record) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        put_in_memory(key, std::move(record));
+      });
+}
+
+void ObservationStore::gc_persistence(
+    const std::unordered_set<NodeFingerprint>& keep) {
+  std::shared_ptr<IObservationPersistence> persistence;
+  {
+    std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+    persistence = persistence_;
+  }
+  if (persistence) persistence->retain_only(keep);
+}
+
+void ObservationStore::purge_observer_version(
+    const std::string& observer_id, const std::string& current_version) {
+  std::shared_ptr<IObservationPersistence> persistence;
+  {
+    std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+    persistence = persistence_;
+  }
+  if (persistence) {
+    persistence->purge_observer_version(observer_id, current_version);
+  }
 }
 
 }  // namespace orc

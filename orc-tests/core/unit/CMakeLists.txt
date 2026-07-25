@@ -397,6 +397,7 @@ orc_add_core_unit_tests(
         "unit"
 
         observation/observation_store_test.cpp
+        observation/observation_store_persistence_test.cpp
         observation/observation_invalidation_test.cpp
         observation/observer_pass_test.cpp
         observation/observation_scheduler_test.cpp
