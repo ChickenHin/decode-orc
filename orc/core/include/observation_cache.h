@@ -18,12 +18,15 @@
 #include <memory>
 #include <string>
 
+#include "frame_provenance.h"
+
 namespace orc {
 
 // Forward declarations
 class DAG;
 class DAGFrameRenderer;
 class ObservationContext;
+class ObservationStore;
 
 /**
  * @brief Universal cache for rendered frame observations across the video
@@ -42,8 +45,15 @@ class ObservationCache {
   /**
    * @brief Construct an observation cache
    * @param dag The DAG to extract observations from
+   * @param store Optional shared, provenance-keyed observation store. When
+   *        supplied together with @p fingerprints, observer output survives DAG
+   *        rebuilds and is reused on a fingerprint hit. Owned externally.
+   * @param fingerprints Optional fingerprint map for @p dag (must match it).
    */
-  explicit ObservationCache(std::shared_ptr<const DAG> dag);
+  explicit ObservationCache(
+      std::shared_ptr<const DAG> dag,
+      std::shared_ptr<ObservationStore> store = nullptr,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints = nullptr);
 
   ~ObservationCache() = default;
 
@@ -60,10 +70,19 @@ class ObservationCache {
   bool get_field(NodeID node_id, FieldID field_id);
 
   /**
-   * @brief Update the DAG reference and clear cache
+   * @brief Update the DAG reference and clear the per-frame render cache
+   *
+   * The shared ObservationStore (if any) is NOT cleared: it is
+   * content-addressed by node fingerprint, so records for unaffected nodes stay
+   * valid across the rebuild and are reused. Only this cache's (node_id,
+   * frame_id) render markers — which are tied to the live DAG — are discarded.
+   *
    * @param dag New DAG to use
+   * @param fingerprints Optional fingerprint map for @p dag (must match it).
    */
-  void update_dag(std::shared_ptr<const DAG> dag);
+  void update_dag(
+      std::shared_ptr<const DAG> dag,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints = nullptr);
 
   /**
    * @brief Clear all cached observations
@@ -101,6 +120,12 @@ class ObservationCache {
 
   std::shared_ptr<const DAG> dag_;
   std::shared_ptr<DAGFrameRenderer> renderer_;
+
+  // Shared, provenance-keyed observation store (may be null). Owned externally
+  // (presenter level) so it survives DAG rebuilds; passed through to the
+  // renderer for read-through caching.
+  std::shared_ptr<ObservationStore> store_;
+  std::shared_ptr<const NodeFingerprintMap> fingerprints_;
 
   // LRU cache of successfully rendered frame IDs (max 500 entries)
   mutable LRUCache<CacheKey, bool, CacheKeyHash> cache_;

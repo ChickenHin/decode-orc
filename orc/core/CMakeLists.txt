@@ -73,6 +73,9 @@ add_library(orc-core SHARED
     
     # Observation cache (shared by all analysis decoders)
     observation_cache.cpp
+
+    # Provenance-keyed observation store (survives DAG rebuilds)
+    observation_store.cpp
     
     # Node type system
     node_type.cpp

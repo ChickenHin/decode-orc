@@ -178,6 +178,7 @@ orc_add_core_unit_tests(
         contracts/audio_channel_pair_contract_test.cpp
         contracts/observation_service_accessor_test.cpp
         contracts/observation_service_identity_contract_test.cpp
+        contracts/observation_store_parity_test.cpp
 )
 
 # Presenter-layer unit tests. These link orc-presenters in addition to the
@@ -389,6 +390,14 @@ orc_add_core_unit_tests(
         "unit"
 
         provenance/frame_provenance_test.cpp
+)
+
+orc_add_core_unit_tests(
+        orc-core-unit-tests-observation
+        "unit"
+
+        observation/observation_store_test.cpp
+        observation/observer_pass_test.cpp
 )
 
         orc_add_core_unit_tests(

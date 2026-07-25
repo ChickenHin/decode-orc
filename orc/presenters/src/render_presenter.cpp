@@ -27,7 +27,9 @@
 
 #include "../core/include/dag_executor.h"
 #include "../core/include/dag_frame_renderer.h"
+#include "../core/include/frame_provenance.h"
 #include "../core/include/observation_cache.h"
+#include "../core/include/observation_store.h"
 #include "../core/include/preview_renderer.h"
 #include "../core/include/preview_view_registry.h"
 #include "../core/include/project.h"
@@ -198,6 +200,14 @@ class RenderPresenter::Impl {
   std::unique_ptr<orc::DAGFrameRenderer> field_renderer_;
   std::unique_ptr<orc::VBIDecoder> vbi_decoder_;
   std::shared_ptr<orc::ObservationCache> obs_cache_;
+
+  // Provenance-keyed observation store, owned here so it survives DAG rebuilds
+  // (editing a parameter on one branch must not discard observations for
+  // unaffected branches/frames). Created lazily on first rebuild and shared
+  // into the ObservationCache and field renderer. The file-identity provider
+  // folds source-file identity into SOURCE-node fingerprints.
+  std::shared_ptr<orc::ObservationStore> obs_store_;
+  orc::FilesystemFileIdentityProvider file_identity_provider_;
   std::atomic<bool> trigger_cancel_requested_;
   std::atomic<bool> trigger_active_;
   uint64_t next_request_id_;
@@ -226,10 +236,23 @@ class RenderPresenter::Impl {
       show_dropouts = preview_renderer_->get_show_dropouts();
     }
 
+    // Compute the static provenance fingerprint map for this DAG. Shared into
+    // the observation cache and field renderer so observer output is keyed to
+    // frame content, not the live DAG instance.
+    auto fingerprints = std::make_shared<const orc::NodeFingerprintMap>(
+        orc::compute_node_fingerprints(*dag, file_identity_provider_));
+
+    // Create the shared observation store once; it persists across rebuilds.
+    if (!obs_store_) {
+      obs_store_ = std::make_shared<orc::ObservationStore>();
+    }
+
     // Rebuild renderers
-    obs_cache_ = std::make_shared<orc::ObservationCache>(dag);
+    obs_cache_ =
+        std::make_shared<orc::ObservationCache>(dag, obs_store_, fingerprints);
     preview_renderer_ = std::make_unique<orc::PreviewRenderer>(dag);
     field_renderer_ = std::make_unique<orc::DAGFrameRenderer>(dag);
+    field_renderer_->set_observation_store(obs_store_, fingerprints);
     vbi_decoder_ = std::make_unique<orc::VBIDecoder>();
 
     preview_view_registry_ = orc::PreviewViewRegistry{};

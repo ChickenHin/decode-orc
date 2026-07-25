@@ -16,6 +16,72 @@
 
 namespace orc {
 
+namespace {
+
+// Derived field ids for a frame: top field = frame*2, bottom field = frame*2+1.
+// Matches Observer::process_frame() (frame_id * 2 + field_idx).
+constexpr FieldID::value_type kFieldsPerFrame = 2;
+
+// Copy every namespaced value stored for one field of a scratch context into
+// the destination context.
+void merge_field(const IObservationContext& from, FieldID field_id,
+                 IObservationContext& into) {
+  for (const auto& [ns, keys] : from.get_all_observations(field_id)) {
+    for (const auto& [key, value] : keys) {
+      into.set(field_id, ns, key, value);
+    }
+  }
+}
+
+}  // namespace
+
+void run_frame_observer_pass(const IObservationService& service,
+                             const std::vector<ObserverInfo>& observers,
+                             const VideoFrameRepresentation& representation,
+                             FrameID frame_id,
+                             const NodeFingerprint* fingerprint,
+                             ObservationStore* store,
+                             IObservationContext& context) {
+  const bool caching = (fingerprint != nullptr) && (store != nullptr);
+
+  const FieldID field_top(frame_id * kFieldsPerFrame);
+  const FieldID field_bottom(frame_id * kFieldsPerFrame + 1);
+
+  for (const auto& observer : observers) {
+    if (!caching) {
+      // No provenance available: run directly into the target context, exactly
+      // as the renderer did before the store existed.
+      service.run_observer(observer.id, representation, frame_id, context);
+      continue;
+    }
+
+    const ObservationRecordKey key_top{*fingerprint, field_top, observer.id,
+                                       observer.version};
+    const ObservationRecordKey key_bottom{*fingerprint, field_bottom,
+                                          observer.id, observer.version};
+
+    if (store->has(key_top) && store->has(key_bottom)) {
+      // Hit: load stored values instead of re-running the observer.
+      store->load_into(key_top, context);
+      store->load_into(key_bottom, context);
+      continue;
+    }
+
+    // Miss: run the observer into a scratch context so we can isolate exactly
+    // what this observer wrote for each field, then merge into the target and
+    // persist per-field records (empty records included, so a later probe
+    // hits).
+    ObservationContext scratch;
+    service.run_observer(observer.id, representation, frame_id, scratch);
+
+    merge_field(scratch, field_top, context);
+    merge_field(scratch, field_bottom, context);
+
+    store->put(key_top, scratch.get_all_observations(field_top));
+    store->put(key_bottom, scratch.get_all_observations(field_bottom));
+  }
+}
+
 DAGFrameRenderer::DAGFrameRenderer(std::shared_ptr<const DAG> dag)
     : dag_(std::move(dag)),
       dag_version_(1),
@@ -39,11 +105,26 @@ DAGFrameRenderer::DAGFrameRenderer(std::shared_ptr<const DAG> dag)
   executor_ = std::make_unique<DAGExecutor>();
   executor_->set_cache_enabled(true);
 
-  // Cache the observer id enumeration once; the registry is fixed at build
-  // time, so update_dag() need not recompute it.
-  for (const auto& info : observation_service_.available_observers()) {
-    observer_ids_.push_back(info.id);
-  }
+  // Cache the observer enumeration once; the registry is fixed at build time,
+  // so update_dag() need not recompute it.
+  refresh_observers();
+}
+
+void DAGFrameRenderer::refresh_observers() {
+  observers_ = observation_service().available_observers();
+}
+
+void DAGFrameRenderer::set_observation_store(
+    std::shared_ptr<ObservationStore> store,
+    std::shared_ptr<const NodeFingerprintMap> fingerprints) {
+  observation_store_ = std::move(store);
+  node_fingerprints_ = std::move(fingerprints);
+}
+
+void DAGFrameRenderer::set_observation_service(
+    std::shared_ptr<IObservationService> service) {
+  observation_service_override_ = std::move(service);
+  refresh_observers();
 }
 
 void DAGFrameRenderer::ensure_node_index() const {
@@ -77,6 +158,12 @@ void DAGFrameRenderer::update_dag(std::shared_ptr<const DAG> new_dag) {
   ++dag_version_;
   node_index_valid_ = false;
   render_cache_.clear();
+
+  // The fingerprint map describes the previous DAG; drop it so stale
+  // fingerprints can never key a lookup. The store is retained (it is content-
+  // addressed and shared) and read-through re-engages once the caller supplies
+  // a fresh map via set_observation_store().
+  node_fingerprints_.reset();
 
   executor_ = std::make_unique<DAGExecutor>();
   executor_->set_cache_enabled(true);
@@ -217,15 +304,22 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
     result.is_valid = true;
     result.representation = vfr;
 
-    // Run every registered observer to populate the observation context for
-    // both fields of this frame. The observer inventory comes from the shared
-    // registry (CoreObservationService), so host and plugins stay in lockstep;
-    // each frame render is independent, so a one-shot run_observer() per id is
-    // equivalent to the former fresh-per-frame observer instances.
+    // Populate the observation context for both fields of this frame. The
+    // observer inventory comes from the shared registry
+    // (CoreObservationService), so host and plugins stay in lockstep. When a
+    // provenance-keyed store and a fingerprint map are attached,
+    // run_frame_observer_pass reads observations through the store and only
+    // runs observers on a miss.
     auto& obs_ctx = executor_->get_observation_context();
-    for (const auto& observer_id : observer_ids_) {
-      observation_service_.run_observer(observer_id, *vfr, frame_id, obs_ctx);
+    const NodeFingerprint* fingerprint = nullptr;
+    if (observation_store_ && node_fingerprints_) {
+      auto fp_it = node_fingerprints_->find(node_id);
+      if (fp_it != node_fingerprints_->end()) {
+        fingerprint = &fp_it->second;
+      }
     }
+    run_frame_observer_pass(observation_service(), observers_, *vfr, frame_id,
+                            fingerprint, observation_store_.get(), obs_ctx);
 
     ORC_LOG_DEBUG("DAGFrameRenderer: node '{}' frame {} rendered successfully",
                   node_id.to_string(), frame_id);
