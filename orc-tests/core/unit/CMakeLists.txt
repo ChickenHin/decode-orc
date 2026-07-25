@@ -384,6 +384,13 @@ orc_add_core_unit_tests(
         observers/core_observation_service_test.cpp
 )
 
+orc_add_core_unit_tests(
+        orc-core-unit-tests-provenance
+        "unit"
+
+        provenance/frame_provenance_test.cpp
+)
+
         orc_add_core_unit_tests(
                 orc-core-unit-tests-preview-foundation
                 "unit;preview"

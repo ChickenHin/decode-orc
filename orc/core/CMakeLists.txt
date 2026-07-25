@@ -3,6 +3,7 @@ add_library(orc-core SHARED
     field_id.cpp
     artifact.cpp
     dag_executor.cpp
+    frame_provenance.cpp
     dag_frame_renderer.cpp
     preview_renderer.cpp
     preview_view_registry.cpp

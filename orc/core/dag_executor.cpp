@@ -16,6 +16,7 @@
 #include <set>
 #include <sstream>
 
+#include "include/frame_provenance.h"
 #include "include/pipeline_validator.h"
 
 namespace orc {
@@ -362,27 +363,24 @@ std::vector<ArtifactPtr> DAGExecutor::get_cached_or_execute(
 
 ArtifactID DAGExecutor::compute_expected_artifact_id(
     const DAGNode& node, const std::vector<ArtifactPtr>& inputs) const {
-  // Simple hash-based ID computation (placeholder)
-  // In production, this would use proper content-addressing
-  std::ostringstream oss;
-  oss << node.stage->get_node_type_info().stage_name << ":"
-      << node.stage->version();
-
+  // Content-addressed ID derived from the single, shared provenance
+  // serialisation (see frame_provenance.h). The executor keys on the runtime
+  // input artifact IDs; the static NodeFingerprintMap keys on recursively
+  // composed node fingerprints. Both use serialize_node_provenance() so there
+  // is one definition of provenance composition.
+  std::vector<std::string> input_tokens;
+  input_tokens.reserve(inputs.size());
   for (const auto& input : inputs) {
     if (!input) {
       throw DAGExecutionError(
           "Null input artifact in compute_expected_artifact_id");
     }
-    oss << ":" << input->id().value();
+    input_tokens.push_back(input->id().value());
   }
 
-  for (const auto& [key, value] : node.parameters) {
-    oss << ":" << key << "=";
-    // Append value based on variant type
-    std::visit([&oss](const auto& v) { oss << v; }, value);
-  }
-
-  return ArtifactID(oss.str());
+  return ArtifactID(serialize_node_provenance(
+      node.stage->get_node_type_info().stage_name, node.stage->version(),
+      input_tokens, node.parameters));
 }
 
 void DAGExecutor::clear_cache() { artifact_cache_.clear(); }
