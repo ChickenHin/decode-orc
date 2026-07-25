@@ -13,7 +13,9 @@
 #include <orc/stage/common_types.h>  // For analysis result types
 
 #include "logging.h"
+#include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
+#include "video_parameter_observation_presenter.h"
 
 namespace {
 
@@ -34,6 +36,20 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   }
   void unsubscribeInvalidation(uint64_t subscription_id) override {
     presenter_.unsubscribeInvalidation(subscription_id);
+  }
+
+  uint64_t requestObservations(
+      orc::NodeID node_id, orc::FieldID field_id,
+      orc::presenters::ObservationDataReadyCallback callback) override {
+    return presenter_.requestObservations(node_id, field_id,
+                                          std::move(callback));
+  }
+  uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback callback) override {
+    return presenter_.subscribeObservationProgress(std::move(callback));
+  }
+  void unsubscribeObservationProgress(uint64_t subscription_id) override {
+    presenter_.unsubscribeObservationProgress(subscription_id);
   }
 
   orc::PreviewRenderResult renderPreview(
@@ -287,6 +303,14 @@ uint64_t RenderCoordinator::requestVBIData(const orc::NodeID& node_id,
   return id;
 }
 
+uint64_t RenderCoordinator::requestObservations(const orc::NodeID& node_id,
+                                                orc::FieldID field_id) {
+  uint64_t id = nextRequestId();
+  auto req = std::make_unique<GetObservationsRequest>(id, node_id, field_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
 uint64_t RenderCoordinator::requestDropoutData(const orc::NodeID& node_id,
                                                orc::DropoutAnalysisMode mode) {
   uint64_t id = nextRequestId();
@@ -485,6 +509,21 @@ void RenderCoordinator::workerLoop() {
     }
   }
 
+  // Tear the presenter down here, on the worker thread, so its background
+  // scheduler is stopped (and any awaited observation callbacks fire, emitting
+  // their final signals) while this coordinator QObject is still fully alive.
+  if (worker_render_presenter_ && worker_invalidation_subscription_ != 0) {
+    worker_render_presenter_->unsubscribeInvalidation(
+        worker_invalidation_subscription_);
+    worker_invalidation_subscription_ = 0;
+  }
+  if (worker_render_presenter_ && worker_progress_subscription_ != 0) {
+    worker_render_presenter_->unsubscribeObservationProgress(
+        worker_progress_subscription_);
+    worker_progress_subscription_ = 0;
+  }
+  worker_render_presenter_.reset();
+
   ORC_LOG_DEBUG("RenderCoordinator: Worker thread loop exiting");
 }
 
@@ -496,6 +535,11 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
 
     case RenderRequestType::RenderPreview:
       handleRenderPreview(*static_cast<RenderPreviewRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetObservations:
+      handleGetObservations(
+          *static_cast<GetObservationsRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetVBIData:
@@ -573,6 +617,11 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
           worker_invalidation_subscription_);
       worker_invalidation_subscription_ = 0;
     }
+    if (worker_render_presenter_ && worker_progress_subscription_ != 0) {
+      worker_render_presenter_->unsubscribeObservationProgress(
+          worker_progress_subscription_);
+      worker_progress_subscription_ = 0;
+    }
     worker_render_presenter_.reset();
 
     ORC_LOG_DEBUG(
@@ -614,6 +663,17 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
                   ids.push_back(node.value());
                 }
                 emit observationsInvalidated(ids);
+              });
+
+      // Subscribe to background-workload snapshots and re-emit them on the GUI
+      // thread (Task 5.4). The callback fires on the scheduler's worker thread;
+      // the queued signal marshals to the GUI thread.
+      worker_progress_subscription_ =
+          worker_render_presenter_->subscribeObservationProgress(
+              [this](const orc::presenters::ObservationProgressEvent& event) {
+                emit observationProgress(
+                    event.active, event.percent_complete,
+                    static_cast<qulonglong>(event.outstanding_nodes));
               });
     }
 
@@ -680,6 +740,56 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
     ORC_LOG_ERROR("RenderCoordinator: Preview render failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
+}
+
+void RenderCoordinator::handleGetObservations(
+    const GetObservationsRequest& req) {
+  if (!worker_render_presenter_) {
+    emit observationDataReady(req.request_id, false,
+                              static_cast<qulonglong>(req.field_id.value()),
+                              orc::presenters::VideoParameterObservationView{},
+                              orc::presenters::NtscFieldObservationsView{});
+    return;
+  }
+
+  // Capture the signal parameters the observation view models need up front, on
+  // this worker thread. The delivery callback may run on the scheduler's worker
+  // thread and must not touch the single-threaded presenter render state; it
+  // only extracts value-type view models from the delivered (pure) context.
+  // Held in a shared_ptr so the callback closure copies cheaply and without
+  // throwing (a bare std::optional<SourceParameters> copy can allocate, which
+  // would make the noexcept delivery lambda ill-formed).
+  auto video_params = std::make_shared<std::optional<orc::SourceParameters>>(
+      worker_render_presenter_->getVideoParameters(req.node_id));
+  const uint64_t request_id = req.request_id;
+  const orc::FieldID field_id = req.field_id;
+
+  worker_render_presenter_->requestObservations(
+      req.node_id, field_id,
+      [this, request_id, field_id, video_params](
+          uint64_t /*presenter_request_id*/, bool available,
+          const void* obs_context) noexcept {
+        // This callback may run on the scheduler's worker thread inside a
+        // completion callback that must never throw; contain everything.
+        try {
+          orc::presenters::VideoParameterObservationView video_view;
+          orc::presenters::NtscFieldObservationsView ntsc_view;
+          if (available && obs_context != nullptr) {
+            video_view = orc::presenters::VideoParameterObservationPresenter::
+                extractObservations(field_id, obs_context, *video_params);
+            ntsc_view = orc::presenters::NtscObservationPresenter::
+                extractFieldObservations(field_id, obs_context);
+          }
+          emit observationDataReady(
+              request_id, available, static_cast<qulonglong>(field_id.value()),
+              std::move(video_view), std::move(ntsc_view));
+        } catch (const std::exception& e) {
+          ORC_LOG_ERROR("RenderCoordinator: observation delivery failed: {}",
+                        e.what());
+        } catch (...) {
+          ORC_LOG_ERROR("RenderCoordinator: observation delivery failed");
+        }
+      });
 }
 
 void RenderCoordinator::handleGetVBIData(const GetVBIDataRequest& req) {

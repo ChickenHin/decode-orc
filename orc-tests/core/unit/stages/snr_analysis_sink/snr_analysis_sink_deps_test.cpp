@@ -227,4 +227,97 @@ TEST(SNRAnalysisSinkCsvTest, AbsentMetricsSerialiseAsEmptyFields) {
   EXPECT_EQ(os.str().find("nan"), std::string::npos);
 }
 
+// ----- Phase 5.3: reuse of pre-loaded observations -----
+
+using testing::ByMove;
+using testing::StrictMock;
+
+namespace {
+
+// A deps instance whose observer handles are captured so a test can assert the
+// exact number of process_frame() calls. The context's has() answers control
+// which frames are treated as already covered by the store pre-load.
+struct ReuseHarness {
+  std::shared_ptr<NiceMock<MockObservationService>> service;
+  std::shared_ptr<NiceMock<MockObservationContext>> context;
+  std::shared_ptr<NiceMock<MockVideoFrameRepresentationArtifact>> vfr;
+  StrictMock<MockObserverHandle>* white_handle = nullptr;
+  StrictMock<MockObserverHandle>* black_handle = nullptr;
+  std::unique_ptr<orc::SNRAnalysisSinkStageDeps> deps;
+  std::atomic<bool> cancel{false};
+};
+
+std::unique_ptr<ReuseHarness> make_reuse_harness(orc::FrameIDRange range) {
+  auto h = std::make_unique<ReuseHarness>();
+  h->service = std::make_shared<NiceMock<MockObservationService>>();
+  h->context = std::make_shared<NiceMock<MockObservationContext>>();
+  h->vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  auto white = std::make_unique<StrictMock<MockObserverHandle>>();
+  auto black = std::make_unique<StrictMock<MockObserverHandle>>();
+  h->white_handle = white.get();
+  h->black_handle = black.get();
+
+  EXPECT_CALL(*h->service, create_observer("white_snr"))
+      .WillOnce(Return(ByMove(std::move(white))));
+  EXPECT_CALL(*h->service, create_observer("black_psnr"))
+      .WillOnce(Return(ByMove(std::move(black))));
+
+  ON_CALL(*h->context, get(_, "white_snr", "snr_db")).WillByDefault(white_for);
+  ON_CALL(*h->context, get(_, "black_psnr", "psnr_db"))
+      .WillByDefault(black_for);
+  ON_CALL(*h->vfr, frame_range()).WillByDefault(Return(range));
+
+  h->deps = std::make_unique<orc::SNRAnalysisSinkStageDeps>(h->service.get());
+  h->deps->init(nullptr, &h->cancel);
+  return h;
+}
+
+}  // namespace
+
+// Fully covered store: every frame's value is already present, so the sink runs
+// the observers zero times yet still produces a full result set.
+TEST(SNRAnalysisSinkDepsReuseTest, FullyCoveredContextRunsZeroObserverFrames) {
+  auto h = make_reuse_harness(orc::FrameIDRange{0, 4});  // 5 frames
+  ON_CALL(*h->context, has(_, "white_snr", "snr_db"))
+      .WillByDefault(Return(true));
+  ON_CALL(*h->context, has(_, "black_psnr", "psnr_db"))
+      .WillByDefault(Return(true));
+
+  EXPECT_CALL(*h->white_handle, process_frame(_, _, _)).Times(0);
+  EXPECT_CALL(*h->black_handle, process_frame(_, _, _)).Times(0);
+
+  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
+                                                   options_with_interval(1));
+
+  ASSERT_TRUE(result.success);
+  ASSERT_EQ(result.frame_stats.size(), 5u);
+  for (const auto& fs : result.frame_stats) {
+    EXPECT_TRUE(fs.has_white_snr);  // values come from the pre-loaded context
+    EXPECT_TRUE(fs.has_black_psnr);
+  }
+}
+
+// Partial coverage: only the uncovered frames are observed. Frames 0..2 are
+// pre-loaded (has() == true); frames 3,4 are missing and must be observed.
+TEST(SNRAnalysisSinkDepsReuseTest, PartialCoverageObservesOnlyMissingFrames) {
+  auto h = make_reuse_harness(orc::FrameIDRange{0, 4});  // 5 frames
+
+  // field id == frame_id * 2, so covered frames 0,1,2 -> fields 0,2,4.
+  const auto covered = [](orc::FieldID fid, const std::string&,
+                          const std::string&) { return fid.value() <= 4; };
+  ON_CALL(*h->context, has(_, "white_snr", "snr_db")).WillByDefault(covered);
+  ON_CALL(*h->context, has(_, "black_psnr", "psnr_db")).WillByDefault(covered);
+
+  // Only frames 3 and 4 are re-observed by each stateless handle.
+  EXPECT_CALL(*h->white_handle, process_frame(_, _, _)).Times(2);
+  EXPECT_CALL(*h->black_handle, process_frame(_, _, _)).Times(2);
+
+  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
+                                                   options_with_interval(1));
+
+  ASSERT_TRUE(result.success);
+  EXPECT_EQ(result.frame_stats.size(), 5u);
+}
+
 }  // namespace orc_unit_test

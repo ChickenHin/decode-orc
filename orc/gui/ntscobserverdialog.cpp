@@ -37,6 +37,12 @@ NtscObserverDialog::~NtscObserverDialog() = default;
 void NtscObserverDialog::setupUI() {
   auto* mainLayout = new QVBoxLayout(this);
 
+  // Pending-state notice (hidden until an async request is in flight).
+  status_label_ = new QLabel(this);
+  status_label_->setObjectName("observationStatusLabel");
+  status_label_->setVisible(false);
+  mainLayout->addWidget(status_label_);
+
   // Field 1 group (FM Code and White Flag)
   field1_group_ = new QGroupBox("Field 1", this);
   auto* field1Layout = new QGridLayout(field1_group_);
@@ -107,9 +113,15 @@ void NtscObserverDialog::setupUI() {
   showing_frame_mode_ = false;
 }
 
+void NtscObserverDialog::showPending() {
+  status_label_->setText(tr("Computing observations…"));
+  status_label_->setVisible(true);
+}
+
 void NtscObserverDialog::updateObservations(
     const orc::FieldID& field_id,
     const orc::presenters::NtscFieldObservationsView& observations) {
+  status_label_->setVisible(false);
   showing_frame_mode_ = false;
   field1_group_->show();
   field2_group_->hide();
@@ -126,6 +138,7 @@ void NtscObserverDialog::updateObservationsForFrame(
     const orc::presenters::NtscFieldObservationsView& field1_observations,
     const orc::FieldID& field2_id,
     const orc::presenters::NtscFieldObservationsView& field2_observations) {
+  status_label_->setVisible(false);
   showing_frame_mode_ = true;
   field1_group_->show();
   field2_group_->show();
@@ -180,6 +193,7 @@ void NtscObserverDialog::updateFieldObservations(
 }
 
 void NtscObserverDialog::clearObservations() {
+  status_label_->setVisible(false);
   field1_fm_code_present_label_->setText("-");
   field1_fm_code_present_label_->setStyleSheet("");
   field1_fm_code_data_label_->setText("-");

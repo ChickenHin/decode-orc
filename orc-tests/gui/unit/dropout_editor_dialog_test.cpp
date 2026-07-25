@@ -69,6 +69,17 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   }
   void unsubscribeInvalidation(uint64_t) override {}
 
+  uint64_t requestObservations(
+      orc::NodeID, orc::FieldID,
+      orc::presenters::ObservationDataReadyCallback) override {
+    return 0;
+  }
+  uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback) override {
+    return 0;
+  }
+  void unsubscribeObservationProgress(uint64_t) override {}
+
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID) override {
     if (!provide_outputs) {

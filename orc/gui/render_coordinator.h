@@ -38,8 +38,11 @@
 #include <string>
 #include <thread>
 
+#include "ntsc_observation_view_models.h"
 #include "observation_invalidation_view.h"
+#include "observation_progress_view.h"
 #include "vbi_view_models.h"
+#include "video_parameter_observation_view_models.h"
 
 namespace orc::presenters {
 class IRenderPresenter;
@@ -55,6 +58,7 @@ class GUIProject;
 enum class RenderRequestType {
   UpdateDAG,            // Update the DAG being rendered
   RenderPreview,        // Render a preview image
+  GetObservations,      // Fetch a frame's observations (async, non-blocking)
   GetVBIData,           // Decode VBI data for a field
   GetDropoutData,       // Get dropout analysis data
   GetSNRData,           // Get SNR analysis data
@@ -111,6 +115,19 @@ struct RenderPreviewRequest : public RenderRequest {
         output_type(type),
         output_index(index),
         option_id(std::move(opt_id)) {}
+};
+
+/**
+ * @brief Request to fetch a frame's observations without blocking
+ */
+struct GetObservationsRequest : public RenderRequest {
+  orc::NodeID node_id;
+  orc::FieldID field_id;
+
+  GetObservationsRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
+      : RenderRequest(RenderRequestType::GetObservations, id),
+        node_id(std::move(node)),
+        field_id(fid) {}
 };
 
 /**
@@ -423,6 +440,14 @@ class IRenderPresenter {
       orc::presenters::ObservationInvalidationCallback callback) = 0;
   virtual void unsubscribeInvalidation(uint64_t subscription_id) = 0;
 
+  // Phase 5: async observation delivery + background-workload progress.
+  virtual uint64_t requestObservations(
+      NodeID node_id, FieldID field_id,
+      orc::presenters::ObservationDataReadyCallback callback) = 0;
+  virtual uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback callback) = 0;
+  virtual void unsubscribeObservationProgress(uint64_t subscription_id) = 0;
+
   virtual orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
       const std::string& option_id) = 0;
@@ -581,6 +606,20 @@ class RenderCoordinator : public QObject {
    * @return Request ID for matching response
    */
   uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
+
+  /**
+   * @brief Request a frame's observations without blocking the GUI (async)
+   *
+   * Answered from the provenance-keyed store when present, otherwise computed
+   * on the background scheduler. The extracted observation view models are
+   * emitted via observationDataReady. No DAG execution runs on the GUI thread.
+   *
+   * @param node_id  Node whose output frame is observed
+   * @param field_id Field of interest (both fields of its frame are covered)
+   * @return Request ID for matching / discarding stale responses
+   */
+  uint64_t requestObservations(const orc::NodeID& node_id,
+                               orc::FieldID field_id);
 
   /**
    * @brief Request dropout analysis data for all fields (async)
@@ -887,6 +926,36 @@ class RenderCoordinator : public QObject {
    */
   void observationsInvalidated(QVector<int> changed_node_ids);
 
+  /**
+   * @brief Emitted (on the GUI thread) when a requestObservations() response is
+   *        ready
+   *
+   * @param request_id     Id returned by requestObservations()
+   * @param available      True when the frame's observations were produced
+   * @param field_id_value Field the observations are for (FieldID::value())
+   * @param video_params   Video-parameter observer view model (empty if absent)
+   * @param ntsc           NTSC observer view model (empty if absent)
+   *
+   * Marshalled from the worker/scheduler thread via a queued connection.
+   */
+  void observationDataReady(
+      uint64_t request_id, bool available, qulonglong field_id_value,
+      orc::presenters::VideoParameterObservationView video_params,
+      orc::presenters::NtscFieldObservationsView ntsc);
+
+  /**
+   * @brief Emitted (on the GUI thread) when the background observation workload
+   *        changes (Task 5.4)
+   *
+   * @param active            True while background observation work is running
+   * @param percent_complete  Overall completion, 0..100
+   * @param outstanding_nodes Distinct nodes with pending work
+   *
+   * Marshalled from the scheduler's worker thread via a queued connection.
+   */
+  void observationProgress(bool active, int percent_complete,
+                           qulonglong outstanding_nodes);
+
  private:
   // ========================================================================
   // Worker thread methods (run on worker thread only)
@@ -911,6 +980,11 @@ class RenderCoordinator : public QObject {
    * @brief Handle RenderPreview request
    */
   void handleRenderPreview(const RenderPreviewRequest& req);
+
+  /**
+   * @brief Handle GetObservations request
+   */
+  void handleGetObservations(const GetObservationsRequest& req);
 
   /**
    * @brief Handle GetVBIData request
@@ -999,6 +1073,9 @@ class RenderCoordinator : public QObject {
 
   // Phase 3: invalidation subscription held on the worker presenter (0 = none).
   uint64_t worker_invalidation_subscription_{0};
+
+  // Phase 5: workload-progress subscription on the worker presenter (0 = none).
+  uint64_t worker_progress_subscription_{0};
 
   // Phase 2.7: Trigger state now managed by RenderPresenter
   // Removed: trigger_cancel_requested_ and current_trigger_stage_

@@ -62,6 +62,14 @@ class VideoParameterObserverDialog : public QDialog {
   void clearObservations();
 
   /**
+   * @brief Show a "computing" pending state while observations are fetched.
+   *
+   * Displayed after an async request is issued and cleared once values arrive
+   * (Phase 5). The previously shown values remain visible beneath the notice.
+   */
+  void showPending();
+
+  /**
    * @brief Set the amplitude display unit used for the burst level.
    *
    * Takes effect on the next update; the main window refreshes the dialog
@@ -85,6 +93,9 @@ class VideoParameterObserverDialog : public QDialog {
   static QString systemName(orc::presenters::VideoSystem sys);
   static QString fmtOptDouble(const std::optional<double>& v,
                               const char* unit = "");
+
+  // Pending-state notice shown while an async observation request is in flight.
+  QLabel* status_label_;
 
   // Signal parameters group (shown once — same for both fields)
   QGroupBox* signal_group_;

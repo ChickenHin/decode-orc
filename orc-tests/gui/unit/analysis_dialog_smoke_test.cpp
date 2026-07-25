@@ -11,6 +11,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QLabel>
 #include <algorithm>
 
 #include "burstlevelanalysisdialog.h"
@@ -143,6 +144,57 @@ TEST(AnalysisDialogSmokeTest, VideoParameterObserverDialog_CanShowAndClose) {
   QCoreApplication::processEvents();
 
   EXPECT_FALSE(dialog.isVisible());
+}
+
+// Phase 5 Task 5.2: the observer dialogs show a pending "computing" notice
+// after an async request is issued and hide it once observations arrive.
+TEST(AnalysisDialogSmokeTest,
+     VideoParameterObserverDialog_PendingThenPopulated) {
+  (void)ensureApplication();
+
+  VideoParameterObserverDialog dialog;
+  auto* status = dialog.findChild<QLabel*>("observationStatusLabel");
+  ASSERT_NE(status, nullptr);
+  EXPECT_FALSE(status->isVisible());  // hidden until a request is in flight
+
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  dialog.showPending();
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(status->isVisible());
+  EXPECT_FALSE(status->text().isEmpty());
+
+  dialog.updateObservations(orc::FieldID(4),
+                            orc::presenters::VideoParameterObservationView{});
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(status->isVisible());  // populated -> notice cleared
+
+  dialog.close();
+}
+
+TEST(AnalysisDialogSmokeTest, NtscObserverDialog_PendingThenPopulated) {
+  (void)ensureApplication();
+
+  NtscObserverDialog dialog;
+  auto* status = dialog.findChild<QLabel*>("observationStatusLabel");
+  ASSERT_NE(status, nullptr);
+  EXPECT_FALSE(status->isVisible());
+
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  dialog.showPending();
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(status->isVisible());
+  EXPECT_FALSE(status->text().isEmpty());
+
+  dialog.updateObservations(orc::FieldID(4),
+                            orc::presenters::NtscFieldObservationsView{});
+  QCoreApplication::processEvents();
+  EXPECT_FALSE(status->isVisible());
+
+  dialog.close();
 }
 
 namespace {

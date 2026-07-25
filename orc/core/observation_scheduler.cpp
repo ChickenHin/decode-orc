@@ -65,6 +65,10 @@ void ObservationScheduler::stop() {
   has_pending_dag_update_ = false;
   pending_dag_.reset();
   pending_fingerprints_.reset();
+  // Clear the workload so a later start() begins from idle. No callback is
+  // fired here: no workload snapshot is delivered after shutdown.
+  workload_total_frames_ = 0;
+  workload_observed_frames_ = 0;
 }
 
 bool ObservationScheduler::is_running() const {
@@ -81,6 +85,7 @@ void ObservationScheduler::submit(ObservationWorkItem item) {
     enqueue_locked(std::move(item));
   }
   cv_.notify_one();
+  emit_workload();
 }
 
 void ObservationScheduler::submit_batch(
@@ -95,9 +100,11 @@ void ObservationScheduler::submit_batch(
     }
   }
   cv_.notify_all();
+  emit_workload();
 }
 
 void ObservationScheduler::enqueue_locked(ObservationWorkItem item) {
+  workload_total_frames_ += item.frames.count();
   const int idx = static_cast<int>(item.priority);
   queues_[idx].push_back(std::move(item));
 }
@@ -162,6 +169,10 @@ void ObservationScheduler::on_dag_changed(
     purge_stale_locked();
   }
   cv_.notify_all();
+  // A purge shrinks the outstanding workload; publish it, then drop to idle if
+  // nothing remains (invalidation that clears the queue resets the aggregate).
+  emit_workload();
+  reset_workload_if_drained();
 }
 
 void ObservationScheduler::purge_stale_locked() {
@@ -173,6 +184,11 @@ void ObservationScheduler::purge_stale_locked() {
     for (auto& item : queue) {
       if (fingerprint_current(item, *fingerprints_)) {
         kept.push_back(std::move(item));
+      } else {
+        // Purged queued items never ran, so remove their whole frame count from
+        // the outstanding total (clamped so it can never underflow).
+        const std::uint64_t count = item.frames.count();
+        workload_total_frames_ -= std::min(workload_total_frames_, count);
       }
     }
     queue = std::move(kept);
@@ -206,6 +222,88 @@ ObservationScheduler::CompletionCallback
 ObservationScheduler::completion_callback() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return completion_cb_;
+}
+
+void ObservationScheduler::set_workload_callback(WorkloadCallback callback) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  workload_cb_ = std::move(callback);
+}
+
+ObservationScheduler::WorkloadCallback ObservationScheduler::workload_callback()
+    const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return workload_cb_;
+}
+
+ObservationWorkload ObservationScheduler::workload() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return build_workload_locked();
+}
+
+ObservationWorkload ObservationScheduler::build_workload_locked() const {
+  ObservationWorkload w;
+  w.frames_total = workload_total_frames_;
+  w.frames_observed =
+      std::min(workload_observed_frames_, workload_total_frames_);
+  w.active = workload_total_frames_ > 0;
+  if (workload_total_frames_ > 0) {
+    // Rounded percentage, clamped to 100 (observed never exceeds total).
+    const std::uint64_t pct =
+        (w.frames_observed * 100 + workload_total_frames_ / 2) /
+        workload_total_frames_;
+    w.percent_complete = static_cast<int>(pct > 100 ? 100 : pct);
+  }
+  // Distinct nodes with pending work: queued items plus the in-flight item.
+  std::unordered_set<NodeID> nodes;
+  for (const auto& queue : queues_) {
+    for (const auto& item : queue) {
+      nodes.insert(item.node_id);
+    }
+  }
+  if (has_in_flight_) {
+    nodes.insert(in_flight_node_);
+  }
+  w.outstanding_nodes = nodes.size();
+  return w;
+}
+
+void ObservationScheduler::emit_workload() {
+  WorkloadCallback cb;
+  ObservationWorkload snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stop_requested_ || !workload_cb_) {
+      return;
+    }
+    cb = workload_cb_;
+    snapshot = build_workload_locked();
+  }
+  cb(snapshot);
+}
+
+void ObservationScheduler::reset_workload_if_drained() {
+  WorkloadCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stop_requested_) {
+      return;
+    }
+    if (has_in_flight_ || has_pending_dag_update_) {
+      return;
+    }
+    for (const auto& queue : queues_) {
+      if (!queue.empty()) {
+        return;
+      }
+    }
+    // Nothing outstanding: return to idle.
+    workload_total_frames_ = 0;
+    workload_observed_frames_ = 0;
+    cb = workload_cb_;
+  }
+  if (cb) {
+    cb(ObservationWorkload{});
+  }
 }
 
 std::size_t ObservationScheduler::queued_count() const {
@@ -281,6 +379,11 @@ void ObservationScheduler::process_item(const ObservationWorkItem& item) {
         break;
       }
       ++observed;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++workload_observed_frames_;
+      }
+      emit_workload();
       if (prog_cb) {
         prog_cb(ObservationProgress{item.node_id, observed, total});
       }
@@ -320,6 +423,7 @@ void ObservationScheduler::worker_loop() {
           std::lock_guard<std::mutex> lock(mutex_);
           has_in_flight_ = false;
         }
+        reset_workload_if_drained();
         break;
     }
   }
@@ -340,6 +444,7 @@ bool ObservationScheduler::process_one_for_testing() {
         std::lock_guard<std::mutex> lock(mutex_);
         has_in_flight_ = false;
       }
+      reset_workload_if_drained();
       return true;
   }
   return false;

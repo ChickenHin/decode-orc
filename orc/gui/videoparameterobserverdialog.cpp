@@ -54,6 +54,12 @@ VideoParameterObserverDialog::~VideoParameterObserverDialog() = default;
 void VideoParameterObserverDialog::setupUI() {
   auto* main = new QVBoxLayout(this);
 
+  // Pending-state notice (hidden until an async request is in flight).
+  status_label_ = new QLabel(this);
+  status_label_->setObjectName("observationStatusLabel");
+  status_label_->setVisible(false);
+  main->addWidget(status_label_);
+
   // --- Signal Parameters group (once per frame) ---
   signal_group_ = new QGroupBox("Signal Parameters", this);
   auto* sg = new QGridLayout(signal_group_);
@@ -172,10 +178,16 @@ void VideoParameterObserverDialog::setupUI() {
 // Public update methods
 // ---------------------------------------------------------------------------
 
+void VideoParameterObserverDialog::showPending() {
+  status_label_->setText(tr("Computing observations…"));
+  status_label_->setVisible(true);
+}
+
 void VideoParameterObserverDialog::updateObservations(
     const orc::FieldID& field_id,
     const orc::presenters::VideoParameterObservationView& obs) {
   (void)field_id;
+  status_label_->setVisible(false);
   updateSignalParams(obs);
   field1_group_->setTitle("Field Observations");
   updateFieldGroup(field1_group_, field1_colour_frame_label_,
@@ -191,6 +203,7 @@ void VideoParameterObserverDialog::updateObservationsForFrame(
     const orc::presenters::VideoParameterObservationView& field2_obs) {
   (void)field1_id;
   (void)field2_id;
+  status_label_->setVisible(false);
   updateSignalParams(field1_obs);
   field1_group_->setTitle("Field 1 Observations");
   updateFieldGroup(field1_group_, field1_colour_frame_label_,
@@ -203,6 +216,7 @@ void VideoParameterObserverDialog::updateObservationsForFrame(
 }
 
 void VideoParameterObserverDialog::clearObservations() {
+  status_label_->setVisible(false);
   system_label_->setText("-");
   frame_width_label_->setText("-");
   burst_range_label_->setText("-");

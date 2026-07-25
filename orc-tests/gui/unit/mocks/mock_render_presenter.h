@@ -10,8 +10,10 @@
 #pragma once
 
 #include <gmock/gmock.h>
+#include <orc/stage/observation/observation_context.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -64,6 +66,88 @@ class MockRenderPresenter : public IRenderPresenter {
   std::size_t invalidationSubscriberCount() {
     std::lock_guard<std::mutex> lock(invalidation_mutex_);
     return invalidation_subscribers_.size();
+  }
+
+  // --- Async observations (Phase 5, Task 5.1) ------------------------------
+  // Controllable seam: when immediate-answer mode is on, the callback fires
+  // synchronously (store hit); otherwise the request is queued for a test to
+  // release later (store miss / deferred). Deliveries carry a real (empty)
+  // ObservationContext so the coordinator's extraction path is exercised.
+
+  uint64_t requestObservations(
+      NodeID /*node_id*/, FieldID /*field_id*/,
+      orc::presenters::ObservationDataReadyCallback callback) override {
+    const uint64_t id = next_obs_request_id_++;
+    if (immediate_answer_) {
+      if (callback) {
+        callback(id, true, &delivered_context_);
+      }
+      return id;
+    }
+    std::lock_guard<std::mutex> lock(obs_mutex_);
+    pending_obs_.push_back({id, std::move(callback)});
+    return id;
+  }
+
+  void setImmediateAnswer(bool on) { immediate_answer_ = on; }
+
+  // Deliver the oldest deferred request. Returns false if none are pending.
+  bool deliverOldestObservation(bool available) {
+    PendingObs p;
+    {
+      std::lock_guard<std::mutex> lock(obs_mutex_);
+      if (pending_obs_.empty()) {
+        return false;
+      }
+      p = std::move(pending_obs_.front());
+      pending_obs_.pop_front();
+    }
+    if (p.callback) {
+      p.callback(p.request_id, available,
+                 available ? &delivered_context_ : nullptr);
+    }
+    return true;
+  }
+
+  std::size_t pendingObservationCount() {
+    std::lock_guard<std::mutex> lock(obs_mutex_);
+    return pending_obs_.size();
+  }
+
+  // --- Workload progress (Phase 5, Task 5.4) -------------------------------
+
+  uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback callback) override {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    const uint64_t id = next_progress_id_++;
+    progress_subscribers_.emplace(id, std::move(callback));
+    return id;
+  }
+
+  void unsubscribeObservationProgress(uint64_t subscription_id) override {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    progress_subscribers_.erase(subscription_id);
+  }
+
+  // Test helper: simulate a scheduler workload snapshot.
+  void fireProgress(const orc::presenters::ObservationProgressEvent& event) {
+    std::vector<orc::presenters::ObservationProgressCallback> callbacks;
+    {
+      std::lock_guard<std::mutex> lock(progress_mutex_);
+      for (const auto& [id, cb] : progress_subscribers_) {
+        callbacks.push_back(cb);
+      }
+    }
+    for (const auto& cb : callbacks) {
+      if (cb) {
+        cb(event);
+      }
+    }
+  }
+
+  std::size_t progressSubscriberCount() {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    return progress_subscribers_.size();
   }
 
   MOCK_METHOD(orc::PreviewRenderResult, renderPreview,
@@ -142,10 +226,26 @@ class MockRenderPresenter : public IRenderPresenter {
               (override));
 
  private:
+  struct PendingObs {
+    uint64_t request_id = 0;
+    orc::presenters::ObservationDataReadyCallback callback;
+  };
+
   std::mutex invalidation_mutex_;
   std::map<uint64_t, orc::presenters::ObservationInvalidationCallback>
       invalidation_subscribers_;
   uint64_t next_invalidation_id_ = 1;
+
+  std::mutex obs_mutex_;
+  std::deque<PendingObs> pending_obs_;
+  uint64_t next_obs_request_id_ = 1;
+  bool immediate_answer_ = false;
+  orc::ObservationContext delivered_context_;
+
+  std::mutex progress_mutex_;
+  std::map<uint64_t, orc::presenters::ObservationProgressCallback>
+      progress_subscribers_;
+  uint64_t next_progress_id_ = 1;
 };
 
 }  // namespace orc::presenters::test

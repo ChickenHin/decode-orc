@@ -125,13 +125,17 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
     }
 
     const FrameID fid = frame_rng.first + offset;
+    const FieldID frame_fid(fid * 2U);
 
-    if (burst_level_handle) {
+    // Phase 5.3: reuse a pre-loaded observation when the host has already
+    // supplied this frame's value from the provenance-keyed store. burst_level
+    // is stateless, so per-frame skipping is safe.
+    if (burst_level_handle && !observation_context.has(frame_fid, "burst_level",
+                                                       "median_burst_10bit")) {
       burst_level_handle->process_frame(*representation, fid,
                                         observation_context);
     }
 
-    const FieldID frame_fid(fid * 2U);
     auto val =
         observation_context.get(frame_fid, "burst_level", "median_burst_10bit");
 

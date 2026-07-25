@@ -23,6 +23,8 @@
 #include "mocks/mock_render_presenter.h"
 
 Q_DECLARE_METATYPE(orc::PreviewRenderResult)
+Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
+Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
 
 namespace gui_unit_test {
 
@@ -33,6 +35,10 @@ using ::testing::Return;
 
 static bool registerRenderCoordinatorMetatypes() {
   qRegisterMetaType<orc::PreviewRenderResult>("orc::PreviewRenderResult");
+  qRegisterMetaType<orc::presenters::VideoParameterObservationView>(
+      "orc::presenters::VideoParameterObservationView");
+  qRegisterMetaType<orc::presenters::NtscFieldObservationsView>(
+      "orc::presenters::NtscFieldObservationsView");
   return true;
 }
 
@@ -283,6 +289,203 @@ TEST(RenderCoordinatorTest, ObservationInvalidation_UnsubscribeStopsDelivery) {
   mock_presenter->fireInvalidation({orc::NodeID(7)});
   QCoreApplication::processEvents();
   EXPECT_EQ(invalidation_spy.count(), 0);
+
+  coordinator.stop();
+}
+
+// --- Phase 5 Task 5.1: async observation requests ------------------------
+
+// A store hit answers immediately: the presenter fires the callback
+// synchronously and the coordinator emits observationDataReady(available=true).
+TEST(RenderCoordinatorTest,
+     ObservationRequest_StoreHit_EmitsDataReadyImmediate) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(true);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::observationDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(10));
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  ASSERT_EQ(data_spy.count(), 1);
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_TRUE(data_spy.at(0).at(1).toBool());            // available
+  EXPECT_EQ(data_spy.at(0).at(2).toULongLong(), 10ull);  // field id value
+
+  coordinator.stop();
+}
+
+// A store miss defers: no signal until the awaited frame is delivered later.
+TEST(RenderCoordinatorTest,
+     ObservationRequest_Miss_EmitsAfterDeferredDelivery) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(false);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::observationDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4));
+
+  // The worker has forwarded the request; it now awaits a deferred delivery.
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 1; }));
+  QCoreApplication::processEvents();
+  EXPECT_EQ(data_spy.count(), 0);  // nothing delivered yet
+
+  // Background computation finishes -> the frame's observations arrive.
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(/*available=*/true));
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_TRUE(data_spy.at(0).at(1).toBool());
+
+  coordinator.stop();
+}
+
+// Concurrent requests carry distinct ids and each response echoes its own id,
+// so a consumer can drop stale (superseded) responses.
+TEST(RenderCoordinatorTest, ObservationRequest_DistinctIdsSupportStaleDrop) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(false);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::observationDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t first =
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4));
+  const uint64_t second =
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(6));
+  EXPECT_NE(first, second);
+
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 2; }));
+
+  // Deliver both (oldest first). Each response carries its originating id.
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(true));
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(true));
+
+  ASSERT_TRUE(waitForCount(data_spy, 2));
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), first);
+  EXPECT_EQ(data_spy.at(1).at(0).toULongLong(), second);
+
+  coordinator.stop();
+}
+
+// --- Phase 5 Task 5.4: background-workload progress ----------------------
+
+// A scheduler workload snapshot is forwarded to the observationProgress signal.
+TEST(RenderCoordinatorTest, ObservationProgress_ForwardedToSignal) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy progress_spy(&coordinator,
+                          &RenderCoordinator::observationProgress);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->progressSubscriberCount() == 1; }));
+
+  orc::presenters::ObservationProgressEvent event;
+  event.active = true;
+  event.percent_complete = 42;
+  event.outstanding_nodes = 3;
+  mock_presenter->fireProgress(event);
+
+  ASSERT_TRUE(waitForCount(progress_spy, 1));
+  EXPECT_TRUE(progress_spy.at(0).at(0).toBool());
+  EXPECT_EQ(progress_spy.at(0).at(1).toInt(), 42);
+  EXPECT_EQ(progress_spy.at(0).at(2).toULongLong(), 3ull);
+
+  // Idle snapshot delivered when the queue drains.
+  orc::presenters::ObservationProgressEvent idle;
+  mock_presenter->fireProgress(idle);
+  ASSERT_TRUE(waitForCount(progress_spy, 2));
+  EXPECT_FALSE(progress_spy.at(1).at(0).toBool());
+
+  coordinator.stop();
+}
+
+// Progress delivery stops once the coordinator tears the presenter down.
+TEST(RenderCoordinatorTest, ObservationProgress_UnsubscribeStopsDelivery) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy progress_spy(&coordinator,
+                          &RenderCoordinator::observationProgress);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->progressSubscriberCount() == 1; }));
+
+  coordinator.updateDAG(nullptr);  // tears down the presenter, unsubscribes
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->progressSubscriberCount() == 0; }));
+
+  orc::presenters::ObservationProgressEvent event;
+  event.active = true;
+  mock_presenter->fireProgress(event);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(progress_spy.count(), 0);
 
   coordinator.stop();
 }

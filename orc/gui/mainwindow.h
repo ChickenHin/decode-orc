@@ -127,6 +127,9 @@ class MainWindow : public QMainWindow {
   void updateVideoParameterObserverDialog();
   void onShowNtscObserverDialog();
   void updateNtscObserverDialog();
+  /// Issue async observation requests for whichever observer dialogs are open
+  /// (Phase 5). Replaces the synchronous per-dialog render-and-extract path.
+  void refreshObserverDialogs();
   void onLineScopeRequested(int image_x, int image_y);
   void onLineScopeRefreshAtFieldLine();  ///< Refresh line scope at stored
                                          ///< field/line (for frame changes)
@@ -146,6 +149,14 @@ class MainWindow : public QMainWindow {
   void onPreviewReady(uint64_t request_id, orc::PreviewRenderResult result);
   void onVBIDataReady(uint64_t request_id,
                       orc::presenters::VBIFieldInfoView info);
+  // Phase 5: async observation delivery + background-workload progress.
+  void onObservationDataReady(
+      uint64_t request_id, bool available, qulonglong field_id_value,
+      orc::presenters::VideoParameterObservationView video_params,
+      orc::presenters::NtscFieldObservationsView ntsc);
+  void onObservationProgress(bool active, int percent_complete,
+                             qulonglong outstanding_nodes);
+  void onObservationsInvalidated(QVector<int> changed_node_ids);
   void onAvailableOutputsReady(uint64_t request_id,
                                std::vector<orc::PreviewOutputInfo> outputs);
   void onLineSamplesReady(uint64_t request_id, uint64_t field_index,
@@ -274,6 +285,23 @@ class MainWindow : public QMainWindow {
   bool pending_vbi_is_frame_mode_{false};
   orc::presenters::VBIFieldInfoView
       pending_vbi_field1_info_;  // Cached first field data (view model)
+  // Phase 5: async observer-dialog requests. One frame yields one (field mode)
+  // or two (frame mode) requests whose responses carry both observer view
+  // models; field1 is cached until field2 arrives, matching the VBI flow.
+  uint64_t pending_obs_request_id_field1_{0};
+  uint64_t pending_obs_request_id_field2_{0};
+  bool pending_obs_frame_mode_{false};
+  bool pending_obs_field1_ready_{false};
+  bool pending_obs_field2_ready_{false};
+  bool pending_obs_field1_available_{false};
+  bool pending_obs_field2_available_{false};
+  orc::FieldID pending_obs_field1_id_{0};
+  orc::FieldID pending_obs_field2_id_{0};
+  orc::presenters::VideoParameterObservationView pending_obs_video_field1_;
+  orc::presenters::VideoParameterObservationView pending_obs_video_field2_;
+  orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field1_;
+  orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field2_;
+
   uint64_t pending_outputs_request_id_{0};
   uint64_t pending_trigger_request_id_{0};
   orc::NodeID pending_trigger_node_id_;  // Track which node is being triggered

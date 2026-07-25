@@ -602,5 +602,134 @@ TEST(ObservationScheduler, NoCallbacksFireAfterShutdown) {
   EXPECT_EQ(scheduler->queued_count(), 0u);
 }
 
+// ---------------------------------------------------------------------------
+// Task 5.4 — workload aggregation for the status-line progress indicator
+// ---------------------------------------------------------------------------
+
+TEST(ObservationScheduler, WorkloadPercentStaysBoundedAndEndsIdleOnDrain) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  std::vector<ObservationWorkload> snapshots;
+  scheduler->set_workload_callback(
+      [&](const ObservationWorkload& w) { snapshots.push_back(w); });
+
+  ObservationWorkItem item;
+  item.node_id = NodeID(1);
+  item.fingerprint = fp("a");
+  item.frames = FrameIDRange{0, 3};  // four frames
+  scheduler->submit(item);
+
+  // Enqueue makes the workload active at 0%.
+  ASSERT_FALSE(snapshots.empty());
+  EXPECT_TRUE(snapshots.front().active);
+  EXPECT_EQ(snapshots.front().frames_total, 4u);
+  EXPECT_EQ(snapshots.front().percent_complete, 0);
+  EXPECT_EQ(snapshots.front().outstanding_nodes, 1u);
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  // Every snapshot stays in range and observed never exceeds total.
+  bool saw_active_progress = false;
+  for (const auto& w : snapshots) {
+    EXPECT_GE(w.percent_complete, 0);
+    EXPECT_LE(w.percent_complete, 100);
+    EXPECT_LE(w.frames_observed, w.frames_total);
+    if (w.active && w.percent_complete > 0) {
+      saw_active_progress = true;
+    }
+  }
+  EXPECT_TRUE(saw_active_progress);
+
+  // Draining the queue returns the aggregate to idle exactly.
+  const ObservationWorkload final = scheduler->workload();
+  EXPECT_FALSE(final.active);
+  EXPECT_EQ(final.frames_total, 0u);
+  EXPECT_EQ(final.frames_observed, 0u);
+  EXPECT_EQ(final.percent_complete, 0);
+  EXPECT_EQ(final.outstanding_nodes, 0u);
+  ASSERT_FALSE(snapshots.empty());
+  EXPECT_FALSE(snapshots.back().active);  // last emitted snapshot is idle
+}
+
+TEST(ObservationScheduler, EnqueueAfterDrainReactivatesWorkloadAtZeroPercent) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->submit(
+      frame_item(NodeID(1), fp("a"), 0, ObservationPriority::kSweep));
+  ASSERT_TRUE(scheduler->process_one_for_testing());  // observe the one frame
+
+  // Queue drained -> idle.
+  EXPECT_FALSE(scheduler->workload().active);
+
+  // A fresh ten-frame item makes it active again, starting at 0%.
+  ObservationWorkItem big;
+  big.node_id = NodeID(2);
+  big.fingerprint = fp("b");
+  big.frames = FrameIDRange{0, 9};
+  scheduler->submit(big);
+
+  const ObservationWorkload w = scheduler->workload();
+  EXPECT_TRUE(w.active);
+  EXPECT_EQ(w.frames_total, 10u);
+  EXPECT_EQ(w.frames_observed, 0u);
+  EXPECT_EQ(w.percent_complete, 0);
+  EXPECT_EQ(w.outstanding_nodes, 1u);
+}
+
+TEST(ObservationScheduler, InvalidationPurgeResetsWorkloadForStaleWork) {
+  auto old_map = std::make_shared<NodeFingerprintMap>();
+  (*old_map)[NodeID(1)] = fp("v1");
+
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner, old_map);
+
+  std::vector<ObservationWorkload> snapshots;
+  scheduler->set_workload_callback(
+      [&](const ObservationWorkload& w) { snapshots.push_back(w); });
+
+  ObservationWorkItem item;
+  item.node_id = NodeID(1);
+  item.fingerprint = fp("v1");
+  item.frames = FrameIDRange{0, 9};
+  scheduler->submit(item);
+  EXPECT_TRUE(scheduler->workload().active);
+
+  // Node 1's content changes: the queued item is now stale and purged.
+  auto new_map = std::make_shared<NodeFingerprintMap>();
+  (*new_map)[NodeID(1)] = fp("v2");
+  scheduler->on_dag_changed(nullptr, new_map);
+
+  const ObservationWorkload after = scheduler->workload();
+  EXPECT_FALSE(after.active);
+  EXPECT_EQ(after.frames_total, 0u);
+  EXPECT_EQ(after.outstanding_nodes, 0u);
+  ASSERT_FALSE(snapshots.empty());
+  EXPECT_FALSE(snapshots.back().active);
+}
+
+TEST(ObservationScheduler, NoWorkloadCallbackFiresAfterShutdown) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  std::atomic<bool> shut_down{false};
+  scheduler->set_workload_callback(
+      [&](const ObservationWorkload&) { EXPECT_FALSE(shut_down.load()); });
+
+  scheduler->start();
+  for (FrameID f = 0; f < 20; ++f) {
+    scheduler->submit(
+        frame_item(NodeID(1), fp("a"), f, ObservationPriority::kSweep));
+  }
+  scheduler->stop();
+  shut_down.store(true);
+
+  // Submitting after shutdown is a no-op and triggers no workload callback.
+  scheduler->submit(
+      frame_item(NodeID(2), fp("b"), 0, ObservationPriority::kSweep));
+}
+
 }  // namespace
 }  // namespace orc

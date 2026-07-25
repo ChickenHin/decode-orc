@@ -378,6 +378,38 @@ live; no synchronous render-on-request from the UI thread.
   frames and produces identical output; with partial coverage, only missing
   frames are observed.
 
+### Task 5.4 — Status-line background progress indication
+
+- Aggregate the scheduler's per-item reporting (`ObservationProgress` /
+  `ObservationCompletion`, `orc/core/include/observation_scheduler.h`) into an
+  overall workload snapshot: frames observed vs frames total across all
+  outstanding work items, exposed by the scheduler (or a thin core-side
+  aggregator fed by the Task 4.4 callbacks) and resetting to idle when the
+  queue drains. Newly enqueued work while active may lower the percentage —
+  the value reflects the current outstanding workload, not a monotonic
+  session total.
+- Forward the aggregate through the observation presenter as a view-types
+  payload (active flag, percent complete, outstanding node count) using the
+  same plain-callback mechanism as the Phase 3 / Task 4.4 notifications
+  (MVP rules: no Qt on the presenters' core-facing side).
+- `MainWindow` subscribes via its coordinator, marshals updates to the main
+  thread, and shows a processing percentage in the window status bar
+  (existing `statusBar()` usage in `orc/gui/mainwindow.cpp`) whenever
+  background observation work is in progress — e.g.
+  "Computing observations… 42%" — clearing the message when the aggregate
+  returns to idle. Message formatting lives in a Tier 1 testable helper.
+
+**Acceptance criteria**
+
+- Core unit tests: percentage stays within 0–100; idle is reported exactly
+  when the queue drains; invalidation purges (Phase 3) reset the aggregate;
+  no callbacks after shutdown.
+- `gui-model` tests: coordinator observes idle → active(percent) → idle
+  transitions delivered on the main thread; unsubscribe/shutdown stops
+  delivery.
+- `gui-logic` tests: status-line formatting helper (percentage rounding,
+  idle → empty message).
+
 ---
 
 ## Phase 6 — Persistent observation sidecar

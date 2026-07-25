@@ -109,6 +109,24 @@ struct ObservationCompletion {
 };
 
 /**
+ * @brief Snapshot of the scheduler's current outstanding observation workload.
+ *
+ * Reflects the *current* outstanding work, not a monotonic session total:
+ * newly enqueued work raises @c frames_total (which lowers
+ * @c percent_complete), and the snapshot returns to idle (@c active == false,
+ * every counter zero) the moment the queue drains. @c percent_complete is
+ * always clamped to [0, 100]. @c frames_observed never exceeds
+ * @c frames_total.
+ */
+struct ObservationWorkload {
+  bool active = false;       ///< True while any work is outstanding.
+  int percent_complete = 0;  ///< frames_observed / frames_total, 0..100.
+  std::uint64_t frames_observed = 0;  ///< Frames observed in the current batch.
+  std::uint64_t frames_total = 0;     ///< Frames enqueued in the current batch.
+  std::size_t outstanding_nodes = 0;  ///< Distinct nodes with pending work.
+};
+
+/**
  * @brief Performs the render + observe work for one frame at one node.
  *
  * This is the seam that lets the scheduler run against a mocked backend in unit
@@ -225,6 +243,7 @@ class ObservationScheduler {
  public:
   using ProgressCallback = std::function<void(const ObservationProgress&)>;
   using CompletionCallback = std::function<void(const ObservationCompletion&)>;
+  using WorkloadCallback = std::function<void(const ObservationWorkload&)>;
 
   /**
    * @param runner        Backend that renders + observes frames (required).
@@ -296,6 +315,21 @@ class ObservationScheduler {
   void set_progress_callback(ProgressCallback callback);
   void set_completion_callback(CompletionCallback callback);
 
+  /**
+   * @brief Subscribe to overall workload snapshots (Task 5.4).
+   *
+   * Fires whenever the outstanding workload changes — a batch is enqueued, a
+   * frame is observed, stale work is purged, or the queue drains to idle.
+   * Invoked on whichever thread drove the change (worker thread for observe /
+   * drain, caller thread for enqueue / purge); a presenter marshals to the UI
+   * thread. Like the progress/completion callbacks, no workload callback fires
+   * after stop() has joined the worker.
+   */
+  void set_workload_callback(WorkloadCallback callback);
+
+  /// Current workload snapshot (introspection / testing).
+  ObservationWorkload workload() const;
+
   // ---- Introspection / testing --------------------------------------------
 
   /// Total number of items currently queued across all priority classes.
@@ -343,6 +377,20 @@ class ObservationScheduler {
 
   ProgressCallback progress_callback() const;
   CompletionCallback completion_callback() const;
+  WorkloadCallback workload_callback() const;
+
+  // Build a workload snapshot from the current counters and queue state. Caller
+  // holds mutex_.
+  ObservationWorkload build_workload_locked() const;
+
+  // Compute a snapshot under the lock and deliver it to the workload callback
+  // outside the lock (so a callback may re-enter the scheduler safely). A no-op
+  // when no callback is set or a stop has been requested.
+  void emit_workload();
+
+  // If no work remains queued or in flight, zero the workload counters and emit
+  // a single idle snapshot. Called after an item finishes and after a purge.
+  void reset_workload_if_drained();
 
   std::unique_ptr<IObservationTaskRunner> runner_;
   std::shared_ptr<IObservationSchedulingPolicy> policy_;
@@ -372,6 +420,15 @@ class ObservationScheduler {
 
   ProgressCallback progress_cb_;
   CompletionCallback completion_cb_;
+  WorkloadCallback workload_cb_;
+
+  // Outstanding-workload counters for the current batch (guarded by mutex_).
+  // frames_total grows on enqueue and shrinks only when never-started queued
+  // items are purged; frames_observed grows per observed frame. Both reset to
+  // zero when the queue drains, so the pair always reflects the *current*
+  // outstanding workload and frames_observed never exceeds frames_total.
+  std::uint64_t workload_total_frames_ = 0;
+  std::uint64_t workload_observed_frames_ = 0;
 };
 
 /**

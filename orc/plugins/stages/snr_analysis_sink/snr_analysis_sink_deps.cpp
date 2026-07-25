@@ -127,19 +127,26 @@ SNRAnalysisComputeResult SNRAnalysisSinkStageDeps::compute_and_analyze(
     }
 
     const FrameID fid = frame_rng.first + offset;
+    const FieldID frame_fid(fid * 2U);
 
-    if (white_snr_handle && (options.snr_mode == SNRAnalysisMode::WHITE ||
-                             options.snr_mode == SNRAnalysisMode::BOTH)) {
+    // Phase 5.3: reuse already-computed observations. When the host has
+    // pre-loaded this frame's value into the context (from the provenance-keyed
+    // store), skip re-running the observer. white_snr/black_psnr are stateless,
+    // so a per-frame skip is safe.
+    if (white_snr_handle &&
+        (options.snr_mode == SNRAnalysisMode::WHITE ||
+         options.snr_mode == SNRAnalysisMode::BOTH) &&
+        !observation_context.has(frame_fid, "white_snr", "snr_db")) {
       white_snr_handle->process_frame(*representation, fid,
                                       observation_context);
     }
-    if (black_psnr_handle && (options.snr_mode == SNRAnalysisMode::BLACK ||
-                              options.snr_mode == SNRAnalysisMode::BOTH)) {
+    if (black_psnr_handle &&
+        (options.snr_mode == SNRAnalysisMode::BLACK ||
+         options.snr_mode == SNRAnalysisMode::BOTH) &&
+        !observation_context.has(frame_fid, "black_psnr", "psnr_db")) {
       black_psnr_handle->process_frame(*representation, fid,
                                        observation_context);
     }
-
-    const FieldID frame_fid(fid * 2U);
 
     FrameSNRStats frame_stat;
     frame_stat.frame_number = static_cast<int32_t>(fid) + 1;

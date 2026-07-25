@@ -17,12 +17,15 @@
 #include "fieldpreviewwidget.h"
 #include "logging.h"
 #include "mainwindow.h"
+#include "ntscobserverdialog.h"
+#include "observation_status_formatter.h"
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/vbi_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
 #include "snranalysisdialog.h"
 #include "vbidialog.h"
+#include "videoparameterobserverdialog.h"
 
 // Coordinator response slot implementations
 
@@ -111,6 +114,114 @@ void MainWindow::onVBIDataReady(uint64_t request_id,
       vbi_dialog_->updateVBIInfo(info);
     }
     pending_vbi_request_id_ = 0;
+  }
+}
+
+void MainWindow::onObservationDataReady(
+    uint64_t request_id, bool available, qulonglong field_id_value,
+    orc::presenters::VideoParameterObservationView video_params,
+    orc::presenters::NtscFieldObservationsView ntsc) {
+  const bool is_field1 = (request_id == pending_obs_request_id_field1_);
+  const bool is_field2 = (request_id == pending_obs_request_id_field2_);
+  if (!is_field1 && !is_field2) {
+    return;  // stale / superseded response
+  }
+
+  const orc::FieldID field_id(
+      static_cast<orc::FieldID::value_type>(field_id_value));
+  if (is_field1) {
+    pending_obs_request_id_field1_ = 0;
+    pending_obs_field1_id_ = field_id;
+    pending_obs_video_field1_ = std::move(video_params);
+    pending_obs_ntsc_field1_ = std::move(ntsc);
+    pending_obs_field1_available_ = available;
+    pending_obs_field1_ready_ = true;
+  } else {
+    pending_obs_request_id_field2_ = 0;
+    pending_obs_field2_id_ = field_id;
+    pending_obs_video_field2_ = std::move(video_params);
+    pending_obs_ntsc_field2_ = std::move(ntsc);
+    pending_obs_field2_available_ = available;
+    pending_obs_field2_ready_ = true;
+  }
+
+  const bool vp_visible = video_parameter_observer_dialog_ &&
+                          video_parameter_observer_dialog_->isVisible();
+  const bool ntsc_visible =
+      ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible();
+
+  if (!pending_obs_frame_mode_) {
+    // Field mode: the single field's response completes the update.
+    if (pending_obs_field1_available_) {
+      if (vp_visible) {
+        video_parameter_observer_dialog_->updateObservations(
+            pending_obs_field1_id_, pending_obs_video_field1_);
+      }
+      if (ntsc_visible) {
+        ntsc_observer_dialog_->updateObservations(pending_obs_field1_id_,
+                                                  pending_obs_ntsc_field1_);
+      }
+    } else {
+      if (vp_visible) {
+        video_parameter_observer_dialog_->clearObservations();
+      }
+      if (ntsc_visible) {
+        ntsc_observer_dialog_->clearObservations();
+      }
+    }
+    pending_obs_field1_ready_ = false;
+    return;
+  }
+
+  // Frame mode: wait until both fields have arrived, then combine.
+  if (!pending_obs_field1_ready_ || !pending_obs_field2_ready_) {
+    return;
+  }
+  if (pending_obs_field1_available_ && pending_obs_field2_available_) {
+    if (vp_visible) {
+      video_parameter_observer_dialog_->updateObservationsForFrame(
+          pending_obs_field1_id_, pending_obs_video_field1_,
+          pending_obs_field2_id_, pending_obs_video_field2_);
+    }
+    if (ntsc_visible) {
+      ntsc_observer_dialog_->updateObservationsForFrame(
+          pending_obs_field1_id_, pending_obs_ntsc_field1_,
+          pending_obs_field2_id_, pending_obs_ntsc_field2_);
+    }
+  } else {
+    if (vp_visible) {
+      video_parameter_observer_dialog_->clearObservations();
+    }
+    if (ntsc_visible) {
+      ntsc_observer_dialog_->clearObservations();
+    }
+  }
+  pending_obs_field1_ready_ = false;
+  pending_obs_field2_ready_ = false;
+}
+
+void MainWindow::onObservationProgress(bool active, int percent_complete,
+                                       qulonglong /*outstanding_nodes*/) {
+  const std::string message =
+      orc::gui::formatObservationStatus(active, percent_complete);
+  if (message.empty()) {
+    statusBar()->clearMessage();
+  } else {
+    statusBar()->showMessage(QString::fromStdString(message));
+  }
+}
+
+void MainWindow::onObservationsInvalidated(QVector<int> changed_node_ids) {
+  // If the node currently being viewed had its observations invalidated,
+  // re-issue the async request so the open dialogs refresh with new data.
+  if (!current_view_node_id_.is_valid()) {
+    return;
+  }
+  for (int node_value : changed_node_ids) {
+    if (node_value == current_view_node_id_.value()) {
+      refreshObserverDialogs();
+      break;
+    }
   }
 }
 

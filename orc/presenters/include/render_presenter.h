@@ -27,7 +27,8 @@
 #include <vector>
 
 #include "observation_invalidation_view.h"  // ObservationInvalidationEvent
-#include "vbi_view_models.h"                // VBIFieldInfoView
+#include "observation_progress_view.h"  // ObservationProgressEvent, ObservationDataReadyCallback
+#include "vbi_view_models.h"  // VBIFieldInfoView
 
 // Forward declare core types
 namespace orc {
@@ -158,6 +159,56 @@ class RenderPresenter {
    * A no-op for an unknown id. Thread-safe.
    */
   void unsubscribeInvalidation(uint64_t subscription_id);
+
+  // === Async Observations (Phase 5) ===
+
+  /**
+   * @brief Request a frame's observations without blocking on a render.
+   *
+   * Answered immediately (the callback fires synchronously before this returns)
+   * when the provenance-keyed store already holds every observer's record for
+   * the frame. Otherwise the frame is enqueued on the background scheduler at
+   * interactive priority and @p callback fires later, on the scheduler's worker
+   * thread, once the frame has been observed (or once its observation attempt
+   * fails). No synchronous DAG execution happens on the calling thread.
+   *
+   * The delivered ObservationContext is valid only for the duration of the
+   * callback; extract value-type view models inside it (see
+   * ObservationDataReadyCallback).
+   *
+   * @param node_id  Node whose output frame is observed.
+   * @param field_id Field of interest; both fields of its parent frame are
+   *                 covered.
+   * @param callback Delivery callback carrying the returned request id.
+   * @return Request id echoed to @p callback for stale-response suppression.
+   *
+   * Thread-safe.
+   */
+  uint64_t requestObservations(
+      NodeID node_id, FieldID field_id,
+      orc::presenters::ObservationDataReadyCallback callback);
+
+  /**
+   * @brief Subscribe to background-observation workload snapshots (Task 5.4).
+   *
+   * The callback fires whenever the outstanding workload changes and returns to
+   * an idle snapshot when the queue drains. Invoked on the scheduler's worker
+   * thread; subscribers marshal to their own thread. Payload is view types
+   * only.
+   *
+   * @return Subscription id for unsubscribeObservationProgress().
+   *
+   * Thread-safe.
+   */
+  uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback callback);
+
+  /**
+   * @brief Cancel a subscription created by subscribeObservationProgress().
+   *
+   * A no-op for an unknown id. Thread-safe.
+   */
+  void unsubscribeObservationProgress(uint64_t subscription_id);
 
   // === Preview Rendering ===
 
