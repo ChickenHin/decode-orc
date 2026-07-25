@@ -80,6 +80,10 @@ add_library(orc-core SHARED
     # Observation change propagation and store garbage collection
     observation_invalidation.cpp
 
+    # Background observation scheduler (computes missing observations ahead of
+    # demand on a worker thread)
+    observation_scheduler.cpp
+
     # Node type system
     node_type.cpp
     

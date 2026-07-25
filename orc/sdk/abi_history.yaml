@@ -154,6 +154,7 @@ history:
     contracts:
       - orc/stage/frame_descriptor.h
       - orc/stage/common_types.h
+      - orc/stage/observation/observation_service_interface.h
     summary: >-
       `FrameDescriptor` drops the `colour_frame_index`, `frame_number`, and
       `timecode` fields. Signal-measured facts are no longer baked in by
@@ -173,5 +174,11 @@ history:
       `field_count`/`white_snr_count`/`black_psnr_count`; `FrameBurstLevelStats`
       drops `field_count`), each record now representing exactly one analysed
       frame with display bucketing moved to a host-side decimation utility.
+      `ObserverInfo` in
+      `<orc/stage/observation/observation_service_interface.h>` also gains an
+      appended `bool stateless` field classifying whether an observer's
+      per-frame result is order-independent (stateless) or models a cross-frame
+      stream (stateful, e.g. `closed_caption`, `colour_frame_phase`); it drives
+      background-scheduler frame ordering and never changes a per-frame result.
       Layout- and source-breaking for any plugin reading the removed fields or
       these result structs.

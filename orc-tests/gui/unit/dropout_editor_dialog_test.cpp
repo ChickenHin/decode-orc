@@ -63,6 +63,12 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   bool getShowDropouts() const override { return false; }
   void setShowDropouts(bool) override {}
 
+  uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback) override {
+    return 0;
+  }
+  void unsubscribeInvalidation(uint64_t) override {}
+
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID) override {
     if (!provide_outputs) {

@@ -35,6 +35,11 @@ using ObserverFactory = std::unique_ptr<Observer> (*)();
 struct ObserverRegistryEntry {
   const char* id;
   ObserverFactory factory;
+  // True when the observer's output for a frame depends only on that frame's
+  // data (surfaced as ObserverInfo::stateless). False for observers that model
+  // a cross-frame stream and must be driven over a work item's frames in
+  // ascending order. See ObserverInfo::stateless for the scheduler contract.
+  bool stateless;
 };
 
 template <typename T>
@@ -46,16 +51,27 @@ std::unique_ptr<Observer> make_observer() {
 // public contract (they reuse each observer's primary observation namespace)
 // and must never be renamed. The enumeration order fixes the order of
 // available_observers().
+//
+// Statefulness classification (the `stateless` column): every standard observer
+// computes each frame's measurement purely from that frame's samples, with two
+// exceptions that model cross-frame streams and are therefore marked stateful
+// so the background scheduler observes their frames in ascending order:
+//   - closed_caption: EIA-608 line-21 bytes form a caption stream whose control
+//     codes and pop-on/paint-on modes span successive frames.
+//   - colour_frame_phase: the 4-/8-field colour-sequence phase is only
+//     meaningful as an ordered progression across frames.
 constexpr std::array<ObserverRegistryEntry, 9> kObserverRegistry{{
-    {"white_snr", &make_observer<WhiteSNRObserver>},
-    {"black_psnr", &make_observer<BlackPSNRObserver>},
-    {"burst_level", &make_observer<BurstLevelObserver>},
-    {"closed_caption", &make_observer<ClosedCaptionObserver>},
-    {"biphase", &make_observer<BiphaseObserver>},
-    {"colour_frame_phase", &make_observer<ColourFramePhaseObserver>},
-    {"disc_quality", &make_observer<FieldQualityObserver>},
-    {"fm_code", &make_observer<FmCodeObserver>},
-    {"white_flag", &make_observer<WhiteFlagObserver>},
+    {"white_snr", &make_observer<WhiteSNRObserver>, /*stateless=*/true},
+    {"black_psnr", &make_observer<BlackPSNRObserver>, /*stateless=*/true},
+    {"burst_level", &make_observer<BurstLevelObserver>, /*stateless=*/true},
+    {"closed_caption", &make_observer<ClosedCaptionObserver>,
+     /*stateless=*/false},
+    {"biphase", &make_observer<BiphaseObserver>, /*stateless=*/true},
+    {"colour_frame_phase", &make_observer<ColourFramePhaseObserver>,
+     /*stateless=*/false},
+    {"disc_quality", &make_observer<FieldQualityObserver>, /*stateless=*/true},
+    {"fm_code", &make_observer<FmCodeObserver>, /*stateless=*/true},
+    {"white_flag", &make_observer<WhiteFlagObserver>, /*stateless=*/true},
 }};
 
 // Look up a factory by id. Returns nullptr for an unknown id (no throw).
@@ -92,7 +108,8 @@ std::vector<ObserverInfo> CoreObservationService::available_observers() const {
   for (const auto& entry : kObserverRegistry) {
     auto observer = entry.factory();
     infos.push_back(ObserverInfo{entry.id, observer->observer_version(),
-                                 observer->get_provided_observations()});
+                                 observer->get_provided_observations(),
+                                 entry.stateless});
   }
   return infos;
 }
