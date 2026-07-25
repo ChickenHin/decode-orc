@@ -26,8 +26,10 @@
 
 #include <QObject>
 #include <QString>
+#include <QVector>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -36,6 +38,7 @@
 #include <string>
 #include <thread>
 
+#include "observation_invalidation_view.h"
 #include "vbi_view_models.h"
 
 namespace orc::presenters {
@@ -413,6 +416,12 @@ class IRenderPresenter {
   virtual void setDAG(std::shared_ptr<void> dag_handle) = 0;
   virtual bool getShowDropouts() const = 0;
   virtual void setShowDropouts(bool show) = 0;
+
+  // Phase 3: observation-invalidation notifications. subscribeInvalidation()
+  // returns an id passed to unsubscribeInvalidation() to cancel delivery.
+  virtual uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback callback) = 0;
+  virtual void unsubscribeInvalidation(uint64_t subscription_id) = 0;
 
   virtual orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
@@ -868,6 +877,16 @@ class RenderCoordinator : public QObject {
    */
   void error(uint64_t request_id, QString message);
 
+  /**
+   * @brief Emitted (on the GUI thread) when a project edit invalidates stored
+   *        observations
+   *
+   * Carries the ids of the nodes whose stored observations became stale
+   * (edited node plus downstream descendants). Marshalled from the worker
+   * thread via Qt's queued connection.
+   */
+  void observationsInvalidated(QVector<int> changed_node_ids);
+
  private:
   // ========================================================================
   // Worker thread methods (run on worker thread only)
@@ -977,6 +996,9 @@ class RenderCoordinator : public QObject {
   std::shared_ptr<orc::presenters::IRenderPresenter> worker_render_presenter_;
   void* worker_project_{nullptr};  // Non-owning opaque handle for presenter
   RenderPresenterFactory presenter_factory_;
+
+  // Phase 3: invalidation subscription held on the worker presenter (0 = none).
+  uint64_t worker_invalidation_subscription_{0};
 
   // Phase 2.7: Trigger state now managed by RenderPresenter
   // Removed: trigger_cancel_requested_ and current_trigger_stage_

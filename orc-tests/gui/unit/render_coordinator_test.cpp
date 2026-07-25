@@ -202,4 +202,89 @@ TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
   coordinator.stop();
 }
 
+// Poll the GUI event loop until @p predicate holds or the timeout elapses.
+template <typename Predicate>
+static bool waitForPredicate(Predicate predicate, int timeout_ms = 2000) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    QCoreApplication::processEvents();
+    if (predicate()) {
+      return true;
+    }
+    QThread::msleep(5);
+  }
+  return predicate();
+}
+
+// Phase 3 Task 3.3: an invalidation from the presenter is forwarded to the
+// observationsInvalidated signal with the correct node set.
+TEST(RenderCoordinatorTest, ObservationInvalidation_ForwardedToSignal) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy invalidation_spy(&coordinator,
+                              &RenderCoordinator::observationsInvalidated);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  // The coordinator subscribes when it creates the presenter on the worker.
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->invalidationSubscriberCount() == 1; }));
+
+  mock_presenter->fireInvalidation({orc::NodeID(3), orc::NodeID(5)});
+
+  ASSERT_TRUE(waitForCount(invalidation_spy, 1));
+  ASSERT_EQ(invalidation_spy.count(), 1);
+  const auto ids = invalidation_spy.at(0).at(0).value<QVector<int>>();
+  EXPECT_EQ(ids, (QVector<int>{3, 5}));
+
+  coordinator.stop();
+}
+
+// Once the coordinator unsubscribes (presenter torn down on empty project),
+// further invalidations are not delivered.
+TEST(RenderCoordinatorTest, ObservationInvalidation_UnsubscribeStopsDelivery) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy invalidation_spy(&coordinator,
+                              &RenderCoordinator::observationsInvalidated);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->invalidationSubscriberCount() == 1; }));
+
+  // A null DAG (empty project) tears down the presenter and unsubscribes.
+  coordinator.updateDAG(nullptr);
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->invalidationSubscriberCount() == 0; }));
+
+  mock_presenter->fireInvalidation({orc::NodeID(7)});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(invalidation_spy.count(), 0);
+
+  coordinator.stop();
+}
+
 }  // namespace gui_unit_test

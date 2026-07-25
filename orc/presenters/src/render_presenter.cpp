@@ -22,6 +22,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -29,6 +31,7 @@
 #include "../core/include/dag_frame_renderer.h"
 #include "../core/include/frame_provenance.h"
 #include "../core/include/observation_cache.h"
+#include "../core/include/observation_invalidation.h"
 #include "../core/include/observation_store.h"
 #include "../core/include/preview_renderer.h"
 #include "../core/include/preview_view_registry.h"
@@ -208,6 +211,42 @@ class RenderPresenter::Impl {
   // folds source-file identity into SOURCE-node fingerprints.
   std::shared_ptr<orc::ObservationStore> obs_store_;
   orc::FilesystemFileIdentityProvider file_identity_provider_;
+
+  // Phase 3: previous fingerprint map + undo retention window drive change
+  // propagation (invalidation notifications) and store garbage collection.
+  orc::NodeFingerprintMap prev_fingerprints_;
+  bool have_prev_fingerprints_ = false;
+  orc::ObservationRetentionWindow retention_window_;
+
+  // Invalidation subscribers. Guarded so subscribe/unsubscribe and firing (from
+  // the DAG-rebuild thread) are safe to interleave.
+  std::mutex subscribers_mutex_;
+  std::map<uint64_t, orc::presenters::ObservationInvalidationCallback>
+      invalidation_subscribers_;
+  uint64_t next_subscription_id_ = 1;
+
+  // Copy subscribers out under the lock, then invoke without holding it so a
+  // callback may re-enter unsubscribeInvalidation() without deadlocking.
+  void notifyInvalidation(const std::vector<NodeID>& changed_nodes) {
+    std::vector<orc::presenters::ObservationInvalidationCallback> callbacks;
+    {
+      std::lock_guard<std::mutex> lock(subscribers_mutex_);
+      callbacks.reserve(invalidation_subscribers_.size());
+      for (const auto& [id, cb] : invalidation_subscribers_) {
+        callbacks.push_back(cb);
+      }
+    }
+    if (callbacks.empty()) {
+      return;
+    }
+    orc::presenters::ObservationInvalidationEvent event;
+    event.changed_nodes = changed_nodes;
+    for (const auto& cb : callbacks) {
+      if (cb) {
+        cb(event);
+      }
+    }
+  }
   std::atomic<bool> trigger_cancel_requested_;
   std::atomic<bool> trigger_active_;
   uint64_t next_request_id_;
@@ -246,6 +285,28 @@ class RenderPresenter::Impl {
     if (!obs_store_) {
       obs_store_ = std::make_shared<orc::ObservationStore>();
     }
+
+    // Diff against the previous fingerprint map to drive change propagation and
+    // store garbage collection. The first build has no predecessor: seed the
+    // state without emitting a spurious full-graph invalidation.
+    const orc::NodeFingerprintMap& new_fingerprints = *fingerprints;
+    if (have_prev_fingerprints_) {
+      const orc::ObservationInvalidation invalidation =
+          orc::diff_node_fingerprints(prev_fingerprints_, new_fingerprints);
+      retention_window_.record_unreachable(invalidation.removed_fingerprints);
+      if (!invalidation.changed_nodes.empty()) {
+        notifyInvalidation(invalidation.changed_nodes);
+      }
+    }
+    prev_fingerprints_ = new_fingerprints;
+    have_prev_fingerprints_ = true;
+
+    // Garbage-collect the store: retain everything reachable now, plus the
+    // bounded window of recently-unreachable fingerprints so an undo reuses
+    // stored observations. Records outside the retain set are evicted by
+    // budget.
+    obs_store_->retain_only(retention_window_.retain_set(new_fingerprints),
+                            obs_store_->memory_budget_bytes());
 
     // Rebuild renderers
     obs_cache_ =
@@ -288,6 +349,19 @@ bool RenderPresenter::updateDAG() {
 void RenderPresenter::setDAG(std::shared_ptr<void> dag_handle) {
   impl_->dag_void_ = std::move(dag_handle);
   impl_->rebuildRenderersFromDAG();
+}
+
+uint64_t RenderPresenter::subscribeInvalidation(
+    orc::presenters::ObservationInvalidationCallback callback) {
+  std::lock_guard<std::mutex> lock(impl_->subscribers_mutex_);
+  const uint64_t id = impl_->next_subscription_id_++;
+  impl_->invalidation_subscribers_.emplace(id, std::move(callback));
+  return id;
+}
+
+void RenderPresenter::unsubscribeInvalidation(uint64_t subscription_id) {
+  std::lock_guard<std::mutex> lock(impl_->subscribers_mutex_);
+  impl_->invalidation_subscribers_.erase(subscription_id);
 }
 
 orc::PreviewRenderResult RenderPresenter::renderPreview(

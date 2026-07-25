@@ -11,6 +11,12 @@
 
 #include <gmock/gmock.h>
 
+#include <cstdint>
+#include <map>
+#include <mutex>
+#include <utility>
+#include <vector>
+
 #include "render_coordinator.h"
 
 namespace orc::presenters::test {
@@ -20,6 +26,45 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(void, setDAG, (std::shared_ptr<void> dag_handle), (override));
   MOCK_METHOD(bool, getShowDropouts, (), (const, override));
   MOCK_METHOD(void, setShowDropouts, (bool show), (override));
+
+  // Real (non-mocked) invalidation registry so tests can exercise the
+  // coordinator's subscribe/fire/unsubscribe wiring end to end.
+  uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback callback) override {
+    std::lock_guard<std::mutex> lock(invalidation_mutex_);
+    const uint64_t id = next_invalidation_id_++;
+    invalidation_subscribers_.emplace(id, std::move(callback));
+    return id;
+  }
+
+  void unsubscribeInvalidation(uint64_t subscription_id) override {
+    std::lock_guard<std::mutex> lock(invalidation_mutex_);
+    invalidation_subscribers_.erase(subscription_id);
+  }
+
+  // Test helper: simulate a project edit invalidating the given node ids.
+  void fireInvalidation(const std::vector<orc::NodeID>& changed_nodes) {
+    std::vector<orc::presenters::ObservationInvalidationCallback> callbacks;
+    {
+      std::lock_guard<std::mutex> lock(invalidation_mutex_);
+      for (const auto& [id, cb] : invalidation_subscribers_) {
+        callbacks.push_back(cb);
+      }
+    }
+    orc::presenters::ObservationInvalidationEvent event;
+    event.changed_nodes = changed_nodes;
+    for (const auto& cb : callbacks) {
+      if (cb) {
+        cb(event);
+      }
+    }
+  }
+
+  // Test helper: number of active invalidation subscribers.
+  std::size_t invalidationSubscriberCount() {
+    std::lock_guard<std::mutex> lock(invalidation_mutex_);
+    return invalidation_subscribers_.size();
+  }
 
   MOCK_METHOD(orc::PreviewRenderResult, renderPreview,
               (NodeID node_id, orc::PreviewOutputType output_type,
@@ -95,6 +140,12 @@ class MockRenderPresenter : public IRenderPresenter {
                orc::VideoDataType data_type,
                const orc::PreviewCoordinate& coordinate),
               (override));
+
+ private:
+  std::mutex invalidation_mutex_;
+  std::map<uint64_t, orc::presenters::ObservationInvalidationCallback>
+      invalidation_subscribers_;
+  uint64_t next_invalidation_id_ = 1;
 };
 
 }  // namespace orc::presenters::test

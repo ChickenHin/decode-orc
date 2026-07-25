@@ -28,6 +28,14 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   bool getShowDropouts() const override { return presenter_.getShowDropouts(); }
   void setShowDropouts(bool show) override { presenter_.setShowDropouts(show); }
 
+  uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback callback) override {
+    return presenter_.subscribeInvalidation(std::move(callback));
+  }
+  void unsubscribeInvalidation(uint64_t subscription_id) override {
+    presenter_.unsubscribeInvalidation(subscription_id);
+  }
+
   orc::PreviewRenderResult renderPreview(
       orc::NodeID node_id, orc::PreviewOutputType output_type,
       uint64_t output_index, const std::string& option_id) override {
@@ -560,6 +568,11 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
 
     // Clear all worker state
     worker_dag_.reset();
+    if (worker_render_presenter_ && worker_invalidation_subscription_ != 0) {
+      worker_render_presenter_->unsubscribeInvalidation(
+          worker_invalidation_subscription_);
+      worker_invalidation_subscription_ = 0;
+    }
     worker_render_presenter_.reset();
 
     ORC_LOG_DEBUG(
@@ -587,6 +600,21 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
 
     if (!worker_render_presenter_) {
       worker_render_presenter_ = presenter_factory_(worker_project_);
+
+      // Subscribe to invalidation notifications and re-emit them on the GUI
+      // thread. The callback fires synchronously on the worker thread inside
+      // setDAG(); the queued signal marshals to the GUI thread.
+      worker_invalidation_subscription_ =
+          worker_render_presenter_->subscribeInvalidation(
+              [this](
+                  const orc::presenters::ObservationInvalidationEvent& event) {
+                QVector<int> ids;
+                ids.reserve(static_cast<int>(event.changed_nodes.size()));
+                for (const auto& node : event.changed_nodes) {
+                  ids.push_back(node.value());
+                }
+                emit observationsInvalidated(ids);
+              });
     }
 
     // Set the new DAG (cast away const since setDAG signature uses non-const

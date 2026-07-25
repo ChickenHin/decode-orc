@@ -26,7 +26,8 @@
 #include <string>
 #include <vector>
 
-#include "vbi_view_models.h"  // VBIFieldInfoView
+#include "observation_invalidation_view.h"  // ObservationInvalidationEvent
+#include "vbi_view_models.h"                // VBIFieldInfoView
 
 // Forward declare core types
 namespace orc {
@@ -131,6 +132,32 @@ class RenderPresenter {
    * The DAG is typically obtained from ProjectPresenter.
    */
   void setDAG(std::shared_ptr<void> dag_handle);
+
+  // === Observation Invalidation (Phase 3) ===
+
+  /**
+   * @brief Subscribe to observation-invalidation notifications.
+   *
+   * The callback fires whenever a DAG rebuild changes one or more nodes'
+   * provenance fingerprints (a parameter or topology edit). It is invoked
+   * synchronously on the thread that calls updateDAG()/setDAG(); subscribers
+   * must marshal to their own thread. The first DAG build does not notify (it
+   * populates rather than invalidates).
+   *
+   * @param callback Invoked with the changed-node set (view types only).
+   * @return Subscription id for unsubscribeInvalidation().
+   *
+   * Thread-safe: the subscriber registry is mutex-guarded.
+   */
+  uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback callback);
+
+  /**
+   * @brief Cancel a subscription created by subscribeInvalidation().
+   *
+   * A no-op for an unknown id. Thread-safe.
+   */
+  void unsubscribeInvalidation(uint64_t subscription_id);
 
   // === Preview Rendering ===
 

@@ -76,7 +76,10 @@ add_library(orc-core SHARED
 
     # Provenance-keyed observation store (survives DAG rebuilds)
     observation_store.cpp
-    
+
+    # Observation change propagation and store garbage collection
+    observation_invalidation.cpp
+
     # Node type system
     node_type.cpp
     
