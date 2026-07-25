@@ -165,7 +165,80 @@ bool dialogShowsText(const QDialog& dialog, const QString& text) {
                      [&text](const QLabel* l) { return l->text() == text; });
 }
 
+// True if any label in the dialog contains the given substring.
+bool dialogHasLabelContaining(const QDialog& dialog, const QString& fragment) {
+  const auto labels = dialog.findChildren<QLabel*>();
+  return std::any_of(labels.cbegin(), labels.cend(),
+                     [&fragment](const QLabel* l) {
+                       return l->isVisible() && l->text().contains(fragment);
+                     });
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Bucket-info status line (Phase 5, Task 5.2)
+// ---------------------------------------------------------------------------
+
+TEST(AnalysisDialogSmokeTest, DropoutDialog_DecimatedSeriesShowsBucketRange) {
+  (void)ensureApplication();
+
+  DropoutAnalysisDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  // A decimated series: two buckets, each covering a range of analysed frames.
+  dialog.startUpdate(/*numberOfFrames=*/5000, /*decimated=*/true);
+  dialog.addDataPoint(/*frameNumber=*/2500, /*dropoutLength=*/40.0,
+                      /*frameStart=*/1, /*frameEnd=*/2500, /*dropoutCount=*/8);
+  dialog.addDataPoint(/*frameNumber=*/5000, /*dropoutLength=*/12.0,
+                      /*frameStart=*/2501, /*frameEnd=*/5000,
+                      /*dropoutCount=*/3);
+  dialog.finishUpdate(/*currentFrameNumber=*/1);
+  QCoreApplication::processEvents();
+
+  // The decimated view states its bucketing so it is not read as per-frame.
+  EXPECT_TRUE(dialogHasLabelContaining(dialog, "Decimated view"));
+  EXPECT_FALSE(dialogHasLabelContaining(dialog, "Per-frame view"));
+}
+
+TEST(AnalysisDialogSmokeTest, SnrDialog_PerFrameSeriesReadsAsPerFrame) {
+  (void)ensureApplication();
+
+  SNRAnalysisDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  // A per-frame series: one bucket per frame (frameStart == frameEnd).
+  dialog.startUpdate(/*numberOfFrames=*/3, /*decimated=*/false);
+  dialog.addDataPoint(/*frameNumber=*/1, /*whiteSNR=*/42.0, /*blackPSNR=*/38.0,
+                      /*frameStart=*/1, /*frameEnd=*/1);
+  dialog.addDataPoint(/*frameNumber=*/2, /*whiteSNR=*/41.0, /*blackPSNR=*/37.0,
+                      /*frameStart=*/2, /*frameEnd=*/2);
+  dialog.finishUpdate(/*currentFrameNumber=*/1);
+  QCoreApplication::processEvents();
+
+  EXPECT_TRUE(dialogHasLabelContaining(dialog, "Per-frame view"));
+  EXPECT_FALSE(dialogHasLabelContaining(dialog, "Decimated view"));
+}
+
+TEST(AnalysisDialogSmokeTest, BurstDialog_DecimatedSeriesShowsBucketRange) {
+  (void)ensureApplication();
+
+  BurstLevelAnalysisDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  dialog.startUpdate(/*numberOfFrames=*/8000, /*decimated=*/true);
+  dialog.addDataPoint(/*frameNumber=*/4000, /*burstLevel10bit=*/120.0,
+                      /*frameStart=*/1, /*frameEnd=*/4000);
+  dialog.addDataPoint(/*frameNumber=*/8000, /*burstLevel10bit=*/118.0,
+                      /*frameStart=*/4001, /*frameEnd=*/8000);
+  dialog.finishUpdate(/*currentFrameNumber=*/1);
+  QCoreApplication::processEvents();
+
+  EXPECT_TRUE(dialogHasLabelContaining(dialog, "Decimated view"));
+}
 
 TEST(AnalysisDialogSmokeTest,
      VideoParameterObserverDialog_BurstLevelFollowsAmplitudeUnit) {

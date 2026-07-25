@@ -56,6 +56,9 @@ SNRAnalysisDialog::SNRAnalysisDialog(QWidget* parent)
   // Set up "No data available" overlay (from base class)
   setupNoDataOverlay(mainLayout, plot_);
 
+  // Bucket-info status line (from base class)
+  setupBucketInfoLabel(mainLayout);
+
   // Set up series for White SNR
   whiteSNRSeries_ = plot_->addSeries("White SNR");
   whiteSNRSeries_->setPen(QPen(Qt::green, 2));
@@ -77,6 +80,8 @@ SNRAnalysisDialog::SNRAnalysisDialog(QWidget* parent)
   // Connect to plot area changed signal
   connect(plot_, &PlotWidget::plotAreaChanged, this,
           &SNRAnalysisDialog::onPlotAreaChanged);
+  connect(plot_, &PlotWidget::plotClicked, this,
+          &SNRAnalysisDialog::onPlotClicked);
 
   // Set default size
   resize(800, 600);
@@ -84,9 +89,10 @@ SNRAnalysisDialog::SNRAnalysisDialog(QWidget* parent)
 
 SNRAnalysisDialog::~SNRAnalysisDialog() { removeChartContents(); }
 
-void SNRAnalysisDialog::startUpdate(int32_t numberOfFrames) {
+void SNRAnalysisDialog::startUpdate(int32_t numberOfFrames, bool decimated) {
   removeChartContents();
   numberOfFrames_ = numberOfFrames;
+  decimated_ = decimated;
   whitePoints_.reserve(numberOfFrames);
   blackPoints_.reserve(numberOfFrames);
 
@@ -102,11 +108,24 @@ void SNRAnalysisDialog::removeChartContents() {
   maxBlackY_ = 0.0;
   whitePoints_.clear();
   blackPoints_.clear();
+  bucketLabel_.clear();
+  bucketStart_.clear();
+  bucketEnd_.clear();
+  bucketWhite_.clear();
+  bucketBlack_.clear();
   plot_->replot();
 }
 
 void SNRAnalysisDialog::addDataPoint(int32_t frameNumber, double whiteSNR,
-                                     double blackPSNR) {
+                                     double blackPSNR, int32_t frameStart,
+                                     int32_t frameEnd) {
+  // Record the bucket for the click readout (one entry per call).
+  bucketLabel_.append(frameNumber);
+  bucketStart_.append(frameStart);
+  bucketEnd_.append(frameEnd);
+  bucketWhite_.append(whiteSNR);
+  bucketBlack_.append(blackPSNR);
+
   // Add white SNR point if valid
   if (!std::isnan(whiteSNR)) {
     whitePoints_.append(
@@ -246,6 +265,10 @@ void SNRAnalysisDialog::finishUpdate(int32_t currentFrameNumber) {
   plotMarker_->setPosition(
       QPointF(static_cast<double>(currentFrameNumber), (yMax + yMin) / 2));
 
+  // Report whether this is a per-frame or a decimated (bucketed) view.
+  setDecimationSummary(decimated_, numberOfFrames_,
+                       static_cast<int>(bucketLabel_.size()));
+
   // Render the plot
   plot_->replot();
 }
@@ -329,4 +352,33 @@ void SNRAnalysisDialog::calculateMarkerPosition(int32_t frameNumber) {
 void SNRAnalysisDialog::onPlotAreaChanged() {
   // Handle plot area changes if needed
   // The PlotWidget handles zoom/pan internally
+}
+
+void SNRAnalysisDialog::onPlotClicked(const QPointF& dataPoint) {
+  if (bucketLabel_.isEmpty()) return;
+
+  // Find the bucket nearest the click on the x (frame) axis.
+  int nearest = 0;
+  double bestDist = std::numeric_limits<double>::max();
+  for (int i = 0; i < bucketLabel_.size(); ++i) {
+    double dist =
+        std::abs(static_cast<double>(bucketLabel_[i]) - dataPoint.x());
+    if (dist < bestDist) {
+      bestDist = dist;
+      nearest = i;
+    }
+  }
+
+  const int32_t start = bucketStart_.value(nearest);
+  const int32_t end = bucketEnd_.value(nearest);
+  const QString range = (start == end)
+                            ? QString("Frame %1").arg(start)
+                            : QString("Frames %1–%2").arg(start).arg(end);
+  auto fmt = [](double v) {
+    return std::isnan(v) ? QString("n/a") : QString::number(v, 'f', 2) + " dB";
+  };
+  setBucketReadout(QString("%1 — white SNR: %2, black PSNR: %3")
+                       .arg(range)
+                       .arg(fmt(bucketWhite_.value(nearest)))
+                       .arg(fmt(bucketBlack_.value(nearest))));
 }

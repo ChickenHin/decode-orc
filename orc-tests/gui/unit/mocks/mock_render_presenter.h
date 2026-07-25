@@ -28,18 +28,12 @@ class MockRenderPresenter : public IRenderPresenter {
 
   MOCK_METHOD((std::optional<VBIFieldInfoView>), getVBIData,
               (NodeID node_id, FieldID field_id), (override));
-  MOCK_METHOD(bool, getDropoutAnalysisData,
-              (NodeID node_id, (std::vector<void*> & frame_stats),
-               int32_t& total_frames),
-              (override));
-  MOCK_METHOD(bool, getSNRAnalysisData,
-              (NodeID node_id, (std::vector<void*> & frame_stats),
-               int32_t& total_frames),
-              (override));
-  MOCK_METHOD(bool, getBurstLevelAnalysisData,
-              (NodeID node_id, (std::vector<void*> & frame_stats),
-               int32_t& total_frames),
-              (override));
+  MOCK_METHOD((std::optional<orc::presenters::DropoutDisplaySeries>),
+              getDropoutAnalysisData, (NodeID node_id), (override));
+  MOCK_METHOD((std::optional<orc::presenters::SNRDisplaySeries>),
+              getSNRAnalysisData, (NodeID node_id), (override));
+  MOCK_METHOD((std::optional<orc::presenters::BurstLevelDisplaySeries>),
+              getBurstLevelAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD((std::vector<orc::PreviewOutputInfo>), getAvailableOutputs,
               (NodeID node_id), (override));
 

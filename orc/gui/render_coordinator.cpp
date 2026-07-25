@@ -40,23 +40,19 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getVBIData(node_id, field_id);
   }
 
-  bool getDropoutAnalysisData(orc::NodeID node_id,
-                              std::vector<void*>& frame_stats,
-                              int32_t& total_frames) override {
-    return presenter_.getDropoutAnalysisData(node_id, frame_stats,
-                                             total_frames);
+  std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
+      orc::NodeID node_id) override {
+    return presenter_.getDropoutAnalysisData(node_id);
   }
 
-  bool getSNRAnalysisData(orc::NodeID node_id, std::vector<void*>& frame_stats,
-                          int32_t& total_frames) override {
-    return presenter_.getSNRAnalysisData(node_id, frame_stats, total_frames);
+  std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
+      orc::NodeID node_id) override {
+    return presenter_.getSNRAnalysisData(node_id);
   }
 
-  bool getBurstLevelAnalysisData(orc::NodeID node_id,
-                                 std::vector<void*>& frame_stats,
-                                 int32_t& total_frames) override {
-    return presenter_.getBurstLevelAnalysisData(node_id, frame_stats,
-                                                total_frames);
+  std::optional<orc::presenters::BurstLevelDisplaySeries>
+  getBurstLevelAnalysisData(orc::NodeID node_id) override {
+    return presenter_.getBurstLevelAnalysisData(node_id);
   }
 
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
@@ -699,12 +695,9 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
       return;
     }
 
-    // Phase 2.4: Use RenderPresenter abstraction instead of direct DAG access
-    std::vector<void*> data_ptr;
-    int32_t total_frames = 0;
-
-    if (!worker_render_presenter_->getDropoutAnalysisData(req.node_id, data_ptr,
-                                                          total_frames)) {
+    // Use the RenderPresenter abstraction instead of direct DAG access.
+    auto series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
+    if (!series) {
       // Stage has not been triggered yet — trigger it now so the data is
       // available.
       ORC_LOG_DEBUG(
@@ -718,8 +711,8 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
                                  static_cast<size_t>(total),
                                  QString::fromStdString(message));
           });
-      if (!worker_render_presenter_->getDropoutAnalysisData(
-              req.node_id, data_ptr, total_frames)) {
+      series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
+      if (!series) {
         emit error(req.request_id,
                    "Failed to get dropout data - node may not be a "
                    "DropoutAnalysisSinkStage or trigger failed");
@@ -727,21 +720,11 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
       }
     }
 
-    if (data_ptr.empty()) {
-      emit error(req.request_id, "No dropout dataset available");
-      return;
-    }
-
-    // Cast back to the actual type
-    auto* stats_vec =
-        static_cast<const std::vector<orc::FrameDropoutStats>*>(data_ptr[0]);
-    auto data = *stats_vec;  // Copy the data
-
     ORC_LOG_DEBUG(
-        "RenderCoordinator: Served dropout dataset from sink ({} buckets, {} "
+        "RenderCoordinator: Served dropout dataset from sink ({} points, {} "
         "frames total)",
-        data.size(), total_frames);
-    emit dropoutDataReady(req.request_id, data, total_frames);
+        series->points.size(), series->total_frames);
+    emit dropoutDataReady(req.request_id, std::move(*series));
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Dropout analysis failed: {}", e.what());
@@ -761,12 +744,9 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
       return;
     }
 
-    // Phase 2.4: Use RenderPresenter abstraction instead of direct DAG access
-    std::vector<void*> data_ptr;
-    int32_t total_frames = 0;
-
-    if (!worker_render_presenter_->getSNRAnalysisData(req.node_id, data_ptr,
-                                                      total_frames)) {
+    // Use the RenderPresenter abstraction instead of direct DAG access.
+    auto series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
+    if (!series) {
       // Stage has not been triggered yet — trigger it now so the data is
       // available.
       ORC_LOG_DEBUG(
@@ -780,8 +760,8 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
                          QString::fromStdString(message));
       };
       worker_render_presenter_->triggerStage(req.node_id, progress_cb);
-      if (!worker_render_presenter_->getSNRAnalysisData(req.node_id, data_ptr,
-                                                        total_frames)) {
+      series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
+      if (!series) {
         emit error(req.request_id,
                    "Failed to get SNR data - node may not be a "
                    "SNRAnalysisSinkStage or trigger failed");
@@ -789,19 +769,9 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
       }
     }
 
-    if (data_ptr.empty()) {
-      emit error(req.request_id, "No SNR dataset available");
-      return;
-    }
-
-    // Cast back to the actual type
-    auto* stats_vec =
-        static_cast<const std::vector<orc::FrameSNRStats>*>(data_ptr[0]);
-    auto data = *stats_vec;  // Copy the data
-
-    ORC_LOG_DEBUG("RenderCoordinator: Served SNR dataset from sink ({} frames)",
-                  data.size());
-    emit snrDataReady(req.request_id, data, total_frames);
+    ORC_LOG_DEBUG("RenderCoordinator: Served SNR dataset from sink ({} points)",
+                  series->points.size());
+    emit snrDataReady(req.request_id, std::move(*series));
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: SNR analysis failed: {}", e.what());
@@ -822,12 +792,10 @@ void RenderCoordinator::handleGetBurstLevelData(
       return;
     }
 
-    // Phase 2.4: Use RenderPresenter abstraction instead of direct DAG access
-    std::vector<void*> data_ptr;
-    int32_t total_frames = 0;
-
-    if (!worker_render_presenter_->getBurstLevelAnalysisData(
-            req.node_id, data_ptr, total_frames)) {
+    // Use the RenderPresenter abstraction instead of direct DAG access.
+    auto series =
+        worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
+    if (!series) {
       // Stage has not been triggered yet — trigger it now so the data is
       // available.
       ORC_LOG_DEBUG(
@@ -841,8 +809,8 @@ void RenderCoordinator::handleGetBurstLevelData(
                                 QString::fromStdString(message));
       };
       worker_render_presenter_->triggerStage(req.node_id, progress_cb);
-      if (!worker_render_presenter_->getBurstLevelAnalysisData(
-              req.node_id, data_ptr, total_frames)) {
+      series = worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
+      if (!series) {
         emit error(req.request_id,
                    "Failed to get burst data - node may not be a "
                    "BurstLevelAnalysisSinkStage or trigger failed");
@@ -850,20 +818,10 @@ void RenderCoordinator::handleGetBurstLevelData(
       }
     }
 
-    if (data_ptr.empty()) {
-      emit error(req.request_id, "No burst level dataset available");
-      return;
-    }
-
-    // Cast back to the actual type
-    auto* stats_vec =
-        static_cast<const std::vector<orc::FrameBurstLevelStats>*>(data_ptr[0]);
-    auto data = *stats_vec;  // Copy the data
-
     ORC_LOG_DEBUG(
-        "RenderCoordinator: Served burst dataset from sink ({} frames)",
-        data.size());
-    emit burstLevelDataReady(req.request_id, data, total_frames);
+        "RenderCoordinator: Served burst dataset from sink ({} points)",
+        series->points.size());
+    emit burstLevelDataReady(req.request_id, std::move(*series));
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Burst level analysis failed: {}",

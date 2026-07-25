@@ -21,6 +21,7 @@
 #include <orc/stage/orc_source_parameters.h>   // Public API VideoParameters
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
+#include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_preview_views.h>
 
 #include <QObject>
@@ -324,44 +325,35 @@ struct VBIDataResponse : public RenderResponse {
  * @brief Response with dropout analysis data
  */
 struct DropoutDataResponse : public RenderResponse {
-  std::vector<orc::FrameDropoutStats> frame_stats;
-  int32_t total_frames;
+  orc::presenters::DropoutDisplaySeries series;
 
   DropoutDataResponse(uint64_t id, bool s,
-                      std::vector<orc::FrameDropoutStats> stats, int32_t total,
+                      orc::presenters::DropoutDisplaySeries data,
                       std::string err = "")
-      : RenderResponse(id, s, std::move(err)),
-        frame_stats(std::move(stats)),
-        total_frames(total) {}
+      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
 };
 
 /**
  * @brief Response with SNR analysis data
  */
 struct SNRDataResponse : public RenderResponse {
-  std::vector<orc::FrameSNRStats> frame_stats;
-  int32_t total_frames;
+  orc::presenters::SNRDisplaySeries series;
 
-  SNRDataResponse(uint64_t id, bool s, std::vector<orc::FrameSNRStats> stats,
-                  int32_t total, std::string err = "")
-      : RenderResponse(id, s, std::move(err)),
-        frame_stats(std::move(stats)),
-        total_frames(total) {}
+  SNRDataResponse(uint64_t id, bool s, orc::presenters::SNRDisplaySeries data,
+                  std::string err = "")
+      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
 };
 
 /**
  * @brief Response with burst level analysis data
  */
 struct BurstLevelDataResponse : public RenderResponse {
-  std::vector<orc::FrameBurstLevelStats> frame_stats;
-  int32_t total_frames;
+  orc::presenters::BurstLevelDisplaySeries series;
 
   BurstLevelDataResponse(uint64_t id, bool s,
-                         std::vector<orc::FrameBurstLevelStats> stats,
-                         int32_t total, std::string err = "")
-      : RenderResponse(id, s, std::move(err)),
-        frame_stats(std::move(stats)),
-        total_frames(total) {}
+                         orc::presenters::BurstLevelDisplaySeries data,
+                         std::string err = "")
+      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
 };
 
 /**
@@ -428,15 +420,12 @@ class IRenderPresenter {
 
   virtual std::optional<VBIFieldInfoView> getVBIData(NodeID node_id,
                                                      FieldID field_id) = 0;
-  virtual bool getDropoutAnalysisData(NodeID node_id,
-                                      std::vector<void*>& frame_stats,
-                                      int32_t& total_frames) = 0;
-  virtual bool getSNRAnalysisData(NodeID node_id,
-                                  std::vector<void*>& frame_stats,
-                                  int32_t& total_frames) = 0;
-  virtual bool getBurstLevelAnalysisData(NodeID node_id,
-                                         std::vector<void*>& frame_stats,
-                                         int32_t& total_frames) = 0;
+  virtual std::optional<orc::presenters::DropoutDisplaySeries>
+  getDropoutAnalysisData(NodeID node_id) = 0;
+  virtual std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
+      NodeID node_id) = 0;
+  virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
+  getBurstLevelAnalysisData(NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -790,8 +779,7 @@ class RenderCoordinator : public QObject {
    * @brief Emitted when dropout analysis data is ready
    */
   void dropoutDataReady(uint64_t request_id,
-                        std::vector<orc::FrameDropoutStats> frame_stats,
-                        int32_t total_frames);
+                        orc::presenters::DropoutDisplaySeries series);
 
   /**
    * @brief Emitted during dropout analysis progress
@@ -802,8 +790,7 @@ class RenderCoordinator : public QObject {
    * @brief Emitted when SNR analysis data is ready
    */
   void snrDataReady(uint64_t request_id,
-                    std::vector<orc::FrameSNRStats> frame_stats,
-                    int32_t total_frames);
+                    orc::presenters::SNRDisplaySeries series);
 
   /**
    * @brief Emitted during SNR analysis progress
@@ -814,8 +801,7 @@ class RenderCoordinator : public QObject {
    * @brief Emitted when burst level analysis data is ready
    */
   void burstLevelDataReady(uint64_t request_id,
-                           std::vector<orc::FrameBurstLevelStats> frame_stats,
-                           int32_t total_frames);
+                           orc::presenters::BurstLevelDisplaySeries series);
 
   /**
    * @brief Emitted during burst level analysis progress

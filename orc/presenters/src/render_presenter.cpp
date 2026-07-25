@@ -50,11 +50,37 @@ int32_t bucket_centre(int32_t frame_start, int32_t frame_end) {
   return frame_start + (frame_end - frame_start) / 2;
 }
 
+// Fill the frame-range/provenance fields shared by every display point from a
+// decimated bucket. `frame_label` is the x-axis position for the point.
+orc::presenters::AnalysisDisplayBucket make_bucket(
+    const orc::analysis::DecimatedBucket& b, int32_t frame_label) {
+  orc::presenters::AnalysisDisplayBucket out;
+  out.frame_start = b.frame_start;
+  out.frame_end = b.frame_end;
+  out.frame_label = frame_label;
+  // Bucket width: all analysed frames spanned, including any without a value.
+  out.contributing_frames = static_cast<int32_t>(b.record_count);
+  out.has_data = b.value_count > 0;
+  return out;
+}
+
+// True when at least one point aggregates more than one analysed frame, i.e.
+// the display is bucketed rather than one-point-per-frame.
+template <typename PointT>
+bool series_is_decimated(const std::vector<PointT>& points) {
+  for (const auto& p : points) {
+    if (p.bucket.frame_end > p.bucket.frame_start) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Reduce the full-resolution per-frame dropout series to at most `max_points`
 // display points. Counts and lengths are summed within each bucket (the graph
 // shows dropout activity per bucket); the bucket is labelled with its last
-// frame, and is marked as data only when a contributing frame had dropouts.
-std::vector<orc::FrameDropoutStats> decimate_dropout_series(
+// frame, matching the previous graph labelling.
+std::vector<orc::presenters::DropoutDisplayPoint> decimate_dropout_series(
     const std::vector<orc::FrameDropoutStats>& full, std::size_t max_points) {
   std::vector<SeriesPoint> length_series;
   std::vector<SeriesPoint> count_series;
@@ -71,15 +97,14 @@ std::vector<orc::FrameDropoutStats> decimate_dropout_series(
   const auto len_buckets = decimate_series(length_series, max_points);
   const auto cnt_buckets = decimate_series(count_series, max_points);
 
-  std::vector<orc::FrameDropoutStats> out;
+  std::vector<orc::presenters::DropoutDisplayPoint> out;
   out.reserve(len_buckets.size());
   for (std::size_t i = 0; i < len_buckets.size(); ++i) {
-    orc::FrameDropoutStats d;
-    d.frame_number = len_buckets[i].frame_end;
+    orc::presenters::DropoutDisplayPoint d;
+    d.bucket = make_bucket(len_buckets[i], len_buckets[i].frame_end);
     d.dropout_length_samples =
         static_cast<int64_t>(std::llround(len_buckets[i].sum));
     d.dropout_count = static_cast<int32_t>(std::llround(cnt_buckets[i].sum));
-    d.has_data = len_buckets[i].value_count > 0;
     out.push_back(d);
   }
   return out;
@@ -88,7 +113,7 @@ std::vector<orc::FrameDropoutStats> decimate_dropout_series(
 // Reduce the full-resolution per-frame SNR series to at most `max_points`
 // display points, averaging each metric within a bucket and labelling the
 // bucket with its centre frame.
-std::vector<orc::FrameSNRStats> decimate_snr_series(
+std::vector<orc::presenters::SNRDisplayPoint> decimate_snr_series(
     const std::vector<orc::FrameSNRStats>& full, std::size_t max_points) {
   std::vector<SeriesPoint> white_series;
   std::vector<SeriesPoint> black_series;
@@ -104,17 +129,19 @@ std::vector<orc::FrameSNRStats> decimate_snr_series(
   const auto white_buckets = decimate_series(white_series, max_points);
   const auto black_buckets = decimate_series(black_series, max_points);
 
-  std::vector<orc::FrameSNRStats> out;
+  std::vector<orc::presenters::SNRDisplayPoint> out;
   out.reserve(white_buckets.size());
   for (std::size_t i = 0; i < white_buckets.size(); ++i) {
-    orc::FrameSNRStats d;
-    d.frame_number =
+    orc::presenters::SNRDisplayPoint d;
+    const int32_t label =
         bucket_centre(white_buckets[i].frame_start, white_buckets[i].frame_end);
+    d.bucket = make_bucket(white_buckets[i], label);
     d.has_white_snr = white_buckets[i].value_count > 0;
     d.white_snr = white_buckets[i].mean;
     d.has_black_psnr = black_buckets[i].value_count > 0;
     d.black_psnr = black_buckets[i].mean;
-    d.has_data = d.has_white_snr || d.has_black_psnr;
+    // A point carries data if either metric contributed a value.
+    d.bucket.has_data = d.has_white_snr || d.has_black_psnr;
     out.push_back(d);
   }
   return out;
@@ -122,7 +149,7 @@ std::vector<orc::FrameSNRStats> decimate_snr_series(
 
 // Reduce the full-resolution per-frame burst-level series to at most
 // `max_points` display points, averaging within a bucket.
-std::vector<orc::FrameBurstLevelStats> decimate_burst_series(
+std::vector<orc::presenters::BurstLevelDisplayPoint> decimate_burst_series(
     const std::vector<orc::FrameBurstLevelStats>& full,
     std::size_t max_points) {
   std::vector<SeriesPoint> series;
@@ -134,12 +161,11 @@ std::vector<orc::FrameBurstLevelStats> decimate_burst_series(
 
   const auto buckets = decimate_series(series, max_points);
 
-  std::vector<orc::FrameBurstLevelStats> out;
+  std::vector<orc::presenters::BurstLevelDisplayPoint> out;
   out.reserve(buckets.size());
   for (const auto& b : buckets) {
-    orc::FrameBurstLevelStats d;
-    d.frame_number = bucket_centre(b.frame_start, b.frame_end);
-    d.has_data = b.value_count > 0;
+    orc::presenters::BurstLevelDisplayPoint d;
+    d.bucket = make_bucket(b, bucket_centre(b.frame_start, b.frame_end));
     d.median_burst_10bit = b.mean;
     out.push_back(d);
   }
@@ -177,15 +203,10 @@ class RenderPresenter::Impl {
   uint64_t next_request_id_;
   std::atomic<orc::TriggerableStage*> current_trigger_stage_{nullptr};
 
-  // Display buffers for the analysis-graph data path. The sinks now expose the
-  // full-resolution per-frame series; these hold the decimated
-  // (≤kDisplayPoints) series handed to the graph dialogs, owned here so the
-  // void* returned by the getXAnalysisData accessors stays valid until the next
-  // call.
+  // Display point budget for the analysis-graph data path. The sinks expose the
+  // full-resolution per-frame series; the getXAnalysisData accessors decimate
+  // it to at most this many points and return a typed view series by value.
   static constexpr std::size_t kDisplayPoints = 1000;
-  std::vector<orc::FrameDropoutStats> dropout_display_;
-  std::vector<orc::FrameSNRStats> snr_display_;
-  std::vector<orc::FrameBurstLevelStats> burst_display_;
 
   void rebuildRenderersFromDAG() {
     auto dag = getConcreteDAG();
@@ -1018,122 +1039,100 @@ std::vector<std::string> RenderPresenter::getAudioChannelPairNames(
   return names;
 }
 
-// === Analysis Data Access (Phase 2.4) ===
+// === Analysis Data Access ===
 
-bool RenderPresenter::getDropoutAnalysisData(NodeID node_id,
-                                             std::vector<void*>& frame_stats,
-                                             int32_t& total_frames) {
-  if (!impl_->getConcreteDAG()) {
-    return false;
-  }
+namespace {
 
-  // Find the node in the DAG
-  const orc::DAGNode* target_node = nullptr;
-  for (const auto& node : impl_->getConcreteDAG()->nodes()) {
+// Locate a DAG node by id, returning nullptr if absent.
+const orc::DAGNode* find_node(const orc::DAG& dag, NodeID node_id) {
+  for (const auto& node : dag.nodes()) {
     if (node.node_id == node_id) {
-      target_node = &node;
-      break;
+      return &node;
     }
   }
+  return nullptr;
+}
 
+}  // namespace
+
+std::optional<DropoutDisplaySeries> RenderPresenter::getDropoutAnalysisData(
+    NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
+  }
+
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
   if (!target_node) {
-    return false;
+    return std::nullopt;
   }
 
   auto* sink =
       dynamic_cast<orc::IDropoutAnalysisResults*>(target_node->stage.get());
   if (!sink || !sink->has_results()) {
-    return false;
+    return std::nullopt;
   }
 
   // The sink exposes the full-resolution per-frame series; decimate it to the
-  // display point budget before handing it to the graph. The decimated series
-  // is owned by Impl so the void* stays valid until the next call. (This void*
-  // handoff is a hack replaced by typed view structs in a later phase — the
-  // caller in render_coordinator knows the concrete type.)
-  impl_->dropout_display_ =
+  // display point budget before handing it to the graph as a typed view series.
+  DropoutDisplaySeries series;
+  series.points =
       decimate_dropout_series(sink->frame_stats(), Impl::kDisplayPoints);
-  total_frames = sink->total_frames();
-
-  frame_stats.clear();
-  frame_stats.push_back(
-      const_cast<void*>(static_cast<const void*>(&impl_->dropout_display_)));
-
-  return true;
+  series.total_frames = sink->total_frames();
+  series.decimated = series_is_decimated(series.points);
+  return series;
 }
 
-bool RenderPresenter::getSNRAnalysisData(NodeID node_id,
-                                         std::vector<void*>& frame_stats,
-                                         int32_t& total_frames) {
-  if (!impl_->getConcreteDAG()) {
-    return false;
+std::optional<SNRDisplaySeries> RenderPresenter::getSNRAnalysisData(
+    NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
   }
 
-  // Find the node in the DAG
-  const orc::DAGNode* target_node = nullptr;
-  for (const auto& node : impl_->getConcreteDAG()->nodes()) {
-    if (node.node_id == node_id) {
-      target_node = &node;
-      break;
-    }
-  }
-
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
   if (!target_node) {
-    return false;
+    return std::nullopt;
   }
 
   auto* sink =
       dynamic_cast<orc::ISNRAnalysisResults*>(target_node->stage.get());
   if (!sink || !sink->has_results()) {
-    return false;
+    return std::nullopt;
   }
 
-  impl_->snr_display_ =
+  SNRDisplaySeries series;
+  series.points =
       decimate_snr_series(sink->frame_stats(), Impl::kDisplayPoints);
-  total_frames = sink->total_frames();
-
-  frame_stats.clear();
-  frame_stats.push_back(
-      const_cast<void*>(static_cast<const void*>(&impl_->snr_display_)));
-
-  return true;
+  series.total_frames = sink->total_frames();
+  series.decimated = series_is_decimated(series.points);
+  return series;
 }
 
-bool RenderPresenter::getBurstLevelAnalysisData(NodeID node_id,
-                                                std::vector<void*>& frame_stats,
-                                                int32_t& total_frames) {
-  if (!impl_->getConcreteDAG()) {
-    return false;
+std::optional<BurstLevelDisplaySeries>
+RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
   }
 
-  // Find the node in the DAG
-  const orc::DAGNode* target_node = nullptr;
-  for (const auto& node : impl_->getConcreteDAG()->nodes()) {
-    if (node.node_id == node_id) {
-      target_node = &node;
-      break;
-    }
-  }
-
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
   if (!target_node) {
-    return false;
+    return std::nullopt;
   }
 
   auto* sink =
       dynamic_cast<orc::IBurstLevelAnalysisResults*>(target_node->stage.get());
   if (!sink || !sink->has_results()) {
-    return false;
+    return std::nullopt;
   }
 
-  impl_->burst_display_ =
+  BurstLevelDisplaySeries series;
+  series.points =
       decimate_burst_series(sink->frame_stats(), Impl::kDisplayPoints);
-  total_frames = sink->total_frames();
-
-  frame_stats.clear();
-  frame_stats.push_back(
-      const_cast<void*>(static_cast<const void*>(&impl_->burst_display_)));
-
-  return true;
+  series.total_frames = sink->total_frames();
+  series.decimated = series_is_decimated(series.points);
+  return series;
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

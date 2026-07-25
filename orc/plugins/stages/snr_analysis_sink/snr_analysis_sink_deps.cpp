@@ -11,11 +11,47 @@
 
 #include <orc/stage/field_id.h>
 
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <ostream>
 #include <utility>
 #include <variant>
+
+namespace {
+
+// Write `path` atomically: stream into a temporary sibling file and rename it
+// into place only after a fully successful write. A cancelled or failed run
+// therefore never leaves a truncated file at `path`.
+template <typename Logger, typename Writer>
+bool write_file_atomically(const std::string& path, Logger& logger,
+                           Writer&& writer) {
+  const std::string tmp_path = path + ".tmp";
+  {
+    std::ofstream out(tmp_path,
+                      std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!out.is_open()) {
+      logger.error("Failed to open temporary file: {}", tmp_path);
+      return false;
+    }
+    writer(out);
+    out.flush();
+    if (!out.good()) {
+      logger.error("Failed writing temporary file: {}", tmp_path);
+      out.close();
+      std::remove(tmp_path.c_str());
+      return false;
+    }
+  }
+  if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+    logger.error("Failed to move {} into place at {}", tmp_path, path);
+    std::remove(tmp_path.c_str());
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
 
 namespace orc {
 void SNRAnalysisSinkStageDeps::init(TriggerProgressCallback progress_callback,
@@ -166,17 +202,12 @@ bool SNRAnalysisSinkStageDeps::write_csv(
 
   logger_.debug("SNRAnalysisSinkDeps: Writing CSV to: {}", path);
 
-  std::ofstream csv(path, std::ios::out | std::ios::trunc);
-  if (!csv.is_open()) {
-    logger_.error("SNRAnalysisSinkDeps: Failed to open file for writing: {}",
-                  path);
-    return false;
+  const bool ok = write_file_atomically(
+      path, logger_, [&](std::ostream& os) { write_csv(os, frame_stats); });
+  if (ok) {
+    logger_.debug("SNRAnalysisSinkDeps: Successfully wrote {} data rows to: {}",
+                  frame_stats.size(), path);
   }
-
-  write_csv(csv, frame_stats);
-
-  logger_.debug("SNRAnalysisSinkDeps: Successfully wrote {} data rows to: {}",
-                frame_stats.size(), path);
-  return true;
+  return ok;
 }
 }  // namespace orc

@@ -172,16 +172,13 @@ class MainWindow : public QMainWindow {
   void onFrameLineNavigationReady(uint64_t request_id,
                                   orc::FrameLineNavigationResult result);
   void onDropoutDataReady(uint64_t request_id,
-                          std::vector<orc::FrameDropoutStats> frame_stats,
-                          int32_t total_frames);
+                          orc::presenters::DropoutDisplaySeries series);
   void onDropoutProgress(size_t current, size_t total, QString message);
   void onSNRDataReady(uint64_t request_id,
-                      std::vector<orc::FrameSNRStats> frame_stats,
-                      int32_t total_frames);
+                      orc::presenters::SNRDisplaySeries series);
   void onSNRProgress(size_t current, size_t total, QString message);
   void onBurstLevelDataReady(uint64_t request_id,
-                             std::vector<orc::FrameBurstLevelStats> frame_stats,
-                             int32_t total_frames);
+                             orc::presenters::BurstLevelDisplaySeries series);
   void onBurstLevelProgress(size_t current, size_t total, QString message);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);

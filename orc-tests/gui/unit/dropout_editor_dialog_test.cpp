@@ -108,16 +108,17 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
       orc::NodeID, orc::FieldID) override {
     return std::nullopt;
   }
-  bool getDropoutAnalysisData(orc::NodeID, std::vector<void*>&,
-                              int32_t&) override {
-    return false;
+  std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
+      orc::NodeID) override {
+    return std::nullopt;
   }
-  bool getSNRAnalysisData(orc::NodeID, std::vector<void*>&, int32_t&) override {
-    return false;
+  std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
+      orc::NodeID) override {
+    return std::nullopt;
   }
-  bool getBurstLevelAnalysisData(orc::NodeID, std::vector<void*>&,
-                                 int32_t&) override {
-    return false;
+  std::optional<orc::presenters::BurstLevelDisplaySeries>
+  getBurstLevelAnalysisData(orc::NodeID) override {
+    return std::nullopt;
   }
   LineSampleData getLineSamplesWithYC(orc::NodeID, orc::PreviewOutputType,
                                       uint64_t, int, int, int) override {

@@ -68,6 +68,9 @@ BurstLevelAnalysisDialog::BurstLevelAnalysisDialog(QWidget* parent)
   // Set up "No data available" overlay (from base class)
   setupNoDataOverlay(mainLayout, plot_);
 
+  // Bucket-info status line (from base class)
+  setupBucketInfoLabel(mainLayout);
+
   // Set up series for Burst Level
   burstSeries_ = plot_->addSeries("Burst Level");
   burstSeries_->setPen(QPen(Qt::yellow, 2));
@@ -84,6 +87,8 @@ BurstLevelAnalysisDialog::BurstLevelAnalysisDialog(QWidget* parent)
   // Connect to plot area changed signal
   connect(plot_, &PlotWidget::plotAreaChanged, this,
           &BurstLevelAnalysisDialog::onPlotAreaChanged);
+  connect(plot_, &PlotWidget::plotClicked, this,
+          &BurstLevelAnalysisDialog::onPlotClicked);
 
   // Set default size
   resize(800, 600);
@@ -91,9 +96,11 @@ BurstLevelAnalysisDialog::BurstLevelAnalysisDialog(QWidget* parent)
 
 BurstLevelAnalysisDialog::~BurstLevelAnalysisDialog() { removeChartContents(); }
 
-void BurstLevelAnalysisDialog::startUpdate(int32_t numberOfFrames) {
+void BurstLevelAnalysisDialog::startUpdate(int32_t numberOfFrames,
+                                           bool decimated) {
   removeChartContents();
   numberOfFrames_ = numberOfFrames;
+  decimated_ = decimated;
   burstPoints_.reserve(numberOfFrames);
 
   // Hide the "No data available" label and show the plot
@@ -107,11 +114,14 @@ void BurstLevelAnalysisDialog::removeChartContents() {
   maxY_ = 0.0;
   minY_ = 1023.0;  // Initialize high for 10-bit domain
   burstPoints_.clear();
+  bucketStart_.clear();
+  bucketEnd_.clear();
   plot_->replot();
 }
 
 void BurstLevelAnalysisDialog::addDataPoint(
-    int32_t frameNumber, double burstLevel10bit,
+    int32_t frameNumber, double burstLevel10bit, int32_t frameStart,
+    int32_t frameEnd,
     const std::optional<orc::presenters::VideoParametersView>& video_params) {
   if (video_params.has_value()) {
     cached_video_params_ = video_params;
@@ -120,6 +130,8 @@ void BurstLevelAnalysisDialog::addDataPoint(
     // Store raw 10-bit value; display conversion happens in finishUpdate().
     burstPoints_.append(QPointF(static_cast<qreal>(frameNumber),
                                 static_cast<qreal>(burstLevel10bit)));
+    bucketStart_.append(frameStart);
+    bucketEnd_.append(frameEnd);
     if (burstLevel10bit > maxY_) maxY_ = burstLevel10bit;
     if (burstLevel10bit < minY_) minY_ = burstLevel10bit;
   }
@@ -151,6 +163,10 @@ void BurstLevelAnalysisDialog::finishUpdate(int32_t currentFrameNumber) {
       sys = toOrcVideoSystem(vp.system);
     }
   }
+  // Cache for the click readout so it uses the same conversion.
+  conv_blanking_ = blanking;
+  conv_white_ = white;
+  conv_sys_ = sys;
 
   // X-axis range from actual data.
   double xMin = 0;
@@ -252,6 +268,10 @@ void BurstLevelAnalysisDialog::finishUpdate(int32_t currentFrameNumber) {
   plotMarker_->setPosition(QPointF(static_cast<double>(currentFrameNumber),
                                    (display_y_max_ + display_y_min_) / 2));
 
+  // Report whether this is a per-frame or a decimated (bucketed) view.
+  setDecimationSummary(decimated_, numberOfFrames_,
+                       static_cast<int>(burstPoints_.size()));
+
   plot_->replot();
 }
 
@@ -283,4 +303,33 @@ void BurstLevelAnalysisDialog::setAmplitudeUnit(
 
 void BurstLevelAnalysisDialog::onPlotAreaChanged() {
   // The PlotWidget handles zoom/pan internally.
+}
+
+void BurstLevelAnalysisDialog::onPlotClicked(const QPointF& dataPoint) {
+  if (burstPoints_.isEmpty()) return;
+
+  // Find the bucket nearest the click on the x (frame) axis.
+  int nearest = 0;
+  double bestDist = std::numeric_limits<double>::max();
+  for (int i = 0; i < burstPoints_.size(); ++i) {
+    double dist = std::abs(burstPoints_[i].x() - dataPoint.x());
+    if (dist < bestDist) {
+      bestDist = dist;
+      nearest = i;
+    }
+  }
+
+  const int32_t start = bucketStart_.value(nearest);
+  const int32_t end = bucketEnd_.value(nearest);
+  const QString range = (start == end)
+                            ? QString("Frame %1").arg(start)
+                            : QString("Frames %1–%2").arg(start).arg(end);
+  const double display =
+      burstAmplitudeToDisplay(burstPoints_[nearest].y(), conv_blanking_,
+                              conv_white_, conv_sys_, amplitude_unit_);
+  setBucketReadout(QString("%1 — burst level: %2 %3")
+                       .arg(range)
+                       .arg(QString::number(display, 'f', 2))
+                       .arg(QString::fromStdString(
+                           orc::amplitude_unit_suffix(amplitude_unit_))));
 }

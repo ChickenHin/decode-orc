@@ -10,11 +10,47 @@
 #include "dropout_analysis_sink_deps.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <ostream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+namespace {
+
+// Write `path` atomically: stream into a temporary sibling file and rename it
+// into place only after a fully successful write. A cancelled or failed run
+// therefore never leaves a truncated file at `path`.
+template <typename Logger, typename Writer>
+bool write_file_atomically(const std::string& path, Logger& logger,
+                           Writer&& writer) {
+  const std::string tmp_path = path + ".tmp";
+  {
+    std::ofstream out(tmp_path,
+                      std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!out.is_open()) {
+      logger.error("Failed to open temporary file: {}", tmp_path);
+      return false;
+    }
+    writer(out);
+    out.flush();
+    if (!out.good()) {
+      logger.error("Failed writing temporary file: {}", tmp_path);
+      out.close();
+      std::remove(tmp_path.c_str());
+      return false;
+    }
+  }
+  if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+    logger.error("Failed to move {} into place at {}", tmp_path, path);
+    std::remove(tmp_path.c_str());
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
 
 namespace orc {
 
@@ -161,7 +197,8 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
 
     if (progress_callback_ && (i % 100 == 0 || i + 1 == total_frames_count)) {
       progress_callback_(i + 1, total_frames_count,
-                         "Processing frame " + std::to_string(i));
+                         "Analysing frame " + std::to_string(i + 1) + "/" +
+                             std::to_string(total_frames_count));
     }
   }
 
@@ -196,17 +233,13 @@ bool DropoutAnalysisSinkStageDeps::write_csv(
 
   logger_.debug("DropoutAnalysisSinkDeps: Writing CSV to: {}", path);
 
-  std::ofstream csv(path, std::ios::out | std::ios::trunc);
-  if (!csv.is_open()) {
-    logger_.error("DropoutAnalysisSinkDeps: Failed to open file: {}", path);
-    return false;
+  const bool ok = write_file_atomically(
+      path, logger_, [&](std::ostream& os) { write_csv(os, frame_stats); });
+  if (ok) {
+    logger_.debug("DropoutAnalysisSinkDeps: Wrote {} rows to: {}",
+                  frame_stats.size(), path);
   }
-
-  write_csv(csv, frame_stats);
-
-  logger_.debug("DropoutAnalysisSinkDeps: Wrote {} rows to: {}",
-                frame_stats.size(), path);
-  return true;
+  return ok;
 }
 
 void DropoutAnalysisSinkStageDeps::write_report_csv(
@@ -261,24 +294,22 @@ bool DropoutAnalysisSinkStageDeps::write_report(
 
   logger_.debug("DropoutAnalysisSinkDeps: Writing dropout report to: {}", path);
 
-  std::ofstream report(path, std::ios::out | std::ios::trunc);
-  if (!report.is_open()) {
-    logger_.error("DropoutAnalysisSinkDeps: Failed to open file: {}", path);
-    return false;
+  const bool ok = write_file_atomically(path, logger_, [&](std::ostream& os) {
+    switch (format) {
+      case DropoutReportFormat::TEXT:
+        write_report_text(os, detail_records);
+        break;
+      case DropoutReportFormat::CSV:
+        write_report_csv(os, detail_records);
+        break;
+    }
+  });
+  if (ok) {
+    logger_.debug(
+        "DropoutAnalysisSinkDeps: Wrote {} dropout detail rows to: {}",
+        detail_records.size(), path);
   }
-
-  switch (format) {
-    case DropoutReportFormat::TEXT:
-      write_report_text(report, detail_records);
-      break;
-    case DropoutReportFormat::CSV:
-      write_report_csv(report, detail_records);
-      break;
-  }
-
-  logger_.debug("DropoutAnalysisSinkDeps: Wrote {} dropout detail rows to: {}",
-                detail_records.size(), path);
-  return true;
+  return ok;
 }
 
 }  // namespace orc

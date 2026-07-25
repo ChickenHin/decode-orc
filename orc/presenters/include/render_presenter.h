@@ -15,6 +15,7 @@
 #include <orc/stage/orc_source_parameters.h>   // Public API SourceParameters
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>   // Public API rendering types
+#include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_preview_views.h>
 
 #include <cstdint>
@@ -202,46 +203,37 @@ class RenderPresenter {
   // === Analysis Data Access ===
 
   /**
-   * @brief Get dropout analysis data from a sink stage
+   * @brief Get the decimated dropout display series from a sink stage
    *
-   * The node must be a DropoutAnalysisSinkStage that has been triggered.
-   * This method abstracts DAG traversal from the GUI layer.
+   * The node must be a DropoutAnalysisSinkStage with results. The sink's
+   * full-resolution per-frame series is decimated to the display budget and
+   * returned as a typed view series; this method abstracts DAG traversal from
+   * the GUI layer.
    *
    * @param node_id Node to get data from
-   * @param frame_stats Output vector of frame statistics
-   * @param total_frames Output total frames count
-   * @return true if data was retrieved successfully
+   * @return The decimated series, or std::nullopt if the node is not a
+   * triggered dropout sink
    */
-  bool getDropoutAnalysisData(
-      NodeID node_id,
-      std::vector<void*>& frame_stats,  // Actually vector<FrameDropoutStats>
-      int32_t& total_frames);
+  std::optional<DropoutDisplaySeries> getDropoutAnalysisData(NodeID node_id);
 
   /**
-   * @brief Get SNR analysis data from a sink stage
+   * @brief Get the decimated SNR display series from a sink stage
    *
    * @param node_id Node to get data from
-   * @param frame_stats Output vector of frame statistics
-   * @param total_frames Output total frames count
-   * @return true if data was retrieved successfully
+   * @return The decimated series, or std::nullopt if the node is not a
+   * triggered SNR sink
    */
-  bool getSNRAnalysisData(
-      NodeID node_id,
-      std::vector<void*>& frame_stats,  // Actually vector<FrameSNRStats>
-      int32_t& total_frames);
+  std::optional<SNRDisplaySeries> getSNRAnalysisData(NodeID node_id);
 
   /**
-   * @brief Get burst level analysis data from a sink stage
+   * @brief Get the decimated burst-level display series from a sink stage
    *
    * @param node_id Node to get data from
-   * @param frame_stats Output vector of frame statistics
-   * @param total_frames Output total frames count
-   * @return true if data was retrieved successfully
+   * @return The decimated series, or std::nullopt if the node is not a
+   * triggered burst-level sink
    */
-  bool getBurstLevelAnalysisData(
-      NodeID node_id,
-      std::vector<void*>& frame_stats,  // Actually vector<FrameBurstLevelStats>
-      int32_t& total_frames);
+  std::optional<BurstLevelDisplaySeries> getBurstLevelAnalysisData(
+      NodeID node_id);
 
   /**
    * @brief Request dropout analysis data from a sink node (deprecated - use

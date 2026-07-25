@@ -43,16 +43,20 @@ class SNRAnalysisDialog : public AnalysisDialogBase {
   /**
    * @brief Start a new update cycle
    * @param numberOfFrames Total number of frames in the source
+   * @param decimated True when each plotted point aggregates >1 analysed frame
    */
-  void startUpdate(int32_t numberOfFrames);
+  void startUpdate(int32_t numberOfFrames, bool decimated);
 
   /**
-   * @brief Add a data point to the graphs
-   * @param frameNumber Frame number (1-based)
+   * @brief Add a data point (display bucket) to the graphs
+   * @param frameNumber Representative frame number for the bucket (1-based)
    * @param whiteSNR White SNR value (dB), or NaN if not available
    * @param blackPSNR Black PSNR value (dB), or NaN if not available
+   * @param frameStart First analysed frame in the bucket
+   * @param frameEnd Last analysed frame in the bucket
    */
-  void addDataPoint(int32_t frameNumber, double whiteSNR, double blackPSNR);
+  void addDataPoint(int32_t frameNumber, double whiteSNR, double blackPSNR,
+                    int32_t frameStart, int32_t frameEnd);
 
   /**
    * @brief Finish the update and render the graphs
@@ -94,6 +98,7 @@ class SNRAnalysisDialog : public AnalysisDialogBase {
  private slots:
   void onDisplayModeChanged(int index);
   void onPlotAreaChanged();
+  void onPlotClicked(const QPointF& dataPoint);
 
  private:
   void removeChartContents();
@@ -108,8 +113,15 @@ class SNRAnalysisDialog : public AnalysisDialogBase {
   double maxWhiteY_;
   double maxBlackY_;
   int32_t numberOfFrames_;
+  bool decimated_ = false;
   QVector<QPointF> whitePoints_;
   QVector<QPointF> blackPoints_;
+  // Per-bucket detail (one entry per addDataPoint call) for the click readout.
+  QVector<int32_t> bucketLabel_;
+  QVector<int32_t> bucketStart_;
+  QVector<int32_t> bucketEnd_;
+  QVector<double> bucketWhite_;
+  QVector<double> bucketBlack_;
 };
 
 #endif  // SNRANALYSISDIALOG_H

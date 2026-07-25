@@ -127,6 +127,21 @@ TEST(BurstLevelAnalysisSinkDepsTest, EmptyRangeYieldsNoRecords) {
   EXPECT_EQ(result.total_frames, 0);
 }
 
+// When cancellation is requested, analysis reports failure so the stage never
+// proceeds to write a (partial) CSV. This is the deps-level guard behind the
+// "cancelling leaves no truncated output file" requirement.
+TEST(BurstLevelAnalysisSinkDepsTest,
+     CancelledRunReportsFailureAndWritesNothing) {
+  auto h = make_harness(orc::FrameIDRange{0, 3});  // 4 frames
+  h->cancel.store(true);
+
+  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
+                                                   options_with_interval(1));
+
+  EXPECT_FALSE(result.success);
+  EXPECT_EQ(result.message, "Cancelled by user");
+}
+
 // ----- CSV writer (stream formatter) -----
 
 TEST(BurstLevelAnalysisSinkCsvTest, HeaderIsSelfDescribing) {

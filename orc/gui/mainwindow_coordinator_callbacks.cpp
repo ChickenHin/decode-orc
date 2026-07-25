@@ -437,8 +437,7 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
 }
 
 void MainWindow::onDropoutDataReady(
-    uint64_t request_id, std::vector<orc::FrameDropoutStats> frame_stats,
-    int32_t total_frames) {
+    uint64_t request_id, orc::presenters::DropoutDisplaySeries series) {
   // Find which node this request was for
   auto req_it = pending_dropout_requests_.find(request_id);
   if (req_it == pending_dropout_requests_.end()) {
@@ -451,8 +450,10 @@ void MainWindow::onDropoutDataReady(
   orc::NodeID node_id = req_it->second;
   pending_dropout_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onDropoutDataReady for node '{}': {} frames, total={}",
-                node_id.to_string(), frame_stats.size(), total_frames);
+  const int32_t total_frames = series.total_frames;
+
+  ORC_LOG_DEBUG("onDropoutDataReady for node '{}': {} points, total={}",
+                node_id.to_string(), series.points.size(), total_frames);
 
   // Close progress dialog safely (matches onTriggerComplete pattern)
   // Erase from map FIRST so any re-entrant onDropoutProgress calls see an empty
@@ -478,7 +479,7 @@ void MainWindow::onDropoutDataReady(
   auto* dialog = dialog_it->second;
 
   // If no data available, show message
-  if (frame_stats.empty() || total_frames == 0) {
+  if (series.points.empty() || total_frames == 0) {
     dialog->showNoDataMessage(
         "No dropout analysis data available.\n\n"
         "Make sure dropout detection is enabled in the pipeline.");
@@ -486,13 +487,15 @@ void MainWindow::onDropoutDataReady(
   }
 
   // Start update cycle
-  dialog->startUpdate(total_frames);
+  dialog->startUpdate(total_frames, series.decimated);
 
-  // Add all data points
-  for (const auto& stats : frame_stats) {
-    if (stats.has_data) {
-      dialog->addDataPoint(stats.frame_number,
-                           static_cast<double>(stats.dropout_length_samples));
+  // Add all display points (buckets)
+  for (const auto& point : series.points) {
+    if (point.bucket.has_data) {
+      dialog->addDataPoint(point.bucket.frame_label,
+                           static_cast<double>(point.dropout_length_samples),
+                           point.bucket.frame_start, point.bucket.frame_end,
+                           point.dropout_count);
     }
   }
 
@@ -511,8 +514,7 @@ void MainWindow::onDropoutDataReady(
 }
 
 void MainWindow::onSNRDataReady(uint64_t request_id,
-                                std::vector<orc::FrameSNRStats> frame_stats,
-                                int32_t total_frames) {
+                                orc::presenters::SNRDisplaySeries series) {
   // Find which node this request was for
   auto req_it = pending_snr_requests_.find(request_id);
   if (req_it == pending_snr_requests_.end()) {
@@ -524,8 +526,10 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   orc::NodeID node_id = req_it->second;
   pending_snr_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onSNRDataReady for node '{}': {} frames, total={}",
-                node_id.to_string(), frame_stats.size(), total_frames);
+  const int32_t total_frames = series.total_frames;
+
+  ORC_LOG_DEBUG("onSNRDataReady for node '{}': {} points, total={}",
+                node_id.to_string(), series.points.size(), total_frames);
 
   // Close progress dialog safely (matches onTriggerComplete pattern)
   // Erase from map FIRST. Do NOT call setValue() before hide() — modal
@@ -550,7 +554,7 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   auto* dialog = dialog_it->second;
 
   // If no data available, show message
-  if (frame_stats.empty() || total_frames == 0) {
+  if (series.points.empty() || total_frames == 0) {
     dialog->showNoDataMessage(
         "No SNR analysis data available.\n\n"
         "Make sure VITS (Vertical Interval Test Signal) is present in the "
@@ -559,18 +563,19 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   }
 
   // Start update cycle
-  dialog->startUpdate(total_frames);
+  dialog->startUpdate(total_frames, series.decimated);
 
-  // Add all data points
-  for (const auto& stats : frame_stats) {
-    if (stats.has_data) {
-      double white_snr = stats.has_white_snr
-                             ? stats.white_snr
+  // Add all display points (buckets)
+  for (const auto& point : series.points) {
+    if (point.bucket.has_data) {
+      double white_snr = point.has_white_snr
+                             ? point.white_snr
                              : std::numeric_limits<double>::quiet_NaN();
-      double black_psnr = stats.has_black_psnr
-                              ? stats.black_psnr
+      double black_psnr = point.has_black_psnr
+                              ? point.black_psnr
                               : std::numeric_limits<double>::quiet_NaN();
-      dialog->addDataPoint(stats.frame_number, white_snr, black_psnr);
+      dialog->addDataPoint(point.bucket.frame_label, white_snr, black_psnr,
+                           point.bucket.frame_start, point.bucket.frame_end);
     }
   }
 
@@ -628,8 +633,7 @@ void MainWindow::onSNRProgress(size_t current, size_t total, QString message) {
 }
 
 void MainWindow::onBurstLevelDataReady(
-    uint64_t request_id, std::vector<orc::FrameBurstLevelStats> frame_stats,
-    int32_t total_frames) {
+    uint64_t request_id, orc::presenters::BurstLevelDisplaySeries series) {
   // Find which node this request was for
   auto req_it = pending_burst_level_requests_.find(request_id);
   if (req_it == pending_burst_level_requests_.end()) {
@@ -642,8 +646,10 @@ void MainWindow::onBurstLevelDataReady(
   orc::NodeID node_id = req_it->second;
   pending_burst_level_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onBurstLevelDataReady for node '{}': {} frames, total={}",
-                node_id.to_string(), frame_stats.size(), total_frames);
+  const int32_t total_frames = series.total_frames;
+
+  ORC_LOG_DEBUG("onBurstLevelDataReady for node '{}': {} points, total={}",
+                node_id.to_string(), series.points.size(), total_frames);
 
   // Close progress dialog safely (matches onTriggerComplete pattern)
   // Erase from map FIRST. Do NOT call setValue() before hide() — modal
@@ -668,7 +674,7 @@ void MainWindow::onBurstLevelDataReady(
   auto* dialog = dialog_it->second;
 
   // If no data available, show message
-  if (frame_stats.empty() || total_frames == 0) {
+  if (series.points.empty() || total_frames == 0) {
     dialog->showNoDataMessage(
         "No burst level data available.\n\n"
         "Color burst detection may have failed.");
@@ -688,13 +694,14 @@ void MainWindow::onBurstLevelDataReady(
   }
 
   // Start update cycle
-  dialog->startUpdate(total_frames);
+  dialog->startUpdate(total_frames, series.decimated);
 
-  // Add all data points
+  // Add all display points (buckets)
   bool first = true;
-  for (const auto& stats : frame_stats) {
-    if (stats.has_data) {
-      dialog->addDataPoint(stats.frame_number, stats.median_burst_10bit,
+  for (const auto& point : series.points) {
+    if (point.bucket.has_data) {
+      dialog->addDataPoint(point.bucket.frame_label, point.median_burst_10bit,
+                           point.bucket.frame_start, point.bucket.frame_end,
                            first ? video_params : std::nullopt);
       first = false;
     }

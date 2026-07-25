@@ -51,6 +51,48 @@ void AnalysisDialogBase::setupNoDataOverlay(QVBoxLayout* mainLayout,
   noDataLabel_->hide();
 }
 
+void AnalysisDialogBase::setupBucketInfoLabel(QVBoxLayout* mainLayout) {
+  bucketInfoLabel_ = new QLabel(this);
+  bucketInfoLabel_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  bucketInfoLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  QFont font = bucketInfoLabel_->font();
+  font.setPointSize(font.pointSize() > 1 ? font.pointSize() - 1
+                                         : font.pointSize());
+  bucketInfoLabel_->setFont(font);
+  mainLayout->addWidget(bucketInfoLabel_);
+}
+
+void AnalysisDialogBase::setDecimationSummary(bool decimated,
+                                              int32_t totalFrames,
+                                              int pointCount) {
+  QString summary;
+  if (decimated && pointCount > 0) {
+    // Average bucket width; individual buckets vary by ±1 frame.
+    int perBucket = (totalFrames + pointCount - 1) / pointCount;
+    summary = QString(
+                  "Decimated view: %1 bars over %2 frames "
+                  "(~%3 frames per bar). Click a bar for its exact range and "
+                  "totals.")
+                  .arg(pointCount)
+                  .arg(totalFrames)
+                  .arg(perBucket);
+  } else {
+    summary = QString("Per-frame view: %1 frame%2.")
+                  .arg(totalFrames)
+                  .arg(totalFrames == 1 ? "" : "s");
+  }
+  decimationSummary_ = summary;
+  if (bucketInfoLabel_) {
+    bucketInfoLabel_->setText(summary);
+  }
+}
+
+void AnalysisDialogBase::setBucketReadout(const QString& text) {
+  if (bucketInfoLabel_) {
+    bucketInfoLabel_->setText(text);
+  }
+}
+
 void AnalysisDialogBase::updateFrameMarkerThrottled(
     int32_t currentFrameNumber) {
   // Always store the pending frame number
