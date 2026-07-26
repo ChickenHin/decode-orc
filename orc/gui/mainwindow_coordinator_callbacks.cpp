@@ -17,12 +17,15 @@
 #include "fieldpreviewwidget.h"
 #include "logging.h"
 #include "mainwindow.h"
+#include "ntscobserverdialog.h"
+#include "observation_status_formatter.h"
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/vbi_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
 #include "snranalysisdialog.h"
 #include "vbidialog.h"
+#include "videoparameterobserverdialog.h"
 
 // Coordinator response slot implementations
 
@@ -111,6 +114,114 @@ void MainWindow::onVBIDataReady(uint64_t request_id,
       vbi_dialog_->updateVBIInfo(info);
     }
     pending_vbi_request_id_ = 0;
+  }
+}
+
+void MainWindow::onObservationDataReady(
+    uint64_t request_id, bool available, qulonglong field_id_value,
+    orc::presenters::VideoParameterObservationView video_params,
+    orc::presenters::NtscFieldObservationsView ntsc) {
+  const bool is_field1 = (request_id == pending_obs_request_id_field1_);
+  const bool is_field2 = (request_id == pending_obs_request_id_field2_);
+  if (!is_field1 && !is_field2) {
+    return;  // stale / superseded response
+  }
+
+  const orc::FieldID field_id(
+      static_cast<orc::FieldID::value_type>(field_id_value));
+  if (is_field1) {
+    pending_obs_request_id_field1_ = 0;
+    pending_obs_field1_id_ = field_id;
+    pending_obs_video_field1_ = std::move(video_params);
+    pending_obs_ntsc_field1_ = std::move(ntsc);
+    pending_obs_field1_available_ = available;
+    pending_obs_field1_ready_ = true;
+  } else {
+    pending_obs_request_id_field2_ = 0;
+    pending_obs_field2_id_ = field_id;
+    pending_obs_video_field2_ = std::move(video_params);
+    pending_obs_ntsc_field2_ = std::move(ntsc);
+    pending_obs_field2_available_ = available;
+    pending_obs_field2_ready_ = true;
+  }
+
+  const bool vp_visible = video_parameter_observer_dialog_ &&
+                          video_parameter_observer_dialog_->isVisible();
+  const bool ntsc_visible =
+      ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible();
+
+  if (!pending_obs_frame_mode_) {
+    // Field mode: the single field's response completes the update.
+    if (pending_obs_field1_available_) {
+      if (vp_visible) {
+        video_parameter_observer_dialog_->updateObservations(
+            pending_obs_field1_id_, pending_obs_video_field1_);
+      }
+      if (ntsc_visible) {
+        ntsc_observer_dialog_->updateObservations(pending_obs_field1_id_,
+                                                  pending_obs_ntsc_field1_);
+      }
+    } else {
+      if (vp_visible) {
+        video_parameter_observer_dialog_->clearObservations();
+      }
+      if (ntsc_visible) {
+        ntsc_observer_dialog_->clearObservations();
+      }
+    }
+    pending_obs_field1_ready_ = false;
+    return;
+  }
+
+  // Frame mode: wait until both fields have arrived, then combine.
+  if (!pending_obs_field1_ready_ || !pending_obs_field2_ready_) {
+    return;
+  }
+  if (pending_obs_field1_available_ && pending_obs_field2_available_) {
+    if (vp_visible) {
+      video_parameter_observer_dialog_->updateObservationsForFrame(
+          pending_obs_field1_id_, pending_obs_video_field1_,
+          pending_obs_field2_id_, pending_obs_video_field2_);
+    }
+    if (ntsc_visible) {
+      ntsc_observer_dialog_->updateObservationsForFrame(
+          pending_obs_field1_id_, pending_obs_ntsc_field1_,
+          pending_obs_field2_id_, pending_obs_ntsc_field2_);
+    }
+  } else {
+    if (vp_visible) {
+      video_parameter_observer_dialog_->clearObservations();
+    }
+    if (ntsc_visible) {
+      ntsc_observer_dialog_->clearObservations();
+    }
+  }
+  pending_obs_field1_ready_ = false;
+  pending_obs_field2_ready_ = false;
+}
+
+void MainWindow::onObservationProgress(bool active, int percent_complete,
+                                       qulonglong /*outstanding_nodes*/) {
+  const std::string message =
+      orc::gui::formatObservationStatus(active, percent_complete);
+  if (message.empty()) {
+    statusBar()->clearMessage();
+  } else {
+    statusBar()->showMessage(QString::fromStdString(message));
+  }
+}
+
+void MainWindow::onObservationsInvalidated(QVector<int> changed_node_ids) {
+  // If the node currently being viewed had its observations invalidated,
+  // re-issue the async request so the open dialogs refresh with new data.
+  if (!current_view_node_id_.is_valid()) {
+    return;
+  }
+  for (int node_value : changed_node_ids) {
+    if (node_value == current_view_node_id_.value()) {
+      refreshObserverDialogs();
+      break;
+    }
   }
 }
 
@@ -437,8 +548,7 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
 }
 
 void MainWindow::onDropoutDataReady(
-    uint64_t request_id, std::vector<orc::FrameDropoutStats> frame_stats,
-    int32_t total_frames) {
+    uint64_t request_id, orc::presenters::DropoutDisplaySeries series) {
   // Find which node this request was for
   auto req_it = pending_dropout_requests_.find(request_id);
   if (req_it == pending_dropout_requests_.end()) {
@@ -451,8 +561,10 @@ void MainWindow::onDropoutDataReady(
   orc::NodeID node_id = req_it->second;
   pending_dropout_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onDropoutDataReady for node '{}': {} frames, total={}",
-                node_id.to_string(), frame_stats.size(), total_frames);
+  const int32_t total_frames = series.total_frames;
+
+  ORC_LOG_DEBUG("onDropoutDataReady for node '{}': {} points, total={}",
+                node_id.to_string(), series.points.size(), total_frames);
 
   // Close progress dialog safely (matches onTriggerComplete pattern)
   // Erase from map FIRST so any re-entrant onDropoutProgress calls see an empty
@@ -478,7 +590,7 @@ void MainWindow::onDropoutDataReady(
   auto* dialog = dialog_it->second;
 
   // If no data available, show message
-  if (frame_stats.empty() || total_frames == 0) {
+  if (series.points.empty() || total_frames == 0) {
     dialog->showNoDataMessage(
         "No dropout analysis data available.\n\n"
         "Make sure dropout detection is enabled in the pipeline.");
@@ -486,12 +598,15 @@ void MainWindow::onDropoutDataReady(
   }
 
   // Start update cycle
-  dialog->startUpdate(total_frames);
+  dialog->startUpdate(total_frames, series.decimated);
 
-  // Add all data points
-  for (const auto& stats : frame_stats) {
-    if (stats.has_data) {
-      dialog->addDataPoint(stats.frame_number, stats.total_dropout_length);
+  // Add all display points (buckets)
+  for (const auto& point : series.points) {
+    if (point.bucket.has_data) {
+      dialog->addDataPoint(point.bucket.frame_label,
+                           static_cast<double>(point.dropout_length_samples),
+                           point.bucket.frame_start, point.bucket.frame_end,
+                           point.dropout_count);
     }
   }
 
@@ -510,8 +625,7 @@ void MainWindow::onDropoutDataReady(
 }
 
 void MainWindow::onSNRDataReady(uint64_t request_id,
-                                std::vector<orc::FrameSNRStats> frame_stats,
-                                int32_t total_frames) {
+                                orc::presenters::SNRDisplaySeries series) {
   // Find which node this request was for
   auto req_it = pending_snr_requests_.find(request_id);
   if (req_it == pending_snr_requests_.end()) {
@@ -523,8 +637,10 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   orc::NodeID node_id = req_it->second;
   pending_snr_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onSNRDataReady for node '{}': {} frames, total={}",
-                node_id.to_string(), frame_stats.size(), total_frames);
+  const int32_t total_frames = series.total_frames;
+
+  ORC_LOG_DEBUG("onSNRDataReady for node '{}': {} points, total={}",
+                node_id.to_string(), series.points.size(), total_frames);
 
   // Close progress dialog safely (matches onTriggerComplete pattern)
   // Erase from map FIRST. Do NOT call setValue() before hide() — modal
@@ -549,7 +665,7 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   auto* dialog = dialog_it->second;
 
   // If no data available, show message
-  if (frame_stats.empty() || total_frames == 0) {
+  if (series.points.empty() || total_frames == 0) {
     dialog->showNoDataMessage(
         "No SNR analysis data available.\n\n"
         "Make sure VITS (Vertical Interval Test Signal) is present in the "
@@ -558,18 +674,19 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   }
 
   // Start update cycle
-  dialog->startUpdate(total_frames);
+  dialog->startUpdate(total_frames, series.decimated);
 
-  // Add all data points
-  for (const auto& stats : frame_stats) {
-    if (stats.has_data) {
-      double white_snr = stats.has_white_snr
-                             ? stats.white_snr
+  // Add all display points (buckets)
+  for (const auto& point : series.points) {
+    if (point.bucket.has_data) {
+      double white_snr = point.has_white_snr
+                             ? point.white_snr
                              : std::numeric_limits<double>::quiet_NaN();
-      double black_psnr = stats.has_black_psnr
-                              ? stats.black_psnr
+      double black_psnr = point.has_black_psnr
+                              ? point.black_psnr
                               : std::numeric_limits<double>::quiet_NaN();
-      dialog->addDataPoint(stats.frame_number, white_snr, black_psnr);
+      dialog->addDataPoint(point.bucket.frame_label, white_snr, black_psnr,
+                           point.bucket.frame_start, point.bucket.frame_end);
     }
   }
 
@@ -627,8 +744,7 @@ void MainWindow::onSNRProgress(size_t current, size_t total, QString message) {
 }
 
 void MainWindow::onBurstLevelDataReady(
-    uint64_t request_id, std::vector<orc::FrameBurstLevelStats> frame_stats,
-    int32_t total_frames) {
+    uint64_t request_id, orc::presenters::BurstLevelDisplaySeries series) {
   // Find which node this request was for
   auto req_it = pending_burst_level_requests_.find(request_id);
   if (req_it == pending_burst_level_requests_.end()) {
@@ -641,8 +757,10 @@ void MainWindow::onBurstLevelDataReady(
   orc::NodeID node_id = req_it->second;
   pending_burst_level_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onBurstLevelDataReady for node '{}': {} frames, total={}",
-                node_id.to_string(), frame_stats.size(), total_frames);
+  const int32_t total_frames = series.total_frames;
+
+  ORC_LOG_DEBUG("onBurstLevelDataReady for node '{}': {} points, total={}",
+                node_id.to_string(), series.points.size(), total_frames);
 
   // Close progress dialog safely (matches onTriggerComplete pattern)
   // Erase from map FIRST. Do NOT call setValue() before hide() — modal
@@ -667,7 +785,7 @@ void MainWindow::onBurstLevelDataReady(
   auto* dialog = dialog_it->second;
 
   // If no data available, show message
-  if (frame_stats.empty() || total_frames == 0) {
+  if (series.points.empty() || total_frames == 0) {
     dialog->showNoDataMessage(
         "No burst level data available.\n\n"
         "Color burst detection may have failed.");
@@ -679,6 +797,9 @@ void MainWindow::onBurstLevelDataReady(
   auto* core_project = project_.presenter()->getCoreProjectHandle();
   if (core_project) {
     orc::presenters::RenderPresenter render_presenter(core_project);
+    // Throwaway helper presenter: parameter reads only — no sidecar,
+    // scheduler, or sweeps (this runs on the GUI thread).
+    render_presenter.setBackgroundObservationEnabled(false);
     render_presenter.setDAG(project_.getDAG());
     auto vp = render_presenter.getVideoParameters(node_id);
     if (vp.has_value()) {
@@ -687,13 +808,14 @@ void MainWindow::onBurstLevelDataReady(
   }
 
   // Start update cycle
-  dialog->startUpdate(total_frames);
+  dialog->startUpdate(total_frames, series.decimated);
 
-  // Add all data points
+  // Add all display points (buckets)
   bool first = true;
-  for (const auto& stats : frame_stats) {
-    if (stats.has_data) {
-      dialog->addDataPoint(stats.frame_number, stats.median_burst_10bit,
+  for (const auto& point : series.points) {
+    if (point.bucket.has_data) {
+      dialog->addDataPoint(point.bucket.frame_label, point.median_burst_10bit,
+                           point.bucket.frame_start, point.bucket.frame_end,
                            first ? video_params : std::nullopt);
       first = false;
     }

@@ -150,8 +150,20 @@ orc_add_core_unit_tests(
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp
         stages/cvbs_sink/cvbs_sink_stage_test.cpp
         stages/dropout_analysis_sink/dropout_analysis_sink_stage_test.cpp
+        stages/dropout_analysis_sink/dropout_analysis_sink_deps_test.cpp
+        stages/dropout_analysis_sink/dropout_analysis_sink_map_contract_test.cpp
+        stages/dropout_analysis_sink/dropout_analysis_sink_report_test.cpp
         stages/snr_analysis_sink/snr_analysis_sink_stage_test.cpp
+        stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
+        stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
+)
+
+orc_add_core_unit_tests(
+        orc-core-unit-tests-analysis
+        "unit"
+
+        analysis/analysis_series_decimator_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -166,6 +178,7 @@ orc_add_core_unit_tests(
         contracts/audio_channel_pair_contract_test.cpp
         contracts/observation_service_accessor_test.cpp
         contracts/observation_service_identity_contract_test.cpp
+        contracts/observation_store_parity_test.cpp
 )
 
 # Presenter-layer unit tests. These link orc-presenters in addition to the
@@ -370,6 +383,24 @@ orc_add_core_unit_tests(
 
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
+)
+
+orc_add_core_unit_tests(
+        orc-core-unit-tests-provenance
+        "unit"
+
+        provenance/frame_provenance_test.cpp
+)
+
+orc_add_core_unit_tests(
+        orc-core-unit-tests-observation
+        "unit"
+
+        observation/observation_store_test.cpp
+        observation/observation_store_persistence_test.cpp
+        observation/observation_invalidation_test.cpp
+        observation/observer_pass_test.cpp
+        observation/observation_scheduler_test.cpp
 )
 
         orc_add_core_unit_tests(

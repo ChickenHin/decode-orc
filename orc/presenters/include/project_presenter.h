@@ -48,6 +48,22 @@ void initCoreLogging(
     const std::string& log_file = "");
 
 /**
+ * @brief Set the background observation worker-pool size.
+ *
+ * @param count Number of worker threads; 0 (the default) means "auto" — half
+ *              the hardware concurrency, at least 1. Call once at startup
+ *              (e.g. from a CLI flag) before opening a project.
+ */
+void setBackgroundObservationWorkerCount(unsigned count);
+
+/**
+ * @brief Resolve the configured worker count to an effective thread count.
+ * @return The configured count, or the auto default (half the cores, min 1)
+ *         when unset.
+ */
+unsigned resolveBackgroundObservationWorkerCount();
+
+/**
  * @brief ProjectPresenter - Manages project creation, loading, and modification
  *
  * This presenter extracts all project-related business logic from the GUI

@@ -41,6 +41,11 @@ struct CVBSMetadataRecord {
   int32_t number_of_sequential_frames = 0;
   // NTSC-J only: explicit black level stored in the 10-bit domain.
   std::optional<int32_t> ntsc_j_black_level;
+  // Upstream decode provenance (cvbs_file.decoder / git_branch / git_commit,
+  // CVBS file format spec).  Empty when the columns are NULL or absent.
+  std::string decoder;
+  std::string git_branch;
+  std::string git_commit;
 };
 
 // One row of the .meta audio_channel_pair table (CVBS file format spec

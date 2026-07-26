@@ -42,6 +42,15 @@ struct ObserverInfo {
   std::string version;  ///< Observer version string (e.g. "1.0.0").
   std::vector<ObservationKey>
       provided_observations;  ///< Keys the observer writes.
+
+  /// True when the observer's output for a frame depends only on that frame's
+  /// representation, so frames may be observed in any order and chunked freely.
+  /// False when the observer models a cross-frame stream (e.g. the EIA-608
+  /// caption stream or the colour-sequence phase) and must therefore be driven
+  /// over a work item's frames in ascending order. Consumed by the background
+  /// observation scheduler to decide frame ordering; never affects an
+  /// observer's per-frame result.
+  bool stateless = true;
 };
 
 /**

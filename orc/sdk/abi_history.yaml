@@ -148,3 +148,44 @@ history:
       `observation_service_interface.h` remain the contract. Source-breaking for
       any plugin still including the observer classes — migrate to
       `IObservationService::create_observer(id)`
+  - abi: 11
+    api: 3
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/frame_descriptor.h
+      - orc/stage/common_types.h
+      - orc/stage/observation/observation_service_interface.h
+      - orc/stage/video_frame_representation.h
+    summary: >-
+      `FrameDescriptor` drops the `colour_frame_index`, `frame_number`, and
+      `timecode` fields. Signal-measured facts are no longer baked in by
+      source stages: colour-sequence phase is measured uniformly for TBC and
+      CVBS sources via the host `colour_frame_phase` observer, reached through
+      the new contract header
+      `<orc/stage/observation/colour_frame_phase_query.h>`
+      (`orc::observation::measure_frame_phase()` /
+      `measure_colour_frame_index()`), and VBI picture numbers / timecodes
+      come from the host `biphase` observer's interpreted `vbi.*` keys (the
+      dropped `frame_number`/`timecode` fields were never populated by any
+      source). The analysis-sink result types in `<orc/stage/common_types.h>`
+      also become canonical per-frame records: the aggregated-per-bucket fields
+      are removed (`FrameDropoutStats` now carries integer `dropout_count` and
+      `dropout_length_samples` in place of the double
+      `dropout_count`/`total_dropout_length`; `FrameSNRStats` drops
+      `field_count`/`white_snr_count`/`black_psnr_count`; `FrameBurstLevelStats`
+      drops `field_count`), each record now representing exactly one analysed
+      frame with display bucketing moved to a host-side decimation utility.
+      `ObserverInfo` in
+      `<orc/stage/observation/observation_service_interface.h>` also gains an
+      appended `bool stateless` field classifying whether an observer's
+      per-frame result is order-independent (stateless) or models a cross-frame
+      stream (stateful, e.g. `closed_caption`, `colour_frame_phase`); it drives
+      background-scheduler frame ordering and never changes a per-frame result.
+      `VideoFrameRepresentation` in
+      `<orc/stage/video_frame_representation.h>` gains an appended virtual
+      `video_passthrough_source(FrameID)` (default nullptr) letting a transform
+      declare, from metadata alone, that a frame's CVBS video content is
+      byte-identical to its upstream input; the host uses it to share
+      frame-content-keyed stored observations across stages instead of
+      re-analysing identical frames. Layout- and source-breaking for any plugin
+      reading the removed fields or these result structs.

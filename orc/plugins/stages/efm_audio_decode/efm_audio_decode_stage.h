@@ -88,6 +88,14 @@ class EFMAudioChannelPairRepresentation
     ensure_decoded(progress);
   }
 
+  // This stage only appends an audio channel pair; the CVBS video content of
+  // every frame passes through byte-identical, so the host may share
+  // frame-content-keyed analysis with the upstream node.
+  std::shared_ptr<const VideoFrameRepresentation> video_passthrough_source(
+      FrameID /*id*/) const override {
+    return source_;
+  }
+
  private:
   size_t source_pair_count() const {
     return source_ ? source_->audio_channel_pair_count() : 0;

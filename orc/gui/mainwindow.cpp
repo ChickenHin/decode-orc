@@ -452,6 +452,15 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onFrameLineNavigationReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::error, this,
           &MainWindow::onCoordinatorError, Qt::QueuedConnection);
+  // Phase 5: async observation delivery, background-workload progress, and the
+  // Phase 3 invalidation signal (previously emitted but unconnected).
+  connect(render_coordinator_.get(), &RenderCoordinator::observationDataReady,
+          this, &MainWindow::onObservationDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::observationProgress,
+          this, &MainWindow::onObservationProgress, Qt::QueuedConnection);
+  connect(render_coordinator_.get(),
+          &RenderCoordinator::observationsInvalidated, this,
+          &MainWindow::onObservationsInvalidated, Qt::QueuedConnection);
 
   // Set the project for the render coordinator (required before updateDAG)
   render_coordinator_->setProject(project_.presenter()->getCoreProjectHandle());
@@ -2633,6 +2642,10 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
 
       orc::NodeID input_source_node_id = node_id;
@@ -2683,6 +2696,10 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
 
       // Reset values should come from the stage input path (pre-override),
@@ -3788,6 +3805,8 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       auto* core_project = project_.presenter()->getCoreProjectHandle();
       if (core_project) {
         orc::presenters::RenderPresenter rp(core_project);
+        // Throwaway helper presenter: parameter reads only — keep cheap.
+        rp.setBackgroundObservationEnabled(false);
         rp.setDAG(project_.getDAG());
         auto vp = rp.getVideoParameters(node_id);
         if (vp.has_value()) {
@@ -3974,6 +3993,11 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     }
 
     auto render_presenter = makeRenderPresenterAdapter(core_project);
+    // Auxiliary presenter: rendering only. Must be set before setDAG() so the
+    // build stays cheap on the GUI thread and no second background observation
+    // pipeline (scheduler/sweeps) is spawned — the coordinator's presenter
+    // already runs one for this process.
+    render_presenter->setBackgroundObservationEnabled(false);
     render_presenter->setDAG(project_.getDAG());
     render_presenter->setShowDropouts(false);
 
@@ -4445,6 +4469,10 @@ void MainWindow::onSetCrosshairsFromFrameTiming() {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
       auto vp = render_presenter.getVideoParameters(current_view_node_id_);
       if (vp.has_value()) {
@@ -4572,6 +4600,10 @@ void MainWindow::onFrameTimingDataReady(
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
 
       auto vp = render_presenter.getVideoParameters(current_view_node_id_);
@@ -4701,6 +4733,10 @@ void MainWindow::onWaveformMonitorDataReady(
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
       auto vp = render_presenter.getVideoParameters(current_view_node_id_);
       if (vp.has_value()) {
@@ -4833,178 +4869,86 @@ void MainWindow::updateVBIDialog() {
 }
 
 void MainWindow::updateVideoParameterObserverDialog() {
-  if (!video_parameter_observer_dialog_ ||
-      !video_parameter_observer_dialog_->isVisible()) {
-    return;
-  }
-
-  if (!current_view_node_id_.is_valid()) {
-    video_parameter_observer_dialog_->clearObservations();
-    return;
-  }
-
-  int current_index = preview_dialog_->previewSlider()->value();
-
-  bool is_frame_mode =
-      (current_output_type_ == orc::PreviewOutputType::Frame_Field1_First ||
-       current_output_type_ == orc::PreviewOutputType::Frame_Reversed ||
-       current_output_type_ == orc::PreviewOutputType::Split);
-
-  orc::FieldID field1_id;
-  orc::FieldID field2_id;
-  if (is_frame_mode) {
-    auto frame_fields = render_coordinator_->getFrameFields(
-        current_view_node_id_, current_index);
-    if (!frame_fields.is_valid) {
-      video_parameter_observer_dialog_->clearObservations();
-      return;
-    }
-    field1_id = orc::FieldID(frame_fields.first_field);
-    field2_id = orc::FieldID(frame_fields.second_field);
-  } else {
-    field1_id = orc::FieldID(current_index);
-    field2_id = orc::FieldID(0);
-  }
-
-  try {
-    auto* core_project = project_.presenter()->getCoreProjectHandle();
-    if (!core_project) {
-      video_parameter_observer_dialog_->clearObservations();
-      return;
-    }
-
-    orc::presenters::RenderPresenter render_presenter(core_project);
-    render_presenter.setDAG(project_.getDAG());
-
-    auto video_params =
-        render_presenter.getVideoParameters(current_view_node_id_);
-
-    if (is_frame_mode) {
-      const auto* ctx1 = render_presenter.getObservationContext(
-          current_view_node_id_, field1_id);
-      const auto* ctx2 = render_presenter.getObservationContext(
-          current_view_node_id_, field2_id);
-      if (!ctx1 || !ctx2) {
-        video_parameter_observer_dialog_->clearObservations();
-        return;
-      }
-      auto obs1 = orc::presenters::VideoParameterObservationPresenter::
-          extractObservations(field1_id, ctx1, video_params);
-      auto obs2 = orc::presenters::VideoParameterObservationPresenter::
-          extractObservations(field2_id, ctx2, video_params);
-      video_parameter_observer_dialog_->updateObservationsForFrame(
-          field1_id, obs1, field2_id, obs2);
-    } else {
-      const auto* ctx = render_presenter.getObservationContext(
-          current_view_node_id_, field1_id);
-      if (!ctx) {
-        video_parameter_observer_dialog_->clearObservations();
-        return;
-      }
-      auto obs = orc::presenters::VideoParameterObservationPresenter::
-          extractObservations(field1_id, ctx, video_params);
-      video_parameter_observer_dialog_->updateObservations(field1_id, obs);
-    }
-  } catch (const std::exception& e) {
-    ORC_LOG_ERROR("Failed to get video parameter observations: {}", e.what());
-    video_parameter_observer_dialog_->clearObservations();
-  }
+  // Phase 5: observation data is fetched asynchronously through the coordinator
+  // (no synchronous render on the UI thread). Both observer dialogs share one
+  // request flow; the response updates whichever dialog is visible.
+  refreshObserverDialogs();
 }
 
 void MainWindow::updateNtscObserverDialog() {
-  // Only update if NTSC observer dialog is visible
-  if (!ntsc_observer_dialog_ || !ntsc_observer_dialog_->isVisible()) {
+  // Phase 5: see updateVideoParameterObserverDialog(). Both observer dialogs
+  // share the same async request flow.
+  refreshObserverDialogs();
+}
+
+void MainWindow::refreshObserverDialogs() {
+  const bool vp_visible = video_parameter_observer_dialog_ &&
+                          video_parameter_observer_dialog_->isVisible();
+  const bool ntsc_visible =
+      ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible();
+  if (!vp_visible && !ntsc_visible) {
     return;
   }
 
-  // Get current field being displayed
   if (!current_view_node_id_.is_valid()) {
-    ntsc_observer_dialog_->clearObservations();
+    if (vp_visible) {
+      video_parameter_observer_dialog_->clearObservations();
+    }
+    if (ntsc_visible) {
+      ntsc_observer_dialog_->clearObservations();
+    }
     return;
   }
 
-  // Get the current index from the preview slider
-  int current_index = preview_dialog_->previewSlider()->value();
-
-  // Check if we're in frame mode (any mode that shows two fields)
-  bool is_frame_mode =
+  const int current_index = preview_dialog_->previewSlider()->value();
+  const bool is_frame_mode =
       (current_output_type_ == orc::PreviewOutputType::Frame_Field1_First ||
        current_output_type_ == orc::PreviewOutputType::Frame_Reversed ||
        current_output_type_ == orc::PreviewOutputType::Split);
 
-  // Get field IDs from core library (handles field ordering correctly)
   orc::FieldID field1_id;
   orc::FieldID field2_id;
-
   if (is_frame_mode) {
-    // Use core library to determine which fields make up this frame
     auto frame_fields = render_coordinator_->getFrameFields(
         current_view_node_id_, current_index);
     if (!frame_fields.is_valid) {
-      ntsc_observer_dialog_->clearObservations();
+      if (vp_visible) {
+        video_parameter_observer_dialog_->clearObservations();
+      }
+      if (ntsc_visible) {
+        ntsc_observer_dialog_->clearObservations();
+      }
       return;
     }
     field1_id = orc::FieldID(frame_fields.first_field);
     field2_id = orc::FieldID(frame_fields.second_field);
   } else {
-    // Field mode - simple mapping
     field1_id = orc::FieldID(current_index);
-    field2_id = orc::FieldID(0);
   }
 
-  // Get NTSC observations using presenter (no direct DAGFrameRenderer access)
-  try {
-    // Create temporary RenderPresenter for observation extraction
-    auto* core_project = project_.presenter()->getCoreProjectHandle();
-    if (!core_project) {
-      ntsc_observer_dialog_->clearObservations();
-      return;
-    }
+  // Reset the per-frame combine state and issue the async request(s). Newly
+  // issued ids supersede any in-flight ones, whose responses are dropped as
+  // stale in onObservationDataReady().
+  pending_obs_frame_mode_ = is_frame_mode;
+  pending_obs_field1_id_ = field1_id;
+  pending_obs_field2_id_ = field2_id;
+  pending_obs_field1_ready_ = false;
+  pending_obs_field2_ready_ = false;
 
-    orc::presenters::RenderPresenter render_presenter(core_project);
-    render_presenter.setDAG(project_.getDAG());
+  if (vp_visible) {
+    video_parameter_observer_dialog_->showPending();
+  }
+  if (ntsc_visible) {
+    ntsc_observer_dialog_->showPending();
+  }
 
-    if (is_frame_mode) {
-      // Get observation context for both fields
-      const auto* context1_void = render_presenter.getObservationContext(
-          current_view_node_id_, field1_id);
-      const auto* context2_void = render_presenter.getObservationContext(
-          current_view_node_id_, field2_id);
-
-      if (!context1_void || !context2_void) {
-        ntsc_observer_dialog_->clearObservations();
-        return;
-      }
-
-      // Extract observations from opaque context pointers
-      auto field1_obs =
-          orc::presenters::NtscObservationPresenter::extractFieldObservations(
-              field1_id, context1_void);
-      auto field2_obs =
-          orc::presenters::NtscObservationPresenter::extractFieldObservations(
-              field2_id, context2_void);
-      ntsc_observer_dialog_->updateObservationsForFrame(field1_id, field1_obs,
-                                                        field2_id, field2_obs);
-    } else {
-      // Get observation context for single field
-      const auto* context_void = render_presenter.getObservationContext(
-          current_view_node_id_, field1_id);
-
-      if (!context_void) {
-        ntsc_observer_dialog_->clearObservations();
-        return;
-      }
-
-      // Extract observations from opaque context pointer
-      auto field_obs =
-          orc::presenters::NtscObservationPresenter::extractFieldObservations(
-              field1_id, context_void);
-      ntsc_observer_dialog_->updateObservations(field1_id, field_obs);
-    }
-
-  } catch (const std::exception& e) {
-    ORC_LOG_ERROR("Failed to get NTSC observations: {}", e.what());
-    ntsc_observer_dialog_->clearObservations();
+  pending_obs_request_id_field1_ = render_coordinator_->requestObservations(
+      current_view_node_id_, field1_id);
+  if (is_frame_mode) {
+    pending_obs_request_id_field2_ = render_coordinator_->requestObservations(
+        current_view_node_id_, field2_id);
+  } else {
+    pending_obs_request_id_field2_ = 0;
   }
 }
 void MainWindow::onLineScopeRequested(int image_x, int image_y) {

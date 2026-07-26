@@ -16,6 +16,8 @@ They are typically used to:
 
 All three analysis sinks work the same way: trigger the stage to compute the dataset, after which the matching analysis chart dialog opens automatically. The dataset is cached in the stage and the chart can be re-opened at any time from the **Stage Tools** menu.
 
+**CSV output format.** Each CSV is written from the full-resolution, canonical per-frame dataset — **one row per frame** (every analysis sink analyses every frame), with the frame's true (1-based) frame number in the first column. Units are carried in the header names (`_samples`, `_db`, `_10bit`) and values are plain numbers. A metric that was not measured for a frame is written as an **empty field** (never the string `nan`). The CSV is independent of the display decimation used to draw the chart, so it always contains every frame regardless of the on-screen point count.
+
 ---
 
 ## Burst Level Analysis Sink
@@ -43,6 +45,10 @@ This stage measures the amplitude of the colour burst for each field and generat
     - Destination CSV file for burst metrics. Leave empty to skip file output.
 * `write_csv` (bool)
     - Enable writing results to CSV at trigger time.
+
+**CSV columns**
+
+`frame_number, median_burst_10bit` — median colour-burst amplitude (10-bit sample units) per frame; the value column is empty when not measured.
 
 **Stage tools**
 
@@ -83,10 +89,33 @@ It does **not** perform dropout detection or correction itself.
     - Destination CSV file for dropout metrics. Leave empty to skip file output.
 * `write_csv` (bool)
     - Enable writing results to CSV at trigger time.
+* `mode` (choice: `full`, `visible`, default `full`)
+    - `full` counts dropouts across the whole field; `visible` restricts the count to the active picture area.
+* `write_report` (bool)
+    - Enable writing a per-dropout detail report at trigger time (one entry per dropout run).
+* `report_path` (file path)
+    - Destination file for the detail report. Leave empty to skip report output.
+* `report_format` (choice: `csv`, `text`, default `csv`)
+    - `csv` writes one row per dropout run; `text` writes a human-readable report grouped by frame.
+
+**CSV columns**
+
+`frame_number, dropout_count, dropout_length_samples` — one row for **every** frame (the sink analyses every frame). A zero row means the frame was analysed and had no dropouts; an absent frame number means the frame was not analysed.
+
+**Per-dropout detail report**
+
+Separate from the per-frame CSV, the detail report records *where* each individual dropout sits within its frame. It is written only when `write_report` is enabled with a `report_path`, is always full-resolution (never decimated), and honours the same `mode`. Coordinates are frame-flat: `line_number` is a 0-based line within the frame and `sample_start` / `sample_end` are 0-based, inclusive sample indices within that line, derived from the nominal samples-per-line (PAL 1135, NTSC 910). Unlike the per-frame CSV, **frames with no dropouts do not appear**.
+
+* `csv` — one row per run: `frame_number, line_number, sample_start, sample_end, length_samples`.
+* `text` — grouped by frame, e.g. `Frame 1: 2 dropouts, 50 samples total` followed by one indented `line N, samples A-B (L samples)` line per run.
 
 **Stage tools**
 
 * **Dropout Analysis** — displays dropout frequency, size, and distribution charts. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+
+**Where the analysis reads its data**
+
+The analysis reports the dropout state **at the sink's input** — the dropout hints visible on the representation connected to it. To include edits made in the **Dropout Map** stage (added or removed dropout regions), the sink must be connected **downstream of the `dropout_map` stage**. A sink placed upstream of, or on a branch that bypasses, `dropout_map` sees only the original sidecar hints. Editing the map and re-triggering re-analyses from scratch, so the chart and CSV never show pre-edit data after a re-trigger.
 
 **Notes**
 
@@ -121,6 +150,12 @@ This stage estimates signal-to-noise ratio using spatial and temporal analysis o
     - Destination CSV file for SNR metrics. Leave empty to skip file output.
 * `write_csv` (bool)
     - Enable writing results to CSV at trigger time.
+* `mode` (choice: `white`, `black`, `both`, default `both`)
+    - Selects which SNR metrics to measure.
+
+**CSV columns**
+
+`frame_number, white_snr_db, black_psnr_db` — white SNR and black PSNR (dB) per frame. A column is empty when that metric was not measured (for example, `mode = white` leaves `black_psnr_db` empty).
 
 **Stage tools**
 

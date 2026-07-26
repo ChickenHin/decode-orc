@@ -18,8 +18,10 @@
 #include <vector>
 
 #include "../../../../orc/plugins/stages/dropout_analysis_sink/dropout_analysis_sink_deps_interface.h"
+#include "../../../../orc/plugins/stages/dropout_map/dropout_map_stage.h"
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
+#include "../../mocks/mock_video_frame_representation.h"
 
 namespace orc_unit_test {
 using testing::_;
@@ -46,6 +48,12 @@ class MockDropoutAnalysisSinkStageDeps
   MOCK_METHOD(bool, write_csv,
               (const std::string& path,
                const std::vector<orc::FrameDropoutStats>& frame_stats),
+              (override));
+
+  MOCK_METHOD(bool, write_report,
+              (const std::string& path,
+               const std::vector<orc::DropoutDetailRecord>& detail_records,
+               orc::DropoutReportFormat format),
               (override));
 };
 
@@ -108,15 +116,19 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   std::vector<orc::FrameDropoutStats> expected_stats;
   orc::FrameDropoutStats stat{};
   stat.frame_number = 12;
-  stat.total_dropout_length = 128.0;
-  stat.dropout_count = 3.0;
+  stat.dropout_length_samples = 128;
+  stat.dropout_count = 3;
   stat.has_data = true;
   expected_stats.push_back(stat);
 
   EXPECT_CALL(*deps, init(_, _));
+  orc::DropoutAnalysisComputeResult success_result;
+  success_result.success = true;
+  success_result.message = "Dropout analysis complete";
+  success_result.frame_stats = expected_stats;
+  success_result.total_frames = 240;
   EXPECT_CALL(*deps, compute_and_analyze(NotNull(), _, _))
-      .WillOnce(Return(orc::DropoutAnalysisComputeResult{
-          true, "Dropout analysis complete", expected_stats, 240}));
+      .WillOnce(Return(success_result));
   EXPECT_CALL(*deps, write_csv(_, _)).Times(0);
 
   const bool result = stage.trigger({vfr}, {}, observation_context);
@@ -126,8 +138,8 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   EXPECT_TRUE(stage.has_results());
   ASSERT_EQ(stage.frame_stats().size(), 1u);
   EXPECT_EQ(stage.frame_stats()[0].frame_number, 12);
-  EXPECT_DOUBLE_EQ(stage.frame_stats()[0].total_dropout_length, 128.0);
-  EXPECT_DOUBLE_EQ(stage.frame_stats()[0].dropout_count, 3.0);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_length_samples, 128);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_count, 3);
   EXPECT_EQ(stage.total_frames(), 240);
   EXPECT_FALSE(stage.is_trigger_in_progress());
 }
@@ -141,9 +153,11 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_UsesDepsSeamAndPropagatesFailure) {
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
 
   EXPECT_CALL(*deps, init(_, _));
+  orc::DropoutAnalysisComputeResult failure_result;
+  failure_result.success = false;
+  failure_result.message = "observer failed";
   EXPECT_CALL(*deps, compute_and_analyze(NotNull(), _, _))
-      .WillOnce(Return(
-          orc::DropoutAnalysisComputeResult{false, "observer failed", {}, 0}));
+      .WillOnce(Return(failure_result));
   EXPECT_CALL(*deps, write_csv(_, _)).Times(0);
 
   const bool result = stage.trigger({vfr}, {}, observation_context);
@@ -167,15 +181,19 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
   std::vector<orc::FrameDropoutStats> expected_stats;
   orc::FrameDropoutStats stat{};
   stat.frame_number = 4;
-  stat.total_dropout_length = 64.0;
-  stat.dropout_count = 2.0;
+  stat.dropout_length_samples = 64;
+  stat.dropout_count = 2;
   stat.has_data = true;
   expected_stats.push_back(stat);
 
   EXPECT_CALL(*deps, init(_, _));
+  orc::DropoutAnalysisComputeResult csv_result;
+  csv_result.success = true;
+  csv_result.message = "Dropout analysis complete";
+  csv_result.frame_stats = expected_stats;
+  csv_result.total_frames = 8;
   EXPECT_CALL(*deps, compute_and_analyze(NotNull(), _, _))
-      .WillOnce(Return(orc::DropoutAnalysisComputeResult{
-          true, "Dropout analysis complete", expected_stats, 8}));
+      .WillOnce(Return(csv_result));
   EXPECT_CALL(*deps, write_csv("out.csv", _))
       .WillOnce(testing::Invoke(
           [](const std::string& path,
@@ -183,8 +201,8 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
             EXPECT_EQ(path, "out.csv");
             EXPECT_EQ(frame_stats.size(), 1u);
             EXPECT_EQ(frame_stats[0].frame_number, 4);
-            EXPECT_DOUBLE_EQ(frame_stats[0].total_dropout_length, 64.0);
-            EXPECT_DOUBLE_EQ(frame_stats[0].dropout_count, 2.0);
+            EXPECT_EQ(frame_stats[0].dropout_length_samples, 64);
+            EXPECT_EQ(frame_stats[0].dropout_count, 2);
             return true;
           }));
 
@@ -197,6 +215,154 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
   EXPECT_TRUE(stage.has_results());
   EXPECT_EQ(stage.total_frames(), 8);
   EXPECT_FALSE(stage.is_trigger_in_progress());
+}
+
+// The per-dropout report parameters are exposed with sensible defaults and
+// round-trip through set/get_parameters (plan Phase 4 Task 4.3).
+TEST(DropoutAnalysisSinkStageTest,
+     Descriptor_IncludesReportParametersWithDefaults) {
+  orc::DropoutAnalysisSinkStage stage;
+  const auto descriptors = stage.get_parameter_descriptors();
+
+  auto find = [&](const std::string& name) {
+    return std::find_if(
+        descriptors.begin(), descriptors.end(),
+        [&](const orc::ParameterDescriptor& d) { return d.name == name; });
+  };
+
+  auto write_report_it = find("write_report");
+  auto report_path_it = find("report_path");
+  auto report_format_it = find("report_format");
+
+  ASSERT_NE(write_report_it, descriptors.end());
+  EXPECT_EQ(write_report_it->type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(write_report_it->constraints.default_value.has_value());
+  EXPECT_FALSE(std::get<bool>(*write_report_it->constraints.default_value));
+
+  ASSERT_NE(report_path_it, descriptors.end());
+  EXPECT_EQ(report_path_it->type, orc::ParameterType::FILE_PATH);
+
+  ASSERT_NE(report_format_it, descriptors.end());
+  EXPECT_EQ(report_format_it->type, orc::ParameterType::STRING);
+  ASSERT_TRUE(report_format_it->constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*report_format_it->constraints.default_value),
+            "csv");
+
+  // Round-trip: values set via set_parameters are returned by get_parameters.
+  const std::map<std::string, orc::ParameterValue> params{
+      {"write_report", true},
+      {"report_path", std::string("dropouts.txt")},
+      {"report_format", std::string("text")}};
+  ASSERT_TRUE(stage.set_parameters(params));
+  const auto got = stage.get_parameters();
+  EXPECT_EQ(std::get<bool>(got.at("write_report")), true);
+  EXPECT_EQ(std::get<std::string>(got.at("report_path")), "dropouts.txt");
+  EXPECT_EQ(std::get<std::string>(got.at("report_format")), "text");
+}
+
+// When write_report is enabled with a report_path, the stage requests detail
+// collection and hands the detail records to the deps report writer with the
+// selected format.
+TEST(DropoutAnalysisSinkStageTest, Trigger_WritesReportWhenEnabled) {
+  orc::DropoutAnalysisSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockDropoutAnalysisSinkStageDeps>>();
+  stage.set_deps_override(deps);
+
+  orc::ObservationContext observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  orc::DropoutAnalysisComputeResult compute_result;
+  compute_result.success = true;
+  compute_result.message = "Dropout analysis complete";
+  compute_result.total_frames = 3;
+  compute_result.detail_records.push_back({1, 10, 100, 139, 40});
+
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, compute_and_analyze(NotNull(), _, _))
+      .WillOnce(testing::Invoke(
+          [&](orc::VideoFrameRepresentation*, orc::IObservationContext&,
+              orc::DropoutAnalysisComputeOptions options) {
+            // Detail collection must be requested when a report is configured.
+            EXPECT_TRUE(options.collect_detail);
+            return compute_result;
+          }));
+  EXPECT_CALL(*deps,
+              write_report("dropouts.txt", _, orc::DropoutReportFormat::TEXT))
+      .WillOnce(testing::Invoke(
+          [](const std::string& path,
+             const std::vector<orc::DropoutDetailRecord>& records,
+             orc::DropoutReportFormat) {
+            EXPECT_EQ(path, "dropouts.txt");
+            EXPECT_EQ(records.size(), 1u);
+            EXPECT_EQ(records[0].line_number, 10);
+            return true;
+          }));
+
+  const bool result =
+      stage.trigger({vfr},
+                    {{"write_report", true},
+                     {"report_path", std::string("dropouts.txt")},
+                     {"report_format", std::string("text")}},
+                    observation_context);
+
+  EXPECT_TRUE(result);
+  EXPECT_FALSE(stage.is_trigger_in_progress());
+}
+
+// Freshness after a dropout_map edit (issue #216, plan Phase 3 Task 3.3): the
+// sink re-analyses its input on every trigger, so a "trigger → edit map →
+// trigger" sequence must yield updated stats and never leak pre-edit data.
+// The map edit is modelled by swapping the input
+// DropoutMappedFrameRepresentation (which is what the DAG rebuilds when the
+// dropout_map parameter changes).
+TEST(DropoutAnalysisSinkStageTest, Trigger_ReflectsMapEditOnRetrigger) {
+  // NTSC source with one sidecar dropout run: line 10, samples 100-200 →
+  // flat start 9200, count 101.
+  auto source = std::make_shared<NiceMock<MockVideoFrameRepresentation>>();
+  ON_CALL(*source, frame_range())
+      .WillByDefault(Return(orc::FrameIDRange{0u, 0u}));
+  ON_CALL(*source, frame_count()).WillByDefault(Return(1u));
+  orc::FrameDescriptor desc;
+  desc.frame_id = 0;
+  desc.system = orc::VideoSystem::NTSC;
+  desc.height = 525;
+  desc.samples_total = 525u * 910u;
+  desc.samples_per_line_nominal = 910;
+  ON_CALL(*source, get_frame_descriptor(orc::FrameID{0}))
+      .WillByDefault(Return(desc));
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::NTSC;
+  params.frame_width_nominal = 910;
+  params.frame_height = 525;
+  ON_CALL(*source, get_video_parameters()).WillByDefault(Return(params));
+  ON_CALL(*source, get_dropout_hints(orc::FrameID{0}))
+      .WillByDefault(
+          Return(std::vector<orc::DropoutRun>{{0u, 9200u, 101u, 128}}));
+
+  orc::DropoutAnalysisSinkStage stage;  // real deps (no override)
+  orc::ObservationContext ctx;
+
+  // First trigger: empty map — the source run is reported.
+  std::map<uint64_t, orc::FrameDropoutMapEntry> empty_map;
+  auto rep1 = std::make_shared<orc::DropoutMappedFrameRepresentation>(
+      source, empty_map);
+  ASSERT_TRUE(stage.trigger({rep1}, {}, ctx));
+  ASSERT_EQ(stage.frame_stats().size(), 1u);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_count, 1);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_length_samples, 101);
+
+  // Edit the map to remove that run, then re-trigger with the rebuilt input.
+  orc::FrameDropoutMapEntry entry;
+  entry.frame_id = 0;
+  entry.removals.push_back({10u, 100u, 200u});
+  std::map<uint64_t, orc::FrameDropoutMapEntry> removal_map{{0, entry}};
+  auto rep2 = std::make_shared<orc::DropoutMappedFrameRepresentation>(
+      source, removal_map);
+  ASSERT_TRUE(stage.trigger({rep2}, {}, ctx));
+  ASSERT_EQ(stage.frame_stats().size(), 1u);
+  // Fresh result — the removed run must not survive from the first trigger.
+  EXPECT_EQ(stage.frame_stats()[0].dropout_count, 0);
+  EXPECT_EQ(stage.frame_stats()[0].dropout_length_samples, 0);
 }
 
 }  // namespace orc_unit_test

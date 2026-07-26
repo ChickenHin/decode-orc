@@ -13,6 +13,8 @@
 #include <QPen>
 #include <QStackedLayout>
 #include <QtMath>
+#include <cmath>
+#include <limits>
 
 #include "logging.h"
 
@@ -37,6 +39,9 @@ DropoutAnalysisDialog::DropoutAnalysisDialog(QWidget* parent)
   // Set up "No data available" overlay (from base class)
   setupNoDataOverlay(mainLayout, plot_);
 
+  // Bucket-info status line (from base class)
+  setupBucketInfoLabel(mainLayout);
+
   // Set up series and marker
   series_ = plot_->addSeries("Dropout Length");
   series_->setPen(QPen(Qt::red, 1));
@@ -52,6 +57,8 @@ DropoutAnalysisDialog::DropoutAnalysisDialog(QWidget* parent)
   // Connect to plot area changed signal
   connect(plot_, &PlotWidget::plotAreaChanged, this,
           &DropoutAnalysisDialog::onPlotAreaChanged);
+  connect(plot_, &PlotWidget::plotClicked, this,
+          &DropoutAnalysisDialog::onPlotClicked);
 
   // Set default size
   resize(800, 600);
@@ -59,9 +66,11 @@ DropoutAnalysisDialog::DropoutAnalysisDialog(QWidget* parent)
 
 DropoutAnalysisDialog::~DropoutAnalysisDialog() { removeChartContents(); }
 
-void DropoutAnalysisDialog::startUpdate(int32_t numberOfFrames) {
+void DropoutAnalysisDialog::startUpdate(int32_t numberOfFrames,
+                                        bool decimated) {
   removeChartContents();
   numberOfFrames_ = numberOfFrames;
+  decimated_ = decimated;
   points_.reserve(numberOfFrames);
 
   // Hide the "No data available" label and show the plot
@@ -74,6 +83,9 @@ void DropoutAnalysisDialog::startUpdate(int32_t numberOfFrames) {
 void DropoutAnalysisDialog::removeChartContents() {
   maxY_ = 0.0;
   points_.clear();
+  bucketStart_.clear();
+  bucketEnd_.clear();
+  bucketCount_.clear();
 
   // Clear the series data
   if (series_) {
@@ -84,9 +96,14 @@ void DropoutAnalysisDialog::removeChartContents() {
 }
 
 void DropoutAnalysisDialog::addDataPoint(int32_t frameNumber,
-                                         double dropoutLength) {
+                                         double dropoutLength,
+                                         int32_t frameStart, int32_t frameEnd,
+                                         int32_t dropoutCount) {
   points_.append(QPointF(static_cast<qreal>(frameNumber),
                          static_cast<qreal>(dropoutLength)));
+  bucketStart_.append(frameStart);
+  bucketEnd_.append(frameEnd);
+  bucketCount_.append(dropoutCount);
 
   // Keep track of the maximum Y value
   if (dropoutLength > maxY_) {
@@ -125,6 +142,10 @@ void DropoutAnalysisDialog::finishUpdate(int32_t currentFrameNumber) {
   plotMarker_->setPosition(
       QPointF(static_cast<double>(currentFrameNumber), yMax / 2));
 
+  // Report whether this is a per-frame or a decimated (bucketed) view.
+  setDecimationSummary(decimated_, numberOfFrames_,
+                       static_cast<int>(points_.size()));
+
   // Render the plot
   plot_->replot();
 }
@@ -150,6 +171,31 @@ void DropoutAnalysisDialog::calculateMarkerPosition(int32_t frameNumber) {
 void DropoutAnalysisDialog::onPlotAreaChanged() {
   // Handle plot area changes if needed
   // The PlotWidget handles zoom/pan internally
+}
+
+void DropoutAnalysisDialog::onPlotClicked(const QPointF& dataPoint) {
+  if (points_.isEmpty()) return;
+
+  // Find the plotted bucket nearest the click on the x (frame) axis.
+  int nearest = 0;
+  double bestDist = std::numeric_limits<double>::max();
+  for (int i = 0; i < points_.size(); ++i) {
+    double dist = std::abs(points_[i].x() - dataPoint.x());
+    if (dist < bestDist) {
+      bestDist = dist;
+      nearest = i;
+    }
+  }
+
+  const int32_t start = bucketStart_.value(nearest);
+  const int32_t end = bucketEnd_.value(nearest);
+  const QString range = (start == end)
+                            ? QString("Frame %1").arg(start)
+                            : QString("Frames %1–%2").arg(start).arg(end);
+  setBucketReadout(QString("%1 — dropout length: %2 samples, dropouts: %3")
+                       .arg(range)
+                       .arg(static_cast<qint64>(points_[nearest].y()))
+                       .arg(bucketCount_.value(nearest)));
 }
 
 // No need to call plot->replot() - marker update() handles the redraw

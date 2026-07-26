@@ -117,7 +117,6 @@ TEST(BurstLevelAnalysisSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   orc::FrameBurstLevelStats stat{};
   stat.frame_number = 12;
   stat.median_burst_10bit = 8.5;
-  stat.field_count = 2;
   stat.has_data = true;
   expected_stats.push_back(stat);
 
@@ -178,7 +177,6 @@ TEST(BurstLevelAnalysisSinkStageTest, Trigger_WritesCSVWhenDepsSucceeds) {
   orc::FrameBurstLevelStats stat{};
   stat.frame_number = 4;
   stat.median_burst_10bit = 10.25;
-  stat.field_count = 2;
   stat.has_data = true;
   expected_stats.push_back(stat);
 

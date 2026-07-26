@@ -859,6 +859,37 @@ TEST(CVBSSourceParamsTest, PALM_FrameWidthIs909) {
   EXPECT_EQ(p->frame_width_nominal, kPalMSamplesPerLine);
 }
 
+TEST(CVBSSourceParamsTest, ProvenanceFieldsComeFromMetadata) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.decoder = "vhs-decode";
+  deps->metadata_record.git_branch = "main";
+  deps->metadata_record.git_commit = "abc1234";
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_EQ(p->decoder, "vhs-decode");
+  EXPECT_EQ(p->git_branch, "main");
+  EXPECT_EQ(p->git_commit, "abc1234");
+}
+
+TEST(CVBSSourceParamsTest, ProvenanceFieldsEmptyWhenMetadataOmitsThem) {
+  // The source must not invent provenance: absent .meta columns yield empty
+  // fields, and the CVBS format has no tape_format / is_mapped equivalents.
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_TRUE(p->decoder.empty());
+  EXPECT_TRUE(p->git_branch.empty());
+  EXPECT_TRUE(p->git_commit.empty());
+  EXPECT_TRUE(p->tape_format.empty());
+  EXPECT_FALSE(p->is_mapped);
+}
+
 TEST(CVBSSourceParamsTest, FrameCountMatchesMetadata) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   deps->metadata_record.number_of_sequential_frames = 3;
@@ -879,16 +910,19 @@ TEST(CVBSSourceParamsTest, FrameCountMatchesMetadata) {
 // The source stage loads raw samples only; colour-frame phase measurement is
 // delegated to ColourFramePhaseObserver.  See colour_frame_phase_observer_test.
 
-TEST(CVBSSourcePhaseContractTest, ColourFrameIndex_IsUnknown) {
-  // The source stage always reports colour_frame_index = -1 regardless of
-  // burst content; measurement is ColourFramePhaseObserver's responsibility.
+TEST(CVBSSourcePhaseContractTest, DescriptorCarriesNoColourPhase) {
+  // The source stage loads raw samples only and produces a descriptor with no
+  // colour-sequence phase: FrameDescriptor no longer has a colour_frame_index
+  // field (measurement is ColourFramePhaseObserver's responsibility, pulled via
+  // colour_frame_phase_query.h). This test guards that the source still yields
+  // a valid descriptor after that field was removed.
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   PALCVBSSourceStage stage(deps);
   auto vfr = execute_and_get_vfr(stage, kDefaultParams);
   ASSERT_NE(vfr, nullptr);
   auto desc = vfr->get_frame_descriptor(0);
   ASSERT_TRUE(desc.has_value());
-  EXPECT_EQ(desc->colour_frame_index, -1);
+  EXPECT_EQ(desc->system, orc::VideoSystem::PAL);
 }
 
 // ===========================================================================

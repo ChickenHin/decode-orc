@@ -10,9 +10,11 @@
 #include "../../../../orc/plugins/stages/stacker/stacker_stage.h"
 
 #include <gtest/gtest.h>
+#include <orc/stage/observation/observation_context.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 
 #include "../../mocks/mock_video_frame_representation.h"
 
@@ -259,6 +261,65 @@ TEST(StackerStageTest, LineReads_ReturnStackedOutputNotFirstSource) {
 
 namespace {
 
+// FakeConstantSource that is also an Artifact, so it can be fed to execute()
+// (which receives ArtifactPtr inputs and dynamic-casts them back to
+// VideoFrameRepresentation).
+class FakeArtifactSource : public FakeConstantSource, public orc::Artifact {
+ public:
+  explicit FakeArtifactSource(sample_type value)
+      : FakeConstantSource(value),
+        orc::Artifact(orc::ArtifactID("fake_source"), orc::Provenance{}) {}
+
+  std::string type_name() const override { return "fake_source"; }
+};
+
+}  // namespace
+
+// Regression: execute() must not discard its cached stacked wrapper when the
+// parameters are unchanged. The DAG passes the node's stored parameters on
+// every execute(); an unconditional reset threw away the wrapper — and its warm
+// per-frame stack cache — on each call, forcing every analysis-sink sweep to
+// re-stack the whole source from scratch.
+TEST(StackerStageTest, Execute_ReusesCachedWrapper_WhenParametersUnchanged) {
+  orc::StackerStage stage;
+  auto src0 = std::make_shared<FakeArtifactSource>(100);
+  auto src1 = std::make_shared<FakeArtifactSource>(200);
+  std::vector<orc::ArtifactPtr> inputs = {src0, src1};
+
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"mode", std::string("Mean")}};
+
+  orc::ObservationContext ctx;
+  const auto out1 = stage.execute(inputs, params, ctx);
+  const auto out2 = stage.execute(inputs, params, ctx);
+
+  ASSERT_EQ(out1.size(), 1u);
+  ASSERT_EQ(out2.size(), 1u);
+  // Same wrapper instance => its per-frame stack cache survives the second
+  // call.
+  EXPECT_EQ(out1[0].get(), out2[0].get());
+}
+
+// Complement: changing the stacking parameters must invalidate the cache and
+// produce a fresh wrapper, so stale stacked frames are never served.
+TEST(StackerStageTest, Execute_RebuildsWrapper_WhenParametersChange) {
+  orc::StackerStage stage;
+  auto src0 = std::make_shared<FakeArtifactSource>(100);
+  auto src1 = std::make_shared<FakeArtifactSource>(200);
+  std::vector<orc::ArtifactPtr> inputs = {src0, src1};
+
+  orc::ObservationContext ctx;
+  const auto out1 = stage.execute(inputs, {{"mode", std::string("Mean")}}, ctx);
+  const auto out2 =
+      stage.execute(inputs, {{"mode", std::string("Median")}}, ctx);
+
+  ASSERT_EQ(out1.size(), 1u);
+  ASSERT_EQ(out2.size(), 1u);
+  EXPECT_NE(out1[0].get(), out2[0].get());
+}
+
+namespace {
+
 // FakeConstantSource with multiple frames and a dropout hint present on every
 // frame (line 1, samples 4..11 = flat offset 20, count 8).
 class FakeDropoutSource : public FakeConstantSource {
@@ -321,7 +382,6 @@ make_audio_stack_source() {
   ON_CALL(*src, has_frame(orc::FrameID{0})).WillByDefault(Return(true));
   orc::FrameDescriptor desc;
   desc.frame_id = orc::FrameID{0};
-  desc.colour_frame_index = -1;
   ON_CALL(*src, get_frame_descriptor(orc::FrameID{0}))
       .WillByDefault(Return(desc));
   ON_CALL(*src, frame_range()).WillByDefault(Return(orc::FrameIDRange{0u, 0u}));

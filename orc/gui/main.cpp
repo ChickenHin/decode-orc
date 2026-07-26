@@ -186,6 +186,13 @@ int main(int argc, char* argv[]) {
         "run (core plugins only)");
     parser.addOption(safeCorePluginsOption);
 
+    QCommandLineOption observerThreadsOption(
+        "observer-threads",
+        "Number of background observation worker threads. 0 or 'auto' uses "
+        "half the available CPU cores (the default).",
+        "count", "auto");
+    parser.addOption(observerThreadsOption);
+
     parser.addPositionalArgument("project", "Project file to open (optional)");
     parser.process(app);
 
@@ -218,6 +225,32 @@ int main(int argc, char* argv[]) {
     orc::presenters::initCoreLogging(logLevel.toStdString(),
                                      "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
                                      sharedLogFile.toStdString());
+
+    // Resolve the background observation worker-pool size. "auto"/0/invalid
+    // means half the cores (resolved in the presenters layer); a positive
+    // integer overrides. Applied before any project is opened.
+    {
+      const QString threadsValue =
+          parser.value(observerThreadsOption).trimmed();
+      unsigned observerThreads = 0;  // 0 == auto
+      if (!threadsValue.isEmpty() &&
+          threadsValue.compare("auto", Qt::CaseInsensitive) != 0) {
+        bool ok = false;
+        const uint parsed = threadsValue.toUInt(&ok);
+        if (ok) {
+          observerThreads = parsed;
+        } else {
+          ORC_LOG_WARN(
+              "Ignoring invalid --observer-threads value '{}'; using auto",
+              threadsValue.toStdString());
+        }
+      }
+      orc::presenters::setBackgroundObservationWorkerCount(observerThreads);
+      ORC_LOG_INFO("Background observation worker threads: {} (effective: {})",
+                   observerThreads == 0 ? std::string("auto")
+                                        : std::to_string(observerThreads),
+                   orc::presenters::resolveBackgroundObservationWorkerCount());
+    }
 
     // Bridge Qt messages to spdlog
     qInstallMessageHandler(qtMessageHandler);

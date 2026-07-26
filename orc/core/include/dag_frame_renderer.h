@@ -12,6 +12,7 @@
 #include <orc/stage/frame_id.h>
 #include <orc/stage/node_id.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/observation/observation_service_interface.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/lru_cache.h>
 
@@ -25,8 +26,55 @@
 
 #include "core_observation_service.h"
 #include "dag_executor.h"
+#include "observation_store.h"
 
 namespace orc {
+
+// Run the standard observer pass for one frame, with optional read-through
+// caching against an ObservationStore keyed by the node's provenance.
+//
+// For each observer the two derived field records (frame_id*2 and frame_id*2+1)
+// are considered:
+//   - When both @p fingerprint and @p store are non-null and both records are
+//     present, the stored values are loaded into @p context and the observer is
+//     not run.
+//   - Otherwise the observer runs; when caching is enabled its output for both
+//     fields is written back to the store (an empty record is stored too, so a
+//     later probe still hits).
+//
+// When either @p fingerprint or @p store is null the observers always run and
+// nothing is stored — behaviour identical to the pre-store renderer.
+//
+// Thread safety: reentrant with respect to distinct @p context objects; @p
+// store is the sole shared state and is internally synchronised.
+void run_frame_observer_pass(const IObservationService& service,
+                             const std::vector<ObserverInfo>& observers,
+                             const VideoFrameRepresentation& representation,
+                             FrameID frame_id,
+                             const NodeFingerprint* fingerprint,
+                             ObservationStore* store,
+                             IObservationContext& context);
+
+// Alias-aware variant: @p fingerprints lists every provenance the frame's
+// content is known under — the observed node's own fingerprint first, followed
+// by the fingerprints of upstream nodes the frame passes through byte-identical
+// (per VideoFrameRepresentation::video_passthrough_source()). All entries key
+// the same content, so:
+//   - A store hit under ANY listed fingerprint satisfies the pass without
+//     running the observer, and the records are copied to every other listed
+//     fingerprint still missing them (so future lookups keyed to any node in
+//     the pass-through chain hit directly — including across sessions via the
+//     persistence sidecar).
+//   - On a miss everywhere the observer runs once and its records are stored
+//     under every listed fingerprint.
+// An empty @p fingerprints (or null @p store) disables caching entirely.
+void run_frame_observer_pass(const IObservationService& service,
+                             const std::vector<ObserverInfo>& observers,
+                             const VideoFrameRepresentation& representation,
+                             FrameID frame_id,
+                             const std::vector<NodeFingerprint>& fingerprints,
+                             ObservationStore* store,
+                             IObservationContext& context);
 
 // Exception thrown during DAG frame rendering.
 class DAGFrameRenderError : public std::runtime_error {
@@ -109,6 +157,23 @@ class DAGFrameRenderer {
   // render_frame_at_node() execution.
   const ObservationContext& get_observation_context() const;
 
+  // Attach a shared, provenance-keyed ObservationStore and the fingerprint map
+  // for the current DAG. When both are set, the observer pass reads
+  // observations through the store (skipping observers whose records are
+  // already present) and writes fresh results back. Pass nulls to disable
+  // read-through caching. The store is owned externally so it can outlive
+  // individual renderers and survive DAG rebuilds; the fingerprint map must
+  // match the renderer's current DAG.
+  void set_observation_store(
+      std::shared_ptr<ObservationStore> store,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints);
+
+  // Override the observation service used by the observer pass (for testing
+  // with a spy/mock). Passing nullptr restores the default host
+  // CoreObservationService. Re-enumerates the observer inventory from the
+  // active service.
+  void set_observation_service(std::shared_ptr<IObservationService> service);
+
   // -------------------------------------------------------------------------
   // Cache Management
   // -------------------------------------------------------------------------
@@ -155,11 +220,29 @@ class DAGFrameRenderer {
   // Host-owned observation service backing the standard observer pass. The
   // registry it enumerates (see CoreObservationService) is the single source
   // of truth for observer identity, so adding an observer to the registry
-  // extends the frame-render pass with no edit here. observer_ids_ caches the
-  // enumeration so available_observers() (which constructs each observer) runs
-  // once rather than per rendered frame.
-  CoreObservationService observation_service_;
-  std::vector<std::string> observer_ids_;
+  // extends the frame-render pass with no edit here. observers_ caches the
+  // enumeration (id + version) so available_observers() (which constructs each
+  // observer) runs once rather than per rendered frame.
+  CoreObservationService default_observation_service_;
+  std::shared_ptr<IObservationService> observation_service_override_;
+  std::vector<ObserverInfo> observers_;
+
+  // Optional provenance-keyed read-through cache. Both must be set for caching
+  // to engage; either being null disables it (renderer behaves as before).
+  std::shared_ptr<ObservationStore> observation_store_;
+  std::shared_ptr<const NodeFingerprintMap> node_fingerprints_;
+
+  // The observation service currently in effect (override if set, else
+  // default).
+  const IObservationService& observation_service() const {
+    if (observation_service_override_) {
+      return *observation_service_override_;
+    }
+    return default_observation_service_;
+  }
+
+  // (Re)populate observers_ from the active observation service.
+  void refresh_observers();
 
   mutable std::map<NodeID, size_t> node_index_;
   mutable bool node_index_valid_;

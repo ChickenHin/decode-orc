@@ -62,6 +62,24 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   void setDAG(std::shared_ptr<void>) override {}
   bool getShowDropouts() const override { return false; }
   void setShowDropouts(bool) override {}
+  void setBackgroundObservationEnabled(bool) override {}
+
+  uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback) override {
+    return 0;
+  }
+  void unsubscribeInvalidation(uint64_t) override {}
+
+  uint64_t requestObservations(
+      orc::NodeID, orc::FieldID,
+      orc::presenters::ObservationDataReadyCallback) override {
+    return 0;
+  }
+  uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback) override {
+    return 0;
+  }
+  void unsubscribeObservationProgress(uint64_t) override {}
 
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID) override {
@@ -108,16 +126,17 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
       orc::NodeID, orc::FieldID) override {
     return std::nullopt;
   }
-  bool getDropoutAnalysisData(orc::NodeID, std::vector<void*>&,
-                              int32_t&) override {
-    return false;
+  std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
+      orc::NodeID) override {
+    return std::nullopt;
   }
-  bool getSNRAnalysisData(orc::NodeID, std::vector<void*>&, int32_t&) override {
-    return false;
+  std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
+      orc::NodeID) override {
+    return std::nullopt;
   }
-  bool getBurstLevelAnalysisData(orc::NodeID, std::vector<void*>&,
-                                 int32_t&) override {
-    return false;
+  std::optional<orc::presenters::BurstLevelDisplaySeries>
+  getBurstLevelAnalysisData(orc::NodeID) override {
+    return std::nullopt;
   }
   LineSampleData getLineSamplesWithYC(orc::NodeID, orc::PreviewOutputType,
                                       uint64_t, int, int, int) override {

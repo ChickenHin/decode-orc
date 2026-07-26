@@ -43,16 +43,20 @@ class BurstLevelAnalysisDialog : public AnalysisDialogBase {
   /**
    * @brief Start a new update cycle
    * @param numberOfFrames Total number of frames in the source
+   * @param decimated True when each plotted point aggregates >1 analysed frame
    */
-  void startUpdate(int32_t numberOfFrames);
+  void startUpdate(int32_t numberOfFrames, bool decimated);
 
   /**
-   * @brief Add a data point to the graph
-   * @param frameNumber Frame number (1-based)
+   * @brief Add a data point (display bucket) to the graph
+   * @param frameNumber Representative frame number for the bucket (1-based)
    * @param burstLevel10bit Burst level in 10-bit sample domain
+   * @param frameStart First analysed frame in the bucket
+   * @param frameEnd Last analysed frame in the bucket
    * @param video_params Optional video parameters (cached when provided)
    */
   void addDataPoint(int32_t frameNumber, double burstLevel10bit,
+                    int32_t frameStart, int32_t frameEnd,
                     const std::optional<orc::presenters::VideoParametersView>&
                         video_params = std::nullopt);
 
@@ -88,6 +92,7 @@ class BurstLevelAnalysisDialog : public AnalysisDialogBase {
 
  private slots:
   void onPlotAreaChanged();
+  void onPlotClicked(const QPointF& dataPoint);
 
  private:
   void removeChartContents();
@@ -100,11 +105,19 @@ class BurstLevelAnalysisDialog : public AnalysisDialogBase {
   double minY_;
   int32_t numberOfFrames_;
   int32_t current_frame_number_{1};
+  bool decimated_ = false;
   QVector<QPointF> burstPoints_;
+  // Per-bucket detail parallel to burstPoints_, for the click readout.
+  QVector<int32_t> bucketStart_;
+  QVector<int32_t> bucketEnd_;
   orc::AmplitudeDisplayUnit amplitude_unit_ = orc::AmplitudeDisplayUnit::IRE;
   std::optional<orc::presenters::VideoParametersView> cached_video_params_;
   double display_y_min_{0.0};
   double display_y_max_{40.0};
+  // Conversion inputs resolved during finishUpdate(), reused by the readout.
+  int32_t conv_blanking_{256};
+  int32_t conv_white_{844};
+  orc::VideoSystem conv_sys_{orc::VideoSystem::PAL};
 };
 
 #endif  // BURSTLEVELANALYSISDIALOG_H

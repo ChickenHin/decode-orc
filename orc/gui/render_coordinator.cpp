@@ -13,7 +13,9 @@
 #include <orc/stage/common_types.h>  // For analysis result types
 
 #include "logging.h"
+#include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
+#include "video_parameter_observation_presenter.h"
 
 namespace {
 
@@ -27,6 +29,31 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   }
   bool getShowDropouts() const override { return presenter_.getShowDropouts(); }
   void setShowDropouts(bool show) override { presenter_.setShowDropouts(show); }
+  void setBackgroundObservationEnabled(bool enabled) override {
+    presenter_.setBackgroundObservationEnabled(enabled);
+  }
+
+  uint64_t subscribeInvalidation(
+      orc::presenters::ObservationInvalidationCallback callback) override {
+    return presenter_.subscribeInvalidation(std::move(callback));
+  }
+  void unsubscribeInvalidation(uint64_t subscription_id) override {
+    presenter_.unsubscribeInvalidation(subscription_id);
+  }
+
+  uint64_t requestObservations(
+      orc::NodeID node_id, orc::FieldID field_id,
+      orc::presenters::ObservationDataReadyCallback callback) override {
+    return presenter_.requestObservations(node_id, field_id,
+                                          std::move(callback));
+  }
+  uint64_t subscribeObservationProgress(
+      orc::presenters::ObservationProgressCallback callback) override {
+    return presenter_.subscribeObservationProgress(std::move(callback));
+  }
+  void unsubscribeObservationProgress(uint64_t subscription_id) override {
+    presenter_.unsubscribeObservationProgress(subscription_id);
+  }
 
   orc::PreviewRenderResult renderPreview(
       orc::NodeID node_id, orc::PreviewOutputType output_type,
@@ -40,23 +67,19 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getVBIData(node_id, field_id);
   }
 
-  bool getDropoutAnalysisData(orc::NodeID node_id,
-                              std::vector<void*>& frame_stats,
-                              int32_t& total_frames) override {
-    return presenter_.getDropoutAnalysisData(node_id, frame_stats,
-                                             total_frames);
+  std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
+      orc::NodeID node_id) override {
+    return presenter_.getDropoutAnalysisData(node_id);
   }
 
-  bool getSNRAnalysisData(orc::NodeID node_id, std::vector<void*>& frame_stats,
-                          int32_t& total_frames) override {
-    return presenter_.getSNRAnalysisData(node_id, frame_stats, total_frames);
+  std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
+      orc::NodeID node_id) override {
+    return presenter_.getSNRAnalysisData(node_id);
   }
 
-  bool getBurstLevelAnalysisData(orc::NodeID node_id,
-                                 std::vector<void*>& frame_stats,
-                                 int32_t& total_frames) override {
-    return presenter_.getBurstLevelAnalysisData(node_id, frame_stats,
-                                                total_frames);
+  std::optional<orc::presenters::BurstLevelDisplaySeries>
+  getBurstLevelAnalysisData(orc::NodeID node_id) override {
+    return presenter_.getBurstLevelAnalysisData(node_id);
   }
 
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
@@ -193,6 +216,35 @@ class Project;
 // Phase 2.7: Trigger operations migrated to RenderPresenter
 // Removed: #include "ld_sink_stage.h"
 
+namespace {
+
+// Wrap a progress-emitting function so it only fires when the whole-percent
+// value or the message changes (final updates always pass). Stage triggers
+// report progress per processed frame; forwarding every call as a queued Qt
+// signal floods the GUI event queue (tens of thousands of events for a long
+// source) and starves painting — the cause of a blank, beach-balling progress
+// dialog. The gate runs on the worker thread, before anything is queued.
+template <typename EmitFn>
+auto makePercentGatedProgress(EmitFn emit_fn) {
+  return [emit_fn = std::move(emit_fn), last_pct = -1,
+          last_message = std::string()](int current, int total,
+                                        const std::string& message) mutable {
+    const int pct =
+        total > 0
+            ? static_cast<int>(static_cast<int64_t>(current) * 100 / total)
+            : 0;
+    const bool final_update = total > 0 && current >= total;
+    if (pct == last_pct && message == last_message && !final_update) {
+      return;
+    }
+    last_pct = pct;
+    last_message = message;
+    emit_fn(current, total, message);
+  };
+}
+
+}  // namespace
+
 RenderCoordinator::RenderCoordinator(QObject* parent)
     : QObject(parent), presenter_factory_([](void* project_handle) {
         return std::make_shared<RenderPresenterAdapter>(project_handle);
@@ -279,6 +331,14 @@ uint64_t RenderCoordinator::requestVBIData(const orc::NodeID& node_id,
                                            orc::FieldID field_id) {
   uint64_t id = nextRequestId();
   auto req = std::make_unique<GetVBIDataRequest>(id, node_id, field_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
+uint64_t RenderCoordinator::requestObservations(const orc::NodeID& node_id,
+                                                orc::FieldID field_id) {
+  uint64_t id = nextRequestId();
+  auto req = std::make_unique<GetObservationsRequest>(id, node_id, field_id);
   enqueueRequest(std::move(req));
   return id;
 }
@@ -481,6 +541,21 @@ void RenderCoordinator::workerLoop() {
     }
   }
 
+  // Tear the presenter down here, on the worker thread, so its background
+  // scheduler is stopped (and any awaited observation callbacks fire, emitting
+  // their final signals) while this coordinator QObject is still fully alive.
+  if (worker_render_presenter_ && worker_invalidation_subscription_ != 0) {
+    worker_render_presenter_->unsubscribeInvalidation(
+        worker_invalidation_subscription_);
+    worker_invalidation_subscription_ = 0;
+  }
+  if (worker_render_presenter_ && worker_progress_subscription_ != 0) {
+    worker_render_presenter_->unsubscribeObservationProgress(
+        worker_progress_subscription_);
+    worker_progress_subscription_ = 0;
+  }
+  worker_render_presenter_.reset();
+
   ORC_LOG_DEBUG("RenderCoordinator: Worker thread loop exiting");
 }
 
@@ -492,6 +567,11 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
 
     case RenderRequestType::RenderPreview:
       handleRenderPreview(*static_cast<RenderPreviewRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetObservations:
+      handleGetObservations(
+          *static_cast<GetObservationsRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetVBIData:
@@ -564,6 +644,16 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
 
     // Clear all worker state
     worker_dag_.reset();
+    if (worker_render_presenter_ && worker_invalidation_subscription_ != 0) {
+      worker_render_presenter_->unsubscribeInvalidation(
+          worker_invalidation_subscription_);
+      worker_invalidation_subscription_ = 0;
+    }
+    if (worker_render_presenter_ && worker_progress_subscription_ != 0) {
+      worker_render_presenter_->unsubscribeObservationProgress(
+          worker_progress_subscription_);
+      worker_progress_subscription_ = 0;
+    }
     worker_render_presenter_.reset();
 
     ORC_LOG_DEBUG(
@@ -591,6 +681,32 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
 
     if (!worker_render_presenter_) {
       worker_render_presenter_ = presenter_factory_(worker_project_);
+
+      // Subscribe to invalidation notifications and re-emit them on the GUI
+      // thread. The callback fires synchronously on the worker thread inside
+      // setDAG(); the queued signal marshals to the GUI thread.
+      worker_invalidation_subscription_ =
+          worker_render_presenter_->subscribeInvalidation(
+              [this](
+                  const orc::presenters::ObservationInvalidationEvent& event) {
+                QVector<int> ids;
+                ids.reserve(static_cast<int>(event.changed_nodes.size()));
+                for (const auto& node : event.changed_nodes) {
+                  ids.push_back(node.value());
+                }
+                emit observationsInvalidated(ids);
+              });
+
+      // Subscribe to background-workload snapshots and re-emit them on the GUI
+      // thread (Task 5.4). The callback fires on the scheduler's worker thread;
+      // the queued signal marshals to the GUI thread.
+      worker_progress_subscription_ =
+          worker_render_presenter_->subscribeObservationProgress(
+              [this](const orc::presenters::ObservationProgressEvent& event) {
+                emit observationProgress(
+                    event.active, event.percent_complete,
+                    static_cast<qulonglong>(event.outstanding_nodes));
+              });
     }
 
     // Set the new DAG (cast away const since setDAG signature uses non-const
@@ -658,6 +774,56 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
   }
 }
 
+void RenderCoordinator::handleGetObservations(
+    const GetObservationsRequest& req) {
+  if (!worker_render_presenter_) {
+    emit observationDataReady(req.request_id, false,
+                              static_cast<qulonglong>(req.field_id.value()),
+                              orc::presenters::VideoParameterObservationView{},
+                              orc::presenters::NtscFieldObservationsView{});
+    return;
+  }
+
+  // Capture the signal parameters the observation view models need up front, on
+  // this worker thread. The delivery callback may run on the scheduler's worker
+  // thread and must not touch the single-threaded presenter render state; it
+  // only extracts value-type view models from the delivered (pure) context.
+  // Held in a shared_ptr so the callback closure copies cheaply and without
+  // throwing (a bare std::optional<SourceParameters> copy can allocate, which
+  // would make the noexcept delivery lambda ill-formed).
+  auto video_params = std::make_shared<std::optional<orc::SourceParameters>>(
+      worker_render_presenter_->getVideoParameters(req.node_id));
+  const uint64_t request_id = req.request_id;
+  const orc::FieldID field_id = req.field_id;
+
+  worker_render_presenter_->requestObservations(
+      req.node_id, field_id,
+      [this, request_id, field_id, video_params](
+          uint64_t /*presenter_request_id*/, bool available,
+          const void* obs_context) noexcept {
+        // This callback may run on the scheduler's worker thread inside a
+        // completion callback that must never throw; contain everything.
+        try {
+          orc::presenters::VideoParameterObservationView video_view;
+          orc::presenters::NtscFieldObservationsView ntsc_view;
+          if (available && obs_context != nullptr) {
+            video_view = orc::presenters::VideoParameterObservationPresenter::
+                extractObservations(field_id, obs_context, *video_params);
+            ntsc_view = orc::presenters::NtscObservationPresenter::
+                extractFieldObservations(field_id, obs_context);
+          }
+          emit observationDataReady(
+              request_id, available, static_cast<qulonglong>(field_id.value()),
+              std::move(video_view), std::move(ntsc_view));
+        } catch (const std::exception& e) {
+          ORC_LOG_ERROR("RenderCoordinator: observation delivery failed: {}",
+                        e.what());
+        } catch (...) {
+          ORC_LOG_ERROR("RenderCoordinator: observation delivery failed");
+        }
+      });
+}
+
 void RenderCoordinator::handleGetVBIData(const GetVBIDataRequest& req) {
   ORC_LOG_DEBUG(
       "RenderCoordinator: Getting VBI data for node '{}', field {} (request "
@@ -699,12 +865,9 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
       return;
     }
 
-    // Phase 2.4: Use RenderPresenter abstraction instead of direct DAG access
-    std::vector<void*> data_ptr;
-    int32_t total_frames = 0;
-
-    if (!worker_render_presenter_->getDropoutAnalysisData(req.node_id, data_ptr,
-                                                          total_frames)) {
+    // Use the RenderPresenter abstraction instead of direct DAG access.
+    auto series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
+    if (!series) {
       // Stage has not been triggered yet — trigger it now so the data is
       // available.
       ORC_LOG_DEBUG(
@@ -713,13 +876,14 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
           req.request_id);
       worker_render_presenter_->triggerStage(
           req.node_id,
-          [this](int current, int total, const std::string& message) {
-            emit dropoutProgress(static_cast<size_t>(current),
-                                 static_cast<size_t>(total),
-                                 QString::fromStdString(message));
-          });
-      if (!worker_render_presenter_->getDropoutAnalysisData(
-              req.node_id, data_ptr, total_frames)) {
+          makePercentGatedProgress(
+              [this](int current, int total, const std::string& message) {
+                emit dropoutProgress(static_cast<size_t>(current),
+                                     static_cast<size_t>(total),
+                                     QString::fromStdString(message));
+              }));
+      series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
+      if (!series) {
         emit error(req.request_id,
                    "Failed to get dropout data - node may not be a "
                    "DropoutAnalysisSinkStage or trigger failed");
@@ -727,21 +891,11 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
       }
     }
 
-    if (data_ptr.empty()) {
-      emit error(req.request_id, "No dropout dataset available");
-      return;
-    }
-
-    // Cast back to the actual type
-    auto* stats_vec =
-        static_cast<const std::vector<orc::FrameDropoutStats>*>(data_ptr[0]);
-    auto data = *stats_vec;  // Copy the data
-
     ORC_LOG_DEBUG(
-        "RenderCoordinator: Served dropout dataset from sink ({} buckets, {} "
+        "RenderCoordinator: Served dropout dataset from sink ({} points, {} "
         "frames total)",
-        data.size(), total_frames);
-    emit dropoutDataReady(req.request_id, data, total_frames);
+        series->points.size(), series->total_frames);
+    emit dropoutDataReady(req.request_id, std::move(*series));
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Dropout analysis failed: {}", e.what());
@@ -761,27 +915,24 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
       return;
     }
 
-    // Phase 2.4: Use RenderPresenter abstraction instead of direct DAG access
-    std::vector<void*> data_ptr;
-    int32_t total_frames = 0;
-
-    if (!worker_render_presenter_->getSNRAnalysisData(req.node_id, data_ptr,
-                                                      total_frames)) {
+    // Use the RenderPresenter abstraction instead of direct DAG access.
+    auto series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
+    if (!series) {
       // Stage has not been triggered yet — trigger it now so the data is
       // available.
       ORC_LOG_DEBUG(
           "RenderCoordinator: SNR stage has no results, triggering now "
           "(request {})",
           req.request_id);
-      auto progress_cb = [this](int current, int total,
-                                const std::string& message) {
-        emit snrProgress(static_cast<size_t>(current),
-                         static_cast<size_t>(total),
-                         QString::fromStdString(message));
-      };
+      auto progress_cb = makePercentGatedProgress(
+          [this](int current, int total, const std::string& message) {
+            emit snrProgress(static_cast<size_t>(current),
+                             static_cast<size_t>(total),
+                             QString::fromStdString(message));
+          });
       worker_render_presenter_->triggerStage(req.node_id, progress_cb);
-      if (!worker_render_presenter_->getSNRAnalysisData(req.node_id, data_ptr,
-                                                        total_frames)) {
+      series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
+      if (!series) {
         emit error(req.request_id,
                    "Failed to get SNR data - node may not be a "
                    "SNRAnalysisSinkStage or trigger failed");
@@ -789,19 +940,9 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
       }
     }
 
-    if (data_ptr.empty()) {
-      emit error(req.request_id, "No SNR dataset available");
-      return;
-    }
-
-    // Cast back to the actual type
-    auto* stats_vec =
-        static_cast<const std::vector<orc::FrameSNRStats>*>(data_ptr[0]);
-    auto data = *stats_vec;  // Copy the data
-
-    ORC_LOG_DEBUG("RenderCoordinator: Served SNR dataset from sink ({} frames)",
-                  data.size());
-    emit snrDataReady(req.request_id, data, total_frames);
+    ORC_LOG_DEBUG("RenderCoordinator: Served SNR dataset from sink ({} points)",
+                  series->points.size());
+    emit snrDataReady(req.request_id, std::move(*series));
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: SNR analysis failed: {}", e.what());
@@ -822,27 +963,25 @@ void RenderCoordinator::handleGetBurstLevelData(
       return;
     }
 
-    // Phase 2.4: Use RenderPresenter abstraction instead of direct DAG access
-    std::vector<void*> data_ptr;
-    int32_t total_frames = 0;
-
-    if (!worker_render_presenter_->getBurstLevelAnalysisData(
-            req.node_id, data_ptr, total_frames)) {
+    // Use the RenderPresenter abstraction instead of direct DAG access.
+    auto series =
+        worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
+    if (!series) {
       // Stage has not been triggered yet — trigger it now so the data is
       // available.
       ORC_LOG_DEBUG(
           "RenderCoordinator: Burst level stage has no results, triggering now "
           "(request {})",
           req.request_id);
-      auto progress_cb = [this](int current, int total,
-                                const std::string& message) {
-        emit burstLevelProgress(static_cast<size_t>(current),
-                                static_cast<size_t>(total),
-                                QString::fromStdString(message));
-      };
+      auto progress_cb = makePercentGatedProgress(
+          [this](int current, int total, const std::string& message) {
+            emit burstLevelProgress(static_cast<size_t>(current),
+                                    static_cast<size_t>(total),
+                                    QString::fromStdString(message));
+          });
       worker_render_presenter_->triggerStage(req.node_id, progress_cb);
-      if (!worker_render_presenter_->getBurstLevelAnalysisData(
-              req.node_id, data_ptr, total_frames)) {
+      series = worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
+      if (!series) {
         emit error(req.request_id,
                    "Failed to get burst data - node may not be a "
                    "BurstLevelAnalysisSinkStage or trigger failed");
@@ -850,20 +989,10 @@ void RenderCoordinator::handleGetBurstLevelData(
       }
     }
 
-    if (data_ptr.empty()) {
-      emit error(req.request_id, "No burst level dataset available");
-      return;
-    }
-
-    // Cast back to the actual type
-    auto* stats_vec =
-        static_cast<const std::vector<orc::FrameBurstLevelStats>*>(data_ptr[0]);
-    auto data = *stats_vec;  // Copy the data
-
     ORC_LOG_DEBUG(
-        "RenderCoordinator: Served burst dataset from sink ({} frames)",
-        data.size());
-    emit burstLevelDataReady(req.request_id, data, total_frames);
+        "RenderCoordinator: Served burst dataset from sink ({} points)",
+        series->points.size());
+    emit burstLevelDataReady(req.request_id, std::move(*series));
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Burst level analysis failed: {}",
@@ -1116,10 +1245,11 @@ void RenderCoordinator::handleTriggerStage(const TriggerStageRequest& req) {
     // The presenter abstracts all DAG access and stage interaction
     worker_render_presenter_->triggerStage(
         req.node_id,
-        [this](int current, int total, const std::string& message) {
+        makePercentGatedProgress([this](int current, int total,
+                                        const std::string& message) {
           // Emit progress updates (Qt will queue to GUI thread)
           emit triggerProgress(current, total, QString::fromStdString(message));
-        });
+        }));
 
     ORC_LOG_DEBUG("RenderCoordinator: Trigger complete successfully");
     emit triggerComplete(req.request_id, true,

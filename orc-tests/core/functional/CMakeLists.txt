@@ -107,3 +107,21 @@ gtest_discover_tests(orc-core-functional-tests-plugin-isolation
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;contracts")
+
+# Observation sidecar tests exercise the real SQLite backend against temporary
+# files on disk, so they are functional (not unit). No stage plugins needed.
+add_executable(orc-core-functional-tests-observation
+    observation_persistence_sqlite_test.cpp
+)
+target_include_directories(orc-core-functional-tests-observation PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/core/include
+    ${CMAKE_SOURCE_DIR}/orc/sdk/include
+)
+target_link_libraries(orc-core-functional-tests-observation
+    orc-core
+    GTest::gmock_main
+)
+gtest_discover_tests(orc-core-functional-tests-observation
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES LABELS "functional\;observation")

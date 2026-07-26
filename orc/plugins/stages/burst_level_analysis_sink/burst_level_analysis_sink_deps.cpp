@@ -12,11 +12,47 @@
 #include <orc/stage/field_id.h>
 #include <orc/support/logging.h>
 
-#include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <memory>
+#include <ostream>
 #include <utility>
 #include <variant>
+
+namespace {
+
+// Write `path` atomically: stream into a temporary sibling file and rename it
+// into place only after a fully successful write. A cancelled or failed run
+// therefore never leaves a truncated file at `path`.
+template <typename Logger, typename Writer>
+bool write_file_atomically(const std::string& path, Logger& logger,
+                           Writer&& writer) {
+  const std::string tmp_path = path + ".tmp";
+  {
+    std::ofstream out(tmp_path,
+                      std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!out.is_open()) {
+      logger.error("Failed to open temporary file: {}", tmp_path);
+      return false;
+    }
+    writer(out);
+    out.flush();
+    if (!out.good()) {
+      logger.error("Failed writing temporary file: {}", tmp_path);
+      out.close();
+      std::remove(tmp_path.c_str());
+      return false;
+    }
+  }
+  if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+    logger.error("Failed to move {} into place at {}", tmp_path, path);
+    std::remove(tmp_path.c_str());
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
 
 namespace orc {
 void BurstLevelAnalysisSinkStageDeps::init(
@@ -33,6 +69,9 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
   if (!representation) {
     return {false, "Input representation is null", {}, 0};
   }
+
+  (void)options.output_path;
+  (void)options.write_csv;
 
   BurstAnalysisComputeResult result;
   result.success = true;
@@ -60,26 +99,21 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
         "level observations skipped");
   }
 
-  // Bucket-sampled analysis: divide the recording into at most kDefaultBuckets
-  // display points and, within each bucket, analyze at most kSamplesPerBucket
-  // evenly-spaced frames.  For small sources (bucket size <= kSamplesPerBucket)
-  // every frame in the bucket is analyzed.  This keeps wall-clock time near-
-  // constant regardless of recording length.
-  constexpr uint64_t kDefaultBuckets = 1000;
-  constexpr uint64_t kSamplesPerBucket = 1;
-  const uint64_t bucket_count =
-      (total_frames < kDefaultBuckets) ? total_frames : kDefaultBuckets;
+  // Canonical per-frame capture: analyse every frame in the range and record
+  // each frame's true frame number. Display bucketing is applied downstream by
+  // the shared decimation utility
+  // (orc/core/analysis/analysis_series_decimator), not here.
+  logger_.debug("BurstLevelAnalysisSinkDeps: analysing {} frames",
+                total_frames);
 
-  logger_.debug(
-      "BurstLevelAnalysisSinkDeps: {} frames → {} buckets (~{} samples/bucket)",
-      total_frames, bucket_count, kSamplesPerBucket);
+  result.frame_stats.reserve(static_cast<size_t>(total_frames));
 
-  result.frame_stats.reserve(static_cast<size_t>(bucket_count));
-
-  for (uint64_t b = 0; b < bucket_count; ++b) {
+  uint64_t analysed = 0;
+  for (uint64_t offset = 0; offset < total_frames; ++offset) {
     if (cancel_requested_ && cancel_requested_->load()) {
-      logger_.warn("BurstLevelAnalysisSinkDeps: Cancel requested at bucket {}",
-                   b);
+      logger_.warn(
+          "BurstLevelAnalysisSinkDeps: Cancel requested at frame offset {}",
+          offset);
       result.success = false;
       result.message = "Cancelled by user";
       result.frame_stats.clear();
@@ -87,75 +121,59 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
       return result;
     }
 
-    // Inclusive frame range for this bucket (no frame is missed or counted
-    // twice across adjacent buckets).
-    const FrameID bucket_start =
-        frame_rng.first + (b * total_frames) / bucket_count;
-    const FrameID bucket_end =
-        frame_rng.first + ((b + 1) * total_frames) / bucket_count - 1;
-    const uint64_t bucket_size = bucket_end - bucket_start + 1;
-    const uint64_t n_samples =
-        (kSamplesPerBucket < bucket_size) ? kSamplesPerBucket : bucket_size;
+    const FrameID fid = frame_rng.first + offset;
+    const FieldID frame_fid(fid * 2U);
 
-    double sum = 0.0;
-    size_t count = 0;
-
-    for (uint64_t s = 0; s < n_samples; ++s) {
-      // Evenly distribute sample frames across the bucket so the first and last
-      // frames are always included.
-      const FrameID fid =
-          (n_samples == 1U)
-              ? bucket_start
-              : bucket_start + (s * (bucket_size - 1U)) / (n_samples - 1U);
-
-      if (burst_level_handle) {
-        burst_level_handle->process_frame(*representation, fid,
-                                          observation_context);
-      }
-
-      const FieldID frame_fid(fid * 2U);
-      auto val = observation_context.get(frame_fid, "burst_level",
-                                         "median_burst_10bit");
-      logger_.debug(
-          "BurstLevelAnalysisSinkDeps: fid={} field_id={} val_present={} "
-          "type_ok={}",
-          fid, frame_fid.value(), val.has_value(),
-          val.has_value() && std::holds_alternative<double>(*val));
-      if (val && std::holds_alternative<double>(*val)) {
-        sum += std::get<double>(*val);
-        ++count;
-      }
-      observation_context.clear_field(frame_fid);
+    // Phase 5.3: reuse a pre-loaded observation when the host has already
+    // supplied this frame's value from the provenance-keyed store. burst_level
+    // is stateless, so per-frame skipping is safe.
+    if (burst_level_handle && !observation_context.has(frame_fid, "burst_level",
+                                                       "median_burst_10bit")) {
+      burst_level_handle->process_frame(*representation, fid,
+                                        observation_context);
     }
+
+    auto val =
+        observation_context.get(frame_fid, "burst_level", "median_burst_10bit");
 
     FrameBurstLevelStats frame_stat;
-    // Use the center frame of the bucket as the representative frame number
-    // (1-based for display).
-    frame_stat.frame_number =
-        static_cast<int32_t>(bucket_start + (bucket_end - bucket_start) / 2U) +
-        1;
-
-    if (count > 0) {
-      frame_stat.median_burst_10bit = sum / static_cast<double>(count);
+    frame_stat.frame_number = static_cast<int32_t>(fid) + 1;
+    if (val && std::holds_alternative<double>(*val)) {
+      frame_stat.median_burst_10bit = std::get<double>(*val);
       frame_stat.has_data = true;
-      frame_stat.field_count = count;
     }
-
     result.frame_stats.push_back(frame_stat);
 
-    if (progress_callback_ && (b % 50 == 0 || b + 1 == bucket_count)) {
-      progress_callback_(b + 1, bucket_count,
-                         "Analysing bucket " + std::to_string(b + 1) + "/" +
-                             std::to_string(bucket_count));
+    observation_context.clear_field(frame_fid);
+
+    ++analysed;
+    if (progress_callback_ &&
+        (analysed % 50 == 0 || analysed == total_frames)) {
+      progress_callback_(analysed, total_frames,
+                         "Analysing frame " + std::to_string(analysed) + "/" +
+                             std::to_string(total_frames));
     }
   }
 
   result.total_frames = static_cast<int32_t>(total_frames);
   logger_.debug(
-      "BurstLevelAnalysisSinkDeps: Complete — {} buckets from {} frames",
+      "BurstLevelAnalysisSinkDeps: Complete — {} analysed frames from {}",
       result.frame_stats.size(), total_frames);
 
   return result;
+}
+
+void BurstLevelAnalysisSinkStageDeps::write_csv(
+    std::ostream& os, const std::vector<FrameBurstLevelStats>& frame_stats) {
+  // Canonical per-frame schema. One row per analysed frame; an absent value is
+  // written as an empty field (never the string "nan"). Units live in the
+  // header name (10-bit sample units); values are plain numbers.
+  os << "frame_number,median_burst_10bit\n";
+  for (const auto& fs : frame_stats) {
+    os << fs.frame_number << ',';
+    if (fs.has_data) os << fs.median_burst_10bit;
+    os << '\n';
+  }
 }
 
 bool BurstLevelAnalysisSinkStageDeps::write_csv(
@@ -168,25 +186,13 @@ bool BurstLevelAnalysisSinkStageDeps::write_csv(
 
   logger_.debug("BurstLevelAnalysisSinkDeps: Writing CSV to: {}", path);
 
-  std::ofstream csv(path, std::ios::out | std::ios::trunc);
-  if (!csv.is_open()) {
-    logger_.error(
-        "BurstLevelAnalysisSinkDeps: Failed to open file for writing: {}",
-        path);
-    return false;
+  const bool ok = write_file_atomically(
+      path, logger_, [&](std::ostream& os) { write_csv(os, frame_stats); });
+  if (ok) {
+    logger_.debug(
+        "BurstLevelAnalysisSinkDeps: Successfully wrote {} data rows to: {}",
+        frame_stats.size(), path);
   }
-
-  csv << "frame_number,median_burst_10bit\n";
-  size_t rows_written = 0;
-  for (const auto& fs : frame_stats) {
-    csv << fs.frame_number << ','
-        << (fs.has_data ? fs.median_burst_10bit : std::nan("")) << '\n';
-    rows_written++;
-  }
-
-  logger_.debug(
-      "BurstLevelAnalysisSinkDeps: Successfully wrote {} data rows to: {}",
-      rows_written, path);
-  return true;
+  return ok;
 }
 }  // namespace orc

@@ -187,7 +187,19 @@ bool CCSinkStageDeps::export_scc(const VideoFrameRepresentation* representation,
       // Run the standard closed_caption observer for this frame so its results
       // land in the context (fields frame_id*2 and frame_id*2 + 1). When the
       // service is unavailable, read whatever is already present.
-      if (cc_observer && representation->has_frame(frame_id)) {
+      //
+      // Phase 5.3: when the host has pre-loaded this frame's observation from
+      // the provenance-keyed store, skip re-running the observer.
+      // closed_caption is stateful, so the host only pre-loads when the whole
+      // range is covered (all-or-nothing); a covered frame here therefore means
+      // the entire run is covered and the stream's continuity is preserved.
+      const bool frame_covered =
+          observation_context.has(FieldID(frame_id * 2), "closed_caption",
+                                  "present") ||
+          observation_context.has(FieldID(frame_id * 2 + 1), "closed_caption",
+                                  "present");
+      if (cc_observer && representation->has_frame(frame_id) &&
+          !frame_covered) {
         cc_observer->process_frame(*representation, frame_id,
                                    observation_context);
       }
@@ -325,7 +337,16 @@ bool CCSinkStageDeps::export_plain_text(
         progress_callback_(done, total_frames, "Processing closed captions...");
       }
 
-      if (cc_observer && representation->has_frame(frame_id)) {
+      // Phase 5.3: skip the observer for frames the host has pre-loaded from
+      // the store (all-or-nothing for the stateful closed_caption stream, see
+      // export_scc()).
+      const bool frame_covered =
+          observation_context.has(FieldID(frame_id * 2), "closed_caption",
+                                  "present") ||
+          observation_context.has(FieldID(frame_id * 2 + 1), "closed_caption",
+                                  "present");
+      if (cc_observer && representation->has_frame(frame_id) &&
+          !frame_covered) {
         cc_observer->process_frame(*representation, frame_id,
                                    observation_context);
       }

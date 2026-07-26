@@ -21,6 +21,7 @@
 #include <orc/stage/observation/observation_service_interface.h>
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -59,6 +60,29 @@ TEST(CoreObservationService, AvailableObservers_ExposesEveryStandardObserver) {
   }
 
   EXPECT_EQ(seen_ids, kExpectedObserverIds);
+}
+
+// Independent restatement of the statefulness contract (ObserverInfo::stateless
+// / ObserverRegistryEntry::stateless). Only observers modelling a cross-frame
+// stream are stateful; a drift in either direction fails this test. See the
+// classification comment in core_observation_service.cpp.
+const std::map<std::string, bool> kExpectedStateless{
+    {"white_snr", true},    {"black_psnr", true},
+    {"burst_level", true},  {"closed_caption", false},
+    {"biphase", true},      {"colour_frame_phase", false},
+    {"disc_quality", true}, {"fm_code", true},
+    {"white_flag", true}};
+
+TEST(CoreObservationService, AvailableObservers_ClassifiesStatefulness) {
+  CoreObservationService service;
+  const auto infos = service.available_observers();
+
+  ASSERT_EQ(infos.size(), kExpectedStateless.size());
+  for (const auto& info : infos) {
+    const auto it = kExpectedStateless.find(info.id);
+    ASSERT_NE(it, kExpectedStateless.end()) << "unclassified id: " << info.id;
+    EXPECT_EQ(info.stateless, it->second) << "id=" << info.id;
+  }
 }
 
 TEST(CoreObservationService, CreateObserver_ReturnsHandle_ForEveryKnownId) {

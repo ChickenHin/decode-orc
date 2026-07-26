@@ -12,27 +12,41 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <utility>
 
 #include "include/dag_frame_renderer.h"
+#include "include/observation_store.h"
 
 namespace orc {
 
-ObservationCache::ObservationCache(std::shared_ptr<const DAG> dag)
-    : dag_(dag), cache_(500) {
+ObservationCache::ObservationCache(
+    std::shared_ptr<const DAG> dag, std::shared_ptr<ObservationStore> store,
+    std::shared_ptr<const NodeFingerprintMap> fingerprints)
+    : dag_(dag),
+      store_(std::move(store)),
+      fingerprints_(std::move(fingerprints)),
+      cache_(500) {
   if (!dag_) {
     throw std::invalid_argument("ObservationCache: DAG cannot be null");
   }
 
   renderer_ = std::make_shared<DAGFrameRenderer>(dag_);
+  renderer_->set_observation_store(store_, fingerprints_);
 }
 
-void ObservationCache::update_dag(std::shared_ptr<const DAG> dag) {
+void ObservationCache::update_dag(
+    std::shared_ptr<const DAG> dag,
+    std::shared_ptr<const NodeFingerprintMap> fingerprints) {
   if (!dag) {
     throw std::invalid_argument("ObservationCache: DAG cannot be null");
   }
 
   dag_ = dag;
+  fingerprints_ = std::move(fingerprints);
   renderer_ = std::make_shared<DAGFrameRenderer>(dag_);
+  // Preserve the shared store across the rebuild; only the (node_id, frame_id)
+  // render markers below are tied to the live DAG and must be discarded.
+  renderer_->set_observation_store(store_, fingerprints_);
   clear();
 }
 

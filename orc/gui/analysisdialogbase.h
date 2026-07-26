@@ -50,6 +50,38 @@ class AnalysisDialogBase : public QDialog {
   void setupNoDataOverlay(QVBoxLayout* mainLayout, PlotWidget* plot);
 
   /**
+   * @brief Set up the bucket-info status line shown below the plot
+   *
+   * The label reports whether the graph is a per-frame or a decimated
+   * (bucketed) view and, after a click, the frame range and aggregate values of
+   * the selected bucket. Call from a derived constructor after the plot has
+   * been added to @p mainLayout.
+   *
+   * @param mainLayout The main layout to append the status line to
+   */
+  void setupBucketInfoLabel(QVBoxLayout* mainLayout);
+
+  /**
+   * @brief Set the decimation summary shown when a new dataset is rendered
+   *
+   * When @p decimated is true the graph aggregates multiple analysed frames per
+   * point; the summary states the average bucket width so the interactive view
+   * is not mistaken for per-frame data. When false the view is per-frame.
+   *
+   * @param decimated True when points aggregate more than one analysed frame
+   * @param totalFrames Total analysed frames represented by the series
+   * @param pointCount Number of display points (buckets) plotted
+   */
+  void setDecimationSummary(bool decimated, int32_t totalFrames,
+                            int pointCount);
+
+  /**
+   * @brief Replace the bucket-info line with a per-bucket readout
+   * @param text Readout describing the selected bucket
+   */
+  void setBucketReadout(const QString& text);
+
+  /**
    * @brief Update the frame marker position (with throttling)
    * @param currentFrameNumber Current frame being viewed
    */
@@ -82,6 +114,9 @@ class AnalysisDialogBase : public QDialog {
  protected:
   // Common UI elements
   QLabel* noDataLabel_;
+  QLabel* bucketInfoLabel_ =
+      nullptr;                 ///< View-mode / bucket-readout status line
+  QString decimationSummary_;  ///< Cached summary restored when readout clears
 
   // Update throttling state
   QTimer* updateTimer_;

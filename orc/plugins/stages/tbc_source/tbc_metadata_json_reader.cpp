@@ -15,6 +15,7 @@
 #include <cmath>
 
 #include "lddecodemetadata.h"
+#include "tbc_level_derivation.h"
 
 namespace orc {
 
@@ -102,31 +103,15 @@ bool TBCMetadataJsonReader::open(const std::string& json_path) {
   source_params_ = sp;
 
   // ---- ld-decode 16-bit domain levels ----
-  // ld-decode stores white16bIre as the 100 IRE white level and black16bIre as
-  // the picture black level — which for NTSC and PAL_M is the 7.5 IRE setup
-  // pedestal (kNtscBlack × 64 = 18048), NOT the 0 IRE blanking reference
-  // (kNtscBlanking × 64 = 15360).  For PAL there is no setup pedestal, so
-  // black16bIre IS the 0 IRE blanking level.
-  //
-  // tbc_to_cvbs() requires the 0 IRE blanking as its reference point, so we
-  // must derive it from black16bIre for NTSC/PAL_M:
-  //   blanking = black − 7.5 × (white − black) / 92.5
-  // The 92.5 denominator is the IRE span from black (7.5 IRE) to white (100
-  // IRE). SMPTE 170M-2004 Table 1 / SMPTE 244M-2003 §4.2.1.
+  // ld-decode stores white16bIre as the 100 IRE white level and black16bIre
+  // as the picture black level.  The 0 IRE blanking reference that
+  // tbc_to_cvbs() needs is derived by derive_tbc_domain_levels(): for PAL
+  // black IS blanking; for NTSC/PAL_M the 7.5 IRE setup pedestal is
+  // subtracted, unless the levels indicate an NTSC-J capture (black stored
+  // at 0 IRE, no setup) — see tbc_level_derivation.h.
   if (vp.white16bIre > vp.black16bIre && vp.black16bIre >= 0) {
-    TbcDomainLevels levels;
-    if (vp.system == LdVideoSystem::NTSC || vp.system == LdVideoSystem::PAL_M) {
-      // Derive 0 IRE blanking by subtracting the 7.5 IRE setup pedestal.
-      const double ire_per_unit =
-          static_cast<double>(vp.white16bIre - vp.black16bIre) / 92.5;
-      levels.blanking_16b =
-          static_cast<int32_t>(std::round(vp.black16bIre - 7.5 * ire_per_unit));
-    } else {
-      // PAL: no setup pedestal; black == blanking (0 IRE).
-      levels.blanking_16b = vp.black16bIre;
-    }
-    levels.white_16b = vp.white16bIre;
-    tbc_domain_levels_ = levels;
+    tbc_domain_levels_ =
+        derive_tbc_domain_levels(sp.system, vp.black16bIre, vp.white16bIre);
   }
 
   // ---- PCM audio parameters ----
@@ -154,7 +139,6 @@ bool TBCMetadataJsonReader::open(const std::string& json_path) {
     fm.is_first_field = f.isFirstField;
     fm.sync_confidence = f.syncConf;
     fm.median_burst_ire = f.medianBurstIRE;
-    fm.field_phase_id = f.fieldPhaseID;
     fm.is_pad = f.pad;
     if (f.audioSamples > 0) fm.audio_samples = f.audioSamples;
     if (f.decodeFaults > 0) fm.decode_faults = f.decodeFaults;

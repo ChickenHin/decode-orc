@@ -111,6 +111,9 @@ class DropoutAnalysisSinkStage : public DAGStage,
     std::string output_path;
     bool write_csv = false;
     DropoutAnalysisMode mode = DropoutAnalysisMode::FULL_FIELD;
+    bool write_report = false;
+    std::string report_path;
+    DropoutReportFormat report_format = DropoutReportFormat::CSV;
   };
 
   ParsedConfig parse_config(

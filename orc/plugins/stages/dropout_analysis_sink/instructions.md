@@ -18,6 +18,113 @@ Destination CSV file for the dropout metrics. Leave empty to skip file output.
 ### write_csv (bool)
 Enable writing the results to CSV at trigger time. Default: `false`.
 
+### mode (choice: full, visible)
+Selects full-field or visible-area dropout analysis. In `visible` mode, dropout
+runs outside the active picture area are excluded and partially-visible runs are
+clamped to the active sample range. Default: `full`.
+
+### write_report (bool)
+Enable writing a per-dropout detail report at trigger time — one entry per
+dropout run showing its location within the frame. Default: `false`.
+
+### report_path (file path)
+Destination file for the per-dropout detail report. Leave empty to skip report
+output.
+
+### report_format (choice: csv, text)
+Format of the detail report: machine-readable `csv` (one row per run) or
+human-readable `text` (grouped by frame). Default: `csv`. See the *Dropout
+detail report* section below.
+
+## CSV output
+
+The CSV is written from the canonical per-frame dataset — **one row per analysed
+frame**. The dropout sink analyses every frame, so the row count equals the
+recording's frame count. A zero row is genuine data (the frame was analysed and
+had no dropouts); a *missing* frame number means that frame was not analysed.
+The CSV always contains full-resolution per-frame data and is never affected by
+the display decimation used to draw the graph.
+
+Columns (units are carried in the header names; values are plain numbers):
+
+| Column | Unit | Meaning |
+|--------|------|---------|
+| `frame_number` | — | Analysed frame number (1-based) |
+| `dropout_count` | count | Number of dropout runs in the frame |
+| `dropout_length_samples` | samples | Total dropout length in the frame |
+
+Example (frame 2 was analysed and had no dropouts):
+
+```csv
+frame_number,dropout_count,dropout_length_samples
+1,3,128
+2,0,0
+3,1,20
+```
+
+## Dropout detail report
+
+Where the per-frame CSV summarises *how much* dropout each frame has, the detail
+report records *where* each individual dropout is within the frame (issue #214).
+It is written only when `write_report` is enabled and `report_path` is set, and
+is always full-resolution — it is never affected by the display decimation used
+to draw the graph. It honours the same `mode` (full / visible) parameter as the
+rest of the analysis, so in `visible` mode runs outside the active area are
+omitted and partially-visible runs are clamped.
+
+Coordinates are frame-flat: `line_number` is a 0-based line index within the
+frame and `sample_start` / `sample_end` are 0-based sample indices within that
+line (both inclusive), derived from the recording's nominal samples-per-line
+(PAL 1135, NTSC 910). A run that crosses a line boundary is reported against its
+start line; its `sample_end` may therefore exceed the nominal line width.
+
+Unlike the per-frame CSV, **frames with no dropouts do not appear** in the
+report.
+
+### csv format
+
+One row per dropout run:
+
+```csv
+frame_number,line_number,sample_start,sample_end,length_samples
+1,10,100,139,40
+1,20,5,14,10
+3,0,50,69,20
+```
+
+| Column | Unit | Meaning |
+|--------|------|---------|
+| `frame_number` | — | Analysed frame number (1-based) |
+| `line_number` | — | Frame-flat 0-based line of the run's start |
+| `sample_start` | — | Sample-within-line of the run's start (inclusive) |
+| `sample_end` | — | Sample-within-line of the run's end (inclusive) |
+| `length_samples` | samples | Run length (after visible-area clamping) |
+
+### text format
+
+Human-readable, grouped by frame — a heading with the frame's dropout count and
+total length, then one line per run:
+
+```text
+Frame 1: 2 dropouts, 50 samples total
+  line 10, samples 100-139 (40 samples)
+  line 20, samples 5-14 (10 samples)
+Frame 3: 1 dropout, 20 samples total
+  line 0, samples 50-69 (20 samples)
+```
+
+## Where the analysis reads its data
+
+The analysis reports the dropout state **at this sink's input** — the dropout
+hints visible on the representation connected to it. To include edits made in
+the **Dropout Map** stage (added or removed dropout regions), connect this sink
+**downstream of the `dropout_map` stage**. A sink wired upstream of, or on a
+branch that bypasses, `dropout_map` sees only the original sidecar hints.
+
+Editing the dropout map and re-triggering the sink re-analyses from scratch, so
+the graph and CSV always reflect the latest map edits — they never show
+pre-edit data after a re-trigger.
+
 ## Tools
 
 ### Dropout Analysis

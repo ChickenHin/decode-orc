@@ -65,12 +65,21 @@ class NtscObserverDialog : public QDialog {
    */
   void clearObservations();
 
+  /**
+   * @brief Show a "computing" pending state while observations are fetched
+   *        asynchronously (Phase 5), cleared once values arrive.
+   */
+  void showPending();
+
  private:
   void setupUI();
   void updateFieldObservations(
       QGroupBox* field_group, const QString& field_label, QLabel* fm_present,
       QLabel* fm_data, QLabel* fm_flag, QLabel* white_flag,
       const orc::presenters::NtscFieldObservationsView& observations);
+
+  // Pending-state notice shown while an async observation request is in flight.
+  QLabel* status_label_;
 
   // UI components - Field 1
   QGroupBox* field1_group_;

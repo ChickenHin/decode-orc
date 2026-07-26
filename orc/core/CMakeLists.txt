@@ -3,6 +3,7 @@ add_library(orc-core SHARED
     field_id.cpp
     artifact.cpp
     dag_executor.cpp
+    frame_provenance.cpp
     dag_frame_renderer.cpp
     preview_renderer.cpp
     preview_view_registry.cpp
@@ -35,7 +36,10 @@ add_library(orc-core SHARED
     # Analysis framework
     analysis/analysis_registry.cpp
     analysis/analysis_init.cpp
-    
+
+    # Shared display decimation for analysis-sink graph paths
+    analysis/analysis_series_decimator.cpp
+
     # Vectorscope analysis
     analysis/vectorscope/vectorscope_analysis.cpp
     
@@ -69,7 +73,20 @@ add_library(orc-core SHARED
     
     # Observation cache (shared by all analysis decoders)
     observation_cache.cpp
-    
+
+    # Provenance-keyed observation store (survives DAG rebuilds)
+    observation_store.cpp
+
+    # SQLite-backed observation sidecar (survives application restarts)
+    sqlite_observation_persistence.cpp
+
+    # Observation change propagation and store garbage collection
+    observation_invalidation.cpp
+
+    # Background observation scheduler (computes missing observations ahead of
+    # demand on a worker thread)
+    observation_scheduler.cpp
+
     # Node type system
     node_type.cpp
     

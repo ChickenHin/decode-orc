@@ -150,6 +150,30 @@ class VideoFrameRepresentation {
     return {};
   }
 
+  // Per-frame video pass-through declaration.
+  //
+  // Return the upstream representation when this representation's CVBS video
+  // content for |id| — samples (composite and, for YC sources, luma/chroma
+  // planes), geometry, and dropout hints — is byte-identical to that upstream
+  // representation's frame |id| because this stage applies no modification to
+  // it. Return nullptr when the frame is (or may be) modified, when frame IDs
+  // are remapped, or when identity cannot be established cheaply; nullptr is
+  // always safe. Audio / EFM / AC3 differences do not matter here: the hook
+  // covers only the video content that frame-derived analysis (the host's
+  // observers) reads.
+  //
+  // The host uses this to share frame-content-keyed derived data (stored
+  // observations) across stages: a transform that passes a frame through
+  // unchanged — e.g. dropout correction on a frame with no dropouts — lets the
+  // host reuse the upstream frame's stored analysis instead of decoding and
+  // re-analysing identical samples. Implementations MUST answer from metadata
+  // alone (never decode samples to compare) and must be safe to call
+  // concurrently, like every other const accessor.
+  virtual std::shared_ptr<const VideoFrameRepresentation>
+  video_passthrough_source(FrameID /*id*/) const {
+    return nullptr;
+  }
+
   // Video parameters describing the signal geometry and level domain.
   virtual std::optional<SourceParameters> get_video_parameters() const {
     return std::nullopt;

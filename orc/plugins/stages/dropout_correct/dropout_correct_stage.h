@@ -72,6 +72,19 @@ class CorrectedVideoFrameRepresentation
     return {};
   }
 
+  // A frame with no source dropout hints is passed through byte-identical
+  // (correct_single_frame caches an empty marker and every accessor falls back
+  // to the source buffer), so the host may share its content-derived analysis
+  // with the upstream node. Answered from dropout metadata alone — no sample
+  // decode.
+  std::shared_ptr<const VideoFrameRepresentation> video_passthrough_source(
+      FrameID id) const override {
+    if (!source_ || !source_->get_dropout_hints(id).empty()) {
+      return nullptr;
+    }
+    return source_;
+  }
+
   friend class DropoutCorrectStage;
 
  private:

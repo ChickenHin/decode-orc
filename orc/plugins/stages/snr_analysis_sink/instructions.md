@@ -18,6 +18,34 @@ Destination CSV file for the SNR metrics. Leave empty to skip file output.
 ### write_csv (bool)
 Enable writing the results to CSV at trigger time. Default: `false`.
 
+### mode (choice: white, black, both)
+Selects which SNR metrics to measure. Default: `both`.
+
+## CSV output
+
+The CSV is written from the canonical per-frame dataset — **one row per frame**;
+the stage analyses every frame. Each row carries the frame's *true* frame
+number. An absent metric is written as an **empty field** — never the string
+`nan`. The CSV always contains full-resolution per-frame data and is never
+affected by the display decimation used to draw the graph.
+
+Columns (units are carried in the header names; values are plain numbers):
+
+| Column | Unit | Meaning |
+|--------|------|---------|
+| `frame_number` | — | Frame number (1-based) |
+| `white_snr_db` | dB | White SNR for the frame (empty if not measured) |
+| `black_psnr_db` | dB | Black PSNR for the frame (empty if not measured) |
+
+Example (`mode = white` measures white SNR only, so the black column is empty):
+
+```csv
+frame_number,white_snr_db,black_psnr_db
+1,42.5,
+2,42.1,
+3,41.9,
+```
+
 ## Tools
 
 ### SNR Analysis

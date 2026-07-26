@@ -51,6 +51,7 @@ struct TBCVideoParams {
   std::string git_branch;
   std::string git_commit;
   bool is_widescreen = false;
+  bool is_mapped = false;
   int32_t active_video_start = -1;
   int32_t active_video_end = -1;
   int32_t first_active_frame_line = -1;
@@ -63,7 +64,6 @@ struct TBCVideoParams {
 // TBCFieldMeta — per-field metadata from .tbc.json.db
 // ---------------------------------------------------------------------------
 struct TBCFieldMeta {
-  std::optional<int32_t> field_phase_id;      // PAL: 1–8, NTSC: 1–2
   std::optional<int32_t> audio_sample_count;  // stereo pairs for this field
   std::optional<int32_t> efm_t_value_count;
   std::optional<int32_t> ac3rf_symbol_count;

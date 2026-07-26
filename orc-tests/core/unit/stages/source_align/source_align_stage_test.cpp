@@ -374,6 +374,62 @@ TEST(SourceAlignStageTest, PadMode_ShiftedRealFramesObeyOnePairRule) {
   EXPECT_EQ(appended[appended.size() - 1], 0);
 }
 
+// ── Dropout hint forwarding (issue #216, plan Phase 3 Task 3.2) ─────────────
+// The alignment wrappers must forward the dropout hints of their *input*
+// (translated to the wrapper's frame IDs), so any upstream dropout_map edit is
+// visible to a downstream analysis sink.
+
+TEST(SourceAlignStageTest, TrimMode_ForwardsDropoutHintsFromShiftedSource) {
+  orc::SourceAlignStage stage;
+  auto source =
+      std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+  ON_CALL(*source, type_name()).WillByDefault(Return("test_vfr_artifact"));
+  ON_CALL(*source, frame_range())
+      .WillByDefault(Return(orc::FrameIDRange{0u, 9u}));
+  ON_CALL(*source, frame_count()).WillByDefault(Return(10u));
+  // Output frame 0 maps to source frame 2 (offset 2).
+  ON_CALL(*source, get_dropout_hints(orc::FrameID{2}))
+      .WillByDefault(Return(
+          std::vector<orc::DropoutRun>{{orc::FrameID{2}, 1000u, 50u, 128}}));
+
+  auto aligned = align_one(stage, source, "first_common_frame", "1+2");
+  ASSERT_NE(aligned, nullptr);
+
+  const auto hints = aligned->get_dropout_hints(orc::FrameID{0});
+  ASSERT_EQ(hints.size(), 1u);
+  EXPECT_EQ(hints[0].sample_start, 1000u);
+  EXPECT_EQ(hints[0].sample_count, 50u);
+  // Frame ID is rewritten to this representation's output frame.
+  EXPECT_EQ(hints[0].frame_id, orc::FrameID{0});
+}
+
+TEST(SourceAlignStageTest,
+     PadMode_ForwardsSourceHintsForRealFrames_EmptyForPadding) {
+  orc::SourceAlignStage stage;
+  auto source =
+      std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+  ON_CALL(*source, type_name()).WillByDefault(Return("test_vfr_artifact"));
+  ON_CALL(*source, frame_range())
+      .WillByDefault(Return(orc::FrameIDRange{0u, 9u}));
+  ON_CALL(*source, frame_count()).WillByDefault(Return(10u));
+  // Real output frame 3 maps to source frame 0 (3 padding frames prepended).
+  ON_CALL(*source, get_dropout_hints(orc::FrameID{0}))
+      .WillByDefault(Return(
+          std::vector<orc::DropoutRun>{{orc::FrameID{0}, 2000u, 30u, 128}}));
+
+  auto padded = align_one(stage, source, "pad_for_alignment", "1+3");
+  ASSERT_NE(padded, nullptr);
+
+  // Synthetic padding frames carry no dropout hints.
+  EXPECT_TRUE(padded->get_dropout_hints(orc::FrameID{0}).empty());
+
+  const auto hints = padded->get_dropout_hints(orc::FrameID{3});
+  ASSERT_EQ(hints.size(), 1u);
+  EXPECT_EQ(hints[0].sample_start, 2000u);
+  EXPECT_EQ(hints[0].sample_count, 30u);
+  EXPECT_EQ(hints[0].frame_id, orc::FrameID{3});
+}
+
 TEST(SourceAlignStageTest, PadMode_PalAudioFollowsShiftedFramesSampleExact) {
   orc::SourceAlignStage stage;
   auto source = make_audio_source(orc::VideoSystem::PAL);

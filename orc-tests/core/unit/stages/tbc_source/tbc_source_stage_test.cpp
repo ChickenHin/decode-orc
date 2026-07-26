@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "../../../../orc/plugins/stages/tbc_source/tbc_level_derivation.h"
 #include "../source_common/source_stage_descriptor_test_utils.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
@@ -115,14 +116,10 @@ static orc::TBCVideoParams make_pal_video_params(int32_t num_fields = 2) {
   return tvp;
 }
 
-// Build two minimal PAL TBCFieldMeta entries (one frame).
+// Build minimal PAL TBCFieldMeta entries (one frame per pair of fields).
 static std::vector<orc::TBCFieldMeta> make_pal_field_meta(
     int32_t num_fields = 2) {
-  std::vector<orc::TBCFieldMeta> meta(static_cast<size_t>(num_fields));
-  for (int i = 0; i < num_fields; ++i) {
-    meta[static_cast<size_t>(i)].field_phase_id = (i % 8) + 1;
-  }
-  return meta;
+  return std::vector<orc::TBCFieldMeta>(static_cast<size_t>(num_fields));
 }
 
 // Return a blanking-level field of the given size.
@@ -150,7 +147,6 @@ static std::vector<orc::TBCFieldMeta> make_ntsc_field_meta(
     int32_t num_fields, int32_t audio_pairs_per_field) {
   std::vector<orc::TBCFieldMeta> meta(static_cast<size_t>(num_fields));
   for (int i = 0; i < num_fields; ++i) {
-    meta[static_cast<size_t>(i)].field_phase_id = (i % 4) + 1;
     if (audio_pairs_per_field > 0) {
       meta[static_cast<size_t>(i)].audio_sample_count = audio_pairs_per_field;
     }
@@ -1051,6 +1047,145 @@ TEST(TBCSourceAudioTest, Descriptors_TimingParametersRemoved) {
   };
   EXPECT_FALSE(has_descriptor("pcm_audio_timing"));
   EXPECT_FALSE(has_descriptor("lock_audio"));
+}
+
+// ===========================================================================
+// ld-decode 16-bit level derivation and NTSC-J detection
+// ===========================================================================
+
+TEST(TbcLevelDerivationTest, NtscStandardSetup_DerivesNominalBlanking) {
+  const auto levels = orc::derive_tbc_domain_levels(
+      orc::VideoSystem::NTSC, orc::kTbcNtscBlack, orc::kTbcNtscWhite);
+  EXPECT_EQ(levels.blanking_16b, orc::kTbcNtscBlanking);
+  ASSERT_TRUE(levels.black_16b.has_value());
+  EXPECT_EQ(*levels.black_16b, orc::kTbcNtscBlack);
+  EXPECT_FALSE(orc::is_ntsc_j_black_level(levels));
+}
+
+TEST(TbcLevelDerivationTest, NtscJBlackAtBlanking_DetectedAsNtscJ) {
+  // NTSC-J stores picture black at the 0 IRE blanking level (no setup).
+  const auto levels = orc::derive_tbc_domain_levels(
+      orc::VideoSystem::NTSC, orc::kTbcNtscBlanking, orc::kTbcNtscWhite);
+  EXPECT_EQ(levels.blanking_16b, orc::kTbcNtscBlanking);
+  EXPECT_TRUE(orc::is_ntsc_j_black_level(levels));
+}
+
+TEST(TbcLevelDerivationTest, NtscNonNominalLevels_StillClassifiedStandard) {
+  // A capture with slightly shifted levels must keep the standard-setup
+  // interpretation, not flip to NTSC-J.
+  const auto levels = orc::derive_tbc_domain_levels(orc::VideoSystem::NTSC,
+                                                    orc::kTbcNtscBlack + 300,
+                                                    orc::kTbcNtscWhite + 300);
+  EXPECT_FALSE(orc::is_ntsc_j_black_level(levels));
+}
+
+TEST(TbcLevelDerivationTest, Pal_BlackIsBlanking) {
+  const auto levels = orc::derive_tbc_domain_levels(
+      orc::VideoSystem::PAL, orc::kTbcPalBlanking, orc::kTbcPalWhite);
+  EXPECT_EQ(levels.blanking_16b, orc::kTbcPalBlanking);
+}
+
+TEST(TbcLevelDerivationTest, PalM_AlwaysSubtractsSetup) {
+  // PAL_M has no NTSC-J variant; the 7.5 IRE setup is always subtracted.
+  const auto levels = orc::derive_tbc_domain_levels(
+      orc::VideoSystem::PAL_M, orc::kTbcNtscBlack, orc::kTbcNtscWhite);
+  EXPECT_EQ(levels.blanking_16b, orc::kTbcNtscBlanking);
+}
+
+// ===========================================================================
+// NTSC-J black-level override and is_mapped propagation through the VFR
+// ===========================================================================
+
+namespace {
+
+orc::VideoFrameRepresentation* execute_and_get_vfr_raw(
+    orc::TBCSourceStage& stage, std::vector<orc::ArtifactPtr>& outputs) {
+  orc::ObservationContext ctx;
+  outputs =
+      stage.execute({}, {{"input_path", std::string("/tmp/test.tbc")}}, ctx);
+  if (outputs.size() != 1u) return nullptr;
+  return dynamic_cast<orc::VideoFrameRepresentation*>(outputs.front().get());
+}
+
+void set_default_source_expectations(
+    NiceMock<MockTBCSourceStageDeps>& deps, const orc::TBCVideoParams& tvp,
+    const std::vector<orc::TBCFieldMeta>& field_meta) {
+  ON_CALL(deps, validate_input_file(_, _)).WillByDefault(Return(true));
+  ON_CALL(deps, load_video_params(_, _))
+      .WillByDefault([tvp](const std::string&, std::string&) {
+        return std::optional<orc::TBCVideoParams>{tvp};
+      });
+  ON_CALL(deps, load_all_field_meta(_, _))
+      .WillByDefault([field_meta](const std::string&, std::string&) {
+        return field_meta;
+      });
+  ON_CALL(deps, has_audio_file(_)).WillByDefault(Return(false));
+  ON_CALL(deps, has_efm_file(_)).WillByDefault(Return(false));
+  ON_CALL(deps, has_ac3_file(_)).WillByDefault(Return(false));
+}
+
+}  // namespace
+
+TEST(TBCSourceStageTest, NtscJBlackLevel_PropagatesToParamsAndDescriptor) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+
+  auto tvp = make_ntsc_video_params(2);
+  // NTSC-J: picture black at the 0 IRE blanking level.
+  tvp.ntsc_j_black_level_16b = tvp.blanking_16b;
+  set_default_source_expectations(*deps, tvp, make_ntsc_field_meta(2, 0));
+
+  std::vector<orc::ArtifactPtr> outputs;
+  auto* vfr = execute_and_get_vfr_raw(stage, outputs);
+  ASSERT_NE(vfr, nullptr);
+
+  const auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_TRUE(p->has_nonstandard_values);
+  EXPECT_EQ(p->black_level, orc::kNtscBlanking);  // 0 IRE black
+
+  const auto desc = vfr->get_frame_descriptor(0);
+  ASSERT_TRUE(desc.has_value());
+  ASSERT_TRUE(desc->black_level_override.has_value());
+  EXPECT_EQ(*desc->black_level_override, orc::kNtscBlanking);
+}
+
+TEST(TBCSourceStageTest, StandardNtsc_NoBlackLevelOverride) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+
+  set_default_source_expectations(*deps, make_ntsc_video_params(2),
+                                  make_ntsc_field_meta(2, 0));
+
+  std::vector<orc::ArtifactPtr> outputs;
+  auto* vfr = execute_and_get_vfr_raw(stage, outputs);
+  ASSERT_NE(vfr, nullptr);
+
+  const auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_FALSE(p->has_nonstandard_values);
+  EXPECT_EQ(p->black_level, orc::kNtscBlack);
+
+  const auto desc = vfr->get_frame_descriptor(0);
+  ASSERT_TRUE(desc.has_value());
+  EXPECT_FALSE(desc->black_level_override.has_value());
+}
+
+TEST(TBCSourceStageTest, IsMapped_PropagatesFromMetadata) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+
+  auto tvp = make_pal_video_params(2);
+  tvp.is_mapped = true;
+  set_default_source_expectations(*deps, tvp, make_pal_field_meta(2));
+
+  std::vector<orc::ArtifactPtr> outputs;
+  auto* vfr = execute_and_get_vfr_raw(stage, outputs);
+  ASSERT_NE(vfr, nullptr);
+
+  const auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_TRUE(p->is_mapped);
 }
 
 }  // namespace orc_unit_test

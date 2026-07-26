@@ -18,6 +18,30 @@ Destination CSV file for the burst metrics. Leave empty to skip file output.
 ### write_csv (bool)
 Enable writing the results to CSV at trigger time. Default: `false`.
 
+## CSV output
+
+The CSV is written from the canonical per-frame dataset — **one row per frame**;
+the stage analyses every frame. Each row carries the frame's *true* frame
+number. An absent value is written as an **empty field** — never the string
+`nan`. The CSV always contains full-resolution per-frame data and is never
+affected by the display decimation used to draw the graph.
+
+Columns (units are carried in the header name; values are plain numbers):
+
+| Column | Unit | Meaning |
+|--------|------|---------|
+| `frame_number` | — | Frame number (1-based) |
+| `median_burst_10bit` | 10-bit sample units | Median colour-burst amplitude for the frame (empty if not measured) |
+
+Example:
+
+```csv
+frame_number,median_burst_10bit
+1,200
+2,205.5
+3,201
+```
+
 ## Tools
 
 ### Burst Level Analysis

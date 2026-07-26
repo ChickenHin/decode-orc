@@ -19,6 +19,8 @@
 #include <mutex>
 #include <stdexcept>
 
+#include "tbc_level_derivation.h"
+
 // Windows compatibility for strcasecmp
 #ifdef _WIN32
 #define strcasecmp _stricmp
@@ -259,14 +261,17 @@ TBCMetadataSqliteReader::read_tbc_domain_levels() {
   if (!is_open_) return std::nullopt;
 
   const char* sql_with_blanking =
-      "SELECT blanking_16b_ire, white_16b_ire FROM capture WHERE capture_id = "
-      "?";
+      "SELECT blanking_16b_ire, white_16b_ire, black_16b_ire FROM capture "
+      "WHERE capture_id = ?";
   sqlite3_stmt* stmt = nullptr;
   int rc = sqlite3_prepare_v2(impl_->db, sql_with_blanking, -1, &stmt, nullptr);
+  bool has_blanking_column = true;
 
   if (rc != SQLITE_OK) {
     const char* sql_without_blanking =
-        "SELECT black_16b_ire, white_16b_ire FROM capture WHERE capture_id = ?";
+        "SELECT black_16b_ire, white_16b_ire, system FROM capture WHERE "
+        "capture_id = ?";
+    has_blanking_column = false;
     rc =
         sqlite3_prepare_v2(impl_->db, sql_without_blanking, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) return std::nullopt;
@@ -276,8 +281,21 @@ TBCMetadataSqliteReader::read_tbc_domain_levels() {
 
   TbcDomainLevels levels;
   if (sqlite3_step(stmt) == SQLITE_ROW) {
-    levels.blanking_16b = sqlite3_column_int(stmt, 0);
-    levels.white_16b = sqlite3_column_int(stmt, 1);
+    if (has_blanking_column) {
+      levels.blanking_16b = sqlite3_column_int(stmt, 0);
+      levels.white_16b = sqlite3_column_int(stmt, 1);
+      if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) {
+        levels.black_16b = sqlite3_column_int(stmt, 2);
+      }
+    } else {
+      // Pre-blanking-column schema: only picture black and white are stored.
+      // Derive the 0 IRE blanking (setup subtraction / NTSC-J detection) the
+      // same way as the JSON reader — see tbc_level_derivation.h.
+      const VideoSystem system =
+          video_system_from_string(impl_->get_string(stmt, 2));
+      levels = derive_tbc_domain_levels(system, sqlite3_column_int(stmt, 0),
+                                        sqlite3_column_int(stmt, 1));
+    }
   } else {
     sqlite3_finalize(stmt);
     return std::nullopt;
@@ -363,13 +381,11 @@ TBCMetadataSqliteReader::read_all_field_metadata() {
 
   const char* sql =
       "SELECT field_id, is_first_field, sync_conf, median_burst_ire, "
-      "field_phase_id, "
       "audio_samples, pad, disk_loc, file_loc, decode_faults, efm_t_values, "
       "ac3_symbols "
       "FROM field_record WHERE capture_id = ? ORDER BY field_id";
   const char* sql_legacy =
       "SELECT field_id, is_first_field, sync_conf, median_burst_ire, "
-      "field_phase_id, "
       "audio_samples, pad, disk_loc, file_loc, decode_faults, efm_t_values "
       "FROM field_record WHERE capture_id = ? ORDER BY field_id";
 
@@ -390,15 +406,14 @@ TBCMetadataSqliteReader::read_all_field_metadata() {
     metadata.is_first_field = impl_->get_optional_bool(stmt, 1);
     metadata.sync_confidence = impl_->get_optional_int(stmt, 2);
     metadata.median_burst_ire = impl_->get_optional_double(stmt, 3);
-    metadata.field_phase_id = impl_->get_optional_int(stmt, 4);
-    metadata.audio_samples = impl_->get_optional_int(stmt, 5);
-    metadata.is_pad = impl_->get_optional_bool(stmt, 6);
-    metadata.disk_location = impl_->get_optional_double(stmt, 7);
-    metadata.file_location = impl_->get_optional_int64(stmt, 8);
-    metadata.decode_faults = impl_->get_optional_int(stmt, 9);
-    metadata.efm_t_values = impl_->get_optional_int(stmt, 10);
+    metadata.audio_samples = impl_->get_optional_int(stmt, 4);
+    metadata.is_pad = impl_->get_optional_bool(stmt, 5);
+    metadata.disk_location = impl_->get_optional_double(stmt, 6);
+    metadata.file_location = impl_->get_optional_int64(stmt, 7);
+    metadata.decode_faults = impl_->get_optional_int(stmt, 8);
+    metadata.efm_t_values = impl_->get_optional_int(stmt, 9);
     if (has_ac3_symbols) {
-      metadata.ac3rf_symbols = impl_->get_optional_int(stmt, 11);
+      metadata.ac3rf_symbols = impl_->get_optional_int(stmt, 10);
     }
     result[FieldID(metadata.seq_no)] = metadata;
   }
