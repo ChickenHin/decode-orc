@@ -13,7 +13,6 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
-#include <algorithm>
 #include <memory>
 #include <stdexcept>
 
@@ -86,18 +85,6 @@ BurstLevelAnalysisSinkStage::get_parameter_descriptors(
                            false,
                            std::nullopt}});
 
-  descriptors.push_back(ParameterDescriptor{
-      "frame_interval", "Frame Interval",
-      "Analyse every Nth frame (1 = every frame). Higher values trade "
-      "resolution for shorter analysis time on long recordings.",
-      ParameterType::INT32,
-      ParameterConstraints{ParameterValue{static_cast<int32_t>(1)},
-                           ParameterValue{static_cast<int32_t>(100000)},
-                           ParameterValue{static_cast<int32_t>(1)},
-                           {},
-                           false,
-                           std::nullopt}});
-
   return descriptors;
 }
 
@@ -137,12 +124,6 @@ BurstLevelAnalysisSinkStage::parse_config(
     cfg.write_csv = std::get<bool>(csv_it->second);
   }
 
-  auto interval_it = parameters.find("frame_interval");
-  if (interval_it != parameters.end() &&
-      std::holds_alternative<int32_t>(interval_it->second)) {
-    cfg.frame_interval = std::max(1, std::get<int32_t>(interval_it->second));
-  }
-
   return cfg;
 }
 
@@ -179,7 +160,6 @@ bool BurstLevelAnalysisSinkStage::trigger(
     BurstAnalysisComputeOptions compute_options;
     compute_options.output_path = cfg.output_path;
     compute_options.write_csv = cfg.write_csv;
-    compute_options.frame_interval = cfg.frame_interval;
 
     const BurstAnalysisComputeResult compute_result = deps->compute_and_analyze(
         vfr.get(), observation_context, compute_options);

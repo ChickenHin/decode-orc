@@ -109,7 +109,6 @@ class BurstLevelAnalysisSinkStage : public DAGStage,
   struct ParsedConfig {
     std::string output_path;
     bool write_csv = false;
-    int32_t frame_interval = 1;
   };
 
   ParsedConfig parse_config(

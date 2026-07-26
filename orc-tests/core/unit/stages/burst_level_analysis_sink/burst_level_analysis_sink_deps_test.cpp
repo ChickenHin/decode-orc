@@ -1,8 +1,8 @@
 /*
  * File:        burst_level_analysis_sink_deps_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for BurstLevelAnalysisSinkStageDeps per-frame capture
- *              and the frame_interval sampling parameter
+ * Purpose:     Unit tests for BurstLevelAnalysisSinkStageDeps per-frame
+ *              capture
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -67,18 +67,16 @@ std::unique_ptr<Harness> make_harness(orc::FrameIDRange range) {
   return h;
 }
 
-orc::BurstAnalysisComputeOptions options_with_interval(int32_t interval) {
-  orc::BurstAnalysisComputeOptions opts;
-  opts.frame_interval = interval;
-  return opts;
+orc::BurstAnalysisComputeOptions default_options() {
+  return orc::BurstAnalysisComputeOptions{};
 }
 
 }  // namespace
 
-TEST(BurstLevelAnalysisSinkDepsTest, IntervalOneAnalysesEveryFrame) {
+TEST(BurstLevelAnalysisSinkDepsTest, AnalysesEveryFrame) {
   auto h = make_harness(orc::FrameIDRange{0, 3});  // 4 frames
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   ASSERT_EQ(result.frame_stats.size(), 4u);
@@ -93,34 +91,22 @@ TEST(BurstLevelAnalysisSinkDepsTest, IntervalOneAnalysesEveryFrame) {
 }
 
 TEST(BurstLevelAnalysisSinkDepsTest,
-     IntervalGreaterThanOneSubsamplesTrueFrames) {
-  auto h = make_harness(orc::FrameIDRange{0, 5});  // 6 frames
+     NonZeroFirstFramePreservesTrueFrameNumbers) {
+  auto h = make_harness(orc::FrameIDRange{10, 12});  // frames at ids 10,11,12
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(3));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
-  // offsets 0,3 → frame numbers 1,4
-  ASSERT_EQ(result.frame_stats.size(), 2u);
-  EXPECT_EQ(result.frame_stats[0].frame_number, 1);
-  EXPECT_EQ(result.frame_stats[1].frame_number, 4);
-  EXPECT_DOUBLE_EQ(result.frame_stats[1].median_burst_10bit, 40.0);
-}
-
-TEST(BurstLevelAnalysisSinkDepsTest, IntervalLargerThanTotalAnalysesFirstOnly) {
-  auto h = make_harness(orc::FrameIDRange{0, 5});  // 6 frames
-  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(100));
-
-  ASSERT_TRUE(result.success);
-  ASSERT_EQ(result.frame_stats.size(), 1u);
-  EXPECT_EQ(result.frame_stats[0].frame_number, 1);
-  EXPECT_EQ(result.total_frames, 6);
+  ASSERT_EQ(result.frame_stats.size(), 3u);
+  EXPECT_EQ(result.frame_stats[0].frame_number, 11);
+  EXPECT_EQ(result.frame_stats[1].frame_number, 12);
+  EXPECT_EQ(result.frame_stats[2].frame_number, 13);
 }
 
 TEST(BurstLevelAnalysisSinkDepsTest, EmptyRangeYieldsNoRecords) {
   auto h = make_harness(orc::FrameIDRange{1, 0});  // count() == 0
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   EXPECT_TRUE(result.frame_stats.empty());
@@ -136,7 +122,7 @@ TEST(BurstLevelAnalysisSinkDepsTest,
   h->cancel.store(true);
 
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   EXPECT_FALSE(result.success);
   EXPECT_EQ(result.message, "Cancelled by user");

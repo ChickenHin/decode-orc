@@ -21,26 +21,19 @@ Enable writing the results to CSV at trigger time. Default: `false`.
 ### mode (choice: white, black, both)
 Selects which SNR metrics to measure. Default: `both`.
 
-### frame_interval (integer)
-Analyse every Nth frame. `1` (the default) analyses every frame; higher values
-sample fewer frames — `10` analyses frames 1, 11, 21, … Each analysed frame is
-recorded with its true frame number. Increasing the interval reduces analysis
-wall-clock time on long recordings in proportion to the interval, at the cost of
-graph and CSV resolution. Minimum `1`.
-
 ## CSV output
 
-The CSV is written from the canonical per-frame dataset — **one row per analysed
-frame** (frames `first, first + interval, …`). Each row carries the frame's
-*true* frame number. An absent metric is written as an **empty field** — never
-the string `nan`. The CSV always contains full-resolution per-frame data and is
-never affected by the display decimation used to draw the graph.
+The CSV is written from the canonical per-frame dataset — **one row per frame**;
+the stage analyses every frame. Each row carries the frame's *true* frame
+number. An absent metric is written as an **empty field** — never the string
+`nan`. The CSV always contains full-resolution per-frame data and is never
+affected by the display decimation used to draw the graph.
 
 Columns (units are carried in the header names; values are plain numbers):
 
 | Column | Unit | Meaning |
 |--------|------|---------|
-| `frame_number` | — | Analysed frame number (1-based) |
+| `frame_number` | — | Frame number (1-based) |
 | `white_snr_db` | dB | White SNR for the frame (empty if not measured) |
 | `black_psnr_db` | dB | Black PSNR for the frame (empty if not measured) |
 

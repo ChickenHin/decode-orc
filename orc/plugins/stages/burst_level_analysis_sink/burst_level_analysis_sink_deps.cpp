@@ -70,6 +70,9 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
     return {false, "Input representation is null", {}, 0};
   }
 
+  (void)options.output_path;
+  (void)options.write_csv;
+
   BurstAnalysisComputeResult result;
   result.success = true;
   result.message = "Burst level analysis complete";
@@ -96,23 +99,17 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
         "level observations skipped");
   }
 
-  // Canonical per-frame capture: analyse frames at first, first + N, … where
-  // N = frame_interval, and record each analysed frame's true frame number.
-  // Display bucketing is applied downstream by the shared decimation utility
+  // Canonical per-frame capture: analyse every frame in the range and record
+  // each frame's true frame number. Display bucketing is applied downstream by
+  // the shared decimation utility
   // (orc/core/analysis/analysis_series_decimator), not here.
-  const uint64_t interval = options.frame_interval > 0
-                                ? static_cast<uint64_t>(options.frame_interval)
-                                : 1U;
-  const uint64_t analysed_count = (total_frames + interval - 1U) / interval;
+  logger_.debug("BurstLevelAnalysisSinkDeps: analysing {} frames",
+                total_frames);
 
-  logger_.debug(
-      "BurstLevelAnalysisSinkDeps: {} frames, interval {} → {} analysed frames",
-      total_frames, interval, analysed_count);
-
-  result.frame_stats.reserve(static_cast<size_t>(analysed_count));
+  result.frame_stats.reserve(static_cast<size_t>(total_frames));
 
   uint64_t analysed = 0;
-  for (uint64_t offset = 0; offset < total_frames; offset += interval) {
+  for (uint64_t offset = 0; offset < total_frames; ++offset) {
     if (cancel_requested_ && cancel_requested_->load()) {
       logger_.warn(
           "BurstLevelAnalysisSinkDeps: Cancel requested at frame offset {}",
@@ -151,10 +148,10 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
 
     ++analysed;
     if (progress_callback_ &&
-        (analysed % 50 == 0 || analysed == analysed_count)) {
-      progress_callback_(analysed, analysed_count,
+        (analysed % 50 == 0 || analysed == total_frames)) {
+      progress_callback_(analysed, total_frames,
                          "Analysing frame " + std::to_string(analysed) + "/" +
-                             std::to_string(analysed_count));
+                             std::to_string(total_frames));
     }
   }
 

@@ -1,8 +1,7 @@
 /*
  * File:        snr_analysis_sink_deps_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for SNRAnalysisSinkStageDeps per-frame capture and
- *              the frame_interval sampling parameter
+ * Purpose:     Unit tests for SNRAnalysisSinkStageDeps per-frame capture
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -76,19 +75,18 @@ std::unique_ptr<Harness> make_harness(orc::FrameIDRange range) {
   return h;
 }
 
-orc::SNRAnalysisComputeOptions options_with_interval(int32_t interval) {
+orc::SNRAnalysisComputeOptions default_options() {
   orc::SNRAnalysisComputeOptions opts;
   opts.snr_mode = orc::SNRAnalysisMode::BOTH;
-  opts.frame_interval = interval;
   return opts;
 }
 
 }  // namespace
 
-TEST(SNRAnalysisSinkDepsTest, IntervalOneAnalysesEveryFrame) {
+TEST(SNRAnalysisSinkDepsTest, AnalysesEveryFrame) {
   auto h = make_harness(orc::FrameIDRange{0, 4});  // 5 frames
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   ASSERT_EQ(result.frame_stats.size(), 5u);
@@ -104,36 +102,10 @@ TEST(SNRAnalysisSinkDepsTest, IntervalOneAnalysesEveryFrame) {
   }
 }
 
-TEST(SNRAnalysisSinkDepsTest, IntervalGreaterThanOneSubsamplesTrueFrames) {
-  auto h = make_harness(orc::FrameIDRange{0, 4});  // 5 frames
-  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(2));
-
-  ASSERT_TRUE(result.success);
-  // offsets 0,2,4 → frame numbers 1,3,5
-  ASSERT_EQ(result.frame_stats.size(), 3u);
-  EXPECT_EQ(result.total_frames, 5);
-  EXPECT_EQ(result.frame_stats[0].frame_number, 1);
-  EXPECT_EQ(result.frame_stats[1].frame_number, 3);
-  EXPECT_EQ(result.frame_stats[2].frame_number, 5);
-  EXPECT_DOUBLE_EQ(result.frame_stats[1].white_snr, 3.0);
-}
-
-TEST(SNRAnalysisSinkDepsTest, IntervalLargerThanTotalAnalysesFirstFrameOnly) {
-  auto h = make_harness(orc::FrameIDRange{0, 4});  // 5 frames
-  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(10));
-
-  ASSERT_TRUE(result.success);
-  ASSERT_EQ(result.frame_stats.size(), 1u);
-  EXPECT_EQ(result.frame_stats[0].frame_number, 1);
-  EXPECT_EQ(result.total_frames, 5);
-}
-
 TEST(SNRAnalysisSinkDepsTest, NonZeroFirstFramePreservesTrueFrameNumbers) {
   auto h = make_harness(orc::FrameIDRange{10, 12});  // frames at ids 10,11,12
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   ASSERT_EQ(result.frame_stats.size(), 3u);
@@ -145,7 +117,7 @@ TEST(SNRAnalysisSinkDepsTest, NonZeroFirstFramePreservesTrueFrameNumbers) {
 TEST(SNRAnalysisSinkDepsTest, EmptyRangeYieldsNoRecords) {
   auto h = make_harness(orc::FrameIDRange{1, 0});  // count() == 0
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   EXPECT_TRUE(result.frame_stats.empty());
@@ -160,7 +132,7 @@ TEST(SNRAnalysisSinkDepsTest, CancelledRunReportsFailureAndWritesNothing) {
   h->cancel.store(true);
 
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   EXPECT_FALSE(result.success);
   EXPECT_EQ(result.message, "Cancelled by user");
@@ -288,7 +260,7 @@ TEST(SNRAnalysisSinkDepsReuseTest, FullyCoveredContextRunsZeroObserverFrames) {
   EXPECT_CALL(*h->black_handle, process_frame(_, _, _)).Times(0);
 
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   ASSERT_EQ(result.frame_stats.size(), 5u);
@@ -314,7 +286,7 @@ TEST(SNRAnalysisSinkDepsReuseTest, PartialCoverageObservesOnlyMissingFrames) {
   EXPECT_CALL(*h->black_handle, process_frame(_, _, _)).Times(2);
 
   const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
-                                                   options_with_interval(1));
+                                                   default_options());
 
   ASSERT_TRUE(result.success);
   EXPECT_EQ(result.frame_stats.size(), 5u);
