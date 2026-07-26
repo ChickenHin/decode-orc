@@ -1346,6 +1346,13 @@ bool ProjectPresenter::triggerNode(orc::NodeID node_id,
 
   if (success) {
     is_modified_ = true;
+  } else if (!status.empty()) {
+    // `status` carries the stage's own failure reason (from
+    // TriggerableStage::get_trigger_status()); without logging it here the
+    // caller only ever sees a generic "failed to trigger" message with no
+    // indication of *why* (e.g. a missing input file, an invalid parameter
+    // value reported by a third-party plugin, etc.).
+    ORC_LOG_ERROR("Trigger failed for node {}: {}", node_id, status);
   }
 
   return success;

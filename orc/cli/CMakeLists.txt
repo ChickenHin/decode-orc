@@ -3,7 +3,9 @@
 add_executable(orc-cli 
     orc_cli.cpp
     command_process.cpp
+    command_filter.cpp
     command_plugins.cpp
+    stage_category.cpp
 )
 
 # Section: Architecture enforcement (MVP)
@@ -200,5 +202,83 @@ if(BUILD_UNIT_TESTS)
     set_tests_properties(CLI.ProcessNoSinksFails PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
+    )
+
+    # --- Filtergraph mode -----------------------------------------------------
+
+    add_test(
+        NAME CLI.HelpShowsFilterCommand
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsFilterCommand PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--filter"
+    )
+
+    add_test(
+        NAME CLI.FilterUnknownStageFails
+        COMMAND $<TARGET_FILE:orc-cli>
+                --filter "definitely_not_a_stage, video_sink"
+    )
+    set_tests_properties(CLI.FilterUnknownStageFails PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.FilterMalformedGraphFails
+        COMMAND $<TARGET_FILE:orc-cli> --filter "src=badparam, sink"
+    )
+    set_tests_properties(CLI.FilterMalformedGraphFails PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.FilterRejectsProjectFileCombination
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --filter "src, sink"
+    )
+    set_tests_properties(CLI.FilterRejectsProjectFileCombination PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.TriadRejectsCombinationWithFilter
+        COMMAND $<TARGET_FILE:orc-cli> --input "src" --filter "src, sink"
+    )
+    set_tests_properties(CLI.TriadRejectsCombinationWithFilter PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.TriadRejectsSinkStageInInput
+        COMMAND $<TARGET_FILE:orc-cli> --input "video_sink" --output "video_sink"
+    )
+    set_tests_properties(CLI.TriadRejectsSinkStageInInput PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    # Pure unit test for the filtergraph parser (no orc-core dependency).
+    find_package(GTest REQUIRED)
+    add_executable(orc-cli-filtergraph-parser-test
+        filtergraph_parser_test.cpp
+        ${CMAKE_SOURCE_DIR}/orc/presenters/src/filtergraph_parser.cpp
+    )
+    target_include_directories(orc-cli-filtergraph-parser-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/orc/presenters/include
+    )
+    target_link_libraries(orc-cli-filtergraph-parser-test PRIVATE
+        GTest::gtest_main
+    )
+    add_test(
+        NAME CLI.FiltergraphParserUnit
+        COMMAND $<TARGET_FILE:orc-cli-filtergraph-parser-test>
+    )
+    set_tests_properties(CLI.FiltergraphParserUnit PROPERTIES
+        LABELS "unit;cli"
     )
 endif()
