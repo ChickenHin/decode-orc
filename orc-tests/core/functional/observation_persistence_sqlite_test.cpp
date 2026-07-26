@@ -91,6 +91,75 @@ TEST_F(SqliteSidecarTest, RoundTrip_PreservesAllVariants) {
   EXPECT_EQ(loaded, all_variants_record());
 }
 
+TEST_F(SqliteSidecarTest, LoadOne_ReadsBackSingleRecordByExactKey) {
+  const auto k = key("fpA", 4, "white_snr", "1.0.0");
+  SqliteObservationPersistence db(db_path_);
+  db.save({PersistedObservation{k, all_variants_record()},
+           PersistedObservation{key("fpA", 6, "white_snr", "1.0.0"),
+                                ObservationRecord{}}});
+
+  // Exact-key point read returns just that record.
+  const auto loaded = db.load_one(k);
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_EQ(*loaded, all_variants_record());
+
+  // Present-but-empty stays distinguishable from never-persisted.
+  const auto empty = db.load_one(key("fpA", 6, "white_snr", "1.0.0"));
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_TRUE(empty->empty());
+  EXPECT_FALSE(db.load_one(key("fpA", 8, "white_snr", "1.0.0")).has_value());
+}
+
+TEST_F(SqliteSidecarTest, MergeFrom_AdoptsRowsTheTargetLacks) {
+  const std::string cache_path = (dir_ / "quick-cache.sqlite").string();
+  const auto shared = key("fpA", 0, "white_snr", "1.0.0");
+  const auto only_in_cache = key("fpA", 2, "white_snr", "1.0.0");
+
+  ObservationRecord cache_shared;
+  cache_shared["ns"]["v"] = static_cast<int32_t>(999);  // must NOT win
+  {
+    SqliteObservationPersistence cache(cache_path);
+    cache.save({PersistedObservation{shared, cache_shared},
+                PersistedObservation{only_in_cache, all_variants_record()}});
+  }
+
+  SqliteObservationPersistence db(db_path_);
+  db.save({PersistedObservation{shared, all_variants_record()}});
+
+  // Merge adopts the missing record without overwriting the existing one.
+  EXPECT_GT(db.merge_from(cache_path), 0u);
+  const auto adopted = db.load_one(only_in_cache);
+  ASSERT_TRUE(adopted.has_value());
+  EXPECT_EQ(*adopted, all_variants_record());
+  const auto kept = db.load_one(shared);
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(*kept, all_variants_record());  // target's row untouched
+
+  // A repeated merge has nothing new to contribute (count guard).
+  EXPECT_EQ(db.merge_from(cache_path), 0u);
+}
+
+TEST_F(SqliteSidecarTest, Meta_RoundTripsAndSurvivesReopen) {
+  {
+    SqliteObservationPersistence db(db_path_);
+    EXPECT_EQ(db.get_meta("observer_versions"), "");  // unset reads empty
+    db.set_meta("observer_versions", "white_snr:1.0.0;");
+    db.set_meta("observer_versions", "white_snr:2.0.0;");  // overwrite wins
+  }
+  SqliteObservationPersistence db(db_path_);
+  EXPECT_EQ(db.get_meta("observer_versions"), "white_snr:2.0.0;");
+  // The "app:" prefix keeps stamps clear of the reserved schema version key.
+  EXPECT_EQ(db.get_meta("version"), "");
+}
+
+TEST_F(SqliteSidecarTest, MergeFrom_MissingSourceIsANoop) {
+  SqliteObservationPersistence db(db_path_);
+  db.save(
+      {PersistedObservation{key("fpA", 0, "id", "v"), all_variants_record()}});
+  EXPECT_EQ(db.merge_from((dir_ / "does-not-exist.sqlite").string()), 0u);
+  EXPECT_EQ(db.merge_from(""), 0u);
+}
+
 TEST_F(SqliteSidecarTest, EmptyRecord_RoundTripsAsPresentButEmpty) {
   const auto k = key("fpE", 0, "silent", "1.0.0");
   SqliteObservationPersistence db(db_path_);
@@ -168,13 +237,25 @@ TEST_F(SqliteSidecarTest, WarmStart_ChangedFingerprint_LoadsNothing) {
     store.put(key("old_fp", 0, "white_snr", "1.0.0"), all_variants_record());
     store.flush();
   }
-  // Reopen after a source/pipeline change: the node fingerprint is different,
-  // so nothing matches and the affected node starts cold.
+  // Reopen after a source/pipeline change: the new fingerprint has no records,
+  // so the affected node starts cold — recomputation happens under the new
+  // provenance.
   ObservationStore store;
   store.set_persistence(
       std::make_shared<SqliteObservationPersistence>(db_path_));
   store.warm_start({fp("new_fp")});
-  EXPECT_FALSE(store.has(key("old_fp", 0, "white_snr", "1.0.0")));
+  EXPECT_FALSE(store.has(key("new_fp", 0, "white_snr", "1.0.0")));
+
+  // The old fingerprint's persisted record stays visible via read-through
+  // (content-addressed keys keep that correct — e.g. an undo back to the old
+  // parameters reuses it). It disappears only when the sidecar GC drops
+  // fingerprints outside the retention set.
+  EXPECT_TRUE(store.has(key("old_fp", 0, "white_snr", "1.0.0")));
+  store.gc_persistence({fp("new_fp")});
+  ObservationStore reader;
+  reader.set_persistence(
+      std::make_shared<SqliteObservationPersistence>(db_path_));
+  EXPECT_FALSE(reader.has(key("old_fp", 0, "white_snr", "1.0.0")));
 }
 
 // ---------------------------------------------------------------------------

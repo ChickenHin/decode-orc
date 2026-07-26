@@ -127,6 +127,74 @@ TEST(RunFrameObserverPass_DifferentFrame_IsSeparateEntry, PerFrame) {
   EXPECT_EQ(spy.total_runs, 2);  // frame 0 and frame 1 are distinct keys
 }
 
+// ---------------------------------------------------------------------------
+// Pass-through aliasing — a frame's content known under several provenances
+// (own node first, then byte-identical upstream nodes) shares one observation
+// ---------------------------------------------------------------------------
+
+TEST(RunFrameObserverPassAliased, HitUnderAliasRunsNothingAndBackfills) {
+  SpyObservationService spy;
+  spy.observers = two_observers();
+  ObservationStore store;
+  FakeVideoFrameRepresentation vfr;
+  const NodeFingerprint source_fp{"source"};
+  const NodeFingerprint doc_fp{"dropout-corrected"};
+  const FrameID frame = 5;
+
+  // Observe once keyed to the source node only.
+  ObservationContext at_source;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame, &source_fp, &store,
+                          at_source);
+  EXPECT_EQ(spy.total_runs, 2);
+
+  // Observing the downstream node with the source listed as a pass-through
+  // alias reuses the stored records without running any observer…
+  ObservationContext at_doc;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame,
+                          std::vector<NodeFingerprint>{doc_fp, source_fp},
+                          &store, at_doc);
+  EXPECT_EQ(spy.total_runs, 2);
+  expect_contexts_equal(at_source, at_doc, frame);
+
+  // …and back-fills the records under the downstream fingerprint, so a later
+  // lookup keyed to it alone (e.g. requestObservations, a sink preload) hits
+  // directly.
+  ObservationContext direct;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame, &doc_fp, &store,
+                          direct);
+  EXPECT_EQ(spy.total_runs, 2);
+  expect_contexts_equal(at_source, direct, frame);
+}
+
+TEST(RunFrameObserverPassAliased, MissStoresUnderEveryAlias) {
+  SpyObservationService spy;
+  spy.observers = two_observers();
+  ObservationStore store;
+  FakeVideoFrameRepresentation vfr;
+  const NodeFingerprint source_fp{"source"};
+  const NodeFingerprint doc_fp{"dropout-corrected"};
+  const FrameID frame = 2;
+
+  // Cold store: the aliased pass runs each observer once and stores the
+  // records under both fingerprints.
+  ObservationContext aliased;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame,
+                          std::vector<NodeFingerprint>{doc_fp, source_fp},
+                          &store, aliased);
+  EXPECT_EQ(spy.total_runs, 2);
+
+  // Both single-fingerprint lookups now hit without any further runs.
+  ObservationContext at_doc;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame, &doc_fp, &store,
+                          at_doc);
+  ObservationContext at_source;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame, &source_fp, &store,
+                          at_source);
+  EXPECT_EQ(spy.total_runs, 2);
+  expect_contexts_equal(aliased, at_doc, frame);
+  expect_contexts_equal(aliased, at_source, frame);
+}
+
 TEST(RunFrameObserverPass_ObserverVersionBump_Invalidates, VersionKeyed) {
   SpyObservationService spy;
   ObservationStore store;

@@ -18,15 +18,20 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -46,6 +51,7 @@
 #include "../core/include/vbi_decoder.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
+#include "project_presenter.h"
 #include "vbi_presenter.h"
 
 namespace orc::presenters {
@@ -187,13 +193,88 @@ std::vector<orc::presenters::BurstLevelDisplayPoint> decimate_burst_series(
 // Observer::process_frame() and DAGFrameRenderer's store keying.
 constexpr orc::FieldID::value_type kFieldsPerFrame = 2;
 
-// Filename of the durable observation sidecar, stored in the project root
-// directory beside the project file.
-constexpr char kObservationSidecarName[] = "observations.orc-obs.sqlite";
+// User config directory (same resolution rules as the plugin registry:
+// XDG_CONFIG_HOME / ~/.config on POSIX, APPDATA on Windows, cwd fallback).
+std::filesystem::path resolveUserConfigDir() {
+  const auto env_or_empty = [](const char* name) {
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+  };
+#if defined(_WIN32)
+  const std::string appdata = env_or_empty("APPDATA");
+  if (!appdata.empty()) {
+    return std::filesystem::path(appdata) / "decode-orc";
+  }
+  const std::string userprofile = env_or_empty("USERPROFILE");
+  if (!userprofile.empty()) {
+    return std::filesystem::path(userprofile) / "AppData" / "Roaming" /
+           "decode-orc";
+  }
+#else
+  const std::string xdg_config_home = env_or_empty("XDG_CONFIG_HOME");
+  if (!xdg_config_home.empty()) {
+    return std::filesystem::path(xdg_config_home) / "decode-orc";
+  }
+  const std::string home = env_or_empty("HOME");
+  if (!home.empty()) {
+    return std::filesystem::path(home) / ".config" / "decode-orc";
+  }
+#endif
+  return std::filesystem::current_path() / ".decode-orc";
+}
+
+// Observation sidecar path for a DAG: a per-source database in the user
+// config dir, named by a stable digest of the DAG's SOURCE nodes (stage,
+// version, parameters — which include the source file path). Used for every
+// project, saved or not: content-addressed records make one cache per source
+// the natural unit, shared across quick sessions and saved projects. File
+// identity (mtime/size) is deliberately excluded so the file name survives
+// touches; staleness is already handled by the fingerprint record keys
+// inside. The legacy "quick-" filename prefix is kept so caches created
+// before saved projects switched to this path remain warm. A hash collision
+// merely shares a database file — content-addressed keys keep that correct.
+// Returns "" when the DAG has no sources or the directory cannot be created
+// (the store then runs in-memory only).
+std::string perSourceSidecarPath(const orc::DAG& dag) {
+  std::string serial;
+  for (const auto& node : dag.nodes()) {
+    if (!node.stage) {
+      continue;
+    }
+    const auto info = node.stage->get_node_type_info();
+    if (info.type != orc::NodeType::SOURCE) {
+      continue;
+    }
+    serial +=
+        orc::serialize_node_provenance(info.stage_name, node.stage->version(),
+                                       /*input_tokens=*/{}, node.parameters,
+                                       /*source_identity=*/"");
+  }
+  if (serial.empty()) {
+    return {};
+  }
+  char digest[17];
+  std::snprintf(digest, sizeof(digest), "%016zx",
+                std::hash<std::string>{}(serial));
+
+  try {
+    const std::filesystem::path dir =
+        resolveUserConfigDir() / "observation-cache";
+    std::filesystem::create_directories(dir);
+    return (dir / (std::string("quick-") + digest + ".orc-obs.sqlite"))
+        .string();
+  } catch (const std::exception& e) {
+    ORC_LOG_WARN(
+        "RenderPresenter: cannot create observation cache directory ({}); "
+        "continuing in-memory only",
+        e.what());
+    return {};
+  }
+}
 
 // True iff the store already holds every observer's record for both fields of
 // @p frame at @p fingerprint (an empty record still counts as present).
-bool store_has_frame(const orc::ObservationStore& store,
+bool store_has_frame(orc::ObservationStore& store,
                      const std::vector<orc::ObserverInfo>& observers,
                      const orc::NodeFingerprint& fingerprint,
                      orc::FrameID frame) {
@@ -212,7 +293,7 @@ bool store_has_frame(const orc::ObservationStore& store,
 }
 
 // Load every observer's stored record for both fields of @p frame into @p out.
-void load_frame_from_store(const orc::ObservationStore& store,
+void load_frame_from_store(orc::ObservationStore& store,
                            const std::vector<orc::ObserverInfo>& observers,
                            const orc::NodeFingerprint& fingerprint,
                            orc::FrameID frame, orc::ObservationContext& out) {
@@ -265,7 +346,13 @@ class RenderPresenter::Impl {
   // once alongside the store when the project has an on-disk location, so
   // observations survive application restarts. Absent for unsaved projects.
   std::shared_ptr<orc::IObservationPersistence> obs_persistence_;
-  bool warm_started_ = false;
+  bool sidecar_initialized_ = false;
+
+  // False for auxiliary presenters (e.g. the dropout editor's) that only
+  // render frames: they skip the background scheduler, sweeps, and prefetch
+  // entirely — constructing one must stay cheap enough for the GUI thread,
+  // and one background pipeline per process is enough.
+  bool background_observation_enabled_ = true;
 
   // Phase 3: previous fingerprint map + undo retention window drive change
   // propagation (invalidation notifications) and store garbage collection.
@@ -319,6 +406,17 @@ class RenderPresenter::Impl {
   std::shared_ptr<const orc::NodeFingerprintMap> fingerprints_shared_;
   std::atomic<uint64_t> next_obs_request_id_{1};
 
+  // Current preview focus that drives background prefetch + whole-node sweeps.
+  // Touched only on the coordinator worker thread (renderPreview /
+  // rebuildRenderersFromDAG run there), so no extra locking is needed.
+  NodeID sched_preview_node_{0};
+  orc::FrameID sched_preview_frame_ = 0;
+  bool sched_have_preview_ = false;
+  // Nodes already swept under their current fingerprint, so a sweep is enqueued
+  // once per provenance rather than on every preview step. Cleared/updated when
+  // a node's fingerprint changes.
+  std::unordered_map<NodeID, orc::NodeFingerprint> sched_swept_;
+
   // A frame observation awaited by an async requestObservations() caller.
   struct PendingObservationRequest {
     uint64_t request_id = 0;
@@ -353,6 +451,93 @@ class RenderPresenter::Impl {
     const auto it = fingerprints_shared_->find(node);
     return it != fingerprints_shared_->end() ? it->second
                                              : orc::NodeFingerprint{};
+  }
+
+  // Number of frames (a frame is a field pair) available at a node's output, or
+  // 0 if unknown. The scheduler works in FrameID, so this bounds sweep/prefetch
+  // ranges. Uses the field count (the most fundamental output) halved, falling
+  // back to the interlaced-frame count for nodes without a plain field output.
+  std::uint64_t frameCountForNode(NodeID node) {
+    if (!preview_renderer_) {
+      return 0;
+    }
+    const std::uint64_t fields = preview_renderer_->get_output_count(
+        node, orc::PreviewOutputType::Frame_Field1);
+    if (fields >= 2) {
+      return fields / 2;
+    }
+    return preview_renderer_->get_output_count(
+        node, orc::PreviewOutputType::Frame_Field1_First);
+  }
+
+  // Assemble a scheduling context snapshot from the current fingerprint map.
+  orc::ObservationSchedulingContext makeSchedContext(
+      std::vector<NodeID> nodes_of_interest, orc::FrameID preview_pos,
+      std::uint64_t total_frames, std::vector<NodeID> changed_nodes) {
+    orc::ObservationSchedulingContext ctx;
+    ctx.fingerprints = fingerprints_shared_;
+    ctx.preview_position = preview_pos;
+    ctx.total_frames = total_frames;
+    ctx.nodes_of_interest = std::move(nodes_of_interest);
+    ctx.changed_nodes = std::move(changed_nodes);
+    return ctx;
+  }
+
+  // Prefetch a window of observations around the current preview position.
+  // Runs on the coordinator worker thread on every preview render. Deliberately
+  // does NOT sweep the whole node: merely clicking through stages must stay
+  // cheap. Because a node's provenance fingerprint is distinct per node (even
+  // when two nodes' output content is identical), a per-stage whole-node sweep
+  // would re-observe every frame for every stage visited. Whole-node sweeps are
+  // reserved for nodes an observer dialog is actually reading
+  // (sweepNodeForObservation, driven by requestObservations). No-op until a
+  // scheduler exists (i.e. a DAG has been built).
+  void scheduleObservationsForPreview(NodeID node_id, orc::FrameID frame_id) {
+    if (!scheduler_) {
+      return;
+    }
+    if (sched_have_preview_ && node_id == sched_preview_node_ &&
+        frame_id == sched_preview_frame_) {
+      return;  // no movement: nothing new to prefetch
+    }
+    const std::uint64_t total = frameCountForNode(node_id);
+    if (total == 0) {
+      return;
+    }
+    sched_preview_node_ = node_id;
+    sched_preview_frame_ = frame_id;
+    sched_have_preview_ = true;
+
+    // Prefetch a window around the new preview position (medium priority).
+    scheduler_->on_preview_moved(makeSchedContext({node_id}, frame_id, total,
+                                                  /*changed_nodes=*/{}));
+  }
+
+  // Enqueue a whole-node background sweep so an observer dialog reading this
+  // node has every frame observed ahead of scrubbing. Called from
+  // requestObservations() — i.e. only when a dialog actually wants the node —
+  // and only once per node provenance, so re-requests and preview navigation
+  // within the node do not re-sweep. Runs on the coordinator worker thread.
+  void sweepNodeForObservation(NodeID node_id) {
+    if (!scheduler_) {
+      return;
+    }
+    const orc::NodeFingerprint fp = fingerprintOf(node_id);
+    if (fp.value.empty()) {
+      return;
+    }
+    const auto it = sched_swept_.find(node_id);
+    if (it != sched_swept_.end() && it->second == fp) {
+      return;  // already swept under this provenance
+    }
+    const std::uint64_t total = frameCountForNode(node_id);
+    if (total == 0) {
+      return;
+    }
+    sched_swept_[node_id] = fp;
+    scheduler_->on_project_loaded(makeSchedContext({node_id}, /*preview_pos=*/0,
+                                                   total,
+                                                   /*changed_nodes=*/{}));
   }
 
   // Deliver every pending request the store can now satisfy, and fail those
@@ -473,6 +658,8 @@ class RenderPresenter::Impl {
         scheduler_->stop();
         scheduler_.reset();
       }
+      sched_have_preview_ = false;
+      sched_swept_.clear();
       failAllPendingRequests();
       fingerprints_shared_.reset();
       preview_renderer_.reset();
@@ -499,19 +686,31 @@ class RenderPresenter::Impl {
     if (!obs_store_) {
       obs_store_ = std::make_shared<orc::ObservationStore>();
 
-      // Attach a durable SQLite sidecar beside the project so observations
-      // survive application restarts. A saved project has an on-disk root;
-      // unsaved projects run in-memory only. A sidecar problem must never fail
-      // project open, so recover by logging and continuing without it.
-      const std::string& project_root = project_->get_project_root();
-      if (!project_root.empty()) {
+      // Attach a durable SQLite sidecar so observations survive eviction and
+      // application restarts. EVERY project — saved or quick — uses the
+      // per-source cache sidecar in the user config dir, keyed by a digest of
+      // the DAG's source stages: records are content-addressed, so the same
+      // source warms up instantly across quick sessions, saved projects, and
+      // save-as copies alike. (A sidecar beside the project file was tried and
+      // abandoned: projects saved into the same directory shared one database,
+      // and each open's GC deleted the other projects' records.) A sidecar
+      // problem must never fail project open, so recover by logging and
+      // continuing in-memory only.
+      // Auxiliary presenters (background observation disabled) skip the
+      // sidecar entirely: they exist to render a few frames or read
+      // parameters, and attaching a potentially multi-GB database makes their
+      // construction far too heavy for the GUI thread that typically builds
+      // them.
+      std::string db_path;
+      if (background_observation_enabled_) {
+        db_path = perSourceSidecarPath(*dag);
+      }
+      if (!db_path.empty()) {
         try {
-          const std::string db_path =
-              (std::filesystem::path(project_root) / kObservationSidecarName)
-                  .string();
           obs_persistence_ =
               std::make_shared<orc::SqliteObservationPersistence>(db_path);
           obs_store_->set_persistence(obs_persistence_);
+          ORC_LOG_INFO("RenderPresenter: observation sidecar at {}", db_path);
         } catch (const std::exception& e) {
           ORC_LOG_WARN(
               "RenderPresenter: observation sidecar unavailable ({}); "
@@ -526,6 +725,9 @@ class RenderPresenter::Impl {
     // store garbage collection. The first build has no predecessor: seed the
     // state without emitting a spurious full-graph invalidation.
     const orc::NodeFingerprintMap& new_fingerprints = *fingerprints;
+    // Nodes whose provenance changed on this build; drives GUI invalidation
+    // (below) and background re-observation (after the scheduler is repointed).
+    std::vector<NodeID> changed_nodes;
     if (have_prev_fingerprints_) {
       const orc::ObservationInvalidation invalidation =
           orc::diff_node_fingerprints(prev_fingerprints_, new_fingerprints);
@@ -533,27 +735,31 @@ class RenderPresenter::Impl {
       if (!invalidation.changed_nodes.empty()) {
         notifyInvalidation(invalidation.changed_nodes);
       }
+      changed_nodes = invalidation.changed_nodes;
     }
     prev_fingerprints_ = new_fingerprints;
     have_prev_fingerprints_ = true;
 
     // On the first build with a durable sidecar, purge records for observers
     // whose version changed (their old records share a still-reachable
-    // fingerprint, so fingerprint GC alone would not remove them) and warm the
-    // in-memory store from persistence so the GUI starts populated. Fingerprint
-    // mismatch (edited pipeline or changed source file) naturally loads nothing
-    // for affected nodes.
-    if (obs_persistence_ && !warm_started_) {
+    // fingerprint, so fingerprint GC alone would not remove them). Stamped:
+    // when the sidecar was last purged with the identical observer-version
+    // set — the overwhelmingly common case — the nine whole-table scans are
+    // skipped entirely. No bulk warm-start either: the store's read-through
+    // reloads any persisted record on demand, so memory fills organically
+    // with what is actually used.
+    if (obs_persistence_ && !sidecar_initialized_) {
+      std::string versions;
       for (const auto& observer : obs_service_.available_observers()) {
-        obs_store_->purge_observer_version(observer.id, observer.version);
+        versions += observer.id + ":" + observer.version + ";";
       }
-      std::unordered_set<orc::NodeFingerprint> reachable;
-      reachable.reserve(new_fingerprints.size());
-      for (const auto& [node_id, fp] : new_fingerprints) {
-        reachable.insert(fp);
+      if (obs_persistence_->get_meta("observer_versions") != versions) {
+        for (const auto& observer : obs_service_.available_observers()) {
+          obs_store_->purge_observer_version(observer.id, observer.version);
+        }
+        obs_persistence_->set_meta("observer_versions", versions);
       }
-      obs_store_->warm_start(reachable);
-      warm_started_ = true;
+      sidecar_initialized_ = true;
     }
 
     // Garbage-collect the store: retain everything reachable now, plus the
@@ -564,8 +770,37 @@ class RenderPresenter::Impl {
     const std::unordered_set<orc::NodeFingerprint> retain_set =
         retention_window_.retain_set(new_fingerprints);
     obs_store_->retain_only(retain_set, obs_store_->memory_budget_bytes());
+    // Sidecar GC scans the whole database, so it only runs when it can matter:
+    // within a session, when provenance actually changed (a topology-only
+    // rebuild cannot make any fingerprint unreachable); across sessions, when
+    // the current fingerprint set differs from the stamped set the last GC
+    // retained — an unchanged reopen skips the scan entirely. Skipping GC is
+    // always safe: unreachable records waste space but can never serve wrong
+    // data (content-addressed keys).
     if (obs_persistence_) {
-      obs_store_->gc_persistence(retain_set);
+      std::string fp_stamp;
+      {
+        std::vector<std::string> values;
+        values.reserve(new_fingerprints.size());
+        for (const auto& [node_id, fp] : new_fingerprints) {
+          values.push_back(fp.value);
+        }
+        std::sort(values.begin(), values.end());
+        std::size_t h = 0;
+        for (const auto& v : values) {
+          h ^= std::hash<std::string>{}(v) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+               (h >> 2);
+        }
+        char buf[17];
+        std::snprintf(buf, sizeof(buf), "%016zx", h);
+        fp_stamp.assign(buf);
+      }
+      const bool stamp_stale =
+          obs_persistence_->get_meta("gc_fingerprints") != fp_stamp;
+      if (stamp_stale || !changed_nodes.empty()) {
+        obs_store_->gc_persistence(retain_set);
+        obs_persistence_->set_meta("gc_fingerprints", fp_stamp);
+      }
     }
 
     // Rebuild renderers
@@ -606,11 +841,27 @@ class RenderPresenter::Impl {
       obs_policy_ = std::make_shared<orc::DefaultObservationSchedulingPolicy>(
           std::move(observer_ids), std::move(stateful_ids));
     }
-    if (!scheduler_) {
-      auto runner = std::make_unique<orc::RendererObservationTaskRunner>(
-          dag, fingerprints, obs_store_);
+    if (!scheduler_ && background_observation_enabled_) {
+      // Build a pool of independent runners (each its own renderer/handles) so
+      // frame observation runs in parallel. They all write into the shared,
+      // thread-safe ObservationStore. Pool size comes from the CLI-configurable
+      // resolver (default: half the cores). Auxiliary presenters (background
+      // observation disabled) never create a scheduler, which also disables
+      // every downstream sweep/prefetch/re-observe path — they all no-op
+      // without one.
+      const unsigned worker_count =
+          orc::presenters::resolveBackgroundObservationWorkerCount();
+      orc::ObservationScheduler::TaskRunnerFactory runner_factory =
+          [dag, fingerprints, store = obs_store_]() {
+            return std::make_unique<orc::RendererObservationTaskRunner>(
+                dag, fingerprints, store);
+          };
       scheduler_ = std::make_unique<orc::ObservationScheduler>(
-          std::move(runner), fingerprints, obs_policy_);
+          std::move(runner_factory), worker_count, fingerprints, obs_policy_);
+      ORC_LOG_INFO(
+          "RenderPresenter: background observation scheduler using {} worker "
+          "thread(s)",
+          worker_count);
       scheduler_->set_completion_callback(
           [this](const orc::ObservationCompletion& completion) {
             resolvePendingRequests(completion);
@@ -620,12 +871,65 @@ class RenderPresenter::Impl {
             notifyObservationProgress(workload);
           });
       scheduler_->start();
-    } else {
+    } else if (scheduler_) {
       // Adopt the new DAG/fingerprints; stale queued work is purged. Requests
       // awaiting a frame whose provenance just changed can never be satisfied
       // by their captured fingerprint, so fail them — the caller re-requests.
       scheduler_->on_dag_changed(dag, fingerprints);
       failStalePendingRequests();
+    }
+
+    // Re-observe changed nodes in the background against the new provenance —
+    // but only nodes that were already of interest (an observer dialog had
+    // swept them). Other changed nodes are recomputed on demand, so a parameter
+    // edit does not kick off whole-node sweeps for stages nobody is observing.
+    // Done after on_dag_changed() has adopted the new map and purged stale work
+    // so the freshly enqueued items are keyed to the fingerprints the scheduler
+    // now holds; their new fingerprints are recorded to keep a later request
+    // from redundantly re-sweeping them.
+    if (scheduler_ && !changed_nodes.empty()) {
+      std::vector<NodeID> reobserve;
+      for (const NodeID node : changed_nodes) {
+        if (sched_swept_.find(node) != sched_swept_.end()) {
+          reobserve.push_back(node);
+        }
+      }
+      if (!reobserve.empty()) {
+        std::uint64_t total = frameCountForNode(sched_preview_node_);
+        if (total == 0) {
+          for (const NodeID node : reobserve) {
+            total = frameCountForNode(node);
+            if (total != 0) {
+              break;
+            }
+          }
+        }
+        if (total != 0) {
+          for (const NodeID node : reobserve) {
+            sched_swept_[node] = fingerprintOf(node);
+          }
+          scheduler_->on_invalidation(makeSchedContext(
+              /*nodes_of_interest=*/{}, sched_preview_frame_, total,
+              reobserve));
+        }
+      }
+    }
+
+    // Pre-warm analysis-sink inputs: every observation an analysis sink will
+    // read on trigger is keyed to its input node's provenance, so sweep those
+    // nodes in the background (lowest priority, once per provenance) as soon as
+    // the DAG is built. By the time the user triggers, the store is warm and
+    // the sink runs zero observer frames. Newly added sinks are picked up here
+    // automatically because every project mutation rebuilds the DAG.
+    for (const auto& node : dag->nodes()) {
+      if (!node.stage || node.input_node_ids.empty()) {
+        continue;
+      }
+      if (node.stage->get_node_type_info().type !=
+          orc::NodeType::ANALYSIS_SINK) {
+        continue;
+      }
+      sweepNodeForObservation(node.input_node_ids[0]);
     }
   }
 
@@ -721,6 +1025,214 @@ class RenderPresenter::Impl {
       }
     }
   }
+
+  // Phase 5.3 (write-back): after a sink trigger computes observations, persist
+  // them into the provenance-keyed store so a later trigger, preview, or
+  // session reuses them instead of recomputing. @p input_node is the node whose
+  // content keys the records (the same key preloadStoredObservations reads).
+  // Only observers that actually produced data for a field are written (an
+  // absent namespace means the observer never ran — persisting an empty record
+  // would wrongly suppress its future computation), and records already present
+  // are left untouched so this adds no redundant persistence writes.
+  void persistTriggerObservations(NodeID input_node,
+                                  const orc::VideoFrameRepresentation* vfr,
+                                  const orc::ObservationContext& ctx) {
+    if (!obs_store_ || vfr == nullptr) {
+      return;
+    }
+    const orc::NodeFingerprint fingerprint = fingerprintOf(input_node);
+    if (fingerprint.value.empty()) {
+      return;
+    }
+    const orc::FrameIDRange range = vfr->frame_range();
+    if (range.empty()) {
+      return;
+    }
+
+    const auto persist_field = [&](orc::FieldID field) {
+      const auto all_obs = ctx.get_all_observations(field);
+      if (all_obs.empty()) {
+        return;
+      }
+      for (const auto& observer : observers_) {
+        const orc::ObservationRecordKey key{fingerprint, field, observer.id,
+                                            observer.version};
+        if (obs_store_->has(key)) {
+          continue;  // already stored (e.g. preloaded) — leave it be
+        }
+        // Collect just this observer's namespace(s) from the merged context.
+        orc::ObservationRecord record;
+        for (const auto& provided : observer.provided_observations) {
+          const auto ns_it = all_obs.find(provided.namespace_);
+          if (ns_it != all_obs.end()) {
+            record[provided.namespace_] = ns_it->second;
+          }
+        }
+        if (!record.empty()) {
+          obs_store_->put(key, std::move(record));
+        }
+      }
+    };
+
+    for (orc::FrameID frame = range.first;; ++frame) {
+      persist_field(orc::FieldID(frame * kFieldsPerFrame));
+      persist_field(orc::FieldID(frame * kFieldsPerFrame + 1));
+      if (frame == range.last) {
+        break;
+      }
+    }
+  }
+
+  // Fill the store with every observation a sink trigger will read, in
+  // parallel across a temporary pool of task runners, before the sink runs.
+  // The sink's serial loop then finds every frame pre-observed (via
+  // preloadStoredObservations) and computes nothing — turning a cold first
+  // trigger from a single-threaded pass into an N-way parallel one, and a
+  // warm trigger into a pure store read. Frames already stored (background
+  // sweep, previous trigger, pass-through alias) are skipped by the runner's
+  // store fast-path, so this never repeats completed work. Runs on the
+  // coordinator worker thread; progress is reported through @p callback and
+  // cancellation honours trigger_cancel_requested_.
+  //
+  // Returns false when cancelled mid-computation. Per-frame failures are
+  // logged and left for the sink itself to surface.
+  bool precomputeTriggerObservations(NodeID input_node,
+                                     const orc::VideoFrameRepresentation* vfr,
+                                     const ProgressCallback& callback) {
+    if (!obs_store_ || !fingerprints_shared_ || vfr == nullptr) {
+      return true;
+    }
+    const orc::NodeFingerprint fingerprint = fingerprintOf(input_node);
+    if (fingerprint.value.empty()) {
+      return true;
+    }
+    const orc::FrameIDRange range = vfr->frame_range();
+    if (range.empty()) {
+      return true;
+    }
+    auto dag = getConcreteDAG();
+    if (!dag) {
+      return true;
+    }
+
+    // Make the input node's records memory-resident in ONE indexed bulk read
+    // from the sidecar before scanning coverage. Without this, a cold store
+    // (fresh app start) turns the scan below into ~a million read-through
+    // point queries — many silent seconds before the sink reports anything.
+    if (callback) {
+      callback(0, 1, "Checking cached observations…");
+    }
+    obs_store_->warm_start({fingerprint});
+
+    // Frames the store does not fully cover yet.
+    std::vector<orc::FrameID> missing;
+    for (orc::FrameID frame = range.first;; ++frame) {
+      if (!store_has_frame(*obs_store_, observers_, fingerprint, frame)) {
+        missing.push_back(frame);
+      }
+      if (frame == range.last) {
+        break;
+      }
+    }
+    if (missing.empty()) {
+      return true;
+    }
+
+    const auto start_time = std::chrono::steady_clock::now();
+    const std::size_t worker_count = std::max<std::size_t>(
+        1, std::min<std::size_t>(
+               orc::presenters::resolveBackgroundObservationWorkerCount(),
+               missing.size()));
+    ORC_LOG_INFO(
+        "RenderPresenter: trigger precompute — observing {} of {} frames at "
+        "node '{}' on {} worker(s)",
+        missing.size(), range.count(), input_node.to_string(), worker_count);
+
+    std::atomic<std::uint64_t> done{0};
+    std::atomic<std::uint64_t> failed{0};
+    std::vector<std::thread> threads;
+    threads.reserve(worker_count);
+    const std::size_t per_worker =
+        (missing.size() + worker_count - 1) / worker_count;
+    for (std::size_t w = 0; w < worker_count; ++w) {
+      const std::size_t begin = w * per_worker;
+      const std::size_t end = std::min(begin + per_worker, missing.size());
+      if (begin >= end) {
+        break;
+      }
+      // References into locals are safe: every thread is joined before this
+      // scope exits. By-reference (not by-value) capture of the string-holding
+      // fingerprint/dag also keeps the closure nothrow-copyable, which the
+      // thread entry point requires (bugprone-exception-escape).
+      threads.emplace_back([this, &missing, &done, &failed, begin, end, &dag,
+                            &fingerprint, input_node]() {
+        // Nothing may escape a thread entry point, and a catch handler at this
+        // level may only perform noexcept work (atomics) — failures are
+        // counted here and logged by the metering thread after the join. Every
+        // frame of the slice is counted as done regardless of outcome so the
+        // metering loop always terminates.
+        std::size_t processed = 0;
+        try {
+          // Each thread owns its renderer (single-threaded by contract); the
+          // shared store is the only cross-thread handoff.
+          orc::RendererObservationTaskRunner runner(dag, fingerprints_shared_,
+                                                    obs_store_);
+          for (std::size_t i = begin; i < end; ++i) {
+            if (trigger_cancel_requested_.load()) {
+              break;
+            }
+            try {
+              runner.observe_frame(input_node, fingerprint, missing[i], {});
+            } catch (...) {
+              failed.fetch_add(1);
+            }
+            ++processed;
+            done.fetch_add(1);
+          }
+        } catch (...) {
+          // Runner construction (or another non-frame step) failed: fail the
+          // remainder of the slice.
+          failed.fetch_add(end - begin - processed);
+          done.fetch_add(end - begin - processed);
+        }
+      });
+    }
+
+    // Meter progress from this (coordinator) thread so the callback fires on
+    // the same thread a stage trigger loop would use.
+    const std::size_t total = missing.size();
+    while (done.load() < missing.size() && !trigger_cancel_requested_.load()) {
+      if (callback) {
+        callback(static_cast<std::size_t>(done.load()), total,
+                 "Computing observations…");
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    for (auto& t : threads) {
+      t.join();
+    }
+
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time)
+            .count();
+    const std::uint64_t completed = done.load();
+    const std::uint64_t failures = failed.load();
+    ORC_LOG_INFO(
+        "RenderPresenter: trigger precompute finished — {}/{} frames in {} ms"
+        "{}{}",
+        completed, missing.size(), elapsed_ms,
+        trigger_cancel_requested_.load() ? " [cancelled]" : "",
+        failures > 0 ? fmt::format(" [{} failed — left for the sink]", failures)
+                     : "");
+    if (trigger_cancel_requested_.load()) {
+      return false;
+    }
+    if (callback) {
+      callback(total, total, "Computing observations…");
+    }
+    return true;
+  }
 };
 
 RenderPresenter::RenderPresenter(void* project_handle)
@@ -783,6 +1295,12 @@ uint64_t RenderPresenter::requestObservations(
     return request_id;
   }
 
+  // An observer dialog is reading this node: sweep the whole node in the
+  // background (once per provenance) so scrubbing through it is instant. This
+  // is the "node of interest" signal — plain preview navigation never reaches
+  // here, so clicking through stages does not trigger whole-node sweeps.
+  impl_->sweepNodeForObservation(node_id);
+
   // Store hit: answer synchronously, no render.
   if (store_has_frame(*impl_->obs_store_, impl_->observers_, fingerprint,
                       frame_id)) {
@@ -810,6 +1328,10 @@ uint64_t RenderPresenter::requestObservations(
   context.fingerprints = impl_->fingerprints_shared_;
   impl_->scheduler_->request_interactive(node_id, frame_id, context);
   return request_id;
+}
+
+void RenderPresenter::setBackgroundObservationEnabled(bool enabled) {
+  impl_->background_observation_enabled_ = enabled;
 }
 
 uint64_t RenderPresenter::subscribeObservationProgress(
@@ -853,6 +1375,20 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
         impl_->obs_cache_->get_field(node_id, orc::FieldID(first_field + 1));
       }
     }
+
+    // Follow the preview with background observation work: prefetch a window
+    // around this position and sweep the whole node once per provenance. For
+    // field-indexed outputs the index is a field; frame-indexed outputs already
+    // count frames.
+    const bool field_indexed =
+        output_type == orc::PreviewOutputType::Frame_Field1 ||
+        output_type == orc::PreviewOutputType::Frame_Field2 ||
+        output_type == orc::PreviewOutputType::Luma ||
+        output_type == orc::PreviewOutputType::Chroma;
+    const orc::FrameID preview_frame =
+        field_indexed ? static_cast<orc::FrameID>(output_index / 2)
+                      : static_cast<orc::FrameID>(output_index);
+    impl_->scheduleObservationsForPreview(node_id, preview_frame);
 
     // Convert core result to public API result
     orc::PreviewRenderResult result;
@@ -1182,11 +1718,22 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
     // Execute trigger using the observation context populated during
     // execute_to_node
     orc::ObservationContext& obs_context = executor->get_observation_context();
-    // Phase 5.3: seed the context with observations the store already holds for
-    // the sink's input node, so the sink skips re-observing covered frames.
+    // Fill the store in parallel with every observation the sink will read
+    // (skipping frames the background already covered), then seed the context
+    // from the store so the sink's own loop computes nothing.
     if (!target_node->input_node_ids.empty() && !inputs.empty()) {
       auto vfr =
           std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(inputs[0]);
+      if (!impl_->precomputeTriggerObservations(target_node->input_node_ids[0],
+                                                vfr.get(), callback)) {
+        throw std::runtime_error("Trigger failed: Cancelled by user");
+      }
+      // Seeding the sink's context from the store touches ~1M records on a
+      // long source; tell the progress dialog what is happening instead of
+      // sitting silent between the precompute and the sink's own reporting.
+      if (callback) {
+        callback(0, 1, "Loading cached observations…");
+      }
       impl_->preloadStoredObservations(target_node->input_node_ids[0],
                                        vfr.get(), obs_context);
     }
@@ -1196,6 +1743,15 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
     // Clear current trigger stage pointer
     impl_->current_trigger_stage_.store(nullptr);
     impl_->trigger_active_.store(false);
+
+    // Phase 5.3 (write-back): persist the freshly-computed observations so a
+    // later trigger/preview/session reuses them instead of recomputing.
+    if (success && !target_node->input_node_ids.empty() && !inputs.empty()) {
+      auto vfr =
+          std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(inputs[0]);
+      impl_->persistTriggerObservations(target_node->input_node_ids[0],
+                                        vfr.get(), obs_context);
+    }
 
     if (!success) {
       std::string status = trigger_stage->get_trigger_status();
@@ -1287,6 +1843,16 @@ uint64_t RenderPresenter::triggerStage(
     if (!target_node->input_node_ids.empty() && !inputs.empty()) {
       auto vfr =
           std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(inputs[0]);
+      if (!impl_->precomputeTriggerObservations(target_node->input_node_ids[0],
+                                                vfr.get(), callback)) {
+        throw std::runtime_error("Trigger failed: Cancelled by user");
+      }
+      // Seeding the sink's context from the store touches ~1M records on a
+      // long source; tell the progress dialog what is happening instead of
+      // sitting silent between the precompute and the sink's own reporting.
+      if (callback) {
+        callback(0, 1, "Loading cached observations…");
+      }
       impl_->preloadStoredObservations(target_node->input_node_ids[0],
                                        vfr.get(), obs_context);
     }
@@ -1294,6 +1860,14 @@ uint64_t RenderPresenter::triggerStage(
 
     impl_->current_trigger_stage_.store(nullptr);
     impl_->trigger_active_.store(false);
+
+    // Phase 5.3 (write-back): persist freshly-computed observations for reuse.
+    if (success && !target_node->input_node_ids.empty() && !inputs.empty()) {
+      auto vfr =
+          std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(inputs[0]);
+      impl_->persistTriggerObservations(target_node->input_node_ids[0],
+                                        vfr.get(), obs_context);
+    }
 
     if (!success) {
       std::string status = trigger_stage->get_trigger_status();

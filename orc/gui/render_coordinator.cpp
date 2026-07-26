@@ -29,6 +29,9 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   }
   bool getShowDropouts() const override { return presenter_.getShowDropouts(); }
   void setShowDropouts(bool show) override { presenter_.setShowDropouts(show); }
+  void setBackgroundObservationEnabled(bool enabled) override {
+    presenter_.setBackgroundObservationEnabled(enabled);
+  }
 
   uint64_t subscribeInvalidation(
       orc::presenters::ObservationInvalidationCallback callback) override {
@@ -212,6 +215,35 @@ class Project;
 
 // Phase 2.7: Trigger operations migrated to RenderPresenter
 // Removed: #include "ld_sink_stage.h"
+
+namespace {
+
+// Wrap a progress-emitting function so it only fires when the whole-percent
+// value or the message changes (final updates always pass). Stage triggers
+// report progress per processed frame; forwarding every call as a queued Qt
+// signal floods the GUI event queue (tens of thousands of events for a long
+// source) and starves painting — the cause of a blank, beach-balling progress
+// dialog. The gate runs on the worker thread, before anything is queued.
+template <typename EmitFn>
+auto makePercentGatedProgress(EmitFn emit_fn) {
+  return [emit_fn = std::move(emit_fn), last_pct = -1,
+          last_message = std::string()](int current, int total,
+                                        const std::string& message) mutable {
+    const int pct =
+        total > 0
+            ? static_cast<int>(static_cast<int64_t>(current) * 100 / total)
+            : 0;
+    const bool final_update = total > 0 && current >= total;
+    if (pct == last_pct && message == last_message && !final_update) {
+      return;
+    }
+    last_pct = pct;
+    last_message = message;
+    emit_fn(current, total, message);
+  };
+}
+
+}  // namespace
 
 RenderCoordinator::RenderCoordinator(QObject* parent)
     : QObject(parent), presenter_factory_([](void* project_handle) {
@@ -844,11 +876,12 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
           req.request_id);
       worker_render_presenter_->triggerStage(
           req.node_id,
-          [this](int current, int total, const std::string& message) {
-            emit dropoutProgress(static_cast<size_t>(current),
-                                 static_cast<size_t>(total),
-                                 QString::fromStdString(message));
-          });
+          makePercentGatedProgress(
+              [this](int current, int total, const std::string& message) {
+                emit dropoutProgress(static_cast<size_t>(current),
+                                     static_cast<size_t>(total),
+                                     QString::fromStdString(message));
+              }));
       series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
       if (!series) {
         emit error(req.request_id,
@@ -891,12 +924,12 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
           "RenderCoordinator: SNR stage has no results, triggering now "
           "(request {})",
           req.request_id);
-      auto progress_cb = [this](int current, int total,
-                                const std::string& message) {
-        emit snrProgress(static_cast<size_t>(current),
-                         static_cast<size_t>(total),
-                         QString::fromStdString(message));
-      };
+      auto progress_cb = makePercentGatedProgress(
+          [this](int current, int total, const std::string& message) {
+            emit snrProgress(static_cast<size_t>(current),
+                             static_cast<size_t>(total),
+                             QString::fromStdString(message));
+          });
       worker_render_presenter_->triggerStage(req.node_id, progress_cb);
       series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
       if (!series) {
@@ -940,12 +973,12 @@ void RenderCoordinator::handleGetBurstLevelData(
           "RenderCoordinator: Burst level stage has no results, triggering now "
           "(request {})",
           req.request_id);
-      auto progress_cb = [this](int current, int total,
-                                const std::string& message) {
-        emit burstLevelProgress(static_cast<size_t>(current),
-                                static_cast<size_t>(total),
-                                QString::fromStdString(message));
-      };
+      auto progress_cb = makePercentGatedProgress(
+          [this](int current, int total, const std::string& message) {
+            emit burstLevelProgress(static_cast<size_t>(current),
+                                    static_cast<size_t>(total),
+                                    QString::fromStdString(message));
+          });
       worker_render_presenter_->triggerStage(req.node_id, progress_cb);
       series = worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
       if (!series) {
@@ -1212,10 +1245,11 @@ void RenderCoordinator::handleTriggerStage(const TriggerStageRequest& req) {
     // The presenter abstracts all DAG access and stage interaction
     worker_render_presenter_->triggerStage(
         req.node_id,
-        [this](int current, int total, const std::string& message) {
+        makePercentGatedProgress([this](int current, int total,
+                                        const std::string& message) {
           // Emit progress updates (Qt will queue to GUI thread)
           emit triggerProgress(current, total, QString::fromStdString(message));
-        });
+        }));
 
     ORC_LOG_DEBUG("RenderCoordinator: Trigger complete successfully");
     emit triggerComplete(req.request_id, true,

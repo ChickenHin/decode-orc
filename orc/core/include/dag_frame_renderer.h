@@ -55,6 +55,27 @@ void run_frame_observer_pass(const IObservationService& service,
                              ObservationStore* store,
                              IObservationContext& context);
 
+// Alias-aware variant: @p fingerprints lists every provenance the frame's
+// content is known under — the observed node's own fingerprint first, followed
+// by the fingerprints of upstream nodes the frame passes through byte-identical
+// (per VideoFrameRepresentation::video_passthrough_source()). All entries key
+// the same content, so:
+//   - A store hit under ANY listed fingerprint satisfies the pass without
+//     running the observer, and the records are copied to every other listed
+//     fingerprint still missing them (so future lookups keyed to any node in
+//     the pass-through chain hit directly — including across sessions via the
+//     persistence sidecar).
+//   - On a miss everywhere the observer runs once and its records are stored
+//     under every listed fingerprint.
+// An empty @p fingerprints (or null @p store) disables caching entirely.
+void run_frame_observer_pass(const IObservationService& service,
+                             const std::vector<ObserverInfo>& observers,
+                             const VideoFrameRepresentation& representation,
+                             FrameID frame_id,
+                             const std::vector<NodeFingerprint>& fingerprints,
+                             ObservationStore* store,
+                             IObservationContext& context);
+
 // Exception thrown during DAG frame rendering.
 class DAGFrameRenderError : public std::runtime_error {
  public:

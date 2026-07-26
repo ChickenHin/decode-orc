@@ -434,6 +434,12 @@ class IRenderPresenter {
   virtual bool getShowDropouts() const = 0;
   virtual void setShowDropouts(bool show) = 0;
 
+  // Disable the presenter's background observation pipeline (scheduler,
+  // sweeps, prefetch). Call before the first setDAG() on auxiliary presenters
+  // that only render frames — construction then stays cheap enough for the
+  // GUI thread and no duplicate background pipeline is spawned.
+  virtual void setBackgroundObservationEnabled(bool enabled) = 0;
+
   // Phase 3: observation-invalidation notifications. subscribeInvalidation()
   // returns an id passed to unsubscribeInvalidation() to cancel delivery.
   virtual uint64_t subscribeInvalidation(

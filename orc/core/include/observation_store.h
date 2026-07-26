@@ -91,17 +91,28 @@ using ObservationRecord =
  *
  * Eviction: an approximate byte budget bounds memory. put() and retain_only()
  * evict least-recently-used records once usage exceeds the budget. get(),
- * load_into() and put() mark a record most-recently-used; has() does not (it is
- * a pure existence probe, matching LRUCache::contains()).
+ * load_into() and put() mark a record most-recently-used.
+ *
+ * Read-through: when a persistence sidecar is attached, has()/get()/load_into()
+ * fall back to it on an in-memory miss and re-install the record — memory is a
+ * cache over the durable sidecar, so budget eviction never causes derived data
+ * to be recomputed, only reloaded. Without a sidecar (or for records that never
+ * reached it) a miss is genuine.
  *
  * Thread safety (coding standards §5.3.3): every public method is safe to call
- * concurrently from any thread; all state is guarded by an internal mutex.
+ * concurrently from any thread; all state is guarded by an internal mutex. The
+ * sidecar is consulted outside that mutex so database I/O never blocks
+ * in-memory reads on other threads.
  */
 class ObservationStore {
  public:
-  /// Default memory budget (64 MiB of approximate record payload).
+  /// Default memory budget of approximate record payload. Sized so a full
+  /// long-play source stays resident: ~54k frames × 2 fields × 9 observers is
+  /// roughly one million records (~300 MB), and pass-through aliasing can
+  /// double the key count. Read-through to the sidecar makes overflow cheap
+  /// (reload, not recompute), so the budget is a soft ceiling, not a cliff.
   static constexpr std::size_t kDefaultMemoryBudgetBytes =
-      static_cast<std::size_t>(64) * 1024 * 1024;
+      static_cast<std::size_t>(512) * 1024 * 1024;
 
   explicit ObservationStore(
       std::size_t memory_budget_bytes = kDefaultMemoryBudgetBytes);
@@ -116,11 +127,13 @@ class ObservationStore {
   ObservationStore(ObservationStore&&) = delete;
   ObservationStore& operator=(ObservationStore&&) = delete;
 
-  /// True if a record is stored for @p key (does not affect LRU order).
-  bool has(const ObservationRecordKey& key) const;
+  /// True if a record is stored for @p key, reading through to the sidecar on
+  /// an in-memory miss (the reloaded record is re-installed and marked
+  /// most-recently-used).
+  bool has(const ObservationRecordKey& key);
 
-  /// Return the stored record for @p key, or nullopt on miss. Marks the record
-  /// most-recently-used on a hit.
+  /// Return the stored record for @p key, or nullopt on miss (after reading
+  /// through to the sidecar). Marks the record most-recently-used on a hit.
   std::optional<ObservationRecord> get(const ObservationRecordKey& key);
 
   /// Store (or replace) the record for @p key and mark it most-recently-used.
@@ -129,9 +142,9 @@ class ObservationStore {
   void put(const ObservationRecordKey& key, ObservationRecord record);
 
   /// Load the record for @p key into @p context at its field id. Returns false
-  /// on miss (context left untouched). Marks the record most-recently-used.
-  bool load_into(const ObservationRecordKey& key,
-                 IObservationContext& context) const;
+  /// on miss (context left untouched, after reading through to the sidecar).
+  /// Marks the record most-recently-used.
+  bool load_into(const ObservationRecordKey& key, IObservationContext& context);
 
   /// Drop every record whose fingerprint is not in @p keep, then evict
   /// least-recently-used records until usage is within @p budget. Also updates
@@ -211,6 +224,12 @@ class ObservationStore {
   // without queuing it for persistence. Caller holds mutex_. Shared by put()
   // (which additionally queues) and warm_start() (which must not re-persist).
   void put_in_memory(const ObservationRecordKey& key, ObservationRecord record);
+
+  // Ensure @p key is resident in memory: on an index miss, reload it from the
+  // persistence sidecar (if attached) and re-install it. Returns true when the
+  // record is resident on return. Takes mutex_ internally; the sidecar query
+  // runs with no store lock held so database I/O never blocks other readers.
+  bool ensure_resident(const ObservationRecordKey& key);
 
   // Write-behind worker loop: drains queued records to persistence_ in
   // batches until stopped.

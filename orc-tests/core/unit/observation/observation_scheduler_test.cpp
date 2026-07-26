@@ -19,10 +19,12 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -180,6 +182,61 @@ std::unique_ptr<ObservationScheduler> make_scheduler(
   *runner_out = runner.get();
   return std::make_unique<ObservationScheduler>(
       std::move(runner), std::move(fingerprints), std::move(policy));
+}
+
+// Shared sink for the multi-worker (pool) tests: every worker's runner records
+// its observed (node, frame) pairs here, and — when a barrier target is set —
+// each observe arrives at a barrier so a test can prove K frames run at once.
+struct PoolSink {
+  std::mutex mutex;
+  std::condition_variable observed_cv;
+  std::vector<std::pair<NodeID::value_type, FrameID>> observed;
+  int runners_created = 0;
+
+  std::mutex bmutex;
+  std::condition_variable bcv;
+  int arrived = 0;
+  int target = 0;  // 0 disables the barrier
+};
+
+class PoolMockRunner final : public IObservationTaskRunner {
+ public:
+  explicit PoolMockRunner(PoolSink* sink) : sink_(sink) {}
+
+  void observe_frame(NodeID node, const NodeFingerprint& /*fingerprint*/,
+                     FrameID frame,
+                     const std::vector<std::string>& /*ids*/) override {
+    {
+      std::lock_guard<std::mutex> lock(sink_->mutex);
+      sink_->observed.emplace_back(node.value(), frame);
+      sink_->observed_cv.notify_all();
+    }
+    if (sink_->target > 0) {
+      std::unique_lock<std::mutex> lock(sink_->bmutex);
+      ++sink_->arrived;
+      sink_->bcv.notify_all();
+      sink_->bcv.wait_for(lock, std::chrono::seconds(5),
+                          [&] { return sink_->arrived >= sink_->target; });
+    }
+  }
+
+  void update_dag(
+      std::shared_ptr<const DAG> /*dag*/,
+      std::shared_ptr<const NodeFingerprintMap> /*fingerprints*/) override {}
+
+ private:
+  PoolSink* sink_;
+};
+
+std::unique_ptr<ObservationScheduler> make_pool_scheduler(
+    PoolSink* sink, unsigned workers,
+    std::shared_ptr<IObservationSchedulingPolicy> policy = nullptr) {
+  ObservationScheduler::TaskRunnerFactory factory = [sink]() {
+    ++sink->runners_created;
+    return std::make_unique<PoolMockRunner>(sink);
+  };
+  return std::make_unique<ObservationScheduler>(std::move(factory), workers,
+                                                nullptr, std::move(policy));
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +417,136 @@ TEST(ObservationScheduler, DagChangeAbortsInFlightStaleItem) {
   EXPECT_EQ(completions.load(), 1);
   EXPECT_TRUE(last.cancelled);
   EXPECT_LT(last.frames_observed, last.frames_total);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-worker pool
+// ---------------------------------------------------------------------------
+
+TEST(ObservationScheduler, PoolObservesDistinctItemsConcurrently) {
+  constexpr unsigned kWorkers = 4;
+  PoolSink sink;
+  sink.target = static_cast<int>(kWorkers);  // barrier: all K observe at once
+
+  auto scheduler = make_pool_scheduler(&sink, kWorkers);
+  EXPECT_EQ(scheduler->worker_count(), static_cast<std::size_t>(kWorkers));
+  EXPECT_EQ(sink.runners_created, static_cast<int>(kWorkers));
+
+  scheduler->start();
+  // One independent single-frame item per worker (single-frame items are never
+  // chunked), so each worker takes exactly one.
+  for (unsigned i = 0; i < kWorkers; ++i) {
+    scheduler->submit(
+        frame_item(NodeID(i + 1), fp("a"), 0, ObservationPriority::kSweep));
+  }
+
+  // The barrier can only open if all K frames are inside observe_frame at the
+  // same time — impossible without K genuinely-parallel worker threads.
+  {
+    std::unique_lock<std::mutex> lock(sink.bmutex);
+    ASSERT_TRUE(sink.bcv.wait_for(lock, std::chrono::seconds(5), [&] {
+      return sink.arrived >= static_cast<int>(kWorkers);
+    }));
+  }
+  scheduler->stop();
+
+  EXPECT_EQ(sink.observed.size(), static_cast<std::size_t>(kWorkers));
+}
+
+TEST(ObservationScheduler, PoolChunksStatelessRangeWithFullCoverage) {
+  constexpr unsigned kWorkers = 4;
+  constexpr FrameID kFrames = 40;
+  PoolSink sink;  // no barrier
+
+  auto scheduler = make_pool_scheduler(&sink, kWorkers);
+
+  // A single stateless whole-range item: the pool must split it into disjoint
+  // chunks and observe every frame exactly once (order across chunks is free).
+  ObservationWorkItem item;
+  item.node_id = NodeID(1);
+  item.fingerprint = fp("a");
+  item.frames = FrameIDRange{0, kFrames - 1};
+  item.stateful = false;
+
+  scheduler->start();
+  scheduler->submit(item);
+
+  {
+    std::unique_lock<std::mutex> lock(sink.mutex);
+    ASSERT_TRUE(sink.observed_cv.wait_for(lock, std::chrono::seconds(10), [&] {
+      return sink.observed.size() >= kFrames;
+    }));
+  }
+  scheduler->stop();
+
+  std::set<FrameID> frames;
+  for (const auto& [node, frame] : sink.observed) {
+    EXPECT_EQ(node, NodeID(1).value());
+    frames.insert(frame);
+  }
+  // Exactly the full range, with no duplicated frames across chunks.
+  EXPECT_EQ(sink.observed.size(), static_cast<std::size_t>(kFrames));
+  EXPECT_EQ(frames.size(), static_cast<std::size_t>(kFrames));
+  EXPECT_EQ(*frames.begin(), 0u);
+  EXPECT_EQ(*frames.rbegin(), kFrames - 1);
+}
+
+// Large stateless items are split into bounded chunks (max ~128 frames each)
+// so workers return to the priority queues frequently — an interactive request
+// arriving mid-sweep is only ever behind the in-flight chunks, never behind a
+// whole node's range.
+TEST(ObservationScheduler, LargeStatelessItemsAreCappedForPreemption) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  ObservationWorkItem item;
+  item.node_id = NodeID(1);
+  item.fingerprint = fp("a");
+  item.frames = FrameIDRange{0, 999};  // 1000 frames
+  item.stateful = false;
+  scheduler->submit(item);
+
+  // 1000 frames under a 128-frame cap => at least 8 queued chunks even on a
+  // single-worker scheduler.
+  EXPECT_GE(scheduler->queued_count(), 8u);
+
+  // Coverage is exact: every frame observed exactly once across the chunks.
+  while (scheduler->process_one_for_testing()) {
+  }
+  EXPECT_EQ(runner->call_count(), 1000u);
+}
+
+// A stateful whole-range item must NOT be chunked: it stays a single item so
+// its frames are observed in ascending order on one worker.
+TEST(ObservationScheduler, PoolDoesNotChunkStatefulItems) {
+  constexpr unsigned kWorkers = 4;
+  constexpr FrameID kFrames = 12;
+  PoolSink sink;
+
+  auto scheduler = make_pool_scheduler(&sink, kWorkers);
+
+  ObservationWorkItem item;
+  item.node_id = NodeID(1);
+  item.fingerprint = fp("a");
+  item.frames = FrameIDRange{0, kFrames - 1};
+  item.stateful = true;
+
+  scheduler->start();
+  scheduler->submit(item);
+
+  {
+    std::unique_lock<std::mutex> lock(sink.mutex);
+    ASSERT_TRUE(sink.observed_cv.wait_for(lock, std::chrono::seconds(10), [&] {
+      return sink.observed.size() >= kFrames;
+    }));
+  }
+  scheduler->stop();
+
+  ASSERT_EQ(sink.observed.size(), static_cast<std::size_t>(kFrames));
+  // One undivided item on one worker → strictly ascending frame order.
+  for (FrameID f = 0; f < kFrames; ++f) {
+    EXPECT_EQ(sink.observed[f].second, f);
+  }
 }
 
 // ---------------------------------------------------------------------------

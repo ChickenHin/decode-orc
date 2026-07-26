@@ -10,10 +10,14 @@
 
 #include "observation_scheduler.h"
 
+#include <orc/support/logging.h>
+
 #include <algorithm>
+#include <chrono>
 #include <unordered_set>
 #include <utility>
 
+#include "core_observation_service.h"
 #include "dag_executor.h"
 #include "dag_frame_renderer.h"
 #include "observation_store.h"
@@ -28,9 +32,25 @@ ObservationScheduler::ObservationScheduler(
     std::unique_ptr<IObservationTaskRunner> runner,
     std::shared_ptr<const NodeFingerprintMap> fingerprints,
     std::shared_ptr<IObservationSchedulingPolicy> policy)
-    : runner_(std::move(runner)),
-      policy_(std::move(policy)),
-      fingerprints_(std::move(fingerprints)) {}
+    : policy_(std::move(policy)), fingerprints_(std::move(fingerprints)) {
+  auto worker = std::make_unique<Worker>();
+  worker->runner = std::move(runner);
+  workers_.push_back(std::move(worker));
+}
+
+ObservationScheduler::ObservationScheduler(
+    TaskRunnerFactory runner_factory, unsigned worker_count,
+    std::shared_ptr<const NodeFingerprintMap> fingerprints,
+    std::shared_ptr<IObservationSchedulingPolicy> policy)
+    : policy_(std::move(policy)), fingerprints_(std::move(fingerprints)) {
+  const unsigned n = worker_count == 0 ? 1 : worker_count;
+  workers_.reserve(n);
+  for (unsigned i = 0; i < n; ++i) {
+    auto worker = std::make_unique<Worker>();
+    worker->runner = runner_factory ? runner_factory() : nullptr;
+    workers_.push_back(std::move(worker));
+  }
+}
 
 ObservationScheduler::~ObservationScheduler() { stop(); }
 
@@ -40,20 +60,27 @@ void ObservationScheduler::start() {
     return;
   }
   stop_requested_ = false;
-  cancel_in_flight_.store(false);
   running_ = true;
-  worker_ = std::thread(&ObservationScheduler::worker_loop, this);
+  for (auto& worker : workers_) {
+    worker->cancel.store(false);
+    worker->thread =
+        std::thread(&ObservationScheduler::worker_loop, this, worker.get());
+  }
 }
 
 void ObservationScheduler::stop() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     stop_requested_ = true;
-    cancel_in_flight_.store(true);
+    for (auto& worker : workers_) {
+      worker->cancel.store(true);
+    }
   }
   cv_.notify_all();
-  if (worker_.joinable()) {
-    worker_.join();
+  for (auto& worker : workers_) {
+    if (worker->thread.joinable()) {
+      worker->thread.join();
+    }
   }
   std::lock_guard<std::mutex> lock(mutex_);
   running_ = false;
@@ -62,9 +89,10 @@ void ObservationScheduler::stop() {
   for (auto& queue : queues_) {
     queue.clear();
   }
-  has_pending_dag_update_ = false;
-  pending_dag_.reset();
-  pending_fingerprints_.reset();
+  for (auto& worker : workers_) {
+    worker->has_in_flight = false;
+  }
+  in_flight_count_ = 0;
   // Clear the workload so a later start() begins from idle. No callback is
   // fired here: no workload snapshot is delivered after shutdown.
   workload_total_frames_ = 0;
@@ -76,15 +104,65 @@ bool ObservationScheduler::is_running() const {
   return running_;
 }
 
+namespace {
+
+// Upper bound on frames per work item. Workers check the priority queues only
+// between items, so this cap bounds how long a queued interactive request can
+// wait behind in-flight sweep work (a whole-node sweep split merely per-worker
+// would produce multi-thousand-frame items that block preemption for minutes).
+constexpr std::uint64_t kMaxChunkFrames = 128;
+
+// Split a work item into disjoint, contiguous frame sub-ranges so a pool can
+// observe them in parallel and preempt between them: enough chunks to occupy
+// every worker, and never more than kMaxChunkFrames per chunk. Stateful items
+// are never split (their ascending-frame contract is per-item) and neither are
+// single-frame items; in those cases the original item is returned unchanged.
+// Priority, node, and fingerprint are preserved on every chunk.
+std::vector<ObservationWorkItem> chunk_item(const ObservationWorkItem& item,
+                                            unsigned parts) {
+  const std::uint64_t total = item.frames.count();
+  if (item.stateful || total <= 1) {
+    return {item};
+  }
+  const std::uint64_t by_cap = (total + kMaxChunkFrames - 1) / kMaxChunkFrames;
+  const std::uint64_t wanted =
+      std::max<std::uint64_t>(parts == 0 ? 1 : parts, by_cap);
+  const unsigned n =
+      static_cast<unsigned>(std::min<std::uint64_t>(wanted, total));
+  if (n <= 1) {
+    return {item};
+  }
+  std::vector<ObservationWorkItem> out;
+  out.reserve(n);
+  const std::uint64_t base = total / n;
+  const std::uint64_t remainder = total % n;
+  FrameID start = item.frames.first;
+  for (unsigned i = 0; i < n; ++i) {
+    // Spread the remainder over the first `remainder` chunks so sizes differ by
+    // at most one frame.
+    const std::uint64_t len = base + (i < remainder ? 1 : 0);
+    ObservationWorkItem chunk = item;
+    chunk.frames = FrameIDRange{start, start + len - 1};
+    out.push_back(std::move(chunk));
+    start += len;
+  }
+  return out;
+}
+
+}  // namespace
+
 void ObservationScheduler::submit(ObservationWorkItem item) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stop_requested_) {
       return;
     }
-    enqueue_locked(std::move(item));
+    for (auto& chunk :
+         chunk_item(item, static_cast<unsigned>(workers_.size()))) {
+      enqueue_locked(std::move(chunk));
+    }
   }
-  cv_.notify_one();
+  cv_.notify_all();
   emit_workload();
 }
 
@@ -96,7 +174,10 @@ void ObservationScheduler::submit_batch(
       return;
     }
     for (auto& item : items) {
-      enqueue_locked(std::move(item));
+      for (auto& chunk :
+           chunk_item(item, static_cast<unsigned>(workers_.size()))) {
+        enqueue_locked(std::move(chunk));
+      }
     }
   }
   cv_.notify_all();
@@ -152,17 +233,24 @@ void ObservationScheduler::on_dag_changed(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     fingerprints_ = fingerprints;
-    has_pending_dag_update_ = true;
-    pending_dag_ = std::move(dag);
-    pending_fingerprints_ = fingerprints;
+    // Record the new DAG and bump the generation; each worker adopts it into
+    // its own runner before processing its next item.
+    current_dag_ = std::move(dag);
+    ++dag_generation_;
 
-    // Abort the in-flight item if its content identity is gone in the new map.
-    if (has_in_flight_ && fingerprints_) {
-      const auto it = fingerprints_->find(in_flight_node_);
-      const bool stale = (it == fingerprints_->end()) ||
-                         (it->second != in_flight_fingerprint_);
-      if (stale) {
-        cancel_in_flight_.store(true);
+    // Abort any worker whose in-flight item's content identity is gone in the
+    // new map; workers whose item is still current keep running.
+    if (fingerprints_) {
+      for (auto& worker : workers_) {
+        if (!worker->has_in_flight) {
+          continue;
+        }
+        const auto it = fingerprints_->find(worker->in_flight_node);
+        const bool stale = (it == fingerprints_->end()) ||
+                           (it->second != worker->in_flight_fingerprint);
+        if (stale) {
+          worker->cancel.store(true);
+        }
       }
     }
 
@@ -253,15 +341,17 @@ ObservationWorkload ObservationScheduler::build_workload_locked() const {
         workload_total_frames_;
     w.percent_complete = static_cast<int>(pct > 100 ? 100 : pct);
   }
-  // Distinct nodes with pending work: queued items plus the in-flight item.
+  // Distinct nodes with pending work: queued items plus every in-flight item.
   std::unordered_set<NodeID> nodes;
   for (const auto& queue : queues_) {
     for (const auto& item : queue) {
       nodes.insert(item.node_id);
     }
   }
-  if (has_in_flight_) {
-    nodes.insert(in_flight_node_);
+  for (const auto& worker : workers_) {
+    if (worker->has_in_flight) {
+      nodes.insert(worker->in_flight_node);
+    }
   }
   w.outstanding_nodes = nodes.size();
   return w;
@@ -275,10 +365,32 @@ void ObservationScheduler::emit_workload() {
     if (stop_requested_ || !workload_cb_) {
       return;
     }
-    cb = workload_cb_;
     snapshot = build_workload_locked();
+    // Deliver only when a consumer-visible field changed. This is called per
+    // observed frame across the whole pool; without the gate a fast sweep
+    // (thousands of frames/second) floods the GUI event queue with queued
+    // status updates and starves painting. The forwarded view payload is
+    // exactly {active, percent, outstanding_nodes}, so gating on those fields
+    // is lossless for every consumer.
+    if (workload_emitted_once_ && snapshot.active == last_workload_.active &&
+        snapshot.percent_complete == last_workload_.percent_complete &&
+        snapshot.outstanding_nodes == last_workload_.outstanding_nodes) {
+      return;
+    }
+    last_workload_ = snapshot;
+    workload_emitted_once_ = true;
+    cb = workload_cb_;
   }
   cb(snapshot);
+}
+
+bool ObservationScheduler::any_dag_update_pending_locked() const {
+  for (const auto& worker : workers_) {
+    if (worker->applied_generation < dag_generation_) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void ObservationScheduler::reset_workload_if_drained() {
@@ -288,7 +400,7 @@ void ObservationScheduler::reset_workload_if_drained() {
     if (stop_requested_) {
       return;
     }
-    if (has_in_flight_ || has_pending_dag_update_) {
+    if (in_flight_count_ > 0 || any_dag_update_pending_locked()) {
       return;
     }
     for (const auto& queue : queues_) {
@@ -296,9 +408,12 @@ void ObservationScheduler::reset_workload_if_drained() {
         return;
       }
     }
-    // Nothing outstanding: return to idle.
+    // Nothing outstanding: return to idle. Record the idle snapshot as the
+    // last delivery so emit_workload()'s change gate stays consistent.
     workload_total_frames_ = 0;
     workload_observed_frames_ = 0;
+    last_workload_ = ObservationWorkload{};
+    workload_emitted_once_ = true;
     cb = workload_cb_;
   }
   if (cb) {
@@ -316,21 +431,21 @@ std::size_t ObservationScheduler::queued_count() const {
 }
 
 ObservationScheduler::NextAction ObservationScheduler::take_next(
-    bool blocking) {
+    Worker* worker, bool blocking) {
   std::unique_lock<std::mutex> lock(mutex_);
   for (;;) {
     if (stop_requested_) {
       return {};
     }
 
-    if (has_pending_dag_update_) {
+    // Bring this worker's runner up to the current DAG generation before it
+    // processes any (necessarily current-generation) work item.
+    if (worker->applied_generation < dag_generation_) {
       NextAction action;
       action.kind = NextAction::Kind::kDagUpdate;
-      action.dag = pending_dag_;
-      action.fingerprints = pending_fingerprints_;
-      has_pending_dag_update_ = false;
-      pending_dag_.reset();
-      pending_fingerprints_.reset();
+      action.dag = current_dag_;
+      action.fingerprints = fingerprints_;
+      action.target_generation = dag_generation_;
       return action;
     }
 
@@ -341,10 +456,11 @@ ObservationScheduler::NextAction ObservationScheduler::take_next(
         action.item = std::move(queue.front());
         queue.pop_front();
 
-        has_in_flight_ = true;
-        in_flight_node_ = action.item.node_id;
-        in_flight_fingerprint_ = action.item.fingerprint;
-        cancel_in_flight_.store(false);
+        worker->has_in_flight = true;
+        worker->in_flight_node = action.item.node_id;
+        worker->in_flight_fingerprint = action.item.fingerprint;
+        worker->cancel.store(false);
+        ++in_flight_count_;
         return action;
       }
     }
@@ -356,23 +472,25 @@ ObservationScheduler::NextAction ObservationScheduler::take_next(
   }
 }
 
-void ObservationScheduler::process_item(const ObservationWorkItem& item) {
+void ObservationScheduler::process_item(Worker* worker,
+                                        const ObservationWorkItem& item) {
   const std::uint64_t total = item.frames.count();
   std::uint64_t observed = 0;
   bool cancelled = false;
   bool failed = false;
 
+  const auto item_start = std::chrono::steady_clock::now();
   const ProgressCallback prog_cb = progress_callback();
 
   if (!item.frames.empty()) {
     for (FrameID frame = item.frames.first;; ++frame) {
-      if (cancel_in_flight_.load()) {
+      if (worker->cancel.load()) {
         cancelled = true;
         break;
       }
       try {
-        runner_->observe_frame(item.node_id, item.fingerprint, frame,
-                               item.observer_ids);
+        worker->runner->observe_frame(item.node_id, item.fingerprint, frame,
+                                      item.observer_ids);
       } catch (...) {
         // A stage/decode error fails the item but never the worker.
         failed = true;
@@ -393,6 +511,21 @@ void ObservationScheduler::process_item(const ObservationWorkItem& item) {
     }
   }
 
+  // Timing instrumentation: how fast this item actually processed. Frames a
+  // runner short-circuits (already stored / passthrough-copied) still count as
+  // observed, so fps here reflects the effective end-to-end rate.
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - item_start)
+                              .count();
+  if (observed > 0 && elapsed_ms > 0) {
+    ORC_LOG_DEBUG(
+        "ObservationScheduler: node '{}' frames {}-{}: {}/{} observed in {} ms "
+        "({:.0f} frames/s){}{}",
+        item.node_id.to_string(), item.frames.first, item.frames.last, observed,
+        total, elapsed_ms, observed * 1000.0 / elapsed_ms,
+        cancelled ? " [cancelled]" : "", failed ? " [failed]" : "");
+  }
+
   const CompletionCallback comp_cb = completion_callback();
   if (comp_cb) {
     ObservationCompletion completion;
@@ -407,21 +540,26 @@ void ObservationScheduler::process_item(const ObservationWorkItem& item) {
   }
 }
 
-void ObservationScheduler::worker_loop() {
+void ObservationScheduler::worker_loop(Worker* worker) {
   for (;;) {
-    NextAction action = take_next(/*blocking=*/true);
+    NextAction action = take_next(worker, /*blocking=*/true);
     switch (action.kind) {
       case NextAction::Kind::kNone:
         return;  // stop requested
       case NextAction::Kind::kDagUpdate:
-        runner_->update_dag(std::move(action.dag),
-                            std::move(action.fingerprints));
-        break;
-      case NextAction::Kind::kItem:
-        process_item(action.item);
+        worker->runner->update_dag(std::move(action.dag),
+                                   std::move(action.fingerprints));
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          has_in_flight_ = false;
+          worker->applied_generation = action.target_generation;
+        }
+        break;
+      case NextAction::Kind::kItem:
+        process_item(worker, action.item);
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          worker->has_in_flight = false;
+          --in_flight_count_;
         }
         reset_workload_if_drained();
         break;
@@ -430,19 +568,26 @@ void ObservationScheduler::worker_loop() {
 }
 
 bool ObservationScheduler::process_one_for_testing() {
-  NextAction action = take_next(/*blocking=*/false);
+  // The single-threaded test driver always uses the first worker's runner.
+  Worker* worker = workers_.front().get();
+  NextAction action = take_next(worker, /*blocking=*/false);
   switch (action.kind) {
     case NextAction::Kind::kNone:
       return false;
     case NextAction::Kind::kDagUpdate:
-      runner_->update_dag(std::move(action.dag),
-                          std::move(action.fingerprints));
-      return true;
-    case NextAction::Kind::kItem:
-      process_item(action.item);
+      worker->runner->update_dag(std::move(action.dag),
+                                 std::move(action.fingerprints));
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        has_in_flight_ = false;
+        worker->applied_generation = action.target_generation;
+      }
+      return true;
+    case NextAction::Kind::kItem:
+      process_item(worker, action.item);
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        worker->has_in_flight = false;
+        --in_flight_count_;
       }
       reset_workload_if_drained();
       return true;
@@ -465,13 +610,49 @@ RendererObservationTaskRunner::RendererObservationTaskRunner(
     renderer_->set_observation_service(service_);
   }
   renderer_->set_observation_store(store_, std::move(fingerprints));
+
+  // Cache the standard observer set (id + version) so observe_frame() can
+  // pre-check the store before rendering. Use the injected service when
+  // present, otherwise the host CoreObservationService (same inventory the
+  // renderer's observer pass runs).
+  const IObservationService* svc = service_.get();
+  CoreObservationService fallback;
+  if (svc == nullptr) {
+    svc = &fallback;
+  }
+  for (const auto& info : svc->available_observers()) {
+    observer_keys_.emplace_back(info.id, info.version);
+  }
 }
 
 RendererObservationTaskRunner::~RendererObservationTaskRunner() = default;
 
 void RendererObservationTaskRunner::observe_frame(
-    NodeID node_id, const NodeFingerprint& /*fingerprint*/, FrameID frame_id,
+    NodeID node_id, const NodeFingerprint& fingerprint, FrameID frame_id,
     const std::vector<std::string>& /*observer_ids*/) {
+  // Fast path: if every observer's records for both fields of this frame are
+  // already stored, there is nothing to compute — skip the expensive render.
+  // Observation is per-frame independent (a fresh observer runs each frame), so
+  // a store hit is authoritative regardless of which chunk/worker produced it.
+  // This eliminates the redundant second whole-node pass (the policy emits a
+  // stateless and a stateful item for the same range) and makes re-sweeps and
+  // warm-started frames cheap.
+  if (store_ && !fingerprint.value.empty() && !observer_keys_.empty()) {
+    const FieldID field_top(frame_id * 2);
+    const FieldID field_bottom(frame_id * 2 + 1);
+    bool all_present = true;
+    for (const auto& [id, version] : observer_keys_) {
+      if (!store_->has({fingerprint, field_top, id, version}) ||
+          !store_->has({fingerprint, field_bottom, id, version})) {
+        all_present = false;
+        break;
+      }
+    }
+    if (all_present) {
+      return;
+    }
+  }
+
   // The renderer's store-backed observer pass writes every standard observer's
   // records for this frame, keyed by the node fingerprint the renderer holds
   // (kept in sync via update_dag). observer_ids is advisory — see the header.

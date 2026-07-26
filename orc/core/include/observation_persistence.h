@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -97,6 +98,35 @@ class IObservationPersistence {
    */
   virtual std::size_t purge_observer_version(
       const std::string& observer_id, const std::string& current_version) = 0;
+
+  /**
+   * @brief Read / write a small named metadata value (maintenance stamps).
+   *
+   * Used to remember what maintenance has already been applied to the durable
+   * data — e.g. the observer-version set the last purge ran with, or the
+   * fingerprint set the last GC retained — so an unchanged reopen skips
+   * whole-database scans entirely. Defaults: no storage (get returns "",
+   * set is a no-op), which simply means the maintenance runs every time.
+   */
+  virtual std::string get_meta(const std::string& /*key*/) { return {}; }
+  virtual void set_meta(const std::string& /*key*/,
+                        const std::string& /*value*/) {}
+
+  /**
+   * @brief Read back a single persisted record by exact key.
+   *
+   * Backs the in-memory store's read-through: a record evicted from memory by
+   * the budget is reloaded from durable storage instead of being recomputed.
+   * Returns an engaged optional holding an empty record for the
+   * present-but-empty state, and nullopt when the key was never persisted.
+   *
+   * Default: nullopt (an implementation that only archives need not support
+   * point reads; the store then treats eviction as a genuine miss).
+   */
+  virtual std::optional<ObservationRecord> load_one(
+      const ObservationRecordKey& /*key*/) {
+    return std::nullopt;
+  }
 };
 
 }  // namespace orc

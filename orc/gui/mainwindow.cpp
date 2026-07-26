@@ -2642,6 +2642,10 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
 
       orc::NodeID input_source_node_id = node_id;
@@ -2692,6 +2696,10 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
 
       // Reset values should come from the stage input path (pre-override),
@@ -3797,6 +3805,8 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       auto* core_project = project_.presenter()->getCoreProjectHandle();
       if (core_project) {
         orc::presenters::RenderPresenter rp(core_project);
+        // Throwaway helper presenter: parameter reads only — keep cheap.
+        rp.setBackgroundObservationEnabled(false);
         rp.setDAG(project_.getDAG());
         auto vp = rp.getVideoParameters(node_id);
         if (vp.has_value()) {
@@ -3983,6 +3993,11 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     }
 
     auto render_presenter = makeRenderPresenterAdapter(core_project);
+    // Auxiliary presenter: rendering only. Must be set before setDAG() so the
+    // build stays cheap on the GUI thread and no second background observation
+    // pipeline (scheduler/sweeps) is spawned — the coordinator's presenter
+    // already runs one for this process.
+    render_presenter->setBackgroundObservationEnabled(false);
     render_presenter->setDAG(project_.getDAG());
     render_presenter->setShowDropouts(false);
 
@@ -4454,6 +4469,10 @@ void MainWindow::onSetCrosshairsFromFrameTiming() {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
       auto vp = render_presenter.getVideoParameters(current_view_node_id_);
       if (vp.has_value()) {
@@ -4581,6 +4600,10 @@ void MainWindow::onFrameTimingDataReady(
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
 
       auto vp = render_presenter.getVideoParameters(current_view_node_id_);
@@ -4710,6 +4733,10 @@ void MainWindow::onWaveformMonitorDataReady(
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
+      // Throwaway helper presenter: rendering/parameter reads only — no
+      // sidecar, scheduler, or sweeps (construction must stay cheap on the
+      // GUI thread).
+      render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
       auto vp = render_presenter.getVideoParameters(current_view_node_id_);
       if (vp.has_value()) {

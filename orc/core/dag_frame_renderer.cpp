@@ -42,7 +42,22 @@ void run_frame_observer_pass(const IObservationService& service,
                              const NodeFingerprint* fingerprint,
                              ObservationStore* store,
                              IObservationContext& context) {
-  const bool caching = (fingerprint != nullptr) && (store != nullptr);
+  std::vector<NodeFingerprint> fingerprints;
+  if (fingerprint != nullptr) {
+    fingerprints.push_back(*fingerprint);
+  }
+  run_frame_observer_pass(service, observers, representation, frame_id,
+                          fingerprints, store, context);
+}
+
+void run_frame_observer_pass(const IObservationService& service,
+                             const std::vector<ObserverInfo>& observers,
+                             const VideoFrameRepresentation& representation,
+                             FrameID frame_id,
+                             const std::vector<NodeFingerprint>& fingerprints,
+                             ObservationStore* store,
+                             IObservationContext& context) {
+  const bool caching = !fingerprints.empty() && (store != nullptr);
 
   const FieldID field_top(frame_id * kFieldsPerFrame);
   const FieldID field_bottom(frame_id * kFieldsPerFrame + 1);
@@ -55,30 +70,64 @@ void run_frame_observer_pass(const IObservationService& service,
       continue;
     }
 
-    const ObservationRecordKey key_top{*fingerprint, field_top, observer.id,
-                                       observer.version};
-    const ObservationRecordKey key_bottom{*fingerprint, field_bottom,
-                                          observer.id, observer.version};
+    const auto key_at = [&](std::size_t i, FieldID field) {
+      return ObservationRecordKey{fingerprints[i], field, observer.id,
+                                  observer.version};
+    };
 
-    if (store->has(key_top) && store->has(key_bottom)) {
-      // Hit: load stored values instead of re-running the observer.
-      store->load_into(key_top, context);
-      store->load_into(key_bottom, context);
+    // Every listed fingerprint keys identical content (own node first, then
+    // pass-through aliases): a hit under any of them satisfies the pass.
+    std::size_t hit = fingerprints.size();
+    for (std::size_t i = 0; i < fingerprints.size(); ++i) {
+      if (store->has(key_at(i, field_top)) &&
+          store->has(key_at(i, field_bottom))) {
+        hit = i;
+        break;
+      }
+    }
+
+    if (hit < fingerprints.size()) {
+      // Hit: load stored values instead of re-running the observer, then copy
+      // the records to every alias still missing them so future lookups keyed
+      // to any node in the pass-through chain hit directly.
+      const ObservationRecordKey hit_top = key_at(hit, field_top);
+      const ObservationRecordKey hit_bottom = key_at(hit, field_bottom);
+      store->load_into(hit_top, context);
+      store->load_into(hit_bottom, context);
+      if (fingerprints.size() > 1) {
+        const auto rec_top = store->get(hit_top);
+        const auto rec_bottom = store->get(hit_bottom);
+        for (std::size_t i = 0; i < fingerprints.size(); ++i) {
+          if (i == hit) {
+            continue;
+          }
+          if (rec_top && !store->has(key_at(i, field_top))) {
+            store->put(key_at(i, field_top), *rec_top);
+          }
+          if (rec_bottom && !store->has(key_at(i, field_bottom))) {
+            store->put(key_at(i, field_bottom), *rec_bottom);
+          }
+        }
+      }
       continue;
     }
 
-    // Miss: run the observer into a scratch context so we can isolate exactly
-    // what this observer wrote for each field, then merge into the target and
-    // persist per-field records (empty records included, so a later probe
-    // hits).
+    // Miss everywhere: run the observer into a scratch context so we can
+    // isolate exactly what this observer wrote for each field, then merge into
+    // the target and persist per-field records under every listed fingerprint
+    // (empty records included, so a later probe hits).
     ObservationContext scratch;
     service.run_observer(observer.id, representation, frame_id, scratch);
 
     merge_field(scratch, field_top, context);
     merge_field(scratch, field_bottom, context);
 
-    store->put(key_top, scratch.get_all_observations(field_top));
-    store->put(key_bottom, scratch.get_all_observations(field_bottom));
+    const auto rec_top = scratch.get_all_observations(field_top);
+    const auto rec_bottom = scratch.get_all_observations(field_bottom);
+    for (std::size_t i = 0; i < fingerprints.size(); ++i) {
+      store->put(key_at(i, field_top), rec_top);
+      store->put(key_at(i, field_bottom), rec_bottom);
+    }
   }
 }
 
@@ -311,15 +360,60 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
     // run_frame_observer_pass reads observations through the store and only
     // runs observers on a miss.
     auto& obs_ctx = executor_->get_observation_context();
-    const NodeFingerprint* fingerprint = nullptr;
+    // Provenance aliases for this frame's content: the node's own fingerprint
+    // first, then — walking video_passthrough_source() up the chain — the
+    // fingerprint of every upstream node whose output is byte-identical for
+    // this frame (e.g. dropout correction on a frame with no dropouts). Each
+    // hop is verified against the executed outputs (the declared source must
+    // be exactly the input node's artifact) so a stage that wraps something
+    // other than its DAG input can never alias the wrong provenance. The
+    // aliased observer pass then reuses stored records across the whole chain
+    // and back-fills the missing keys.
+    std::vector<NodeFingerprint> fingerprints;
     if (observation_store_ && node_fingerprints_) {
       auto fp_it = node_fingerprints_->find(node_id);
       if (fp_it != node_fingerprints_->end()) {
-        fingerprint = &fp_it->second;
+        fingerprints.push_back(fp_it->second);
+
+        ensure_node_index();
+        const VideoFrameRepresentation* rep = vfr.get();
+        NodeID cur = node_id;
+        while (true) {
+          const auto src = rep->video_passthrough_source(frame_id);
+          if (!src) {
+            break;
+          }
+          const auto idx_it = node_index_.find(cur);
+          if (idx_it == node_index_.end()) {
+            break;
+          }
+          const auto& cur_node = dag_->nodes()[idx_it->second];
+          if (cur_node.input_node_ids.empty()) {
+            break;
+          }
+          const NodeID parent = cur_node.input_node_ids[0];
+          const auto out_it = node_outputs.find(parent);
+          if (out_it == node_outputs.end() || out_it->second.empty()) {
+            break;
+          }
+          const auto parent_vfr =
+              std::dynamic_pointer_cast<const VideoFrameRepresentation>(
+                  out_it->second[0]);
+          if (!parent_vfr || parent_vfr.get() != src.get()) {
+            break;  // declared source is not the DAG input's artifact
+          }
+          const auto parent_fp = node_fingerprints_->find(parent);
+          if (parent_fp == node_fingerprints_->end()) {
+            break;
+          }
+          fingerprints.push_back(parent_fp->second);
+          rep = parent_vfr.get();
+          cur = parent;
+        }
       }
     }
     run_frame_observer_pass(observation_service(), observers_, *vfr, frame_id,
-                            fingerprint, observation_store_.get(), obs_ctx);
+                            fingerprints, observation_store_.get(), obs_ctx);
 
     ORC_LOG_DEBUG("DAGFrameRenderer: node '{}' frame {} rendered successfully",
                   node_id.to_string(), frame_id);

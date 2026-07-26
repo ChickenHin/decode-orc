@@ -62,6 +62,7 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   void setDAG(std::shared_ptr<void>) override {}
   bool getShowDropouts() const override { return false; }
   void setShowDropouts(bool) override {}
+  void setBackgroundObservationEnabled(bool) override {}
 
   uint64_t subscribeInvalidation(
       orc::presenters::ObservationInvalidationCallback) override {

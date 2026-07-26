@@ -797,6 +797,9 @@ void MainWindow::onBurstLevelDataReady(
   auto* core_project = project_.presenter()->getCoreProjectHandle();
   if (core_project) {
     orc::presenters::RenderPresenter render_presenter(core_project);
+    // Throwaway helper presenter: parameter reads only — no sidecar,
+    // scheduler, or sweeps (this runs on the GUI thread).
+    render_presenter.setBackgroundObservationEnabled(false);
     render_presenter.setDAG(project_.getDAG());
     auto vp = render_presenter.getVideoParameters(node_id);
     if (vp.has_value()) {

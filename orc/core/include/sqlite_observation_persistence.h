@@ -90,6 +90,28 @@ class SqliteObservationPersistence : public IObservationPersistence {
       const std::unordered_set<NodeFingerprint>& keep,
       const std::function<void(ObservationRecordKey, ObservationRecord)>& sink)
       override;
+  std::optional<ObservationRecord> load_one(
+      const ObservationRecordKey& key) override;
+
+  // Maintenance stamps, stored in the schema_meta table under an "app:" key
+  // prefix (the bare "version" key is reserved for the schema version).
+  std::string get_meta(const std::string& key) override;
+  void set_meta(const std::string& key, const std::string& value) override;
+
+  /**
+   * @brief Merge records from another sidecar database into this one.
+   *
+   * Inserts every row of @p source_db_path's observation_record table that
+   * this database does not already hold (matched on the full primary key).
+   * Used to adopt the per-source quick-project cache when a project is saved
+   * and reopened, so observations computed before the save are not lost. A
+   * no-op (returning 0) when the source does not exist, cannot be attached,
+   * or holds no rows this database lacks; guarded by row counts so repeated
+   * calls after a completed merge are cheap.
+   *
+   * @return Number of rows inserted.
+   */
+  std::size_t merge_from(const std::string& source_db_path);
   std::size_t retain_only(
       const std::unordered_set<NodeFingerprint>& keep) override;
   std::size_t purge_observer_version(
@@ -104,6 +126,12 @@ class SqliteObservationPersistence : public IObservationPersistence {
   // false if the file is unusable (corrupt / not a database / wrong schema),
   // in which case the caller rebuilds from scratch. Caller holds mutex_.
   bool try_open_and_verify();
+
+  // Apply the per-connection performance configuration (WAL journal,
+  // synchronous=NORMAL, enlarged page cache, mmap window, in-memory temp
+  // store, busy timeout). Called immediately after every successful
+  // sqlite3_open; see the implementation for the workload rationale.
+  void configure_connection();
 
   // Discard any existing file and recreate an empty, current-schema database.
   // Caller holds mutex_.

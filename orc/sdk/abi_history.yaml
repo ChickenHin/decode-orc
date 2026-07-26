@@ -155,6 +155,7 @@ history:
       - orc/stage/frame_descriptor.h
       - orc/stage/common_types.h
       - orc/stage/observation/observation_service_interface.h
+      - orc/stage/video_frame_representation.h
     summary: >-
       `FrameDescriptor` drops the `colour_frame_index`, `frame_number`, and
       `timecode` fields. Signal-measured facts are no longer baked in by
@@ -180,5 +181,11 @@ history:
       per-frame result is order-independent (stateless) or models a cross-frame
       stream (stateful, e.g. `closed_caption`, `colour_frame_phase`); it drives
       background-scheduler frame ordering and never changes a per-frame result.
-      Layout- and source-breaking for any plugin reading the removed fields or
-      these result structs.
+      `VideoFrameRepresentation` in
+      `<orc/stage/video_frame_representation.h>` gains an appended virtual
+      `video_passthrough_source(FrameID)` (default nullptr) letting a transform
+      declare, from metadata alone, that a frame's CVBS video content is
+      byte-identical to its upstream input; the host uses it to share
+      frame-content-keyed stored observations across stages instead of
+      re-analysing identical frames. Layout- and source-breaking for any plugin
+      reading the removed fields or these result structs.

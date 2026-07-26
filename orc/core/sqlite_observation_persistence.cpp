@@ -136,6 +136,33 @@ SqliteObservationPersistence::~SqliteObservationPersistence() {
   }
 }
 
+void SqliteObservationPersistence::configure_connection() {
+  // Performance configuration for this workload: a large (multi-GB),
+  // regenerable cache written in frequent small batches by the write-behind
+  // thread and read via indexed point/streaming queries.
+  //
+  //  - WAL: commits append to one log instead of creating and deleting a
+  //    rollback-journal file per transaction — the write-behind path commits
+  //    continuously during sweeps and triggers.
+  //  - synchronous=NORMAL: with WAL this cannot corrupt the database on an
+  //    application crash; an OS/power failure may lose the most recent
+  //    transactions, which for a cache of recomputable observations merely
+  //    means recomputing a few frames. FULL's per-commit fsyncs buy nothing
+  //    here.
+  //  - 64 MiB page cache + 1 GiB mmap window: point reads (read-through) and
+  //    fingerprint streams (warm-up, merge) over a database far larger than
+  //    SQLite's ~2 MiB default cache.
+  //  - temp_store=MEMORY: GC's NOT-IN scratch structures stay off disk.
+  //  - busy_timeout: a second connection (another app instance sharing the
+  //    per-source quick cache) waits briefly instead of failing SQLITE_BUSY.
+  exec(db_, "PRAGMA journal_mode=WAL");
+  exec(db_, "PRAGMA synchronous=NORMAL");
+  exec(db_, "PRAGMA cache_size=-65536");
+  exec(db_, "PRAGMA mmap_size=1073741824");
+  exec(db_, "PRAGMA temp_store=MEMORY");
+  sqlite3_busy_timeout(db_, 5000);
+}
+
 bool SqliteObservationPersistence::try_open_and_verify() {
   if (sqlite3_open(db_path_.c_str(), &db_) != SQLITE_OK) {
     if (db_) {
@@ -145,18 +172,23 @@ bool SqliteObservationPersistence::try_open_and_verify() {
     return false;
   }
 
-  // A garbage file opens lazily; the first real statement surfaces corruption.
-  // integrity_check returns "ok" for a healthy database (including a brand-new
-  // empty one) and an error string / SQLITE_NOTADB for a corrupt file.
-  {
-    Statement check(db_, "PRAGMA integrity_check(1)");
-    if (!check) return false;
-    const int rc = sqlite3_step(check.get());
-    if (rc != SQLITE_ROW) return false;
-    if (column_text(check.get(), 0) != "ok") return false;
-  }
+  configure_connection();
 
+  // A garbage file opens lazily; the first real statements surface corruption
+  // (SQLITE_NOTADB / SQLITE_CORRUPT), and every failure path here funnels into
+  // rebuild(). A full integrity_check would read the entire multi-GB B-tree on
+  // every open — deliberately NOT done: this is a regenerable cache, and any
+  // deeper corruption that slips past these probes surfaces as per-operation
+  // errors that degrade to cache misses (recompute), never wrong data.
   if (!ensure_schema()) return false;
+
+  // Cheap root-page probe of the main table (reads at most one page).
+  {
+    Statement probe(db_, "SELECT 1 FROM observation_record LIMIT 1");
+    if (!probe) return false;
+    const int rc = sqlite3_step(probe.get());
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) return false;
+  }
 
   // Reject an existing database written by a newer/older schema version.
   Statement stmt(db_, "SELECT value FROM schema_meta WHERE key = 'version'");
@@ -182,6 +214,7 @@ void SqliteObservationPersistence::rebuild() {
     }
     throw std::runtime_error("ObservationSidecar: " + msg);
   }
+  configure_connection();
   if (!ensure_schema()) {
     throw std::runtime_error(
         "ObservationSidecar: failed to initialise schema for '" + db_path_ +
@@ -292,13 +325,33 @@ void SqliteObservationPersistence::load_matching(
   std::lock_guard<std::mutex> lock(mutex_);
   if (!db_ || keep.empty()) return;
 
-  Statement stmt(db_,
-                 "SELECT node_fingerprint, field_id, observer_id,"
-                 " observer_version, namespace, key, value_type, value"
-                 " FROM observation_record"
-                 " ORDER BY node_fingerprint, field_id, observer_id,"
-                 " observer_version");
+  // Small keep sets stream just the wanted fingerprints through the
+  // idx_obs_fingerprint index — a single-fingerprint warm-up on a multi-GB
+  // sidecar must not pay a full-table scan. Larger sets (whole-map warm
+  // start) fall back to one ordered scan with the filter applied in the loop.
+  std::string sql =
+      "SELECT node_fingerprint, field_id, observer_id,"
+      " observer_version, namespace, key, value_type, value"
+      " FROM observation_record";
+  constexpr std::size_t kIndexedKeepLimit = 8;
+  const bool indexed = keep.size() <= kIndexedKeepLimit;
+  if (indexed) {
+    sql += " WHERE node_fingerprint IN (";
+    for (std::size_t i = 0; i < keep.size(); ++i) {
+      sql += i == 0 ? "?" : ",?";
+    }
+    sql += ")";
+  }
+  sql += " ORDER BY node_fingerprint, field_id, observer_id, observer_version";
+
+  Statement stmt(db_, sql.c_str());
   if (!stmt) return;
+  if (indexed) {
+    int slot = 1;
+    for (const auto& fp : keep) {
+      bind_text(stmt.get(), slot++, fp.value);
+    }
+  }
 
   // Rows arrive grouped by record key; accumulate a record and emit it when the
   // key changes.
@@ -337,6 +390,118 @@ void SqliteObservationPersistence::load_matching(
         decode_value(value_type, column_text(stmt.get(), 7));
   }
   flush_current();
+}
+
+std::optional<ObservationRecord> SqliteObservationPersistence::load_one(
+    const ObservationRecordKey& key) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_) return std::nullopt;
+
+  Statement stmt(db_,
+                 "SELECT namespace, key, value_type, value"
+                 " FROM observation_record"
+                 " WHERE node_fingerprint = ? AND field_id = ?"
+                 " AND observer_id = ? AND observer_version = ?");
+  if (!stmt) return std::nullopt;
+
+  bind_text(stmt.get(), 1, key.fingerprint.value);
+  sqlite3_bind_int64(stmt.get(), 2,
+                     static_cast<sqlite3_int64>(key.field_id.value()));
+  bind_text(stmt.get(), 3, key.observer_id);
+  bind_text(stmt.get(), 4, key.observer_version);
+
+  bool found = false;
+  ObservationRecord record;
+  while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+    found = true;
+    const int value_type = sqlite3_column_int(stmt.get(), 2);
+    if (value_type == kEmptyRecord) continue;  // sentinel: present-but-empty
+    record[column_text(stmt.get(), 0)][column_text(stmt.get(), 1)] =
+        decode_value(value_type, column_text(stmt.get(), 3));
+  }
+  if (!found) return std::nullopt;
+  return record;
+}
+
+std::string SqliteObservationPersistence::get_meta(const std::string& key) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_) return {};
+  Statement stmt(db_, "SELECT value FROM schema_meta WHERE key = ?");
+  if (!stmt) return {};
+  bind_text(stmt.get(), 1, "app:" + key);
+  if (sqlite3_step(stmt.get()) != SQLITE_ROW) return {};
+  return column_text(stmt.get(), 0);
+}
+
+void SqliteObservationPersistence::set_meta(const std::string& key,
+                                            const std::string& value) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_) return;
+  Statement stmt(db_,
+                 "INSERT OR REPLACE INTO schema_meta(key, value)"
+                 " VALUES (?, ?)");
+  if (!stmt) return;
+  bind_text(stmt.get(), 1, "app:" + key);
+  bind_text(stmt.get(), 2, value);
+  sqlite3_step(stmt.get());
+}
+
+std::size_t SqliteObservationPersistence::merge_from(
+    const std::string& source_db_path) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_ || source_db_path.empty()) return 0;
+
+  std::error_code ec;
+  if (!std::filesystem::exists(source_db_path, ec) || ec) return 0;
+
+  Statement attach(db_, "ATTACH DATABASE ? AS merge_src");
+  if (!attach) return 0;
+  bind_text(attach.get(), 1, source_db_path);
+  if (sqlite3_step(attach.get()) != SQLITE_DONE) {
+    ORC_LOG_WARN("ObservationSidecar: cannot attach '{}' for merge",
+                 source_db_path);
+    return 0;
+  }
+
+  std::size_t inserted = 0;
+  {
+    // Count guard: a source with no more rows than we already hold cannot
+    // contribute anything new through INSERT OR IGNORE on the full PK — the
+    // common case after a completed merge, kept cheap.
+    sqlite3_int64 own_rows = 0;
+    sqlite3_int64 src_rows = 0;
+    Statement own_count(db_, "SELECT COUNT(*) FROM observation_record");
+    Statement src_count(db_,
+                        "SELECT COUNT(*) FROM merge_src.observation_record");
+    const bool counts_ok =
+        own_count && sqlite3_step(own_count.get()) == SQLITE_ROW &&
+        (own_rows = sqlite3_column_int64(own_count.get(), 0), true) &&
+        src_count && sqlite3_step(src_count.get()) == SQLITE_ROW &&
+        (src_rows = sqlite3_column_int64(src_count.get(), 0), true);
+
+    if (counts_ok && src_rows > 0 && src_rows > own_rows) {
+      exec(db_, "BEGIN IMMEDIATE");
+      // Adopt whole records only: a record (one observer's output for one
+      // field) is atomic, so rows are copied only when the target holds NO
+      // rows for that record key. Row-level INSERT OR IGNORE would blend rows
+      // from two different observations of the same record.
+      if (exec(db_,
+               "INSERT INTO observation_record"
+               " SELECT s.* FROM merge_src.observation_record AS s"
+               " WHERE NOT EXISTS ("
+               "   SELECT 1 FROM observation_record AS t"
+               "   WHERE t.node_fingerprint = s.node_fingerprint"
+               "     AND t.field_id = s.field_id"
+               "     AND t.observer_id = s.observer_id"
+               "     AND t.observer_version = s.observer_version)")) {
+        inserted = static_cast<std::size_t>(sqlite3_changes(db_));
+      }
+      exec(db_, "COMMIT");
+    }
+  }
+
+  exec(db_, "DETACH DATABASE merge_src");
+  return inserted;
 }
 
 std::size_t SqliteObservationPersistence::retain_only(

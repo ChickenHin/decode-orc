@@ -458,3 +458,74 @@ project shows observer data immediately.
 - Unit tests via the persistence interface: GC removes only unreachable
   records; corrupted-database path recovers by rebuilding; version bump of
   one observer leaves other observers' records intact.
+
+---
+
+## Phase 7 — Making the pipeline actually deliver responsiveness
+
+Phases 1–6 built the machinery; measurement of real projects showed the
+objectives (instant sink triggers, useful background preparation) were still
+unmet for structural reasons. Phase 7 closes those gaps. Implemented 2026-07.
+
+### Task 7.1 — Bounded work-item chunks (preemption latency)
+
+Workers check the priority queues only between items, so item size bounds how
+long queued interactive work waits behind an in-flight sweep. Stateless items
+are split into chunks of at most ~128 frames (and at least one per pool
+worker); stateful items stay whole (ascending-order contract).
+`orc/core/observation_scheduler.cpp` (`chunk_item`).
+
+### Task 7.2 — Background prepares what consumers read
+
+The sweep previously targeted previewed/dialog nodes, but an analysis sink
+reads observations keyed to its *input* node — which nothing swept. On every
+DAG build the presenter now sweeps the input node of each `ANALYSIS_SINK`
+stage (lowest priority, once per provenance), so the store is warm by the
+time the user triggers. Preview navigation only prefetches a window; whole-
+node sweeps happen for sink inputs and dialog-read nodes.
+`orc/presenters/src/render_presenter.cpp` (`rebuildRenderersFromDAG`,
+`sweepNodeForObservation`).
+
+### Task 7.3 — Triggers consume the parallel engine
+
+`triggerStage()` no longer lets the sink compute observations serially: it
+first fills the store for the input node's missing frames across a temporary
+pool of per-thread `RendererObservationTaskRunner`s (skipping frames the
+background already covered), metering progress through the existing trigger
+progress callback and honouring cancellation, then preloads the sink's
+context from the store. A cold first trigger runs N-way parallel; a warm one
+is a pure store read; a re-trigger is instant.
+(`precomputeTriggerObservations`).
+
+### Task 7.4 — Per-frame pass-through provenance (cross-node sharing)
+
+Node fingerprints are distinct even when two nodes' output content is
+identical for most frames (e.g. dropout correction changes only frames with
+dropouts), so nothing carried over between adjacent nodes. The SDK now lets a
+transform declare, from metadata alone, that a frame's CVBS video content is
+byte-identical to its upstream input:
+`VideoFrameRepresentation::video_passthrough_source(FrameID)`
+(appended virtual, default nullptr; folded into the unshipped ABI v11 entry).
+`dropout_correct` answers from the source's dropout hints; `efm_audio_decode`
+passes all video through. The renderer's observer pass resolves the
+pass-through chain per frame (verifying each declared source against the
+executed DAG inputs) and treats every fingerprint in the chain as an alias of
+the same content: a store hit under any alias satisfies the pass and
+back-fills the others; a miss computes once and stores under all. Browsing or
+analysing `source` vs `dropout_correct` now shares ~all no-dropout frames.
+`orc/core/dag_frame_renderer.cpp` (aliased `run_frame_observer_pass`).
+
+### Task 7.5 — Timing instrumentation
+
+Per-item debug logging in the scheduler (frames, elapsed, effective
+frames/sec, cancel/fail markers) and info-level precompute summaries in the
+presenter (missing/total, worker count, elapsed, failures), so future tuning
+starts from numbers instead of guesses.
+
+**Acceptance criteria (all landed)**
+
+- Unit: chunk cap yields ≥ ceil(total/128) queued chunks with exact coverage;
+  aliased observer pass reuses records across fingerprints in both
+  directions and back-fills missing keys; stateful items never chunked.
+- SDK gates (`ctest -L sdk`) green with the v11 history/docs updates.
+- Full suite + MVP architecture check green.

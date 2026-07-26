@@ -28,6 +28,8 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(void, setDAG, (std::shared_ptr<void> dag_handle), (override));
   MOCK_METHOD(bool, getShowDropouts, (), (const, override));
   MOCK_METHOD(void, setShowDropouts, (bool show), (override));
+  MOCK_METHOD(void, setBackgroundObservationEnabled, (bool enabled),
+              (override));
 
   // Real (non-mocked) invalidation registry so tests can exercise the
   // coordinator's subscribe/fire/unsubscribe wiring end to end.

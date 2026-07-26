@@ -397,6 +397,22 @@ class RenderPresenter {
    */
   void cancelTrigger();
 
+  /**
+   * @brief Enable or disable this presenter's background observation pipeline.
+   *
+   * Enabled (the default), the first DAG build attaches the durable
+   * observation sidecar and starts the worker-pool scheduler with its
+   * background sweeps. Auxiliary presenters that only render frames or read
+   * parameters (the dropout editor's, and MainWindow's short-lived helper
+   * presenters) must disable this *before* the first setDAG()/updateDAG():
+   * they then run with a small in-memory store only — no sidecar attach, no
+   * version purge/GC against a potentially multi-GB database, no scheduler,
+   * no sweeps — keeping construction cheap enough for the GUI thread and
+   * avoiding duplicate background pipelines (one per process is enough). No
+   * effect once the store/scheduler have been created.
+   */
+  void setBackgroundObservationEnabled(bool enabled);
+
   // === Dropout Visualization ===
 
   /**

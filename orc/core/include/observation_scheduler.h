@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "frame_provenance.h"
@@ -245,13 +246,42 @@ class ObservationScheduler {
   using CompletionCallback = std::function<void(const ObservationCompletion&)>;
   using WorkloadCallback = std::function<void(const ObservationWorkload&)>;
 
+  /// Creates one task runner (renderer/executor/observer handles) for a worker
+  /// thread. Called once per worker at construction; each returned runner is
+  /// used only on its own thread, so implementations need not be thread-safe.
+  using TaskRunnerFactory =
+      std::function<std::unique_ptr<IObservationTaskRunner>()>;
+
   /**
    * @param runner        Backend that renders + observes frames (required).
    * @param fingerprints  Initial fingerprint map used for staleness checks.
    * @param policy        Optional enqueue policy driving the on_* events.
+   *
+   * Single-worker constructor: one runner, one worker thread. Retained for
+   * tests and callers that do not parallelise.
    */
   ObservationScheduler(
       std::unique_ptr<IObservationTaskRunner> runner,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints,
+      std::shared_ptr<IObservationSchedulingPolicy> policy = nullptr);
+
+  /**
+   * @brief Multi-worker constructor: a pool of @p worker_count threads, each
+   *        with its own runner built by @p runner_factory.
+   *
+   * Stateless work items are split across the pool; stateful items stay whole
+   * on a single worker (their ascending-frame order is preserved). The shared
+   * ObservationStore each runner writes to is the sole thread-safe handoff
+   * point. @p worker_count is clamped to at least 1.
+   *
+   * @param runner_factory Builds one runner per worker (called worker_count
+   *                       times, on the constructing thread).
+   * @param worker_count   Number of worker threads (>= 1).
+   * @param fingerprints   Initial fingerprint map used for staleness checks.
+   * @param policy         Optional enqueue policy driving the on_* events.
+   */
+  ObservationScheduler(
+      TaskRunnerFactory runner_factory, unsigned worker_count,
       std::shared_ptr<const NodeFingerprintMap> fingerprints,
       std::shared_ptr<IObservationSchedulingPolicy> policy = nullptr);
 
@@ -269,8 +299,11 @@ class ObservationScheduler {
   /// safe to call from the destructor. No callback fires after it returns.
   void stop();
 
-  /// True while the worker thread is running.
+  /// True while the worker threads are running.
   bool is_running() const;
+
+  /// Number of worker threads in the pool (>= 1).
+  std::size_t worker_count() const { return workers_.size(); }
 
   // ---- Direct submission ---------------------------------------------------
 
@@ -348,29 +381,53 @@ class ObservationScheduler {
  private:
   static constexpr int kPriorityClasses = 3;
 
-  // A control action taken by the worker (or the test driver): either a DAG
-  // update to forward to the runner, or a work item to process.
+  // One background worker: its own task runner (renderer/executor/handles), its
+  // thread, a per-item cancel flag polled inside long observe loops, and
+  // in-flight bookkeeping for staleness aborts. `runner` is touched only on
+  // this worker's own thread; the remaining fields are guarded by mutex_ except
+  // `cancel`, which is atomic. Held by unique_ptr because atomic/thread members
+  // make Worker non-movable.
+  struct Worker {
+    std::unique_ptr<IObservationTaskRunner> runner;
+    std::thread thread;
+    std::atomic<bool> cancel{false};
+    bool has_in_flight = false;
+    NodeID in_flight_node;
+    NodeFingerprint in_flight_fingerprint;
+    // DAG generation this worker's runner has adopted; lags dag_generation_
+    // until the worker applies the pending update before its next item.
+    std::uint64_t applied_generation = 0;
+  };
+
+  // A control action taken by a worker (or the test driver): either a DAG
+  // update to forward to that worker's runner, or a work item to process.
   struct NextAction {
     enum class Kind { kNone, kDagUpdate, kItem } kind = Kind::kNone;
     ObservationWorkItem item;
     std::shared_ptr<const DAG> dag;
     std::shared_ptr<const NodeFingerprintMap> fingerprints;
+    std::uint64_t target_generation = 0;
   };
 
   // True if @p item's fingerprint still matches the node in @p map.
   static bool fingerprint_current(const ObservationWorkItem& item,
                                   const NodeFingerprintMap& map);
 
-  void worker_loop();
+  void worker_loop(Worker* worker);
 
-  // Pop the next action under the lock. When @p blocking, waits until there is
-  // work, a DAG update, or a stop request; returns kNone only on stop. When not
-  // blocking, returns kNone immediately if nothing is pending.
-  NextAction take_next(bool blocking);
+  // Pop the next action for @p worker under the lock. When @p blocking, waits
+  // until there is work, a DAG update, or a stop request; returns kNone only on
+  // stop. When not blocking, returns kNone immediately if nothing is pending.
+  NextAction take_next(Worker* worker, bool blocking);
 
-  // Execute one dequeued work item: observe its frames in order, honouring
-  // cancellation, and emit progress + a single completion. Never throws.
-  void process_item(const ObservationWorkItem& item);
+  // Execute one dequeued work item on @p worker: observe its frames in order,
+  // honouring cancellation, and emit progress + a single completion. Never
+  // throws.
+  void process_item(Worker* worker, const ObservationWorkItem& item);
+
+  // True (caller holds mutex_) if any worker's runner has not yet adopted the
+  // current DAG generation.
+  bool any_dag_update_pending_locked() const;
 
   void enqueue_locked(ObservationWorkItem item);
   void purge_stale_locked();
@@ -392,7 +449,9 @@ class ObservationScheduler {
   // a single idle snapshot. Called after an item finishes and after a purge.
   void reset_workload_if_drained();
 
-  std::unique_ptr<IObservationTaskRunner> runner_;
+  // The worker pool (>= 1). Each worker owns a runner and, once started, a
+  // thread. Populated at construction; threads are spawned in start().
+  std::vector<std::unique_ptr<Worker>> workers_;
   std::shared_ptr<IObservationSchedulingPolicy> policy_;
 
   mutable std::mutex mutex_;
@@ -403,20 +462,18 @@ class ObservationScheduler {
 
   std::shared_ptr<const NodeFingerprintMap> fingerprints_;
 
-  // A pending DAG update to forward to the runner on the worker thread.
-  bool has_pending_dag_update_ = false;
-  std::shared_ptr<const DAG> pending_dag_;
-  std::shared_ptr<const NodeFingerprintMap> pending_fingerprints_;
+  // Latest DAG to adopt and its monotonic generation. on_dag_changed() bumps
+  // the generation and records the DAG; each worker lazily brings its runner up
+  // to the current generation before its next item (a per-worker barrier).
+  std::uint64_t dag_generation_ = 0;
+  std::shared_ptr<const DAG> current_dag_;
 
-  // In-flight item bookkeeping for staleness-driven abort.
-  bool has_in_flight_ = false;
-  NodeID in_flight_node_;
-  NodeFingerprint in_flight_fingerprint_;
-  std::atomic<bool> cancel_in_flight_{false};
+  // Number of items currently being processed across all workers (guarded by
+  // mutex_); the workload returns to idle only when this reaches zero.
+  int in_flight_count_ = 0;
 
   bool stop_requested_ = false;
   bool running_ = false;
-  std::thread worker_;
 
   ProgressCallback progress_cb_;
   CompletionCallback completion_cb_;
@@ -429,6 +486,13 @@ class ObservationScheduler {
   // outstanding workload and frames_observed never exceeds frames_total.
   std::uint64_t workload_total_frames_ = 0;
   std::uint64_t workload_observed_frames_ = 0;
+
+  // Last snapshot delivered to the workload callback (guarded by mutex_).
+  // emit_workload() suppresses deliveries whose consumer-visible fields
+  // (active / percent / outstanding nodes) are unchanged, so per-frame calls
+  // from a fast sweep cannot flood the subscriber (typically a GUI queue).
+  ObservationWorkload last_workload_;
+  bool workload_emitted_once_ = false;
 };
 
 /**
@@ -471,6 +535,10 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
   std::shared_ptr<ObservationStore> store_;
   std::shared_ptr<IObservationService> service_;
   std::unique_ptr<DAGFrameRenderer> renderer_;
+  // (id, version) of every standard observer, cached so observe_frame() can
+  // pre-check the store and skip rendering a frame whose observations are all
+  // already present (e.g. computed by a parallel chunk covering the same node).
+  std::vector<std::pair<std::string, std::string>> observer_keys_;
 };
 
 /**

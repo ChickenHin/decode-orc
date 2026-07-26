@@ -82,17 +82,41 @@ void ObservationStore::evict_to_budget(std::size_t keep_at_least) {
   }
 }
 
-bool ObservationStore::has(const ObservationRecordKey& key) const {
+bool ObservationStore::ensure_resident(const ObservationRecordKey& key) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index_.find(key) != index_.end()) {
+      return true;
+    }
+    if (!persistence_) {
+      return false;
+    }
+  }
+  // Sidecar point read with no store lock held, so database I/O never blocks
+  // other readers. A concurrent install of the same key is harmless:
+  // put_in_memory replaces.
+  auto record = persistence_->load_one(key);
+  if (!record) {
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  return index_.find(key) != index_.end();
+  put_in_memory(key, std::move(*record));
+  return true;
+}
+
+bool ObservationStore::has(const ObservationRecordKey& key) {
+  return ensure_resident(key);
 }
 
 std::optional<ObservationRecord> ObservationStore::get(
     const ObservationRecordKey& key) {
+  if (!ensure_resident(key)) {
+    return std::nullopt;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = index_.find(key);
   if (it == index_.end()) {
-    return std::nullopt;
+    return std::nullopt;  // evicted between ensure_resident and here
   }
   touch(it->second);
   return it->second->record;
@@ -138,11 +162,14 @@ void ObservationStore::put(const ObservationRecordKey& key,
 }
 
 bool ObservationStore::load_into(const ObservationRecordKey& key,
-                                 IObservationContext& context) const {
+                                 IObservationContext& context) {
+  if (!ensure_resident(key)) {
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = index_.find(key);
   if (it == index_.end()) {
-    return false;
+    return false;  // evicted between ensure_resident and here
   }
   touch(it->second);
   for (const auto& [ns, keys] : it->second->record) {
