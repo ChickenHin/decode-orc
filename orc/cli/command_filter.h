@@ -1,9 +1,8 @@
 /*
  * File:        command_filter.h
  * Module:      orc-cli
- * Purpose:     Build and process a DAG from an ffmpeg-style filtergraph
- *              string (or an input/filters/output triad) instead of a
- *              .orcprj project file.
+ * Purpose:     Build and process a DAG from an input/filters/output triad
+ *              instead of a .orcprj project file.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -19,15 +18,11 @@ namespace cli {
 /**
  * @brief Options for the filter command.
  *
- * Exactly one of the two modes below is used, chosen by which fields are
- * non-empty:
- *
- * - Graph-string mode: `filtergraph` holds a full ffmpeg-style filtergraph.
- * - Triad mode: `input_stages` / `filters_stages` / `output_stages` each hold
- *   a (possibly comma-chained) fragment restricted to one stage category —
- *   source stages, processing stages, and sink stages respectively. This is
- *   friendlier for the common linear pipeline and is validated per category
- *   (see filter_command()).
+ * `input_stages` / `filters_stages` / `output_stages` each hold a (possibly
+ * comma/semicolon-chained) fragment restricted to one stage category —
+ * source stages, processing stages, and sink stages respectively — and are
+ * validated per category (see filter_command()). Any of the three may be
+ * omitted, but at least one must be non-empty.
  *
  * There is no video/source-format option: video format and source type are
  * inherent to the stage modules used (e.g. an NTSC-only source, or the
@@ -35,22 +30,33 @@ namespace cli {
  * automatically.
  */
 struct FilterOptions {
-  std::string filtergraph;     ///< Graph-string mode: full filtergraph.
-  std::string input_stages;    ///< Triad mode: input (source) stage(s).
-  std::string filters_stages;  ///< Triad mode: processing stage(s).
-  std::string output_stages;   ///< Triad mode: output (sink) stage(s).
+  std::string input_stages;    ///< Input (source) stage(s).
+  std::string filters_stages;  ///< Processing stage(s).
+  std::string output_stages;   ///< Output (sink) stage(s).
+
+  /// When non-empty, save the assembled project to this .orcprj path
+  /// instead of running it (e.g. for later editing in the GUI, or reuse
+  /// with --process). No sinks are triggered when this is set. This calls
+  /// the existing ProjectPresenter::saveProject() — the same YAML writer
+  /// used elsewhere — so it is not a new save format, just a different
+  /// entry point into the existing one.
+  std::string export_project_path;
 };
 
 /**
- * @brief Execute a filtergraph decode run.
+ * @brief Execute a filtergraph decode run, or save it instead of running.
  *
- * Parses the filtergraph (or composes and validates the input/filters/output
- * triad), auto-detects the project's video format and source type from the
- * stages actually used, builds an in-memory project via the project
- * presenter, then triggers all sink nodes. No .orcprj file is read or
- * written.
+ * Parses and composes the input/filters/output triad (validating that each
+ * segment only contains stages of the matching category), auto-detects the
+ * project's video format and source type from the stages actually used, and
+ * builds an in-memory project via the project presenter.
  *
- * @param options Filtergraph or triad options.
+ * Normally, triggers all sink nodes and returns their combined result. If
+ * `export_project_path` is set, saves the assembled project as a .orcprj
+ * file instead (for opening in the GUI, or later use with `--process`) and
+ * does not run anything.
+ *
+ * @param options Triad options.
  * @return Exit code (0 = success, non-zero = error).
  */
 int filter_command(const FilterOptions& options);

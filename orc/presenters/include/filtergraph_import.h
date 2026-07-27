@@ -57,8 +57,8 @@ struct FiltergraphImportResult {
  *
  * @param presenter Project to build into. Any existing nodes are left
  * alone; the new nodes are added alongside them.
- * @param filtergraph The filtergraph string (same grammar as orc-cli's
- * `--filter`).
+ * @param filtergraph The filtergraph string (same grammar as the composed
+ * --input/--filters/--output triad).
  * @return Result; check `.ok` before assuming the project changed.
  */
 FiltergraphImportResult import_filtergraph_into_project(

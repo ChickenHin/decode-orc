@@ -1,8 +1,7 @@
 /*
  * File:        command_filter.cpp
  * Module:      orc-cli
- * Purpose:     Build and process a DAG from an ffmpeg-style filtergraph
- *              (or an input/filters/output triad).
+ * Purpose:     Build and process a DAG from an input/filters/output triad.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -98,39 +97,32 @@ void log_plugin_diagnostics(const ProjectPresenter& presenter) {
 }  // namespace
 
 int filter_command(const FilterOptions& options) {
-  const bool triad_mode = options.filtergraph.empty();
+  const auto stage_index = build_stage_index();
 
+  std::string error;
+  if (!validate_triad_segment(options.input_stages, StageCategory::kInput,
+                              stage_index, error) ||
+      !validate_triad_segment(options.filters_stages, StageCategory::kFilters,
+                              stage_index, error) ||
+      !validate_triad_segment(options.output_stages, StageCategory::kOutput,
+                              stage_index, error)) {
+    ORC_LOG_ERROR("{}", error);
+    return 1;
+  }
+
+  std::vector<std::string> segments;
+  for (const auto& segment :
+       {options.input_stages, options.filters_stages, options.output_stages}) {
+    if (!segment.empty()) {
+      segments.push_back(segment);
+    }
+  }
   std::string combined_graph;
-
-  if (triad_mode) {
-    const auto stage_index = build_stage_index();
-
-    std::string error;
-    if (!validate_triad_segment(options.input_stages, StageCategory::kInput,
-                                stage_index, error) ||
-        !validate_triad_segment(options.filters_stages, StageCategory::kFilters,
-                                stage_index, error) ||
-        !validate_triad_segment(options.output_stages, StageCategory::kOutput,
-                                stage_index, error)) {
-      ORC_LOG_ERROR("{}", error);
-      return 1;
+  for (size_t i = 0; i < segments.size(); ++i) {
+    if (i > 0) {
+      combined_graph += ",";
     }
-
-    std::vector<std::string> segments;
-    for (const auto& segment : {options.input_stages, options.filters_stages,
-                                options.output_stages}) {
-      if (!segment.empty()) {
-        segments.push_back(segment);
-      }
-    }
-    for (size_t i = 0; i < segments.size(); ++i) {
-      if (i > 0) {
-        combined_graph += ",";
-      }
-      combined_graph += segments[i];
-    }
-  } else {
-    combined_graph = options.filtergraph;
+    combined_graph += segments[i];
   }
 
   ProjectPresenter presenter;
@@ -155,6 +147,20 @@ int filter_command(const FilterOptions& options) {
 
   ORC_LOG_INFO("Parsed filtergraph successfully");
   log_plugin_diagnostics(presenter);
+
+  // --export-project: save the assembled project instead of running it.
+  // This calls the presenter's existing saveProject() (the same YAML writer
+  // used elsewhere), so it's a different entry point into the existing save
+  // path, not a new one.
+  if (!options.export_project_path.empty()) {
+    if (!presenter.saveProject(options.export_project_path)) {
+      ORC_LOG_ERROR("Failed to save project to '{}'",
+                    options.export_project_path);
+      return 1;
+    }
+    ORC_LOG_INFO("Project saved to '{}'", options.export_project_path);
+    return 0;
+  }
 
   // Validate the assembled project before running.
   if (!presenter.validateProject()) {

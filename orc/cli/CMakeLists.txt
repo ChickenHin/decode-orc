@@ -204,7 +204,7 @@ if(BUILD_UNIT_TESTS)
         WILL_FAIL TRUE
     )
 
-    # --- Filtergraph mode -----------------------------------------------------
+    # --- Filtergraph mode (input/filters/output triad) ------------------------
 
     add_test(
         NAME CLI.HelpShowsFilterCommand
@@ -212,13 +212,13 @@ if(BUILD_UNIT_TESTS)
     )
     set_tests_properties(CLI.HelpShowsFilterCommand PROPERTIES
         LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "--filter"
+        PASS_REGULAR_EXPRESSION "--input"
     )
 
     add_test(
         NAME CLI.FilterUnknownStageFails
         COMMAND $<TARGET_FILE:orc-cli>
-                --filter "definitely_not_a_stage, video_sink"
+                --input "definitely_not_a_stage" --output "video_sink"
     )
     set_tests_properties(CLI.FilterUnknownStageFails PROPERTIES
         LABELS "unit;cli"
@@ -227,7 +227,7 @@ if(BUILD_UNIT_TESTS)
 
     add_test(
         NAME CLI.FilterMalformedGraphFails
-        COMMAND $<TARGET_FILE:orc-cli> --filter "src=badparam, sink"
+        COMMAND $<TARGET_FILE:orc-cli> --input "src=badparam" --output sink
     )
     set_tests_properties(CLI.FilterMalformedGraphFails PROPERTIES
         LABELS "unit;cli"
@@ -236,7 +236,7 @@ if(BUILD_UNIT_TESTS)
 
     add_test(
         NAME CLI.FilterRejectsProjectFileCombination
-        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --filter "src, sink"
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --input "src" --output sink
     )
     set_tests_properties(CLI.FilterRejectsProjectFileCombination PROPERTIES
         LABELS "unit;cli"
@@ -244,10 +244,10 @@ if(BUILD_UNIT_TESTS)
     )
 
     add_test(
-        NAME CLI.TriadRejectsCombinationWithFilter
-        COMMAND $<TARGET_FILE:orc-cli> --input "src" --filter "src, sink"
+        NAME CLI.ProcessAndTriadCannotCombine
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --process --input "src"
     )
-    set_tests_properties(CLI.TriadRejectsCombinationWithFilter PROPERTIES
+    set_tests_properties(CLI.ProcessAndTriadCannotCombine PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
     )
@@ -257,6 +257,25 @@ if(BUILD_UNIT_TESTS)
         COMMAND $<TARGET_FILE:orc-cli> --input "video_sink" --output "video_sink"
     )
     set_tests_properties(CLI.TriadRejectsSinkStageInInput PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.HelpShowsExportProjectOption
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsExportProjectOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--export-project"
+    )
+
+    add_test(
+        NAME CLI.ExportProjectRejectedWithProjectFile
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --process
+                --export-project out.orcprj
+    )
+    set_tests_properties(CLI.ExportProjectRejectedWithProjectFile PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
     )
