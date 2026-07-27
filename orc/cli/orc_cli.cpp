@@ -57,10 +57,19 @@ void print_usage(const char* program_name) {
   std::cerr << "                                 instead of running it (for "
                "the GUI, or later\n";
   std::cerr << "                                 reuse with --process)\n";
+  std::cerr << "  --video-format NTSC|PAL|PAL-M  Only used (and only needed) "
+               "with --export-project,\n";
+  std::cerr << "                                 if none of the stages used "
+               "imply a format —\n";
+  std::cerr << "                                 e.g. tbc_source reads its "
+               "own format from its\n";
+  std::cerr << "                                 metadata file, so it never "
+               "implies one\n";
   std::cerr << "\n";
-  std::cerr << "Note: video format and source signal type are detected "
-               "automatically\n";
-  std::cerr << "from the stage modules used, and never need to be specified.\n";
+  std::cerr << "Note: video format and source signal type are usually "
+               "detected automatically\n";
+  std::cerr << "from the stage modules used (see --video-format above for "
+               "the one exception).\n";
   std::cerr << "\n";
   std::cerr << "Plugin Management:\n";
   std::cerr << "  plugins list                   List registry entries and "
@@ -136,6 +145,7 @@ int main(int argc, char* argv[]) {
     std::string output_stages;
     bool triad_provided = false;      // --input / --filters / --output
     std::string export_project_path;  // --export-project
+    std::string export_video_format;  // --video-format (export-only override)
 
     // Command flags
     bool do_process = false;
@@ -227,6 +237,8 @@ int main(int argc, char* argv[]) {
         triad_provided = true;
       } else if (arg == "--export-project" && i + 1 < argc) {
         export_project_path = argv[++i];
+      } else if (arg == "--video-format" && i + 1 < argc) {
+        export_video_format = argv[++i];
       } else if (arg[0] != '-') {
         // Positional argument - project file
         if (project_path.empty()) {
@@ -244,6 +256,13 @@ int main(int argc, char* argv[]) {
     }
 
     const bool filtergraph_mode = triad_provided;
+
+    if (!export_video_format.empty() && export_project_path.empty()) {
+      std::cerr << "Error: --video-format only makes sense with "
+                   "--export-project\n\n";
+      print_usage(argv[0]);
+      return 1;
+    }
 
     if (filtergraph_mode) {
       if (!project_path.empty()) {
@@ -336,6 +355,7 @@ int main(int argc, char* argv[]) {
         options.filters_stages = filters_stages;
         options.output_stages = output_stages;
         options.export_project_path = export_project_path;
+        options.export_video_format = export_video_format;
 
         exit_code = cli::filter_command(options);
       } else {

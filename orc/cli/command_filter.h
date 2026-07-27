@@ -41,6 +41,16 @@ struct FilterOptions {
   /// used elsewhere — so it is not a new save format, just a different
   /// entry point into the existing one.
   std::string export_project_path;
+
+  /// Optional override for the project's video format ("NTSC", "PAL", or
+  /// "PAL-M"), only consulted when exporting (export_project_path is set)
+  /// and none of the stages used imply a format on their own. Running in
+  /// memory never needs this — the .orcprj file format itself requires an
+  /// explicit format, but the core's own compatibility checks do not, so
+  /// this exists purely to satisfy the save path for stages that are
+  /// legitimately format-agnostic (e.g. tbc_source, which reads its own
+  /// format from its metadata sidecar file rather than from the project).
+  std::string export_video_format;
 };
 
 /**

@@ -280,6 +280,25 @@ if(BUILD_UNIT_TESTS)
         WILL_FAIL TRUE
     )
 
+    add_test(
+        NAME CLI.VideoFormatRejectedWithoutExportProject
+        COMMAND $<TARGET_FILE:orc-cli> --input "src" --output "sink"
+                --video-format NTSC
+    )
+    set_tests_properties(CLI.VideoFormatRejectedWithoutExportProject PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.HelpShowsVideoFormatOption
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsVideoFormatOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--video-format"
+    )
+
     # Pure unit test for the filtergraph parser (no orc-core dependency).
     find_package(GTest REQUIRED)
     add_executable(orc-cli-filtergraph-parser-test

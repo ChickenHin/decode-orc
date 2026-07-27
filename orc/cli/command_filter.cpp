@@ -9,6 +9,7 @@
 
 #include "command_filter.h"
 
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -27,6 +28,34 @@ namespace {
 
 using orc::presenters::ProjectPresenter;
 using orc::presenters::StageInfo;
+using orc::presenters::VideoFormat;
+
+/**
+ * Parse a video format name for --video-format (export-only override).
+ * Accepts "NTSC", "PAL", or "PAL-M" (case-insensitive; "PAL_M"/"PALM" also
+ * accepted for convenience). Returns false, leaving `out` untouched, for
+ * anything else.
+ */
+bool parse_video_format_name(const std::string& text, VideoFormat& out) {
+  std::string upper;
+  upper.reserve(text.size());
+  for (char c : text) {
+    upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  }
+  if (upper == "NTSC") {
+    out = VideoFormat::NTSC;
+    return true;
+  }
+  if (upper == "PAL") {
+    out = VideoFormat::PAL;
+    return true;
+  }
+  if (upper == "PAL-M" || upper == "PAL_M" || upper == "PALM") {
+    out = VideoFormat::PAL_M;
+    return true;
+  }
+  return false;
+}
 
 /**
  * Validate that every stage named in `segment` belongs to `category`
@@ -153,6 +182,34 @@ int filter_command(const FilterOptions& options) {
   // used elsewhere), so it's a different entry point into the existing save
   // path, not a new one.
   if (!options.export_project_path.empty()) {
+    // Running in memory tolerates an undetermined video format (the core's
+    // own compatibility checks are simply skipped), but a saved .orcprj file
+    // is not: the loader requires an explicit NTSC/PAL/PAL-M value and
+    // rejects a project without one. If none of the stages used gave any
+    // format hint (e.g. tbc_source, which reads its own format from its
+    // metadata sidecar rather than the project), --video-format lets the
+    // export succeed anyway.
+    if (presenter.getVideoFormat() == orc::presenters::VideoFormat::Unknown) {
+      if (options.export_video_format.empty()) {
+        ORC_LOG_ERROR(
+            "Cannot export: none of the stages used imply a video format "
+            "(NTSC/PAL/PAL-M), so the saved project would fail to reload. "
+            "Pass --video-format NTSC|PAL|PAL-M to set it explicitly for "
+            "the export, or run the pipeline directly instead of "
+            "exporting.");
+        return 1;
+      }
+      orc::presenters::VideoFormat forced =
+          orc::presenters::VideoFormat::Unknown;
+      if (!parse_video_format_name(options.export_video_format, forced)) {
+        ORC_LOG_ERROR(
+            "Unknown --video-format value '{}': expected NTSC, PAL, or "
+            "PAL-M",
+            options.export_video_format);
+        return 1;
+      }
+      presenter.setVideoFormat(forced);
+    }
     if (!presenter.saveProject(options.export_project_path)) {
       ORC_LOG_ERROR("Failed to save project to '{}'",
                     options.export_project_path);
