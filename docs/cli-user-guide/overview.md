@@ -36,8 +36,8 @@ orc-cli <project-file> [options]
 | `--filters GRAPH`, `-f GRAPH` | Processing stage(s), for the triad | - |
 | `--sink GRAPH`, `-o GRAPH` | Output (sink) stage(s), for the triad | - |
 | `--export-project FILE` | Save the assembled filtergraph as a `.orcprj` file instead of running it | - |
-| `--video-format NTSC\|PAL\|PAL-M` | Export-only override, only needed if no stage implies a video format | - |
-| `--source-type composite\|yc` | Export-only override, only needed if no stage implies a source signal type | - |
+| `--video-format NTSC\|PAL\|PAL-M` | Set the video format if no stage implies one (works when running directly too, but only `--export-project` requires it) | - |
+| `--source-type composite\|yc` | Same idea, for the source signal type | - |
 | `--log-level LEVEL` | Set logging verbosity level | `info` |
 | `--log-file FILE` | Write logs to specified file | None (console only) |
 | `--help`, `-h` | Display help message and exit | - |
@@ -191,15 +191,20 @@ A saved `.orcprj` file requires an explicit video format *and* source signal
 type — unlike running in memory, which tolerates either being undetermined.
 If no stage implies one (a format-agnostic source like `tbc_source` reads
 its own format from its metadata sidecar file rather than implying one),
-`--video-format` and/or `--source-type` set them for the export:
+`--video-format` and/or `--source-type` set them explicitly:
 
 ```bash
 orc-cli --source "tbc_source=input_path=capture.tbc" --sink video_sink \
   --export-project capture.orcprj --video-format NTSC --source-type composite
 ```
 
-`--video-format` and `--source-type` are only meaningful together with
-`--export-project`; they have no effect on running the pipeline directly.
+`--video-format`/`--source-type` also work without `--export-project` — set
+them when running a graph directly and no stage implies a format, and the
+graph gets the same format-specific parameter defaults it would after being
+exported and reprocessed with `--process`, rather than only the
+exported/reprocessed path ever getting a concrete value. `--export-project`
+is the only thing that actually *requires* one, since it's the `.orcprj`
+file format itself that demands an explicit value, not the pipeline.
 
 ### Discovering stages and their parameters
 
@@ -389,9 +394,8 @@ Stage '<name>': missing required parameter '<param>'.
 **Cannot export — no video format:**
 ```
 Cannot export: none of the stages used imply a video format (NTSC/PAL/PAL-M),
-so the saved project would fail to reload. Pass --video-format NTSC|PAL|PAL-M
-to set it explicitly for the export, or run the pipeline directly instead of
-exporting.
+so the saved project would fail to reload. Pass --video-format NTSC|PAL|PAL-M,
+or run the pipeline directly instead of exporting.
 ```
 → Add `--video-format`, or add a format-specific source stage to the graph
 
@@ -399,8 +403,8 @@ exporting.
 ```
 Cannot export: none of the stages used imply a source signal type
 (composite/Y-C), so the saved project would fail to reload. Pass
---source-type composite|yc to set it explicitly for the export, or run the
-pipeline directly instead of exporting.
+--source-type composite|yc, or run the pipeline directly instead of
+exporting.
 ```
 → Add `--source-type`, or ensure a source stage's parameters reveal its
 signal type (`y_path`+`c_path`, or `input_path`)

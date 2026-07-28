@@ -281,13 +281,23 @@ if(BUILD_UNIT_TESTS)
     )
 
     add_test(
-        NAME CLI.VideoFormatRejectedWithoutExportProject
+        NAME CLI.VideoFormatRejectedWithoutTriad
+        COMMAND $<TARGET_FILE:orc-cli> --video-format NTSC
+    )
+    set_tests_properties(CLI.VideoFormatRejectedWithoutTriad PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.VideoFormatWorksWithoutExportProject
         COMMAND $<TARGET_FILE:orc-cli> --source "src" --sink "sink"
                 --video-format NTSC
     )
-    set_tests_properties(CLI.VideoFormatRejectedWithoutExportProject PROPERTIES
+    set_tests_properties(CLI.VideoFormatWorksWithoutExportProject PROPERTIES
         LABELS "unit;cli"
-        WILL_FAIL TRUE
+        WILL_FAIL TRUE  # fails on "unknown stage 'src'", not on --video-format
+        FAIL_REGULAR_EXPRESSION "only makes sense with"
     )
 
     add_test(
@@ -297,6 +307,35 @@ if(BUILD_UNIT_TESTS)
     set_tests_properties(CLI.HelpShowsVideoFormatOption PROPERTIES
         LABELS "unit;cli"
         PASS_REGULAR_EXPRESSION "--video-format"
+    )
+
+    add_test(
+        NAME CLI.SourceTypeRejectedWithoutTriad
+        COMMAND $<TARGET_FILE:orc-cli> --source-type composite
+    )
+    set_tests_properties(CLI.SourceTypeRejectedWithoutTriad PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.SourceTypeWorksWithoutExportProject
+        COMMAND $<TARGET_FILE:orc-cli> --source "src" --sink "sink"
+                --source-type composite
+    )
+    set_tests_properties(CLI.SourceTypeWorksWithoutExportProject PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE  # fails on "unknown stage 'src'", not on --source-type
+        FAIL_REGULAR_EXPRESSION "only makes sense with"
+    )
+
+    add_test(
+        NAME CLI.HelpShowsSourceTypeOption
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsSourceTypeOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--source-type"
     )
 
     # Pure unit test for the filtergraph parser (no orc-core dependency).

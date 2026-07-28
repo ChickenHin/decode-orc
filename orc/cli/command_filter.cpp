@@ -207,6 +207,37 @@ int filter_command(const FilterOptions& options) {
   ORC_LOG_INFO("Parsed filtergraph successfully");
   log_plugin_diagnostics(presenter);
 
+  // If the user supplied an explicit --video-format/--source-type and none
+  // of the stages implied one, apply it now — regardless of whether we're
+  // about to export or run directly. This is what makes a graph decoded
+  // directly with --video-format behave identically to the same graph
+  // exported then processed with --process: both see the same format-
+  // specific parameter defaults (project_to_dag.cpp selects them from
+  // video_format/source_type), rather than only the exported/reprocessed
+  // path ever getting a concrete value.
+  if (presenter.getVideoFormat() == orc::presenters::VideoFormat::Unknown &&
+      !options.video_format_override.empty()) {
+    orc::presenters::VideoFormat forced = orc::presenters::VideoFormat::Unknown;
+    if (!parse_video_format_name(options.video_format_override, forced)) {
+      ORC_LOG_ERROR(
+          "Unknown --video-format value '{}': expected NTSC, PAL, or PAL-M",
+          options.video_format_override);
+      return 1;
+    }
+    presenter.setVideoFormat(forced);
+  }
+  if (presenter.getSourceFormat() == SourceType::Unknown &&
+      !options.source_type_override.empty()) {
+    SourceType forced_source = SourceType::Unknown;
+    if (!parse_source_type_name(options.source_type_override, forced_source)) {
+      ORC_LOG_ERROR(
+          "Unknown --source-type value '{}': expected composite or yc",
+          options.source_type_override);
+      return 1;
+    }
+    presenter.setSourceType(forced_source);
+  }
+
   // --export-project: save the assembled project instead of running it.
   // This calls the presenter's existing saveProject() (the same YAML writer
   // used elsewhere), so it's a different entry point into the existing save
@@ -215,30 +246,16 @@ int filter_command(const FilterOptions& options) {
     // Running in memory tolerates an undetermined video format (the core's
     // own compatibility checks are simply skipped), but a saved .orcprj file
     // is not: the loader requires an explicit NTSC/PAL/PAL-M value and
-    // rejects a project without one. If none of the stages used gave any
-    // format hint (e.g. tbc_source, which reads its own format from its
-    // metadata sidecar rather than the project), --video-format lets the
-    // export succeed anyway.
+    // rejects a project without one. The override above already applied
+    // --video-format if one was given; this only fires when none of the
+    // stages implied a format *and* no override was supplied either.
     if (presenter.getVideoFormat() == orc::presenters::VideoFormat::Unknown) {
-      if (options.export_video_format.empty()) {
-        ORC_LOG_ERROR(
-            "Cannot export: none of the stages used imply a video format "
-            "(NTSC/PAL/PAL-M), so the saved project would fail to reload. "
-            "Pass --video-format NTSC|PAL|PAL-M to set it explicitly for "
-            "the export, or run the pipeline directly instead of "
-            "exporting.");
-        return 1;
-      }
-      orc::presenters::VideoFormat forced =
-          orc::presenters::VideoFormat::Unknown;
-      if (!parse_video_format_name(options.export_video_format, forced)) {
-        ORC_LOG_ERROR(
-            "Unknown --video-format value '{}': expected NTSC, PAL, or "
-            "PAL-M",
-            options.export_video_format);
-        return 1;
-      }
-      presenter.setVideoFormat(forced);
+      ORC_LOG_ERROR(
+          "Cannot export: none of the stages used imply a video format "
+          "(NTSC/PAL/PAL-M), so the saved project would fail to reload. "
+          "Pass --video-format NTSC|PAL|PAL-M, or run the pipeline "
+          "directly instead of exporting.");
+      return 1;
     }
 
     // Mirror the same guard for source signal type: the loader also
@@ -247,23 +264,12 @@ int filter_command(const FilterOptions& options) {
     // source stage's parameters actually reveal it (see
     // filtergraph_import.cpp) — some legitimate graphs give no such hint.
     if (presenter.getSourceFormat() == SourceType::Unknown) {
-      if (options.export_source_type.empty()) {
-        ORC_LOG_ERROR(
-            "Cannot export: none of the stages used imply a source signal "
-            "type (composite/Y-C), so the saved project would fail to "
-            "reload. Pass --source-type composite|yc to set it explicitly "
-            "for the export, or run the pipeline directly instead of "
-            "exporting.");
-        return 1;
-      }
-      SourceType forced_source = SourceType::Unknown;
-      if (!parse_source_type_name(options.export_source_type, forced_source)) {
-        ORC_LOG_ERROR(
-            "Unknown --source-type value '{}': expected composite or yc",
-            options.export_source_type);
-        return 1;
-      }
-      presenter.setSourceType(forced_source);
+      ORC_LOG_ERROR(
+          "Cannot export: none of the stages used imply a source signal "
+          "type (composite/Y-C), so the saved project would fail to "
+          "reload. Pass --source-type composite|yc, or run the pipeline "
+          "directly instead of exporting.");
+      return 1;
     }
 
     // A saved .orcprj resolves relative file-path parameters against the

@@ -46,20 +46,25 @@ struct FilterOptions {
   std::string export_project_path;
 
   /// Optional override for the project's video format ("NTSC", "PAL", or
-  /// "PAL-M"), only consulted when exporting (export_project_path is set)
-  /// and none of the stages used imply a format on their own. Running in
-  /// memory never needs this — the .orcprj file format itself requires an
-  /// explicit format, but the core's own compatibility checks do not, so
-  /// this exists purely to satisfy the save path for stages that are
-  /// legitimately format-agnostic (e.g. tbc_source, which reads its own
-  /// format from its metadata sidecar file rather than from the project).
-  std::string export_video_format;
+  /// "PAL-M"), applied whenever none of the stages used imply a format on
+  /// their own — whether running directly or exporting. Running in memory
+  /// doesn't *need* this (the core's own compatibility checks tolerate an
+  /// undetermined format), but supplying it anyway means the same graph
+  /// behaves identically run directly or exported then reprocessed with
+  /// --process, since format-specific parameter defaults are selected from
+  /// the same video_format either way (see project_to_dag.cpp). Exporting
+  /// specifically *requires* a concrete value one way or another — the
+  /// .orcprj file format itself always requires an explicit format — so a
+  /// stage that is legitimately format-agnostic (e.g. tbc_source, which
+  /// reads its own format from its metadata sidecar file rather than from
+  /// the project) needs this to export at all.
+  std::string video_format_override;
 
   /// Optional override for the project's source signal type ("composite"
-  /// or "yc"), only consulted when exporting and none of the source stages'
-  /// parameters reveal it on their own (e.g. tbc_source with only pcm_path
-  /// set). Same rationale as export_video_format above.
-  std::string export_source_type;
+  /// or "yc"), applied under the same conditions and for the same reasons
+  /// as video_format_override above (e.g. tbc_source with only pcm_path set
+  /// reveals neither on its own).
+  std::string source_type_override;
 };
 
 /**
