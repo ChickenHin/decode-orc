@@ -10,7 +10,7 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "presenters/include/filtergraph_import.h"
+#include "filtergraph_import.h"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-#include "presenters/include/i_project_presenter.h"
+#include "i_project_presenter.h"
 
 namespace orc::presenters::test {
 
