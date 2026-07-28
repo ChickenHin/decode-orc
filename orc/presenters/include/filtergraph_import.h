@@ -3,7 +3,7 @@
  * Module:      orc-presenters
  * Purpose:     Parse an ffmpeg-style filtergraph string and build it into a
  *              project via the presenter — shared between orc-cli
- *              (--filter/--input/--filters/--output) and any GUI feature
+ *              (--source/--filters/--sink) and any GUI feature
  *              that lets a person paste a CLI command to build a project.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -58,7 +58,7 @@ struct FiltergraphImportResult {
  * @param presenter Project to build into. Any existing nodes are left
  * alone; the new nodes are added alongside them.
  * @param filtergraph The filtergraph string (same grammar as the composed
- * --input/--filters/--output triad).
+ * --source/--filters/--sink triad).
  * @return Result; check `.ok` before assuming the project changed.
  */
 FiltergraphImportResult import_filtergraph_into_project(

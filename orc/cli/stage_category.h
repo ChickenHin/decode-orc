@@ -2,9 +2,9 @@
  * File:        stage_category.h
  * Module:      orc-cli
  * Purpose:     Shared classification of stages into the three categories
- *              the CLI presents them under (input/filters/output), used by
- *              both the filtergraph triad validator and the plugin/stage
- *              listing commands.
+ *              the CLI presents them under (source/filters/sink), used by
+ *              the filtergraph triad validator to enforce that each flag
+ *              only accepts stages of the matching role.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -21,16 +21,11 @@ namespace orc {
 namespace cli {
 
 /// The three stage categories the CLI classifies every stage into. This
-/// mirrors the --input/--filters/--output triad, and is also used to group
-/// `orc-cli plugins stages`/`inputs`/`outputs`/`filters` output.
+/// mirrors the --source/--filters/--sink triad.
 enum class StageCategory { kInput, kFilters, kOutput };
 
-/// The CLI flag associated with a category (e.g. "--input").
+/// The CLI flag associated with a category (e.g. "--source"/"-i").
 const char* category_flag(StageCategory category);
-
-/// Human-readable label for a category (e.g. "input (source)"), used as a
-/// role tag in listings and error messages.
-const char* category_label(StageCategory category);
 
 /// A stage's category is never guessed from its name: it comes straight
 /// from the same is_source/is_sink metadata the GUI uses, so this works
@@ -41,7 +36,7 @@ StageCategory category_of(const orc::presenters::StageInfo& info);
 /// for error messages ("X is <this>, not <expected>").
 const char* actual_role_description(const orc::presenters::StageInfo& info);
 
-/// Which CLI flag a stage's actual role belongs under (e.g. "--output").
+/// Which CLI flag a stage's actual role belongs under (e.g. "--sink"/"-o").
 const char* suggested_flag_for(const orc::presenters::StageInfo& info);
 
 /// Whether `info` belongs to `category`.

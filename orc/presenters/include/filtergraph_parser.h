@@ -1,6 +1,6 @@
 /*
  * File:        filtergraph_parser.h
- * Module:      orc-cli
+ * Module:      orc-presenters
  * Purpose:     Parse an ffmpeg-style complex filtergraph string into a
  *              stage/edge description that can drive the project presenter.
  *
@@ -17,7 +17,7 @@
 #include <vector>
 
 namespace orc {
-namespace cli {
+namespace presenters {
 
 /**
  * @brief A single stage instance parsed from a filtergraph.
@@ -88,5 +88,5 @@ struct FilterGraphParseResult {
  */
 FilterGraphParseResult parse_filtergraph(const std::string& input);
 
-}  // namespace cli
+}  // namespace presenters
 }  // namespace orc

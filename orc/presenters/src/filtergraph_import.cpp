@@ -24,8 +24,6 @@ namespace presenters {
 
 namespace {
 
-using orc::cli::FilterStage;
-
 /// Result of auto-detecting the project's video format from its stages.
 struct VideoFormatInference {
   VideoFormat format = VideoFormat::Unknown;
@@ -92,12 +90,21 @@ struct SourceFormatInference {
 
 /**
  * Auto-detect the project's source signal type (composite vs Y/C) from the
- * parameters actually supplied to source stages: y_path/c_path implies Y/C,
- * input_path implies composite — the same convention every dual-mode source
- * stage (tbc_source, the CVBS sources) already follows, so this works
- * without hardcoding any specific stage name. A stage name containing "YC"
- * is used as a fallback hint, mirroring the core's own heuristic.
+ * parameters actually supplied to source stages: y_path AND c_path both
+ * present and non-empty implies Y/C; input_path present and non-empty
+ * implies composite — the same convention, and the same presence-and-
+ * non-empty check, the core's own set_node_parameters() uses (project.cpp),
+ * so this works without hardcoding any specific stage name.
  */
+/// True if `stage` has a non-empty string value for parameter `key`. A key
+/// that is merely *present* with an empty value (e.g. a composite source
+/// that still lists `y_path=''` for symmetry) must not count — matching
+/// the core's own `has_nonempty_str()` check exactly (project.cpp).
+bool has_nonempty_param(const FilterStage& stage, const std::string& key) {
+  const auto it = stage.params.find(key);
+  return it != stage.params.end() && !it->second.empty();
+}
+
 SourceFormatInference infer_source_format(
     const std::vector<FilterStage>& stages,
     const std::map<std::string, StageInfo>& stage_index) {
@@ -111,14 +118,15 @@ SourceFormatInference infer_source_format(
     }
 
     SourceType this_format = SourceType::Unknown;
-    const bool has_yc_path =
-        stage.params.count("y_path") != 0 || stage.params.count("c_path") != 0;
-    const bool has_input_path = stage.params.count("input_path") != 0;
-    const bool name_implies_yc =
-        stage.stage_name.find("YC") != std::string::npos && !has_input_path;
-    if (has_yc_path || name_implies_yc) {
+    // Y/C requires *both* y_path and c_path — matching the core's own
+    // has_nonempty_str("y_path") && has_nonempty_str("c_path") exactly.
+    // Either alone is not enough: a composite source may still carry an
+    // empty y_path/c_path key for parameter symmetry, and that must not be
+    // mistaken for Y/C.
+    if (has_nonempty_param(stage, "y_path") &&
+        has_nonempty_param(stage, "c_path")) {
       this_format = SourceType::YC;
-    } else if (has_input_path) {
+    } else if (has_nonempty_param(stage, "input_path")) {
       this_format = SourceType::Composite;
     }
     if (this_format == SourceType::Unknown) {
@@ -145,8 +153,7 @@ FiltergraphImportResult import_filtergraph_into_project(
     IProjectPresenter& presenter, const std::string& filtergraph) {
   FiltergraphImportResult result;
 
-  orc::cli::FilterGraphParseResult parsed =
-      orc::cli::parse_filtergraph(filtergraph);
+  FilterGraphParseResult parsed = parse_filtergraph(filtergraph);
   if (!parsed.ok) {
     result.errors.push_back("Failed to parse filtergraph: " + parsed.error);
     return result;
@@ -189,6 +196,18 @@ FiltergraphImportResult import_filtergraph_into_project(
     return result;
   }
 
+  // Set the detected format/source-type *before* fetching parameter
+  // descriptors below: some stages narrow their descriptor set by format or
+  // source type (see FixedFormatCVBSSourceStage::get_parameter_descriptors),
+  // so descriptors must be fetched with the real context already in place,
+  // not with Unknown.
+  if (video_inference.format != VideoFormat::Unknown) {
+    presenter.setVideoFormat(video_inference.format);
+  }
+  if (source_inference.format != SourceType::Unknown) {
+    presenter.setSourceType(source_inference.format);
+  }
+
   // Validate parameters against each stage's descriptors. This uses only
   // the generic getStageParameters() API, so it works identically for core
   // stages and for third-party plugin stages: missing required parameters
@@ -224,14 +243,17 @@ FiltergraphImportResult import_filtergraph_into_project(
     }
   }
   if (!result.errors.empty()) {
+    // Parameter validation failed after all: undo the format/source-type
+    // set above, so a failed import leaves the presenter completely
+    // unchanged either way (see the contract documented in
+    // filtergraph_import.h).
+    if (video_inference.format != VideoFormat::Unknown) {
+      presenter.setVideoFormat(VideoFormat::Unknown);
+    }
+    if (source_inference.format != SourceType::Unknown) {
+      presenter.setSourceType(SourceType::Unknown);
+    }
     return result;
-  }
-
-  if (video_inference.format != VideoFormat::Unknown) {
-    presenter.setVideoFormat(video_inference.format);
-  }
-  if (source_inference.format != SourceType::Unknown) {
-    presenter.setSourceType(source_inference.format);
   }
 
   // Add nodes (auto-layout left to right) and their parameters, then wire up
@@ -257,6 +279,13 @@ FiltergraphImportResult import_filtergraph_into_project(
   } catch (const std::exception& e) {
     result.errors.push_back(std::string("Failed to build filtergraph: ") +
                             e.what());
+    // Same rollback as the parameter-validation failure above.
+    if (video_inference.format != VideoFormat::Unknown) {
+      presenter.setVideoFormat(VideoFormat::Unknown);
+    }
+    if (source_inference.format != SourceType::Unknown) {
+      presenter.setSourceType(SourceType::Unknown);
+    }
     return result;
   }
 

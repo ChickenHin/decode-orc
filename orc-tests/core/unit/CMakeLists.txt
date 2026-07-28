@@ -188,6 +188,7 @@ orc_add_core_unit_tests(
         "unit;presenters"
 
         presenters/project_presenter_validation_test.cpp
+        presenters/filtergraph_import_test.cpp
 )
 target_link_libraries(orc-core-unit-tests-presenters orc-presenters)
 

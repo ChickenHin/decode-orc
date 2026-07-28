@@ -1,7 +1,7 @@
 /*
  * File:        command_filter.h
  * Module:      orc-cli
- * Purpose:     Build and process a DAG from an input/filters/output triad
+ * Purpose:     Build and process a DAG from a source/filters/sink triad
  *              instead of a .orcprj project file.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -18,21 +18,24 @@ namespace cli {
 /**
  * @brief Options for the filter command.
  *
- * `input_stages` / `filters_stages` / `output_stages` each hold a (possibly
+ * `input_stages` / `filters_stages` / `output_stages` correspond to the CLI's
+ * --source/--filters/--sink flags respectively; each holds a (possibly
  * comma/semicolon-chained) fragment restricted to one stage category —
- * source stages, processing stages, and sink stages respectively — and are
- * validated per category (see filter_command()). Any of the three may be
- * omitted, but at least one must be non-empty.
+ * source stages, processing stages, and sink stages — and is validated per
+ * category (see filter_command()). Any of the three may be omitted, but at
+ * least one must be non-empty.
  *
- * There is no video/source-format option: video format and source type are
- * inherent to the stage modules used (e.g. an NTSC-only source, or the
- * y_path/c_path/input_path parameters actually supplied) and are detected
- * automatically.
+ * There is no video/source-format option for running: video format and
+ * source type are inherent to the stage modules used (e.g. an NTSC-only
+ * source, or the y_path/c_path/input_path parameters actually supplied) and
+ * are detected automatically. The two export_* overrides below exist only
+ * because a saved .orcprj file requires an explicit value even for stages
+ * that are legitimately format-agnostic when run directly.
  */
 struct FilterOptions {
-  std::string input_stages;    ///< Input (source) stage(s).
-  std::string filters_stages;  ///< Processing stage(s).
-  std::string output_stages;   ///< Output (sink) stage(s).
+  std::string input_stages;    ///< --source: input (source) stage(s).
+  std::string filters_stages;  ///< --filters: processing stage(s).
+  std::string output_stages;   ///< --sink: output (sink) stage(s).
 
   /// When non-empty, save the assembled project to this .orcprj path
   /// instead of running it (e.g. for later editing in the GUI, or reuse
@@ -51,12 +54,18 @@ struct FilterOptions {
   /// legitimately format-agnostic (e.g. tbc_source, which reads its own
   /// format from its metadata sidecar file rather than from the project).
   std::string export_video_format;
+
+  /// Optional override for the project's source signal type ("composite"
+  /// or "yc"), only consulted when exporting and none of the source stages'
+  /// parameters reveal it on their own (e.g. tbc_source with only pcm_path
+  /// set). Same rationale as export_video_format above.
+  std::string export_source_type;
 };
 
 /**
  * @brief Execute a filtergraph decode run, or save it instead of running.
  *
- * Parses and composes the input/filters/output triad (validating that each
+ * Parses and composes the source/filters/sink triad (validating that each
  * segment only contains stages of the matching category), auto-detects the
  * project's video format and source type from the stages actually used, and
  * builds an in-memory project via the project presenter.

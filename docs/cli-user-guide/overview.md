@@ -32,11 +32,12 @@ orc-cli <project-file> [options]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--process` | Process the complete DAG pipeline (trigger all sink nodes) | Required |
-| `--filter GRAPH` | Build and process a DAG from an ffmpeg-style filtergraph string (no `.orcprj` file) | - |
-| `--filter-file FILE` | Read the filtergraph from `FILE` (`-` for stdin) | - |
-| `--input GRAPH` | Input (source) stage(s), for the input/filters/output triad | - |
-| `--filters GRAPH` | Processing stage(s), for the triad | - |
-| `--output GRAPH` | Output (sink) stage(s), for the triad | - |
+| `--source GRAPH`, `-i GRAPH` | Input (source) stage(s), for the source/filters/sink triad | - |
+| `--filters GRAPH`, `-f GRAPH` | Processing stage(s), for the triad | - |
+| `--sink GRAPH`, `-o GRAPH` | Output (sink) stage(s), for the triad | - |
+| `--export-project FILE` | Save the assembled filtergraph as a `.orcprj` file instead of running it | - |
+| `--video-format NTSC\|PAL\|PAL-M` | Export-only override, only needed if no stage implies a video format | - |
+| `--source-type composite\|yc` | Export-only override, only needed if no stage implies a source signal type | - |
 | `--log-level LEVEL` | Set logging verbosity level | `info` |
 | `--log-file FILE` | Write logs to specified file | None (console only) |
 | `--help`, `-h` | Display help message and exit | - |
@@ -89,25 +90,41 @@ orc-cli my-project.orcprj --process --log-level debug --log-file debug.log
 
 ## Filtergraph Mode
 
-As an alternative to authoring a `.orcprj` file, a linear decode pipeline can
-be described directly on the command line. This builds the same in-memory DAG
-a `.orcprj` file would and triggers all sink nodes, so results are identical.
+As an alternative to authoring a `.orcprj` file, a decode pipeline can be
+described directly on the command line with `--source`, `--filters`, and
+`--sink` (short forms `-i`, `-f`, `-o`). This builds the same in-memory DAG a
+`.orcprj` file would and triggers all sink nodes, so results are identical.
 The `.orcprj` workflow itself is unchanged.
 
 Video format (NTSC/PAL/PAL-M) and source signal type (composite/Y-C) are
-**never specified separately** — they are detected automatically from the
-stage modules used (a stage that is exclusively NTSC-compatible implies NTSC;
-supplying `y_path`/`c_path` implies Y/C; supplying `input_path` implies
-composite). If two stages imply conflicting formats, that is reported as an
-error before anything runs.
+**usually detected automatically** from the stage modules used — a stage
+that is exclusively NTSC-compatible implies NTSC; a source stage with both
+`y_path` and `c_path` set implies Y/C; one with `input_path` set implies
+composite. If two stages imply conflicting formats, that is reported as an
+error before anything runs. Some stages (`tbc_source` in particular) are
+format-agnostic — they read their own format from a metadata sidecar file
+rather than declaring one — so no stage in the graph may give any hint at
+all; running in memory tolerates this, but see
+[Exporting instead of running](#exporting-instead-of-running) below for the
+one case where it matters.
 
-### Style 1: a single filtergraph string (`--filter`)
+### The source/filters/sink triad
+
+`--source`, `--filters`, and `--sink` enforce that stages go where they
+belong: **every stage named in `--source` must be a source, every stage in
+`--sink` must be a sink, and every stage in `--filters` must be neither** (a
+transform or similar processing stage). Putting a sink in `--source`, for
+example, is rejected with a clear error naming the correct flag — this is
+checked against each stage's real role (the same metadata the GUI uses), not
+guessed from its name, so it works for any third-party plugin stage too.
 
 ```
 stage_name=key=value:key=value, stage_name=key=value
 ```
 
-- **Stages** are separated by `,` and are auto-connected in order.
+- **Stages** within a single `--source`/`--filters`/`--sink` value are
+  separated by `,` (or `;`, for a separate filterchain) and are
+  auto-connected in order.
 - **Values** may be wrapped in single quotes (`'...'`) **or** double quotes
   (`"..."`) — whichever is more convenient for your shell — to include `:`
   `,` `;` and spaces literally; the two quote styles are interchangeable, and
@@ -116,46 +133,26 @@ stage_name=key=value:key=value, stage_name=key=value
   `=`.
 
 ```bash
-orc-cli --filter "tbc_source=input_path=capture.tbc, hvd_chroma_decoder, video_sink=output_path=capture.mp4"
-```
-
-Reading the graph from a file or standard input:
-
-```bash
-orc-cli --filter-file graph.txt
-cat graph.txt | orc-cli --filter-file -
-```
-
-### Style 2: the input/filters/output triad
-
-For the common case — one input, a chain of processing stages, one output —
-`--input`, `--filters`, and `--output` avoid needing to know the full
-filtergraph grammar, and they enforce that stages go where they belong:
-**every stage named in `--input` must be a source, every stage in `--output`
-must be a sink, and every stage in `--filters` must be neither** (a transform
-or similar processing stage). Putting a sink in `--input`, for example, is
-rejected with a clear error naming the correct flag — this is checked against
-each stage's real role (the same metadata the GUI uses), not guessed from its
-name, so it works for any third-party plugin stage too.
-
-```bash
 orc-cli \
-  --input "tbc_source=input_path=capture.tbc" \
-  --filters "hvd_chroma_decoder" \
-  --output "video_sink=output_path=capture.mp4"
+  --source "tbc_source=input_path=capture.tbc" \
+  --filters "dropout_correct" \
+  --sink "video_sink=output_path=capture.mp4"
 ```
 
-Any of the three may be omitted, and each may itself contain a
-comma-separated chain of stages. `--input`/`--filters`/`--output` cannot be
-combined with `--filter`/`--filter-file` in the same run — pick one style.
+The same thing with short options and a CVBS source:
+
+```bash
+orc-cli -i "NTSC_CVBS_Source=input_path=capture.composite" -o "video_sink=output_path=capture.mp4"
+```
+
+Any of the three may be omitted, but at least one must be non-empty.
 
 ### Windows paths
 
-Unquoted Windows paths (drive letters and backslashes) are parsed correctly
-in both styles above:
+Unquoted Windows paths (drive letters and backslashes) are parsed correctly:
 
 ```bash
-orc-cli --input "tbc_source=input_path=C:\Users\me\capture.tbc" --output video_sink
+orc-cli --source "tbc_source=input_path=C:\Users\me\capture.tbc" --sink video_sink
 ```
 
 If a value needs to rule out any ambiguity — for instance it contains a
@@ -164,9 +161,55 @@ whichever your shell passes through more conveniently.
 
 ### Non-linear graphs
 
-Anything with real shape — fan-in (multiple sources into one stage), fan-out
-(one stage into several sinks), or branching — is not expressible this way by
-design, and remains a `.orcprj` project file.
+Fan-in (multiple sources into one stage, e.g. a stacker) and fan-out (one
+stage feeding several sinks) are fully supported, using `[label]` link
+syntax to connect stages across `--source`/`--filters`/`--sink`:
+
+```bash
+orc-cli --source "tbc_source=input_path=a.tbc[a]; tbc_source=input_path=b.tbc[b]; tbc_source=input_path=c.tbc[c]" \
+  --filters "[a][b][c] stacker" \
+  --sink video_sink
+```
+
+### Exporting instead of running
+
+`--export-project` builds the project exactly as `--source`/`--filters`/
+`--sink` normally would, but saves it as a `.orcprj` file instead of
+triggering it — using the same `saveProject()` writer the GUI's "Save As"
+uses, so this isn't a new save format, just a different way to reach the
+existing one:
+
+```bash
+orc-cli --source "tbc_source=input_path=capture.tbc" --sink video_sink \
+  --export-project capture.orcprj
+```
+
+Useful for building a project quickly from the command line and then
+opening it in the GUI, or reusing it later with `--process`.
+
+A saved `.orcprj` file requires an explicit video format *and* source signal
+type — unlike running in memory, which tolerates either being undetermined.
+If no stage implies one (a format-agnostic source like `tbc_source` reads
+its own format from its metadata sidecar file rather than implying one),
+`--video-format` and/or `--source-type` set them for the export:
+
+```bash
+orc-cli --source "tbc_source=input_path=capture.tbc" --sink video_sink \
+  --export-project capture.orcprj --video-format NTSC --source-type composite
+```
+
+`--video-format` and `--source-type` are only meaningful together with
+`--export-project`; they have no effect on running the pipeline directly.
+
+### Discovering stages and their parameters
+
+Every stage's parameter names, types, and which ones are required come from
+the same descriptors the GUI uses (`getStageParameters()`), so a mismatch
+between a filtergraph and what a stage actually accepts is caught before
+anything runs — see the "Missing required parameter" and "not recognised"
+errors below. There is currently no CLI subcommand to list available stages
+directly; check the GUI's stage palette, or a stage's own documentation, for
+its exact name and parameters.
 
 ## Processing Workflow
 
@@ -332,8 +375,8 @@ Unknown stage '<name>'.
 
 **Stage used in the wrong triad category:**
 ```
---input: stage 'video_sink' (Video Sink) is an output (sink) stage — it
-belongs under --output, not --input.
+--source: stage 'video_sink' (Video Sink) is an output (sink) stage — it
+belongs under --sink, not --source.
 ```
 → Move the stage to the flag matching its actual role
 
@@ -342,6 +385,25 @@ belongs under --output, not --input.
 Stage '<name>': missing required parameter '<param>'.
 ```
 → Supply the parameter
+
+**Cannot export — no video format:**
+```
+Cannot export: none of the stages used imply a video format (NTSC/PAL/PAL-M),
+so the saved project would fail to reload. Pass --video-format NTSC|PAL|PAL-M
+to set it explicitly for the export, or run the pipeline directly instead of
+exporting.
+```
+→ Add `--video-format`, or add a format-specific source stage to the graph
+
+**Cannot export — no source signal type:**
+```
+Cannot export: none of the stages used imply a source signal type
+(composite/Y-C), so the saved project would fail to reload. Pass
+--source-type composite|yc to set it explicitly for the export, or run the
+pipeline directly instead of exporting.
+```
+→ Add `--source-type`, or ensure a source stage's parameters reveal its
+signal type (`y_path`+`c_path`, or `input_path`)
 
 ### Crash Diagnostics
 

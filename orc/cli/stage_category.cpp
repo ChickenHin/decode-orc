@@ -20,23 +20,11 @@ using orc::presenters::StageInfo;
 const char* category_flag(StageCategory category) {
   switch (category) {
     case StageCategory::kInput:
-      return "--input";
+      return "--source";
     case StageCategory::kFilters:
       return "--filters";
     case StageCategory::kOutput:
-      return "--output";
-  }
-  return "?";
-}
-
-const char* category_label(StageCategory category) {
-  switch (category) {
-    case StageCategory::kInput:
-      return "input (source)";
-    case StageCategory::kFilters:
-      return "processing";
-    case StageCategory::kOutput:
-      return "output (sink)";
+      return "--sink";
   }
   return "?";
 }
@@ -54,21 +42,11 @@ const char* actual_role_description(const StageInfo& info) {
 }
 
 const char* suggested_flag_for(const StageInfo& info) {
-  if (info.is_source) return "--input";
-  if (info.is_sink) return "--output";
-  return "--filters";
+  return category_flag(category_of(info));
 }
 
 bool stage_matches_category(const StageInfo& info, StageCategory category) {
-  switch (category) {
-    case StageCategory::kInput:
-      return info.is_source;
-    case StageCategory::kFilters:
-      return !info.is_source && !info.is_sink;
-    case StageCategory::kOutput:
-      return info.is_sink;
-  }
-  return false;
+  return category_of(info) == category;
 }
 
 std::map<std::string, StageInfo> build_stage_index() {

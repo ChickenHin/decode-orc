@@ -16,8 +16,8 @@
 
 namespace {
 
-using orc::cli::FilterGraph;
-using orc::cli::parse_filtergraph;
+using orc::presenters::FilterGraph;
+using orc::presenters::parse_filtergraph;
 
 bool HasEdge(const FilterGraph& g, std::size_t from, std::size_t to) {
   for (const auto& e : g.edges) {
@@ -137,7 +137,7 @@ TEST(FiltergraphParser, UnquotedWindowsPathWithDriveLetter) {
 
 TEST(FiltergraphParser, TwoWindowsPathsInOneStage) {
   auto r = parse_filtergraph(
-      "hvd_chroma_decoder=input_path=C:\\in\\a.tbc:output_path=D:\\out\\b.rgb, "
+      "dropout_correct=input_path=C:\\in\\a.tbc:output_path=D:\\out\\b.rgb, "
       "sink");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.graph.stages[0].params.at("input_path"), "C:\\in\\a.tbc");
@@ -148,7 +148,7 @@ TEST(FiltergraphParser, RelativeWindowsStylePathNoDriveLetter) {
   // The common case: no drive letter, just a bare filename (no colon at all).
   auto r = parse_filtergraph(
       "tbc_source=input_path=Santana_smooth_CLV_NTSC.tbc,"
-      "hvd_chroma_decoder=output_path=Santana_smooth_CLV_NTSC.rgb");
+      "dropout_correct=output_path=Santana_smooth_CLV_NTSC.rgb");
   ASSERT_TRUE(r.ok) << r.error;
   ASSERT_EQ(r.graph.stages.size(), 2u);
   ASSERT_EQ(r.graph.edges.size(), 1u);
@@ -240,7 +240,7 @@ TEST(FiltergraphParser, RejectsUnterminatedDoubleQuote) {
 
 TEST(FiltergraphParser, DoubleQuotedTwoWindowsPathsInOneStage) {
   auto r = parse_filtergraph(
-      "hvd_chroma_decoder=input_path=\"C:\\in\\a.tbc\":"
+      "dropout_correct=input_path=\"C:\\in\\a.tbc\":"
       "output_path=\"D:\\out\\b.rgb\", sink");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.graph.stages[0].params.at("input_path"), "C:\\in\\a.tbc");

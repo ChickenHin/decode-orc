@@ -1,7 +1,7 @@
 /*
  * File:        command_filter.cpp
  * Module:      orc-cli
- * Purpose:     Build and process a DAG from an input/filters/output triad.
+ * Purpose:     Build and process a DAG from a source/filters/sink triad.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -9,7 +9,9 @@
 
 #include "command_filter.h"
 
+#include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -26,7 +28,10 @@ namespace cli {
 
 namespace {
 
+using orc::presenters::FilterGraphParseResult;
+using orc::presenters::parse_filtergraph;
 using orc::presenters::ProjectPresenter;
+using orc::presenters::SourceType;
 using orc::presenters::StageInfo;
 using orc::presenters::VideoFormat;
 
@@ -58,6 +63,30 @@ bool parse_video_format_name(const std::string& text, VideoFormat& out) {
 }
 
 /**
+ * Parse a source type name for --source-type (export-only override).
+ * Accepts "composite" or "yc" (case-insensitive; "y/c" and "s-video" also
+ * accepted for convenience). Returns false, leaving `out` untouched, for
+ * anything else.
+ */
+bool parse_source_type_name(const std::string& text, SourceType& out) {
+  std::string lower;
+  lower.reserve(text.size());
+  for (char c : text) {
+    lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  if (lower == "composite" || lower == "cvbs") {
+    out = SourceType::Composite;
+    return true;
+  }
+  if (lower == "yc" || lower == "y/c" || lower == "svideo" ||
+      lower == "s-video") {
+    out = SourceType::YC;
+    return true;
+  }
+  return false;
+}
+
+/**
  * Validate that every stage named in `segment` belongs to `category`
  * (input segments must be sources, filters segments must be neither
  * source nor sink, output segments must be sinks). A stage's category is
@@ -82,7 +111,8 @@ bool validate_triad_segment(const std::string& segment, StageCategory category,
     if (it == stage_index.end()) {
       error = std::string(category_flag(category)) + ": unknown stage '" +
               stage.stage_name +
-              "'. Run 'orc-cli plugins stages' to see available stages.";
+              "'. Check the exact name in the GUI's stage palette or the "
+              "stage's own documentation.";
       return false;
     }
     if (!stage_matches_category(it->second, category)) {
@@ -210,6 +240,66 @@ int filter_command(const FilterOptions& options) {
       }
       presenter.setVideoFormat(forced);
     }
+
+    // Mirror the same guard for source signal type: the loader also
+    // hard-requires 'source_format' even though running in memory never
+    // needs it, and infer_source_format() can only conclude anything when a
+    // source stage's parameters actually reveal it (see
+    // filtergraph_import.cpp) — some legitimate graphs give no such hint.
+    if (presenter.getSourceFormat() == SourceType::Unknown) {
+      if (options.export_source_type.empty()) {
+        ORC_LOG_ERROR(
+            "Cannot export: none of the stages used imply a source signal "
+            "type (composite/Y-C), so the saved project would fail to "
+            "reload. Pass --source-type composite|yc to set it explicitly "
+            "for the export, or run the pipeline directly instead of "
+            "exporting.");
+        return 1;
+      }
+      SourceType forced_source = SourceType::Unknown;
+      if (!parse_source_type_name(options.export_source_type, forced_source)) {
+        ORC_LOG_ERROR(
+            "Unknown --source-type value '{}': expected composite or yc",
+            options.export_source_type);
+        return 1;
+      }
+      presenter.setSourceType(forced_source);
+    }
+
+    // A saved .orcprj resolves relative file-path parameters against the
+    // *file's own* directory on reload (see Project::project_root_), not
+    // the directory the export command was run from. Absolutise any
+    // relative FILE_PATH parameter now, while it still means what the
+    // person typed, so the path doesn't silently change meaning once saved
+    // elsewhere.
+    for (const auto& node : presenter.getNodes()) {
+      const auto descriptors = presenter.getStageParameters(node.stage_name);
+      auto params = presenter.getNodeParameters(node.node_id);
+      bool changed = false;
+      for (auto& [key, value] : params) {
+        const auto descriptor_it =
+            std::find_if(descriptors.begin(), descriptors.end(),
+                         [&](const auto& d) { return d.name == key; });
+        if (descriptor_it == descriptors.end() ||
+            descriptor_it->type != orc::ParameterType::FILE_PATH ||
+            !std::holds_alternative<std::string>(value)) {
+          continue;
+        }
+        const std::string& path_str = std::get<std::string>(value);
+        if (path_str.empty()) {
+          continue;
+        }
+        const std::filesystem::path path(path_str);
+        if (path.is_relative()) {
+          value = std::filesystem::absolute(path).lexically_normal().string();
+          changed = true;
+        }
+      }
+      if (changed) {
+        presenter.setNodeParameters(node.node_id, params);
+      }
+    }
+
     if (!presenter.saveProject(options.export_project_path)) {
       ORC_LOG_ERROR("Failed to save project to '{}'",
                     options.export_project_path);

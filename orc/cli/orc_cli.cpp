@@ -39,17 +39,17 @@ using namespace orc;  // NOLINT(google-build-using-namespace)
 void print_usage(const char* program_name) {
   std::cerr << "Usage: " << program_name << " <project-file> [options]\n";
   std::cerr << "       " << program_name
-            << " --input/--filters/--output <...>\n";
+            << " --source/--filters/--sink <...>\n";
   std::cerr << "       " << program_name << " plugins <subcommand> [options]\n";
   std::cerr << "\n";
   std::cerr << "Commands:\n";
   std::cerr << "  --process                      Process the whole DAG chain "
                "(trigger all sinks)\n";
   std::cerr << "\n";
-  std::cerr << "Filtergraph — input/filters/output triad:\n";
-  std::cerr << "  --input GRAPH                  Input (source) stage(s)\n";
-  std::cerr << "  --filters GRAPH                Processing stage(s)\n";
-  std::cerr << "  --output GRAPH                 Output (sink) stage(s)\n";
+  std::cerr << "Filtergraph — source/filters/sink triad:\n";
+  std::cerr << "  --source GRAPH, -i GRAPH       Input (source) stage(s)\n";
+  std::cerr << "  --filters GRAPH, -f GRAPH      Processing stage(s)\n";
+  std::cerr << "  --sink GRAPH, -o GRAPH         Output (sink) stage(s)\n";
   std::cerr << "\n";
   std::cerr << "Filtergraph export:\n";
   std::cerr << "  --export-project FILE          Save the assembled "
@@ -60,16 +60,24 @@ void print_usage(const char* program_name) {
   std::cerr << "  --video-format NTSC|PAL|PAL-M  Only used (and only needed) "
                "with --export-project,\n";
   std::cerr << "                                 if none of the stages used "
-               "imply a format —\n";
-  std::cerr << "                                 e.g. tbc_source reads its "
-               "own format from its\n";
-  std::cerr << "                                 metadata file, so it never "
-               "implies one\n";
+               "imply a video\n";
+  std::cerr << "                                 format — e.g. tbc_source "
+               "reads its own format\n";
+  std::cerr << "                                 from its metadata file, so "
+               "it never implies one\n";
+  std::cerr << "  --source-type composite|yc     Same idea as --video-format, "
+               "but for the source\n";
+  std::cerr << "                                 signal type — needed only "
+               "if no source stage's\n";
+  std::cerr << "                                 parameters reveal it (e.g. "
+               "tbc_source with only\n";
+  std::cerr << "                                 pcm_path set)\n";
   std::cerr << "\n";
   std::cerr << "Note: video format and source signal type are usually "
                "detected automatically\n";
-  std::cerr << "from the stage modules used (see --video-format above for "
-               "the one exception).\n";
+  std::cerr << "from the stage modules used (see --video-format/"
+               "--source-type above for the\n";
+  std::cerr << "rare exception).\n";
   std::cerr << "\n";
   std::cerr << "Plugin Management:\n";
   std::cerr << "  plugins list                   List registry entries and "
@@ -104,11 +112,14 @@ void print_usage(const char* program_name) {
   std::cerr << "  " << program_name
             << " project.orcprj --process --log-level debug\n";
   std::cerr << "  " << program_name
-            << " --input tbc_source=input_path=a.tbc \\\n";
-  std::cerr << "      --filters hvd_chroma_decoder --output "
+            << " --source tbc_source=input_path=a.tbc \\\n";
+  std::cerr << "      --filters dropout_correct --sink "
                "video_sink=output_path=a.mp4\n";
   std::cerr << "  " << program_name
-            << " --input tbc_source=input_path=a.tbc --output video_sink "
+            << " -i \"NTSC_CVBS_Source=input_path=a.composite\" -o video_sink"
+               "=output_path=a.mp4\n";
+  std::cerr << "  " << program_name
+            << " --source tbc_source=input_path=a.tbc --sink video_sink "
                "\\\n";
   std::cerr << "      --export-project a.orcprj\n";
   std::cerr << "  " << program_name << " plugins list\n";
@@ -143,9 +154,10 @@ int main(int argc, char* argv[]) {
     std::string input_stages;
     std::string filters_stages;
     std::string output_stages;
-    bool triad_provided = false;      // --input / --filters / --output
+    bool triad_provided = false;      // --source / --filters / --sink
     std::string export_project_path;  // --export-project
     std::string export_video_format;  // --video-format (export-only override)
+    std::string export_source_type;   // --source-type (export-only override)
 
     // Command flags
     bool do_process = false;
@@ -226,19 +238,21 @@ int main(int argc, char* argv[]) {
         // Handled before dispatch.
       } else if (arg == "--process") {
         do_process = true;
-      } else if (arg == "--input" && i + 1 < argc) {
+      } else if ((arg == "--source" || arg == "-i") && i + 1 < argc) {
         input_stages = argv[++i];
         triad_provided = true;
-      } else if (arg == "--filters" && i + 1 < argc) {
+      } else if ((arg == "--filters" || arg == "-f") && i + 1 < argc) {
         filters_stages = argv[++i];
         triad_provided = true;
-      } else if (arg == "--output" && i + 1 < argc) {
+      } else if ((arg == "--sink" || arg == "-o") && i + 1 < argc) {
         output_stages = argv[++i];
         triad_provided = true;
       } else if (arg == "--export-project" && i + 1 < argc) {
         export_project_path = argv[++i];
       } else if (arg == "--video-format" && i + 1 < argc) {
         export_video_format = argv[++i];
+      } else if (arg == "--source-type" && i + 1 < argc) {
+        export_source_type = argv[++i];
       } else if (arg[0] != '-') {
         // Positional argument - project file
         if (project_path.empty()) {
@@ -263,24 +277,29 @@ int main(int argc, char* argv[]) {
       print_usage(argv[0]);
       return 1;
     }
+    if (!export_source_type.empty() && export_project_path.empty()) {
+      std::cerr << "Error: --source-type only makes sense with "
+                   "--export-project\n\n";
+      print_usage(argv[0]);
+      return 1;
+    }
 
     if (filtergraph_mode) {
       if (!project_path.empty()) {
-        std::cerr << "Error: --input/--filters/--output cannot be "
+        std::cerr << "Error: --source/--filters/--sink cannot be "
                      "combined with a project file\n\n";
         print_usage(argv[0]);
         return 1;
       }
       if (do_process) {
         std::cerr << "Error: --process is only for a project file and "
-                     "cannot be combined with --input/--filters/--output\n\n";
+                     "cannot be combined with --source/--filters/--sink\n\n";
         print_usage(argv[0]);
         return 1;
       }
       if (input_stages.empty() && filters_stages.empty() &&
           output_stages.empty()) {
-        std::cerr
-            << "Error: --input, --filters and --output were all empty\n\n";
+        std::cerr << "Error: --source, --filters and --sink were all empty\n\n";
         print_usage(argv[0]);
         return 1;
       }
@@ -293,7 +312,7 @@ int main(int argc, char* argv[]) {
       }
       if (!export_project_path.empty()) {
         std::cerr << "Error: --export-project only makes sense with "
-                     "--input/--filters/--output (a project file is "
+                     "--source/--filters/--sink (a project file is "
                      "already a project)\n\n";
         print_usage(argv[0]);
         return 1;
@@ -356,6 +375,7 @@ int main(int argc, char* argv[]) {
         options.output_stages = output_stages;
         options.export_project_path = export_project_path;
         options.export_video_format = export_video_format;
+        options.export_source_type = export_source_type;
 
         exit_code = cli::filter_command(options);
       } else {

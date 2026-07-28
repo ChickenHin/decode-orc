@@ -1,6 +1,6 @@
 /*
  * File:        filtergraph_parser.cpp
- * Module:      orc-cli
+ * Module:      orc-presenters
  * Purpose:     Implementation of the ffmpeg-style filtergraph parser.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace orc {
-namespace cli {
+namespace presenters {
 
 namespace {
 
@@ -477,5 +477,5 @@ FilterGraphParseResult parse_filtergraph(const std::string& input) {
   return result;
 }
 
-}  // namespace cli
+}  // namespace presenters
 }  // namespace orc
