@@ -204,19 +204,23 @@ void set_up_generic_source_and_sink(NiceMock<MockProjectPresenter>& presenter,
   ON_CALL(presenter, getStageParameters(_))
       .WillByDefault(Return(std::vector<ParameterDescriptor>{}));
 
-  int next_id = 0;
-  ON_CALL(presenter, addNode(_, _, _))
-      .WillByDefault([&next_id](const std::string&, double, double) {
-        return NodeID(next_id++);
-      });
+  // A single fixed default is enough for every test that doesn't care about
+  // exact, distinct NodeID sequencing (most of them, below) — tests that do
+  // (BuildsSimpleLinearGraph) override this locally with their own
+  // EXPECT_CALL, which GMock matches in preference to this ON_CALL default.
+  ON_CALL(presenter, addNode(_, _, _)).WillByDefault(Return(NodeID(0)));
 }
 
 TEST(FiltergraphImportTest, BuildsSimpleLinearGraph) {
   NiceMock<MockProjectPresenter> presenter;
   set_up_generic_source_and_sink(presenter, "tbc_source", "video_sink");
 
-  EXPECT_CALL(presenter, addNode("tbc_source", _, _)).Times(1);
-  EXPECT_CALL(presenter, addNode("video_sink", _, _)).Times(1);
+  EXPECT_CALL(presenter, addNode("tbc_source", _, _))
+      .Times(1)
+      .WillOnce(Return(NodeID(0)));
+  EXPECT_CALL(presenter, addNode("video_sink", _, _))
+      .Times(1)
+      .WillOnce(Return(NodeID(1)));
   EXPECT_CALL(
       presenter,
       setNodeParameters(
