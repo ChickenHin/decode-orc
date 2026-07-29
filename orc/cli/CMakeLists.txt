@@ -3,7 +3,9 @@
 add_executable(orc-cli 
     orc_cli.cpp
     command_process.cpp
+    command_filter.cpp
     command_plugins.cpp
+    stage_category.cpp
 )
 
 # Section: Architecture enforcement (MVP)
@@ -200,5 +202,160 @@ if(BUILD_UNIT_TESTS)
     set_tests_properties(CLI.ProcessNoSinksFails PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
+    )
+
+    # --- Filtergraph mode (input/filters/output triad) ------------------------
+
+    add_test(
+        NAME CLI.HelpShowsFilterCommand
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsFilterCommand PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--source"
+    )
+
+    add_test(
+        NAME CLI.FilterUnknownStageFails
+        COMMAND $<TARGET_FILE:orc-cli>
+                --source "definitely_not_a_stage" --sink "video_sink"
+    )
+    set_tests_properties(CLI.FilterUnknownStageFails PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.FilterMalformedGraphFails
+        COMMAND $<TARGET_FILE:orc-cli> --source "src=badparam" --sink sink
+    )
+    set_tests_properties(CLI.FilterMalformedGraphFails PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.FilterRejectsProjectFileCombination
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --source "src" --sink sink
+    )
+    set_tests_properties(CLI.FilterRejectsProjectFileCombination PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.ProcessAndTriadCannotCombine
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --process --source "src"
+    )
+    set_tests_properties(CLI.ProcessAndTriadCannotCombine PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.TriadRejectsSinkStageInSource
+        COMMAND $<TARGET_FILE:orc-cli> --source "video_sink" --sink "video_sink"
+    )
+    set_tests_properties(CLI.TriadRejectsSinkStageInSource PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.HelpShowsExportProjectOption
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsExportProjectOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--export-project"
+    )
+
+    add_test(
+        NAME CLI.ExportProjectRejectedWithProjectFile
+        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --process
+                --export-project out.orcprj
+    )
+    set_tests_properties(CLI.ExportProjectRejectedWithProjectFile PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.VideoFormatRejectedWithoutTriad
+        COMMAND $<TARGET_FILE:orc-cli> --video-format NTSC
+    )
+    set_tests_properties(CLI.VideoFormatRejectedWithoutTriad PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.VideoFormatWorksWithoutExportProject
+        COMMAND $<TARGET_FILE:orc-cli> --source "src" --sink "sink"
+                --video-format NTSC
+    )
+    set_tests_properties(CLI.VideoFormatWorksWithoutExportProject PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE  # fails on "unknown stage 'src'", not on --video-format
+        FAIL_REGULAR_EXPRESSION "only makes sense with"
+    )
+
+    add_test(
+        NAME CLI.HelpShowsVideoFormatOption
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsVideoFormatOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--video-format"
+    )
+
+    add_test(
+        NAME CLI.SourceTypeRejectedWithoutTriad
+        COMMAND $<TARGET_FILE:orc-cli> --source-type composite
+    )
+    set_tests_properties(CLI.SourceTypeRejectedWithoutTriad PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
+    add_test(
+        NAME CLI.SourceTypeWorksWithoutExportProject
+        COMMAND $<TARGET_FILE:orc-cli> --source "src" --sink "sink"
+                --source-type composite
+    )
+    set_tests_properties(CLI.SourceTypeWorksWithoutExportProject PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE  # fails on "unknown stage 'src'", not on --source-type
+        FAIL_REGULAR_EXPRESSION "only makes sense with"
+    )
+
+    add_test(
+        NAME CLI.HelpShowsSourceTypeOption
+        COMMAND $<TARGET_FILE:orc-cli> --help
+    )
+    set_tests_properties(CLI.HelpShowsSourceTypeOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--source-type"
+    )
+
+    # Pure unit test for the filtergraph parser (no orc-core dependency).
+    find_package(GTest REQUIRED)
+    add_executable(orc-cli-filtergraph-parser-test
+        filtergraph_parser_test.cpp
+        ${CMAKE_SOURCE_DIR}/orc/presenters/src/filtergraph_parser.cpp
+    )
+    target_include_directories(orc-cli-filtergraph-parser-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/orc/presenters/include
+    )
+    target_link_libraries(orc-cli-filtergraph-parser-test PRIVATE
+        GTest::gtest_main
+    )
+    add_test(
+        NAME CLI.FiltergraphParserUnit
+        COMMAND $<TARGET_FILE:orc-cli-filtergraph-parser-test>
+    )
+    set_tests_properties(CLI.FiltergraphParserUnit PROPERTIES
+        LABELS "unit;cli"
     )
 endif()
