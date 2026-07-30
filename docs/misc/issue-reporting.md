@@ -10,11 +10,14 @@ When the application crashes, you'll see a message showing where the diagnostic 
 
 **For orc-gui:**
 - A dialog box will appear with the crash information and bundle location
-- Example: `/home/username/Documents/decode-orc-crashes/crash_bundle_20260111_143022.zip`
+- Example (Linux): `/home/username/Documents/decode-orc-crashes/crash_bundle_20260111_143022.zip`
 
 **For orc-cli:**
 - A message is printed to the terminal showing the bundle location
 - Example: `./crash_bundle_20260111_143022.zip` (in your current directory)
+
+The exact directory depends on your operating system - see
+[Crash Bundle Locations](#crash-bundle-locations) below.
 
 ### Crash Bundle Contents
 
@@ -64,19 +67,61 @@ The crash bundle may contain:
 
 ### Crash Bundle Locations
 
-**orc-gui:**
-- Primary: `~/Documents/decode-orc-crashes/`
-- Fallback: `~/.decode-orc-crashes/` or current directory
+Bundles are named `crash_bundle_YYYYMMDD_HHMMSS.zip`, where the timestamp is
+the local time of the crash.
 
-**orc-cli:**
-- Saved in your current working directory
+**orc-gui** writes bundles to a `decode-orc-crashes` folder inside your
+Documents folder. The folder is created when the application starts, so it may
+exist and be empty if you have never had a crash.
+
+| Operating system | Crash bundle directory |
+| --- | --- |
+| Linux | `~/Documents/decode-orc-crashes/` (or the folder set as `XDG_DOCUMENTS_DIR` in `~/.config/user-dirs.dirs`) |
+| macOS | `~/Documents/decode-orc-crashes/` |
+| Windows | `C:\Users\<username>\Documents\decode-orc-crashes\` |
+
+!!! note "Windows and OneDrive"
+    If your Documents folder is redirected to OneDrive, the bundle is written
+    to the redirected location instead, for example
+    `C:\Users\<username>\OneDrive\Documents\decode-orc-crashes\`.
+
+!!! note "Linux Flatpak"
+    The Flatpak build has access to your home directory, so bundles appear in
+    your real `~/Documents/decode-orc-crashes/` folder rather than inside the
+    sandbox.
+
+If the Documents folder cannot be determined, orc-gui falls back to
+`decode-orc-crashes` in your home directory (`~/decode-orc-crashes/`,
+`C:\Users\<username>\decode-orc-crashes\` on Windows), and finally to the
+current working directory.
+
+**orc-cli** saves bundles in the current working directory - the directory you
+were in when you ran the command - on Linux, macOS and Windows alike.
+
+### Platform Differences in Bundle Contents
+
+- **Windows** - the bundle contains a `minidump_YYYYMMDD_HHMMSS.dmp` file
+  written at the moment of the crash. There is no coredump.
+- **Linux** - the coredump is written by the system, not by Decode Orc, so it
+  is only included if core dumps are enabled. `crash_info.txt` records where
+  the system was expected to put it (for example systemd-coredump - list these
+  with `coredumpctl list orc-gui` - or apport in `/var/crash/`).
+- **macOS** - a coredump is only produced if you ran the application after
+  setting `ulimit -c unlimited`, in which case it is written to
+  `/cores/core.<pid>`.
+
+On all platforms, if the system ZIP tool is unavailable the bundle is left as a
+plain `crash_bundle_YYYYMMDD_HHMMSS` **folder** next to where the ZIP would have
+been. Attach the folder's contents, or compress it yourself, when reporting.
 
 ### If You Can't Find the Crash Bundle
 
 If the application crashed but you can't find the bundle:
 
 1. Check the terminal output or error dialog for the exact path
-2. Search your home directory for files named `crash_bundle_*.zip`
+2. Search your home directory for files named `crash_bundle_*`:
+   - Linux/macOS: `find ~ -name 'crash_bundle_*' 2>/dev/null`
+   - Windows (PowerShell): `Get-ChildItem $HOME -Recurse -Filter 'crash_bundle_*'`
 3. Look in the current working directory where you ran the command
 
 If no bundle was created, please report the crash manually with:

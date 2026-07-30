@@ -418,10 +418,13 @@ If `orc-cli` crashes unexpectedly, it automatically creates a diagnostic bundle 
 - Application logs
 - Core dump file (when available)
 
-The crash bundle is saved as a ZIP file in the current working directory:
+The crash bundle is saved as a ZIP file in the current working directory, on
+Linux, macOS and Windows alike:
 
 ```
-crash-bundle-orc-cli-YYYY-MM-DD-HHMMSS.zip
+crash_bundle_YYYYMMDD_HHMMSS.zip
 ```
 
 When reporting issues, attach this bundle to your bug report on [GitHub Issues](https://github.com/simoninns/decode-orc/issues).
+See [Issue Reporting](../misc/issue-reporting.md) for full details of the bundle
+contents and the locations used by `orc-gui`.
