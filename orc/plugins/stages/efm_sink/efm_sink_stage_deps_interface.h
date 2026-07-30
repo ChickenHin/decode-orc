@@ -29,6 +29,13 @@ struct EFMSinkOptions {
   bool no_wav_header{false};
   bool output_metadata{false};
   bool report{false};
+  // Issue #231: align the head of the decoded audio with the input (video)
+  // timeline so the WAV starts in sync with the video. Ignored when zero_pad
+  // is set (zero_pad anchors to disc absolute time 00:00:00 instead).
+  bool video_sync{true};
+  // User sync slip in milliseconds applied on top of the alignment; positive
+  // delays the audio relative to the video, negative advances it.
+  double offset_ms{0.0};
 };
 
 struct EFMSinkDecodeResult {

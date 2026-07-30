@@ -71,6 +71,78 @@ TEST(EFMSinkStageTest, Descriptor_DefaultsIncludeOutputPathAndDecodeMode) {
   EXPECT_EQ(mode_it->constraints.allowed_strings.size(), 2u);
 }
 
+TEST(EFMSinkStageTest, Descriptor_VideoSyncDefaultsOnAndOffsetDefaultsZero) {
+  orc::EFMSinkStage stage;
+  const auto descriptors = stage.get_parameter_descriptors();
+
+  auto sync_it = std::find_if(
+      descriptors.begin(), descriptors.end(),
+      [](const orc::ParameterDescriptor& d) { return d.name == "video_sync"; });
+  auto offset_it = std::find_if(
+      descriptors.begin(), descriptors.end(),
+      [](const orc::ParameterDescriptor& d) { return d.name == "offset_ms"; });
+
+  // Issue #231: audio aligns with the video timeline by default.
+  ASSERT_NE(sync_it, descriptors.end());
+  EXPECT_EQ(sync_it->type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(sync_it->constraints.default_value.has_value());
+  EXPECT_TRUE(std::get<bool>(*sync_it->constraints.default_value));
+  ASSERT_TRUE(sync_it->constraints.depends_on.has_value());
+  EXPECT_EQ(sync_it->constraints.depends_on->parameter_name, "decode_mode");
+
+  ASSERT_NE(offset_it, descriptors.end());
+  EXPECT_EQ(offset_it->type, orc::ParameterType::DOUBLE);
+  ASSERT_TRUE(offset_it->constraints.default_value.has_value());
+  EXPECT_EQ(std::get<double>(*offset_it->constraints.default_value), 0.0);
+}
+
+TEST(EFMSinkStageTest, Trigger_ForwardsVideoSyncAndOffsetToDeps) {
+  orc::EFMSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockEFMSinkStageDeps>>();
+  stage.set_deps_override(deps);
+
+  MockObservationContext observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVFRArtifactWithEFM>>();
+
+  EXPECT_CALL(*vfr, has_efm()).WillOnce(Return(true));
+  EXPECT_CALL(*deps, decode_efm(vfr.get(), testing::_))
+      .WillOnce([](const orc::VideoFrameRepresentation*,
+                   const orc::EFMSinkOptions& options) {
+        EXPECT_FALSE(options.video_sync);
+        EXPECT_EQ(options.offset_ms, 33.5);
+        return orc::EFMSinkDecodeResult{true, "Success"};
+      });
+
+  const bool result = stage.trigger({vfr},
+                                    {{"output_path", std::string("out.wav")},
+                                     {"video_sync", false},
+                                     {"offset_ms", 33.5}},
+                                    observation_context);
+  EXPECT_TRUE(result);
+}
+
+TEST(EFMSinkStageTest, Trigger_VideoSyncDefaultsOnWhenUnset) {
+  orc::EFMSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockEFMSinkStageDeps>>();
+  stage.set_deps_override(deps);
+
+  MockObservationContext observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVFRArtifactWithEFM>>();
+
+  EXPECT_CALL(*vfr, has_efm()).WillOnce(Return(true));
+  EXPECT_CALL(*deps, decode_efm(vfr.get(), testing::_))
+      .WillOnce([](const orc::VideoFrameRepresentation*,
+                   const orc::EFMSinkOptions& options) {
+        EXPECT_TRUE(options.video_sync);
+        EXPECT_EQ(options.offset_ms, 0.0);
+        return orc::EFMSinkDecodeResult{true, "Success"};
+      });
+
+  const bool result = stage.trigger(
+      {vfr}, {{"output_path", std::string("out.wav")}}, observation_context);
+  EXPECT_TRUE(result);
+}
+
 TEST(EFMSinkStageTest, Trigger_FailsWhenNoInputProvided) {
   orc::EFMSinkStage stage;
   MockObservationContext observation_context;

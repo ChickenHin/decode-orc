@@ -62,6 +62,8 @@ void WriterRaw::write(const AudioSection& audioSection) {
     const std::vector<int16_t>& data = audio.data();
     sectionData.insert(sectionData.end(), data.begin(), data.end());
   }
+  m_headOffset.apply(sectionData);
+  if (sectionData.empty()) return;
 
   const auto* bytes = reinterpret_cast<const char*>(sectionData.data());
   const auto byteCount =

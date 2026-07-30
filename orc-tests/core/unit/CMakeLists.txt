@@ -302,6 +302,20 @@ gtest_discover_tests(orc-core-unit-tests-efm-section-framing
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# Audio/video sync head alignment (issue #231): the writer-level pad/trim
+# primitive and the decoder head-loss counters (t-value bits and F3 frames
+# consumed before first output) that the alignment offset is computed from.
+# Links the shared EFM decode library directly, as with the de-emphasis DSP.
+add_executable(orc-core-unit-tests-efm-sync-head-offset
+        stages/efm_common/audio_sync_head_offset_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-sync-head-offset
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-sync-head-offset
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # End-to-end boundary attribution: a stream that is clean by construction is run
 # through the real F2 -> F1 -> Data24 -> Audio -> concealment chain and must
 # report no input defects at all. Guards the regression where drain codewords

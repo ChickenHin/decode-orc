@@ -16,7 +16,7 @@ The stage wraps the incoming frame representation and appends one audio channel 
 
 EFM decoding is whole-stream sequential (the CIRC interleaving spans sectors), so it cannot run frame-by-frame. The decode therefore runs lazily, at most once, on the first access to the appended pair's audio: the stage gathers the t-values across the input's full frame range, runs the shared EFM decode pipeline, widens the decoded 44.1 kHz 16-bit CD audio to 24-bit, resamples it to 48 kHz (SoXR HQ), and caches the converted frame-locked PCM in a scratch file on disk. Video-only preview and project validation never trigger the decode.
 
-EFM decode start-up (sync acquisition) makes the pair's time origin approximate; if the digital audio needs nudging relative to the video, apply a per-pair sync adjustment downstream (Audio Align).
+The EFM t-values are demodulated from the same FM signal as the video, so the decoded audio has a fixed, computable relationship to the video timeline. The stage aligns the head of the decoded stream automatically: the CIRC de-interleaver's constant 111-frame latency (666 stereo pairs, 15.1 ms of warm-up filler at the stream head) is removed, and the input the decoder consumed while acquiring sync (discarded t-values, pre-sync frames, and any settle or lead-in sections) is restored as silence. After alignment the pair's first sample is synchronous with the first frame of this stage's input — the same sync the analogue audio has. If the audio still needs nudging, use the **offset_ms** parameter (or a downstream Audio Align stage for post-hoc, per-pair adjustment).
 
 Appending the pair counts toward the pipeline's 8-channel-pair limit; the stage fails validation if the input already carries 8 channel pairs.
 
@@ -33,6 +33,9 @@ Boolean, default `false`. Ignore the 50/15 µs pre-emphasis CONTROL flag (IEC 60
 
 ### pair_name
 String, default `EFM digital audio`. Human-readable name for the decoded EFM audio channel pair. It surfaces in the CVBS container and as the embedded stream title in the Video Sink. If left empty it falls back to `EFM digital audio`.
+
+### offset_ms
+Double, default `0`. Additional sync slip in milliseconds applied on top of the automatic video-timeline alignment. Positive values delay the audio relative to the video; negative values advance it. Leave at 0 unless the decoded audio still needs nudging after the automatic alignment.
 
 ### report
 Boolean, default `false`. Enable to write a detailed decode statistics report (the same per-stage CIRC/error/timing statistics the EFM Decoder Sink writes) once the lazy decode runs. When enabled, set the report destination in **report_path**.

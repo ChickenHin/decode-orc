@@ -85,6 +85,27 @@ class EfmProcessor {
   void setZeroPad(bool zeroPad);
   void setNoWavHeader(bool noWavHeader);
 
+  // Audio/video sync alignment (issue #231). When enabled, the head of the
+  // decoded audio stream is aligned with the EFM input timeline (for a
+  // LaserDisc capture, the video timeline): the CIRC de-interleave warm-up
+  // (kDeinterleaveLatencySamples pairs of filler at the stream head) is
+  // removed and the input consumed during decoder sync acquisition
+  // (discarded T-values, pre-sync F3 frames, settle/lead-in sections) is
+  // restored as silence. Audio mode only; ignored when zero-pad is active
+  // (zero-pad anchors the stream to disc absolute time 00:00:00 instead).
+  void setAudioSyncOffset(bool audioSyncOffset);
+  // Additional user slip in 44.1 kHz stereo pairs applied on top of the
+  // computed alignment (positive delays the audio relative to the input
+  // timeline, negative advances it). Applied even when the computed
+  // alignment is disabled.
+  void setAudioSyncSlipPairs(int64_t slipPairs);
+  // The net head adjustment applied to the audio output, in 44.1 kHz stereo
+  // pairs (positive = silence prepended, negative = pairs dropped). Valid
+  // after finishStream(); 0 when no adjustment was applied.
+  int64_t appliedAudioSyncOffsetPairs() const {
+    return m_appliedAudioSyncOffsetPairs;
+  }
+
   // Data options
   void setOutputMetadata(bool outputMetadata);
 
@@ -113,6 +134,20 @@ class EfmProcessor {
   bool m_outputMetadata;
   bool m_reportOutput;
   std::string m_reportFilename;  // empty = derive from m_outputFilename
+
+  // Audio/video sync alignment (issue #231); see setAudioSyncOffset().
+  bool m_audioSyncOffset{false};
+  int64_t m_audioSyncSlipPairs{0};
+  // Input consumed by the front end before its first output section, in
+  // 44.1 kHz stereo pairs. Snapshotted on the FRONT-END thread the moment the
+  // first F2 section becomes ready (the head counters are frozen by then);
+  // the queue hand-off orders it before any back-end read.
+  bool m_headSkipCaptured{false};
+  int64_t m_headSkipPairs{0};
+  // Set once by the back end when the head adjustment has been decided and
+  // handed to the active audio writer.
+  bool m_audioSyncApplied{false};
+  int64_t m_appliedAudioSyncOffsetPairs{0};
 
   // -----------------------------------------------------------------------
   // Pipeline decoder instances
@@ -224,6 +259,10 @@ class EfmProcessor {
   void drainBackEnd(bool& zeroPadApplied);
   void drainAudioPipeline();
   void drainDataPipeline();
+
+  // Audio/video sync alignment helpers (issue #231).
+  void captureHeadSkip();       // front-end thread, before first hand-off
+  void applyAudioSyncOffset();  // back-end thread, before first audio write
 
   void showGeneralPipelineStatistics() const;
   void showD24PipelineStatistics() const;

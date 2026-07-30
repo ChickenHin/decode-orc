@@ -42,11 +42,14 @@ namespace orc {
 // resampled 44100 → 48000 Hz, cadence-segmented via the shared resampler,
 // and stored in the deps' scratch cache as a raw int32 cadence-aligned
 // stream; per-frame serving seeks by audio_pair_offset(id, system).
-// Video-only access never pays for the decode. Pair 0 of the decoded stream
-// is treated as synchronous with the first frame of the wrapped
-// representation. A failed decode leaves the appended pair silent
-// (cadence-sized zero blocks). Bit-exact un-resampled CD audio remains
-// available via the EFM Decoder Sink.
+// Video-only access never pays for the decode. The decoder aligns the head
+// of the stream with the input (video) timeline — compensating the CIRC
+// de-interleave latency and the input consumed during sync acquisition, plus
+// the user's offset_ms slip (issue #231) — so pair 0 of the decoded stream
+// is synchronous with the first frame of the wrapped representation. A
+// failed decode leaves the appended pair silent (cadence-sized zero blocks).
+// Bit-exact un-resampled CD audio remains available via the EFM Decoder
+// Sink.
 //
 // Thread safety: safe for concurrent reads; the lazy decode+conversion is
 // serialised by std::call_once and cache reads are stateless.
@@ -182,6 +185,9 @@ class EFMAudioDecodeStage : public DAGStage,
   std::string pair_name_ = "EFM digital audio";
   bool report_ = false;      // checkbox: write a decode statistics report
   std::string report_path_;  // report destination when report_ is enabled
+  // User sync slip in milliseconds on top of the automatic video-timeline
+  // alignment; positive delays the audio, negative advances it (issue #231).
+  double offset_ms_ = 0.0;
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
   std::shared_ptr<IEFMAudioDecodeDeps> deps_override_;

@@ -28,7 +28,14 @@ F3FrameToF2Section::F3FrameToF2Section()
       m_overshootSync0(0),
       m_discardedF3Frames(0),
       m_paddedF3Frames(0),
-      m_lostSyncCounter(0) {}
+      m_lostSyncCounter(0),
+      m_headLostF3Frames(0),
+      m_firstSectionOutput(false) {}
+
+void F3FrameToF2Section::noteHeadLoss(uint64_t frames) {
+  if (m_firstSectionOutput) return;
+  m_headLostF3Frames += frames;
+}
 
 void F3FrameToF2Section::pushFrame(const F3Frame& data) {
   m_internalBuffer.push_back(data);
@@ -86,6 +93,7 @@ F3FrameToF2Section::State F3FrameToF2Section::expectingInitialSync() {
   for (size_t i = 0; i < m_internalBuffer.size(); ++i) {
     if (m_internalBuffer[i].f3FrameType() == F3Frame::Sync0) {
       m_presyncDiscardedF3Frames += i;
+      noteHeadLoss(i);
       // Discard all frames before the sync0 frame
       m_internalBuffer = std::vector<F3Frame>(
           m_internalBuffer.begin() + static_cast<std::ptrdiff_t>(i),
@@ -104,6 +112,7 @@ F3FrameToF2Section::State F3FrameToF2Section::expectingInitialSync() {
     nextState = ExpectingSync;
   } else {
     m_presyncDiscardedF3Frames += m_internalBuffer.size();
+    noteHeadLoss(m_internalBuffer.size());
     m_internalBuffer.clear();
   }
 
@@ -249,6 +258,7 @@ F3FrameToF2Section::State F3FrameToF2Section::handleOvershoot() {
   if (frameCount == 1) {
     // Delete frames from the start of the section buffer to make it 98 frames
     m_discardedF3Frames += remainder;
+    noteHeadLoss(static_cast<uint64_t>(remainder));
     m_sectionFrames = std::vector<F3Frame>(m_sectionFrames.begin() + remainder,
                                            m_sectionFrames.end());
     outputSection(true);
@@ -256,6 +266,7 @@ F3FrameToF2Section::State F3FrameToF2Section::handleOvershoot() {
     // Remove any frames that are not part of a complete section from the
     // beginning of the section buffer
     m_discardedF3Frames += remainder;
+    noteHeadLoss(static_cast<uint64_t>(remainder));
     m_sectionFrames = std::vector<F3Frame>(m_sectionFrames.begin() + remainder,
                                            m_sectionFrames.end());
 
@@ -284,6 +295,7 @@ F3FrameToF2Section::State F3FrameToF2Section::lostSync() {
   ORC_LOG_DEBUG("F3FrameToF2Section::lostSync - Lost section sync");
   m_lostSyncCounter++;
   m_badSyncCounter = 0;
+  noteHeadLoss(m_internalBuffer.size() + m_sectionFrames.size());
   m_internalBuffer.clear();
   m_sectionFrames.clear();
   return nextState;
@@ -337,6 +349,7 @@ void F3FrameToF2Section::outputSection(bool showAddress) {
   if (sectionMetadata.isValid()) {
     m_lastSectionMetadata = sectionMetadata;
   }
+  m_firstSectionOutput = true;
   m_outputBuffer.push(f2Section);
 
   if (showAddress) {

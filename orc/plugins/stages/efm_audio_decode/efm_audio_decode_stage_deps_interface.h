@@ -35,12 +35,20 @@ struct EFMAudioDecodeOptions {
   // the pair descriptor name (the CVBS container description column and the
   // video sink's per-stream title). Empty falls back to "EFM digital audio".
   std::string pair_name{"EFM digital audio"};
+  // User sync slip in milliseconds applied on top of the automatic
+  // input-timeline (video) alignment; positive delays the audio relative to
+  // the video, negative advances it (issue #231).
+  double offset_ms{0.0};
 };
 
 struct EFMAudioDecodeResult {
   bool success{false};
   std::string error_message;      // human-readable reason when !success
   uint64_t stream_pair_count{0};  // decoded 44.1 kHz stereo pairs available
+  // Net head adjustment the decoder applied to align the stream with the
+  // input (video) timeline, in 44.1 kHz stereo pairs (positive = silence
+  // prepended, negative = pairs dropped). Informational.
+  int64_t applied_sync_offset_pairs{0};
 };
 
 // Dependency seam for EFMAudioDecodeStage: performs the whole-stream EFM

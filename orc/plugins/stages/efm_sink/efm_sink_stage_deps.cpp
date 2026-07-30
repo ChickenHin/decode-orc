@@ -12,6 +12,7 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "efm-decode/efm-lib/efm_exception.h"
 #include "efm-decode/efm_processor.h"
@@ -64,6 +65,13 @@ EFMSinkDecodeResult EFMSinkStageDeps::decode_efm(
     processor.setNoWavHeader(options.no_wav_header);
     processor.setOutputMetadata(options.output_metadata);
     processor.setReportOutput(options.report);
+
+    // Issue #231: align the decoded audio head with the input (video)
+    // timeline, plus the user's millisecond slip. IEC 60908: CD audio is
+    // 44.1 kHz, so the slip converts at 44.1 pairs per millisecond.
+    processor.setAudioSyncOffset(options.video_sync);
+    processor.setAudioSyncSlipPairs(
+        static_cast<int64_t>(std::llround(options.offset_ms * 44.1)));
 
     processor.beginStream(options.output_path,
                           static_cast<int64_t>(total_tvalues));

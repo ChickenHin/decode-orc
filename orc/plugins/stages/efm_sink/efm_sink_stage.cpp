@@ -142,6 +142,43 @@ std::vector<ParameterDescriptor> EFMSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  // video_sync  (audio only)
+  {
+    ParameterDescriptor desc;
+    desc.name = "video_sync";
+    desc.display_name = "Align With Video Timeline";
+    desc.description =
+        "Align the start of the decoded audio with the video timeline of the "
+        "capture: compensates the CIRC de-interleave latency and the input "
+        "consumed while the decoder acquired sync. Ignored when Zero-Pad "
+        "Audio is enabled (zero-pad anchors the audio to disc absolute time "
+        "00:00:00 instead). Disable for bit-exact legacy output.";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    desc.constraints.depends_on = ParameterDependency{"decode_mode", {"audio"}};
+    descriptors.push_back(desc);
+  }
+
+  // offset_ms  (audio only)
+  {
+    ParameterDescriptor desc;
+    desc.name = "offset_ms";
+    desc.display_name = "Sync Offset (ms)";
+    desc.description =
+        "Additional sync slip in milliseconds on top of the video-timeline "
+        "alignment. Positive values delay the audio relative to the video; "
+        "negative values advance it. Leave at 0 unless the decoded audio "
+        "still needs nudging.";
+    desc.type = ParameterType::DOUBLE;
+    // A finite range keeps the GUI spin box a sensible width; ±1 hour is far
+    // beyond any real audio/video sync correction.
+    desc.constraints.min_value = -3'600'000.0;
+    desc.constraints.max_value = 3'600'000.0;
+    desc.constraints.default_value = 0.0;
+    desc.constraints.depends_on = ParameterDependency{"decode_mode", {"audio"}};
+    descriptors.push_back(desc);
+  }
+
   // zero_pad  (audio only)
   {
     ParameterDescriptor desc;
@@ -235,6 +272,15 @@ static std::string get_string_param(
   return default_val;
 }
 
+static double get_double_param(
+    const std::map<std::string, ParameterValue>& params,
+    const std::string& name, double default_val = 0.0) {
+  auto it = params.find(name);
+  if (it == params.end()) return default_val;
+  if (const double* v = std::get_if<double>(&it->second)) return *v;
+  return default_val;
+}
+
 // ---------------------------------------------------------------------------
 // trigger()
 // ---------------------------------------------------------------------------
@@ -287,6 +333,8 @@ bool EFMSinkStage::trigger(
     const bool no_wav_header = get_bool_param(parameters, "no_wav_header");
     const bool output_metadata = get_bool_param(parameters, "output_metadata");
     const bool report = get_bool_param(parameters, "report");
+    const bool video_sync = get_bool_param(parameters, "video_sync", true);
+    const double offset_ms = get_double_param(parameters, "offset_ms");
 
     ORC_LOG_INFO("EFMSink: mode={}, output={}", audio_mode ? "audio" : "data",
                  output_path);
@@ -302,6 +350,8 @@ bool EFMSinkStage::trigger(
     options.no_wav_header = no_wav_header;
     options.output_metadata = output_metadata;
     options.report = report;
+    options.video_sync = video_sync;
+    options.offset_ms = offset_ms;
 
     std::shared_ptr<IEFMSinkStageDeps> deps = deps_override_;
     if (!deps) {
