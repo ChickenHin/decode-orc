@@ -30,8 +30,14 @@ Disable interpolation-based error concealment for uncorrectable audio samples. W
 ### ignore_preemphasis (boolean)
 Ignore the 50/15 µs pre-emphasis CONTROL flag (IEC 60908 §17.5) and write the audio exactly as decoded. When unchecked (default), sections flagged as pre-emphasised are de-emphasised during decode with a 50/15 µs filter, so the output plays back with a flat response. Enable this only if you want the raw pre-emphasised samples (e.g. to apply de-emphasis yourself downstream). When Audacity labels are enabled, the label for a pre-emphasised track is annotated `Preemphasis:50/15us(removed)` when de-emphasis was applied, or `Preemphasis:50/15us` when this flag is set. Audio mode only. Default: `false`.
 
+### video_sync (boolean)
+Align the start of the decoded audio with the video timeline of the capture. The EFM t-values are demodulated from the same FM signal as the video, so the decoded audio has a fixed, computable relationship to the video: the CIRC de-interleaver's constant 111-frame latency (666 stereo pairs, 15.1 ms of warm-up filler at the stream head) is removed, and the input the decoder consumed while acquiring sync (discarded t-values, pre-sync frames, and any settle or lead-in sections) is restored as silence. The result starts in sync with the video — the same sync the analogue audio has — so it can be muxed against the video without manual correction. Ignored when `zero_pad` is enabled (zero-pad anchors the audio to disc absolute time 00:00:00 instead). Disable for bit-exact legacy output. The adjustment actually applied is stated in the decode report (Part C, decode boundaries). Audio mode only. Default: `true`.
+
+### offset_ms (double)
+Additional sync slip in milliseconds applied at the head of the audio output, on top of the `video_sync` alignment. Positive values delay the audio relative to the video (silence is prepended); negative values advance it (samples are trimmed). Applied even when `video_sync` is disabled. Audio mode only. Default: `0`.
+
 ### zero_pad (boolean)
-Zero-pad the start of the audio output so that playback begins at 00:00:00.0 relative to the first valid EFM timecode. Audio mode only. Default: `false`.
+Zero-pad the start of the audio output so that playback begins at 00:00:00.0 relative to the first valid EFM timecode. Overrides `video_sync`. Audio mode only. Default: `false`.
 
 ### no_wav_header (boolean)
 Output raw PCM samples without a RIFF WAV header. Useful when the output will be piped into another tool that expects headerless PCM. Audio mode only. Default: `false`.

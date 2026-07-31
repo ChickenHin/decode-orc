@@ -36,33 +36,6 @@ using orc::presenters::StageInfo;
 using orc::presenters::VideoFormat;
 
 /**
- * Parse a video format name for --video-format (export-only override).
- * Accepts "NTSC", "PAL", or "PAL-M" (case-insensitive; "PAL_M"/"PALM" also
- * accepted for convenience). Returns false, leaving `out` untouched, for
- * anything else.
- */
-bool parse_video_format_name(const std::string& text, VideoFormat& out) {
-  std::string upper;
-  upper.reserve(text.size());
-  for (char c : text) {
-    upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-  }
-  if (upper == "NTSC") {
-    out = VideoFormat::NTSC;
-    return true;
-  }
-  if (upper == "PAL") {
-    out = VideoFormat::PAL;
-    return true;
-  }
-  if (upper == "PAL-M" || upper == "PAL_M" || upper == "PALM") {
-    out = VideoFormat::PAL_M;
-    return true;
-  }
-  return false;
-}
-
-/**
  * Parse a source type name for --source-type (export-only override).
  * Accepts "composite" or "yc" (case-insensitive; "y/c" and "s-video" also
  * accepted for convenience). Returns false, leaving `out` untouched, for
@@ -218,7 +191,7 @@ int filter_command(const FilterOptions& options) {
   if (presenter.getVideoFormat() == orc::presenters::VideoFormat::Unknown &&
       !options.video_format_override.empty()) {
     orc::presenters::VideoFormat forced = orc::presenters::VideoFormat::Unknown;
-    if (!parse_video_format_name(options.video_format_override, forced)) {
+    if (!parse_video_format_name(options.video_format_override, &forced)) {
       ORC_LOG_ERROR(
           "Unknown --video-format value '{}': expected NTSC, PAL, or PAL-M",
           options.video_format_override);

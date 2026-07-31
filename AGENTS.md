@@ -383,6 +383,7 @@ Plugin architecture and SDK documentation are published in `docs/technical/plugi
 | `IStageServices` interface methods added or removed | `plugin-sdk.md` — Host services section |
 | `StageToolDescriptor` / `AnalysisToolDescriptor` contract changed | `plugin-sdk.md` — Optional: Stage tools section |
 | Plugin cache path or download behaviour changed | `plugin-architecture.md` — Plugin Registry section |
+| Plugin or stage capability added or removed in `orc/gui` or `orc/cli` | `orc/plugin_ux_capabilities.yaml` (capability manifest; the `CLI.PluginUxCapabilityParity` gate enforces it) → `docs/cli-user-guide/overview.md` and `docs/gui-user-guide/dialogues/main.md` |
 | `orc_add_stage_plugin()` macro signature changed | `plugin-sdk.md` — CMake Integration section |
 
 ### 9.1 Stage Self-Documentation (Non-Negotiable)

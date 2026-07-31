@@ -9,6 +9,8 @@
 
 #include "pluginmanagerdialog.h"
 
+#include <plugin_ux_strings.h>
+
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -19,13 +21,19 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QString>
+#include <QStringList>
+#include <QThread>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <unordered_set>
+#include <utility>
 
+#include "plugin_row_presentation.h"
 #include "pluginbrowsedialog.h"
 #include "pluginmanagermodel.h"
 #include "plugintrustdialog.h"
+#include "presenters/include/plugin_details.h"
+#include "presenters/include/plugin_selector.h"
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/project_presenter_types.h"
 
@@ -35,30 +43,61 @@ namespace orc {
 static constexpr int COL_ID = 0;
 static constexpr int COL_PATH = 1;
 static constexpr int COL_VERSION = 2;
-static constexpr int COL_SOURCE = 3;
-static constexpr int COL_ENABLED = 4;
-static constexpr int COL_TRUSTED = 5;
+static constexpr int COL_UPDATE = 3;
+static constexpr int COL_SOURCE = 4;
+static constexpr int COL_ENABLED = 5;
 static constexpr int NUM_COLS = 6;
 static constexpr int ROW_REGISTRY_ENTRY_ROLE = Qt::UserRole + 1;
-static constexpr int ROW_IS_CORE_ROLE = Qt::UserRole + 2;
-static constexpr int ROW_PATH_ROLE = Qt::UserRole + 3;
-static constexpr int ROW_RELEASE_ASSET_URL_ROLE = Qt::UserRole + 4;
+// The one handle the row is addressed by; the CLI takes the same string.
+static constexpr int ROW_SELECTOR_ROLE = Qt::UserRole + 2;
+// Presenter-computed load state, stored as its underlying integer.
+static constexpr int ROW_LOAD_STATE_ROLE = Qt::UserRole + 3;
 
-static const QStringList COLUMN_HEADERS = {"ID",     "Path",    "Version",
-                                           "Source", "Enabled", "Trusted"};
+namespace {
+
+orc::presenters::PluginLoadState rowLoadState(const QTableWidgetItem* item) {
+  return static_cast<orc::presenters::PluginLoadState>(
+      item->data(ROW_LOAD_STATE_ROLE).toInt());
+}
+
+}  // namespace
+
+static const QStringList COLUMN_HEADERS = {"ID",     "Path",   "Version",
+                                           "Update", "Source", "Enabled"};
 
 PluginManagerDialog::PluginManagerDialog(QWidget* parent)
     : QDialog(parent),
-      presenter_(std::make_unique<orc::presenters::ProjectPresenter>()),
+      owned_presenter_(std::make_unique<orc::presenters::ProjectPresenter>()),
+      presenter_(owned_presenter_.get()),
       model_(std::make_unique<PluginManagerModel>(*presenter_)) {
-  setWindowTitle("Plugin Manager");
-  resize(980, 500);
-  buildUI();
-  refresh();
-  captureInitialRegistrySnapshot();
+  initialise();
 }
 
-PluginManagerDialog::~PluginManagerDialog() = default;
+PluginManagerDialog::PluginManagerDialog(
+    orc::presenters::IProjectPresenter& presenter, QWidget* parent)
+    : QDialog(parent),
+      presenter_(&presenter),
+      model_(std::make_unique<PluginManagerModel>(presenter)) {
+  initialise();
+}
+
+void PluginManagerDialog::initialise() {
+  setWindowTitle("Plugin Manager");
+  resize(1280, 560);
+  buildUI();
+  refresh();
+  refreshDiagnostics();
+  captureInitialRegistrySnapshot();
+  startUpdateCheck();
+}
+
+PluginManagerDialog::~PluginManagerDialog() {
+  if (update_check_thread_) {
+    update_check_thread_->wait();
+    delete update_check_thread_;
+    update_check_thread_ = nullptr;
+  }
+}
 
 void PluginManagerDialog::accept() {
   if (!plugin_changes_made_) {
@@ -124,7 +163,7 @@ void PluginManagerDialog::reject() {
 }
 
 void PluginManagerDialog::captureInitialRegistrySnapshot() {
-  const auto registry = orc::presenters::ProjectPresenter::readPluginRegistry();
+  const auto registry = model_->registry();
   initial_registry_path_ = registry.registry_path;
   initial_registry_contents_.clear();
   initial_registry_exists_ = false;
@@ -215,9 +254,9 @@ void PluginManagerDialog::buildUI() {
   header->setSectionResizeMode(COL_ID, QHeaderView::Interactive);
   header->setSectionResizeMode(COL_PATH, QHeaderView::Interactive);
   header->setSectionResizeMode(COL_VERSION, QHeaderView::ResizeToContents);
+  header->setSectionResizeMode(COL_UPDATE, QHeaderView::ResizeToContents);
   header->setSectionResizeMode(COL_SOURCE, QHeaderView::Stretch);
   header->setSectionResizeMode(COL_ENABLED, QHeaderView::ResizeToContents);
-  header->setSectionResizeMode(COL_TRUSTED, QHeaderView::ResizeToContents);
   QFont header_font = header->font();
   header_font.setBold(false);
   header->setFont(header_font);
@@ -229,18 +268,60 @@ void PluginManagerDialog::buildUI() {
   table_->setColumnWidth(COL_ID, 260);
   table_->setColumnWidth(COL_PATH, 220);
   table_->verticalHeader()->setVisible(false);
-  root_layout->addWidget(table_, 1);
+
+  // Details for the selected entry, worded and ordered by the presenter so the
+  // pane and 'orc-cli plugins info' describe a plugin identically.
+  auto* details_group = new QGroupBox("Details", this);
+  auto* details_layout = new QVBoxLayout(details_group);
+  details_label_ = new QLabel(this);
+  details_label_->setObjectName("pluginDetailsLabel");
+  details_label_->setWordWrap(true);
+  details_label_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+  details_label_->setTextInteractionFlags(Qt::TextBrowserInteraction);
+  details_layout->addWidget(details_label_, 1);
+  details_group->setMinimumWidth(320);
+
+  auto* content_row = new QHBoxLayout();
+  content_row->addWidget(table_, 2);
+  content_row->addWidget(details_group, 1);
+  root_layout->addLayout(content_row, 1);
 
   // Action buttons
   auto* button_row = new QHBoxLayout();
   add_button_ = new QPushButton("Add Plugin...");
   browse_button_ = new QPushButton("Browse Plugins...");
   remove_button_ = new QPushButton("Remove");
-  button_row->addWidget(add_button_);
+  update_button_ = new QPushButton("Update");
+  update_button_->setToolTip(
+      "Update the selected plugin to its latest published release");
   button_row->addWidget(browse_button_);
+  button_row->addWidget(add_button_);
   button_row->addWidget(remove_button_);
+  button_row->addWidget(update_button_);
   button_row->addStretch();
+  show_core_check_ = new QCheckBox("Show core plugins");
+  show_core_check_->setChecked(false);
+  show_core_check_->setToolTip(
+      "Show the plugins that ship with the application as well as the ones "
+      "you have installed");
+  button_row->addWidget(show_core_check_);
   root_layout->addLayout(button_row);
+
+  // What the plugin runtime reported while loading, collapsed by default: it
+  // matters when something did not appear, not on every visit.
+  diagnostics_group_ =
+      new QGroupBox(QString::fromUtf8(plugin_ux::kDiagnosticsTitle), this);
+  diagnostics_group_->setObjectName("pluginDiagnosticsGroup");
+  diagnostics_group_->setCheckable(true);
+  diagnostics_group_->setChecked(false);
+  auto* diagnostics_layout = new QVBoxLayout(diagnostics_group_);
+  diagnostics_label_ = new QLabel(this);
+  diagnostics_label_->setObjectName("pluginDiagnosticsLabel");
+  diagnostics_label_->setWordWrap(true);
+  diagnostics_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  diagnostics_label_->setVisible(false);
+  diagnostics_layout->addWidget(diagnostics_label_);
+  root_layout->addWidget(diagnostics_group_);
 
   // Commit / cancel buttons
   auto* close_box = new QDialogButtonBox(
@@ -248,8 +329,9 @@ void PluginManagerDialog::buildUI() {
   root_layout->addWidget(close_box);
 
   // Note label
-  auto* note_label = new QLabel(
-      "Note: Registry changes take effect on the next application launch.");
+  auto* note_label =
+      new QLabel(QString::fromUtf8(plugin_ux::kNotePrefix) +
+                 QString::fromUtf8(plugin_ux::kRegistryChangeNote));
   note_label->setEnabled(false);
   root_layout->addWidget(note_label);
 
@@ -260,6 +342,12 @@ void PluginManagerDialog::buildUI() {
           &PluginManagerDialog::onBrowsePlugins);
   connect(remove_button_, &QPushButton::clicked, this,
           &PluginManagerDialog::onRemovePlugin);
+  connect(update_button_, &QPushButton::clicked, this,
+          &PluginManagerDialog::onUpdatePlugin);
+  connect(show_core_check_, &QCheckBox::toggled, this,
+          [this](bool) { refresh(); });
+  connect(diagnostics_group_, &QGroupBox::toggled, diagnostics_label_,
+          &QWidget::setVisible);
   connect(table_->selectionModel(), &QItemSelectionModel::selectionChanged,
           this, &PluginManagerDialog::onSelectionChanged);
   connect(table_, &QTableWidget::itemChanged, this,
@@ -279,12 +367,29 @@ void PluginManagerDialog::refresh() {
           ? "<none>"
           : QString::fromStdString(registry.registry_path));
 
+  // Core plugins are hidden unless the user asks for them, so the table shows
+  // only self-installed plugins by default.
+  const bool show_core = show_core_check_->isChecked();
+
   refreshing_table_ = true;
   table_->setRowCount(0);
+  row_entries_.clear();
   std::unordered_set<std::string> seen_ids;
   std::unordered_set<std::string> seen_paths;
 
   for (const auto& e : registry.entries) {
+    if (e.is_core_plugin && !show_core) {
+      // Still record the identity so a duplicate runtime-loaded copy of a
+      // hidden core plugin does not reappear in the fallback list below.
+      if (!e.plugin_id.empty()) {
+        seen_ids.insert(e.plugin_id);
+      }
+      if (!e.path.empty()) {
+        seen_paths.insert(e.path);
+      }
+      continue;
+    }
+
     // Overlay runtime-discovered data (id, version) when the registry YAML
     // doesn't have it populated yet (e.g. freshly added remote plugins).
     const auto loaded_it = std::find_if(
@@ -302,66 +407,57 @@ void PluginManagerDialog::refresh() {
             : (loaded_it != loaded_plugins.end() ? loaded_it->plugin_version
                                                  : std::string());
 
+    // Ticked means "will load at the next launch", and every other cue on the
+    // row comes from the same presenter-computed state.
+    const auto presentation =
+        makePluginRowPresentation(e.load_state, e.load_state_detail);
+
+    // The details pane describes what the row shows, so it carries the same
+    // runtime-overlaid id and version.
+    auto row_entry = e;
+    row_entry.plugin_id = display_id;
+    row_entry.plugin_version = display_version;
+    row_entries_.push_back(std::move(row_entry));
+
     const int row = table_->rowCount();
     table_->insertRow(row);
     auto* id_item = new QTableWidgetItem(QString::fromStdString(display_id));
     id_item->setData(ROW_REGISTRY_ENTRY_ROLE, true);
-    id_item->setData(ROW_IS_CORE_ROLE, e.is_core_plugin);
-    id_item->setData(ROW_PATH_ROLE, QString::fromStdString(e.path));
-    id_item->setData(ROW_RELEASE_ASSET_URL_ROLE,
-                     QString::fromStdString(e.release_asset_url));
+    id_item->setData(ROW_SELECTOR_ROLE, QString::fromStdString(e.selector));
+    id_item->setData(ROW_LOAD_STATE_ROLE, static_cast<int>(e.load_state));
     table_->setItem(row, COL_ID, id_item);
     table_->setItem(row, COL_PATH,
                     new QTableWidgetItem(QString::fromStdString(e.path)));
     auto* version_item =
         new QTableWidgetItem(QString::fromStdString(display_version));
-    if (!e.abi_compatible) {
-      // The plugin declares an incompatible required_host_abi; the host will
-      // not download or load it. Flag it and explain the fix.
-      version_item->setText(version_item->text() + QStringLiteral(" ⚠"));
-      version_item->setToolTip(
-          QStringLiteral("Requires Orc ABI %1 but this host is ABI %2; the "
-                         "plugin must be rebuilt for ABI %2.")
-              .arg(e.required_host_abi)
-              .arg(e.host_abi_version));
+    if (presentation.warn_version) {
+      // The binary cannot load on this host; flag it and explain the fix.
+      version_item->setText(version_item->text() +
+                            QString::fromUtf8(plugin_ux::kNeedsRebuildMarker));
+      version_item->setToolTip(QString::fromStdString(presentation.tooltip));
     }
     table_->setItem(row, COL_VERSION, version_item);
 
-    // The Enabled checkbox reflects only the enabled flag. Trust is a
-    // separate decision shown in its own column; the host loads an entry
-    // only when it is both enabled and trusted (core plugins are always
-    // trusted).
+    table_->setItem(row, COL_UPDATE, new QTableWidgetItem());
+    applyUpdateStatusToRow(row, e.is_core_plugin ? std::string() : display_id);
+
     auto* enabled_item = new QTableWidgetItem();
     enabled_item->setData(ROW_REGISTRY_ENTRY_ROLE, true);
-    enabled_item->setData(ROW_IS_CORE_ROLE, e.is_core_plugin);
+    enabled_item->setData(ROW_SELECTOR_ROLE,
+                          QString::fromStdString(e.selector));
+    enabled_item->setData(ROW_LOAD_STATE_ROLE, static_cast<int>(e.load_state));
     enabled_item->setFlags(
-        e.is_core_plugin ? (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable)
-                         : (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable |
-                            Qt::ItemIsEnabled));
-    enabled_item->setCheckState(
-        (e.is_core_plugin || e.enabled) ? Qt::Checked : Qt::Unchecked);
-    const std::string source =
-        e.is_core_plugin
-            ? std::string("Core")
-            : (!e.release_asset_url.empty()
-                   ? e.release_asset_url
-                   : (e.source_repo_url.empty() ? e.path : e.source_repo_url));
-    table_->setItem(row, COL_SOURCE,
-                    new QTableWidgetItem(QString::fromStdString(source)));
+        presentation.enabled_interactive
+            ? (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable |
+               Qt::ItemIsEnabled)
+            : (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable));
+    enabled_item->setCheckState(presentation.enabled_checked ? Qt::Checked
+                                                             : Qt::Unchecked);
+    enabled_item->setToolTip(QString::fromStdString(presentation.tooltip));
+    table_->setItem(
+        row, COL_SOURCE,
+        new QTableWidgetItem(QString::fromStdString(e.source_label)));
     table_->setItem(row, COL_ENABLED, enabled_item);
-
-    // Trusted checkbox: core plugins are implicitly trusted and immutable;
-    // toggling this for other entries prompts an explicit confirmation.
-    const bool is_trusted = e.is_core_plugin || e.trust_state == "trusted";
-    auto* trusted_item = new QTableWidgetItem();
-    trusted_item->setData(ROW_REGISTRY_ENTRY_ROLE, true);
-    trusted_item->setData(ROW_IS_CORE_ROLE, e.is_core_plugin);
-    trusted_item->setFlags(
-        e.is_core_plugin ? (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable)
-                         : (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable |
-                            Qt::ItemIsEnabled));
-    trusted_item->setCheckState(is_trusted ? Qt::Checked : Qt::Unchecked);
-    table_->setItem(row, COL_TRUSTED, trusted_item);
 
     if (!display_id.empty()) {
       seen_ids.insert(display_id);
@@ -375,6 +471,10 @@ void PluginManagerDialog::refresh() {
   // but skip any that were removed during this dialog session (they remain
   // in-memory until the next restart but should not re-appear in the list).
   for (const auto& plugin : loaded_plugins) {
+    if (plugin.is_core_plugin && !show_core) {
+      continue;
+    }
+
     const bool id_seen =
         !plugin.plugin_id.empty() && seen_ids.count(plugin.plugin_id) > 0;
     const bool path_seen =
@@ -384,15 +484,27 @@ void PluginManagerDialog::refresh() {
       continue;
     }
 
+    // Present the running plugin as the registry entry it would become — the
+    // same projection the CLI's `plugins info` uses for loaded plugins, so
+    // the details pane describes it in the same fields as a registered one
+    // and the two front ends cannot drift about its identity or state.
+    const orc::presenters::PluginRegistryEntryInfo row_entry =
+        orc::presenters::makeEntryForLoadedPlugin(plugin);
+    const std::string selector = row_entry.selector;
+    const auto load_state = row_entry.load_state;
+    const std::string source = row_entry.source_label;
+    const auto presentation =
+        makePluginRowPresentation(load_state, row_entry.load_state_detail);
+    row_entries_.push_back(row_entry);
+
     const int row = table_->rowCount();
     table_->insertRow(row);
 
     auto* id_item =
         new QTableWidgetItem(QString::fromStdString(plugin.plugin_id));
     id_item->setData(ROW_REGISTRY_ENTRY_ROLE, false);
-    id_item->setData(ROW_IS_CORE_ROLE, plugin.is_core_plugin);
-    id_item->setData(ROW_PATH_ROLE, QString::fromStdString(plugin.path));
-    id_item->setData(ROW_RELEASE_ASSET_URL_ROLE, QString());
+    id_item->setData(ROW_SELECTOR_ROLE, QString::fromStdString(selector));
+    id_item->setData(ROW_LOAD_STATE_ROLE, static_cast<int>(load_state));
     table_->setItem(row, COL_ID, id_item);
     table_->setItem(row, COL_PATH,
                     new QTableWidgetItem(QString::fromStdString(plugin.path)));
@@ -400,28 +512,25 @@ void PluginManagerDialog::refresh() {
         row, COL_VERSION,
         new QTableWidgetItem(QString::fromStdString(plugin.plugin_version)));
 
+    // Runtime-discovered plugins have no registry entry to update.
+    table_->setItem(row, COL_UPDATE, new QTableWidgetItem());
+    applyUpdateStatusToRow(row, std::string());
+
+    // Unticking materialises the plugin into the registry as disabled.
     auto* enabled_item = new QTableWidgetItem();
     enabled_item->setData(ROW_REGISTRY_ENTRY_ROLE, false);
-    enabled_item->setData(ROW_IS_CORE_ROLE, plugin.is_core_plugin);
+    enabled_item->setData(ROW_SELECTOR_ROLE, QString::fromStdString(selector));
+    enabled_item->setData(ROW_LOAD_STATE_ROLE, static_cast<int>(load_state));
     enabled_item->setFlags(
-        plugin.is_core_plugin ? (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable)
-                              : (Qt::ItemIsSelectable |
-                                 Qt::ItemIsUserCheckable | Qt::ItemIsEnabled));
-    enabled_item->setCheckState(Qt::Checked);
-    const std::string source =
-        plugin.is_core_plugin ? std::string("Core") : plugin.path;
+        presentation.enabled_interactive
+            ? (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable |
+               Qt::ItemIsEnabled)
+            : (Qt::ItemIsSelectable | Qt::ItemIsUserCheckable));
+    enabled_item->setCheckState(presentation.enabled_checked ? Qt::Checked
+                                                             : Qt::Unchecked);
     table_->setItem(row, COL_SOURCE,
                     new QTableWidgetItem(QString::fromStdString(source)));
     table_->setItem(row, COL_ENABLED, enabled_item);
-
-    // A runtime-loaded plugin is already running this session, so it is shown
-    // trusted but non-interactive until it is materialised into the registry.
-    auto* trusted_item = new QTableWidgetItem();
-    trusted_item->setData(ROW_REGISTRY_ENTRY_ROLE, false);
-    trusted_item->setData(ROW_IS_CORE_ROLE, plugin.is_core_plugin);
-    trusted_item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
-    trusted_item->setCheckState(Qt::Checked);
-    table_->setItem(row, COL_TRUSTED, trusted_item);
   }
 
   refreshing_table_ = false;
@@ -434,19 +543,24 @@ void PluginManagerDialog::onSelectionChanged() {
   bool is_registry_entry = false;
   bool is_core_plugin = false;
   bool has_removal_identity = false;
+  bool update_available = false;
 
   if (has_selection) {
     const int row = table_->currentRow();
     if (row >= 0) {
       if (auto* id_item = table_->item(row, COL_ID)) {
         is_registry_entry = id_item->data(ROW_REGISTRY_ENTRY_ROLE).toBool();
-        is_core_plugin = id_item->data(ROW_IS_CORE_ROLE).toBool();
+        is_core_plugin =
+            rowLoadState(id_item) == orc::presenters::PluginLoadState::Core;
         const QString plugin_id = id_item->text();
-        const QString path = id_item->data(ROW_PATH_ROLE).toString();
-        const QString release_asset_url =
-            id_item->data(ROW_RELEASE_ASSET_URL_ROLE).toString();
-        has_removal_identity = !plugin_id.isEmpty() || !path.isEmpty() ||
-                               !release_asset_url.isEmpty();
+        has_removal_identity =
+            !id_item->data(ROW_SELECTOR_ROLE).toString().isEmpty();
+
+        const auto status_it = update_statuses_.find(plugin_id.toStdString());
+        update_available =
+            status_it != update_statuses_.end() &&
+            status_it->second.status ==
+                orc::presenters::PluginUpdateStatus::UpdateAvailable;
       }
     }
   }
@@ -455,11 +569,69 @@ void PluginManagerDialog::onSelectionChanged() {
                                          !is_core_plugin &&
                                          has_removal_identity;
   remove_button_->setEnabled(can_mutate_registry_entry);
+  update_button_->setEnabled(can_mutate_registry_entry && update_available);
+
+  updateDetailsPane();
+}
+
+void PluginManagerDialog::updateDetailsPane() {
+  if (!details_label_) {
+    return;
+  }
+
+  const int row = table_->currentRow();
+  if (!table_->selectedItems().isEmpty() && row >= 0 &&
+      row < static_cast<int>(row_entries_.size())) {
+    const auto& entry = row_entries_[static_cast<size_t>(row)];
+
+    // The update status is whatever the background check has established so
+    // far; nothing here goes to the network.
+    const orc::presenters::PluginUpdateStatusInfo* update = nullptr;
+    const auto status_it = update_statuses_.find(entry.plugin_id);
+    if (update_check_completed_ && status_it != update_statuses_.end()) {
+      update = &status_it->second;
+    }
+
+    QString text;
+    for (const auto& field :
+         orc::presenters::makePluginDetails(&entry, nullptr, update)) {
+      text += "<b>" + QString::fromStdString(field.label).toHtmlEscaped() +
+              ":</b> " + QString::fromStdString(field.value).toHtmlEscaped() +
+              "<br>";
+    }
+    details_label_->setText(text);
+    return;
+  }
+
+  details_label_->setText(QString::fromUtf8(plugin_ux::kDetailsNoSelection));
+}
+
+void PluginManagerDialog::refreshDiagnostics() {
+  if (!diagnostics_label_ || !diagnostics_group_) {
+    return;
+  }
+
+  const auto diagnostics = model_->diagnostics();
+  diagnostics_group_->setTitle(
+      QString::fromUtf8(plugin_ux::kDiagnosticsTitle) +
+      (diagnostics.empty() ? QString()
+                           : QStringLiteral(" (%1)").arg(diagnostics.size())));
+
+  if (diagnostics.empty()) {
+    diagnostics_label_->setText(QString::fromUtf8(plugin_ux::kDiagnosticsNone));
+    return;
+  }
+
+  QStringList lines;
+  for (const auto& diagnostic : diagnostics) {
+    lines.push_back(QString::fromStdString(
+        orc::presenters::formatPluginDiagnostic(diagnostic)));
+  }
+  diagnostics_label_->setText(lines.join("\n"));
 }
 
 void PluginManagerDialog::onTableItemChanged(QTableWidgetItem* item) {
-  if (!item || refreshing_table_ ||
-      (item->column() != COL_ENABLED && item->column() != COL_TRUSTED)) {
+  if (!item || refreshing_table_ || item->column() != COL_ENABLED) {
     return;
   }
 
@@ -472,7 +644,8 @@ void PluginManagerDialog::onTableItemChanged(QTableWidgetItem* item) {
 
   const bool is_registry_entry =
       id_item->data(ROW_REGISTRY_ENTRY_ROLE).toBool();
-  const bool is_core_plugin = id_item->data(ROW_IS_CORE_ROLE).toBool();
+  const auto load_state = rowLoadState(id_item);
+  const QString selector = id_item->data(ROW_SELECTOR_ROLE).toString();
   const QString plugin_id = id_item->text();
   const QString plugin_path = table_->item(row, COL_PATH)
                                   ? table_->item(row, COL_PATH)->text()
@@ -482,26 +655,32 @@ void PluginManagerDialog::onTableItemChanged(QTableWidgetItem* item) {
                                      : QString();
   const bool checked = (item->checkState() == Qt::Checked);
 
-  if (is_core_plugin) {
+  if (load_state == orc::presenters::PluginLoadState::Core) {
     refresh();
     return;
   }
 
-  // Trust column: prompt for explicit confirmation before granting trust.
-  if (item->column() == COL_TRUSTED) {
-    if (plugin_id.isEmpty()) {
-      QMessageBox::warning(
-          this, "Update Trust Failed",
-          "This plugin has no ID, so its trust state cannot be changed.");
-      refresh();
-      return;
-    }
-    handleTrustToggle(plugin_id.toStdString(), checked);
+  if (selector.isEmpty()) {
+    QMessageBox::warning(
+        this, "Update Plugin Failed",
+        "This plugin cannot be identified, so its enabled state cannot be "
+        "changed.");
+    refresh();
     return;
   }
 
-  // Enabled column: change only the enabled flag. Enabling never grants trust.
+  // Enabling an entry that is not trusted yet means its binary is about to be
+  // downloaded and run, so that is where the trust confirmation belongs.
   const bool enabled = checked;
+  const auto presentation =
+      makePluginRowPresentation(load_state, std::string());
+
+  if (enabled && presentation.tick_grants_trust) {
+    if (!grantTrustWithConfirmation(selector.toStdString())) {
+      refresh();  // Revert the checkbox; the entry stays untrusted.
+      return;
+    }
+  }
 
   if (!is_registry_entry) {
     if (plugin_path.isEmpty()) {
@@ -518,7 +697,7 @@ void PluginManagerDialog::onTableItemChanged(QTableWidgetItem* item) {
     // already running and trusted; materialise it as trusted so it keeps
     // loading after restart. This is not the enable path granting trust — the
     // plugin is live now.
-    entry_info.trust_state = "trusted";
+    entry_info.trust_state = orc::presenters::kPluginTrustStateTrusted;
     entry_info.enabled = true;
 
     const auto add_result = model_->addEntry(entry_info);
@@ -535,15 +714,7 @@ void PluginManagerDialog::onTableItemChanged(QTableWidgetItem* item) {
     }
   }
 
-  if (plugin_id.isEmpty()) {
-    QMessageBox::warning(
-        this, "Update Plugin Failed",
-        "This plugin has no ID, so its enabled state cannot be changed.");
-    refresh();
-    return;
-  }
-
-  const auto result = model_->setEnabled(plugin_id.toStdString(), enabled);
+  const auto result = model_->setEnabled(selector.toStdString(), enabled);
 
   if (!result.success) {
     QMessageBox::warning(
@@ -586,13 +757,9 @@ void PluginManagerDialog::onAddPlugin() {
       return;
     }
 
-    // Adding and trusting are separate decisions: confirm trust explicitly.
-    PluginTrustDialog::Details details;
-    details.source = path;
-    details.license = QString();
-    details.digest_status = "local file";
-    PluginTrustDialog trust_dialog(this, details, /*allow_untrusted=*/true);
-    if (trust_dialog.exec() != QDialog::Accepted) {
+    // Adding a plugin means it will run as native code, so trust is
+    // confirmed explicitly before the entry is recorded.
+    if (!confirmPluginTrust(this)) {
       return;
     }
 
@@ -600,10 +767,7 @@ void PluginManagerDialog::onAddPlugin() {
     entry_info.artifact_source = "local_path";
     entry_info.path = path.toStdString();
     entry_info.enabled = true;
-    entry_info.trust_state =
-        (trust_dialog.choice() == PluginTrustDialog::Choice::Trust)
-            ? "trusted"
-            : "untrusted";
+    entry_info.trust_state = orc::presenters::kPluginTrustStateTrusted;
 
     const auto result = model_->addEntry(entry_info);
 
@@ -640,20 +804,14 @@ void PluginManagerDialog::onAddPlugin() {
     return;
   }
 
-  // Confirm trust explicitly; the entry is added untrusted unless trusted here.
-  PluginTrustDialog::Details details;
-  details.source = releases_url.trimmed();
-  details.license = QString();
-  details.digest_status = "verified after download when a digest is recorded";
-  PluginTrustDialog trust_dialog(this, details, /*allow_untrusted=*/true);
-  if (trust_dialog.exec() != QDialog::Accepted) {
+  // Adding a plugin means it will run as native code, so trust is confirmed
+  // explicitly before the entry is recorded.
+  if (!confirmPluginTrust(this)) {
     return;
   }
 
-  const bool trusted =
-      trust_dialog.choice() == PluginTrustDialog::Choice::Trust;
-  const auto result =
-      model_->addFromUrl(releases_url.trimmed().toStdString(), trusted);
+  const auto result = model_->addFromUrl(releases_url.trimmed().toStdString(),
+                                         /*trusted=*/true);
 
   if (!result.success) {
     QMessageBox::warning(this, "Add Plugin Failed",
@@ -675,55 +833,23 @@ void PluginManagerDialog::onBrowsePlugins() {
   }
 }
 
-void PluginManagerDialog::handleTrustToggle(const std::string& plugin_id,
-                                            bool trusted) {
-  if (!trusted) {
-    // Removing trust needs no confirmation.
-    const auto result = model_->setTrusted(plugin_id, false);
-    if (!result.success) {
-      QMessageBox::warning(this, "Update Trust Failed",
-                           QString::fromStdString(result.error_message));
-    } else {
-      plugin_changes_made_ = true;
-    }
-    refresh();
-    return;
+bool PluginManagerDialog::grantTrustWithConfirmation(
+    const std::string& selector) {
+  // Granting trust allows the binary to be downloaded and executed, so it
+  // always goes through the explicit warning.
+  if (!confirmPluginTrust(this)) {
+    return false;
   }
 
-  // Granting trust: surface the entry's source, license and digest status so
-  // the decision is deliberate.
-  PluginTrustDialog::Details details;
-  const auto registry = model_->registry();
-  for (const auto& entry : registry.entries) {
-    if (entry.plugin_id == plugin_id) {
-      details.source = QString::fromStdString(
-          !entry.release_asset_url.empty()
-              ? entry.release_asset_url
-              : (entry.source_repo_url.empty() ? entry.path
-                                               : entry.source_repo_url));
-      details.license = QString::fromStdString(entry.license_spdx);
-      details.digest_status = entry.sha256.empty()
-                                  ? QStringLiteral("no digest recorded")
-                                  : QStringLiteral("sha256 recorded");
-      break;
-    }
-  }
-
-  PluginTrustDialog dialog(this, details, /*allow_untrusted=*/false);
-  if (dialog.exec() != QDialog::Accepted ||
-      dialog.choice() != PluginTrustDialog::Choice::Trust) {
-    refresh();  // Revert the checkbox.
-    return;
-  }
-
-  const auto result = model_->setTrusted(plugin_id, true);
+  const auto result = model_->setTrusted(selector, true);
   if (!result.success) {
     QMessageBox::warning(this, "Update Trust Failed",
                          QString::fromStdString(result.error_message));
-  } else {
-    plugin_changes_made_ = true;
+    return false;
   }
-  refresh();
+
+  plugin_changes_made_ = true;
+  return true;
 }
 
 void PluginManagerDialog::onRemovePlugin() {
@@ -737,32 +863,28 @@ void PluginManagerDialog::onRemovePlugin() {
     return;
   }
 
-  if (id_item->data(ROW_IS_CORE_ROLE).toBool()) {
+  if (rowLoadState(id_item) == orc::presenters::PluginLoadState::Core) {
     QMessageBox::information(this, "Remove Plugin",
                              "Core plugins cannot be removed.");
     return;
   }
 
-  const QString plugin_id = id_item->text();
-  const QString plugin_path = id_item->data(ROW_PATH_ROLE).toString();
-  const QString release_asset_url =
-      id_item->data(ROW_RELEASE_ASSET_URL_ROLE).toString();
+  const QString selector = id_item->data(ROW_SELECTOR_ROLE).toString();
+  const QString plugin_path = table_->item(row, COL_PATH)
+                                  ? table_->item(row, COL_PATH)->text()
+                                  : QString();
 
   const auto answer = QMessageBox::question(
       this, "Remove Plugin",
       QString("Remove selected plugin from the registry?") +
-          (plugin_id.isEmpty() ? QString()
-                               : QString("\n\nID: %1").arg(plugin_id)),
+          (selector.isEmpty() ? QString() : QString("\n\n%1").arg(selector)),
       QMessageBox::Yes | QMessageBox::No);
 
   if (answer != QMessageBox::Yes) {
     return;
   }
 
-  const auto result =
-      orc::presenters::ProjectPresenter::removePluginRegistryEntry(
-          plugin_id.toStdString(), plugin_path.toStdString(),
-          release_asset_url.toStdString());
+  const auto result = model_->removeEntry(selector.toStdString());
 
   if (!result.success) {
     QMessageBox::warning(this, "Remove Plugin Failed",
@@ -779,6 +901,177 @@ void PluginManagerDialog::onRemovePlugin() {
   plugin_changes_made_ = true;
 
   refresh();
+}
+
+void PluginManagerDialog::startUpdateCheck() {
+  if (update_check_running_) {
+    return;
+  }
+  if (update_check_thread_) {
+    update_check_thread_->wait();
+    delete update_check_thread_;
+    update_check_thread_ = nullptr;
+  }
+
+  update_check_running_ = true;
+  pending_update_results_.clear();
+
+  // Show "Checking..." on rows that will receive a status.
+  for (int row = 0; row < table_->rowCount(); ++row) {
+    if (auto* id_item = table_->item(row, COL_ID)) {
+      const bool is_registry_entry =
+          id_item->data(ROW_REGISTRY_ENTRY_ROLE).toBool();
+      const bool is_core =
+          rowLoadState(id_item) == orc::presenters::PluginLoadState::Core;
+      applyUpdateStatusToRow(row, (is_registry_entry && !is_core)
+                                      ? id_item->text().toStdString()
+                                      : std::string());
+    }
+  }
+
+  // The check performs one GitHub API request per distinct repository; run it
+  // off the UI thread like the browse dialog's index refresh.
+  update_check_thread_ = QThread::create(
+      [this]() { pending_update_results_ = model_->checkUpdates(); });
+  connect(update_check_thread_, &QThread::finished, this,
+          &PluginManagerDialog::onUpdateCheckFinished);
+  update_check_thread_->start();
+}
+
+void PluginManagerDialog::onUpdateCheckFinished() {
+  if (update_check_thread_) {
+    update_check_thread_->deleteLater();
+    update_check_thread_ = nullptr;
+  }
+  update_check_running_ = false;
+  update_check_completed_ = true;
+
+  update_statuses_.clear();
+  for (auto& status : pending_update_results_) {
+    update_statuses_.emplace(status.plugin_id, std::move(status));
+  }
+  pending_update_results_.clear();
+
+  refresh();
+}
+
+void PluginManagerDialog::applyUpdateStatusToRow(int row,
+                                                 const std::string& plugin_id) {
+  auto* item = table_->item(row, COL_UPDATE);
+  if (!item) {
+    return;
+  }
+
+  QString text = QString::fromUtf8(plugin_ux::kUpdateStatusNone);
+  QString tooltip;
+
+  if (!plugin_id.empty()) {
+    if (update_check_running_) {
+      text = QString::fromUtf8(plugin_ux::kUpdateStatusChecking);
+    } else if (update_check_completed_) {
+      const auto it = update_statuses_.find(plugin_id);
+      if (it != update_statuses_.end()) {
+        const auto& status = it->second;
+        if (status.status !=
+            orc::presenters::PluginUpdateStatus::NotApplicable) {
+          // The column and the CLI's `update:` field share one wording.
+          text = QString::fromStdString(
+              orc::presenters::pluginUpdateStatusLabel(status));
+        }
+        switch (status.status) {
+          case orc::presenters::PluginUpdateStatus::UpToDate:
+            tooltip = QStringLiteral("Latest release: %1")
+                          .arg(QString::fromStdString(status.latest_tag));
+            break;
+          case orc::presenters::PluginUpdateStatus::UpdateAvailable:
+            tooltip = QStringLiteral(
+                "A newer release is published; select the plugin and press "
+                "Update.");
+            break;
+          case orc::presenters::PluginUpdateStatus::Unreachable:
+            // The label already carries the failure detail; the tooltip
+            // repeats it for a truncated cell.
+            text = QString::fromUtf8(plugin_ux::kUpdateStatusUnreachable);
+            tooltip = QString::fromStdString(status.message);
+            break;
+          case orc::presenters::PluginUpdateStatus::Unknown:
+            tooltip = QStringLiteral(
+                "The installed version is unknown, so it cannot be compared "
+                "with the latest release.");
+            break;
+          case orc::presenters::PluginUpdateStatus::NotApplicable:
+            break;
+        }
+      }
+    }
+  }
+
+  item->setText(text);
+  item->setToolTip(tooltip);
+}
+
+void PluginManagerDialog::onUpdatePlugin() {
+  const int row = table_->currentRow();
+  if (row < 0) {
+    return;
+  }
+  const auto* id_item = table_->item(row, COL_ID);
+  if (!id_item || row >= static_cast<int>(row_entries_.size())) {
+    return;
+  }
+
+  // Update statuses are reported per plugin id, read from the row's entry
+  // data rather than the rendered cell text; the mutation itself goes
+  // through the row's selector like every other registry change.
+  const std::string plugin_id =
+      row_entries_[static_cast<size_t>(row)].plugin_id;
+  const std::string selector =
+      id_item->data(ROW_SELECTOR_ROLE).toString().toStdString();
+  if (plugin_id.empty()) {
+    return;
+  }
+  const auto status_it = update_statuses_.find(plugin_id);
+  if (status_it == update_statuses_.end() ||
+      status_it->second.status !=
+          orc::presenters::PluginUpdateStatus::UpdateAvailable) {
+    return;
+  }
+  const auto& status = status_it->second;
+
+  const auto answer = QMessageBox::question(
+      this, "Update Plugin",
+      QStringLiteral(
+          "Update '%1' from %2 to %3?\n\n"
+          "The new release will be downloaded as a fresh binary, so you will "
+          "be asked to confirm that it may run.")
+          .arg(QString::fromStdString(plugin_id),
+               QString::fromStdString(status.installed_version.empty()
+                                          ? std::string("the installed version")
+                                          : status.installed_version),
+               QString::fromStdString(status.latest_version)),
+      QMessageBox::Yes | QMessageBox::No);
+  if (answer != QMessageBox::Yes) {
+    return;
+  }
+
+  const auto result = model_->updateToLatest(selector);
+  if (!result.success) {
+    QMessageBox::warning(this, "Update Plugin Failed",
+                         QString::fromStdString(result.error_message));
+    return;
+  }
+
+  plugin_changes_made_ = true;
+
+  // The rewritten entry is untrusted; confirm the new binary right away.
+  // Declining leaves it untrusted, which shows as an unticked Enabled box the
+  // user can tick later to confirm.
+  grantTrustWithConfirmation(selector);
+  refresh();
+
+  // Re-evaluate statuses against the rewritten registry entry.
+  update_check_completed_ = false;
+  startUpdateCheck();
 }
 
 }  // namespace orc

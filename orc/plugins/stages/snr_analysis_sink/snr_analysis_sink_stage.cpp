@@ -34,9 +34,7 @@ NodeTypeInfo SNRAnalysisSinkStage::get_node_type_info() const {
                       1,  // max_inputs
                       0,  // min_outputs
                       0,  // max_outputs
-                      VideoFormatCompatibility::ALL,
-                      SinkCategory::ANALYSIS,
-                      "Sink (Analysis)"};
+                      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> SNRAnalysisSinkStage::execute(

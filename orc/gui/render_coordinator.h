@@ -499,11 +499,12 @@ class IRenderPresenter {
 
   virtual orc::ImageToFieldMappingResult mapImageToField(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-      int image_y, int image_height) = 0;
+      int image_y, int image_height, const std::string& option_id) = 0;
 
   virtual orc::FieldToImageMappingResult mapFieldToImage(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-      uint64_t field_index, int field_line, int image_height) = 0;
+      uint64_t field_index, int field_line, int image_height,
+      const std::string& option_id) = 0;
 
   virtual orc::FrameFieldsResult getFrameFields(NodeID node_id,
                                                 uint64_t frame_index) = 0;
@@ -730,11 +731,14 @@ class RenderCoordinator : public QObject {
    * @param output_index The output index (0-based)
    * @param image_y Y coordinate in the preview image
    * @param image_height Total height of the image (for split mode)
+   * @param option_id The preview option being displayed; frame outputs may be
+   *        weaved or field-sequential and only the option id says which
    * @return Mapping result (field_index, field_line)
    */
   orc::ImageToFieldMappingResult mapImageToField(
       const orc::NodeID& node_id, orc::PreviewOutputType output_type,
-      uint64_t output_index, int image_y, int image_height);
+      uint64_t output_index, int image_y, int image_height,
+      const std::string& option_id = "");
 
   /**
    * @brief Map field coordinates back to preview image coordinates
@@ -749,12 +753,13 @@ class RenderCoordinator : public QObject {
    * @param field_index The field index
    * @param field_line The line within the field
    * @param image_height Total height of the image (for split mode)
+   * @param option_id The preview option being displayed (see mapImageToField)
    * @return Mapping result (image_y)
    */
   orc::FieldToImageMappingResult mapFieldToImage(
       const orc::NodeID& node_id, orc::PreviewOutputType output_type,
       uint64_t output_index, uint64_t field_index, int field_line,
-      int image_height);
+      int image_height, const std::string& option_id = "");
 
   /**
    * @brief Get the field indices that make up a frame (synchronous)
@@ -955,11 +960,13 @@ class RenderCoordinator : public QObject {
    *
    * @param active            True while background observation work is running
    * @param percent_complete  Overall completion, 0..100
+   * @param computing         True when the batch has actually computed frames;
+   *                          false while it only verifies stored coverage
    * @param outstanding_nodes Distinct nodes with pending work
    *
    * Marshalled from the scheduler's worker thread via a queued connection.
    */
-  void observationProgress(bool active, int percent_complete,
+  void observationProgress(bool active, int percent_complete, bool computing,
                            qulonglong outstanding_nodes);
 
  private:

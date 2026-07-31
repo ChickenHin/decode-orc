@@ -49,9 +49,7 @@ class SourceAlignStage : public DAGStage,
                         16,
                         2,
                         UINT32_MAX,
-                        VideoFormatCompatibility::ALL,
-                        SinkCategory::CORE,
-                        "Transform"};
+                        VideoFormatCompatibility::ALL};
   }
 
   std::vector<ArtifactPtr> execute(

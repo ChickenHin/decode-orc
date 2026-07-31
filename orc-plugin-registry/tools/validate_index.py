@@ -7,24 +7,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 decode-orc contributors
 #
-# Offline checks (default): schema conformance, artifact naming (incl. ABI
-# token), SPDX license present, and mandatory sha256 digest present/well-formed.
-# With --online: additionally resolve each artifact URL and verify that the
-# downloaded bytes hash to the declared sha256.
+# Offline checks (default): schema conformance, SPDX license present, and a
+# GitHub source_repo_url present. Schema 2 curates plugins without pinning
+# versions, so pinned `artifacts` lists are rejected.
+# With --online: additionally query each repository's latest GitHub release
+# and verify it publishes at least one asset that follows the plugin artifact
+# naming convention.
 #
 # Exit status is non-zero when any error is found; every error is printed.
 
 import argparse
-import hashlib
+import json
 import re
 import sys
 
 import yaml
 
-KNOWN_SCHEMA_MAJOR = 1
-VALID_PLATFORMS = ("linux", "macos", "windows")
-VALID_EXTENSIONS = (".so", ".dylib", ".dll")
-SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+KNOWN_SCHEMA_MAJOR = 2
 # orc-plugin_<stage>_<platform>[-<arch>][_abi<N>].<ext>
 # The <stage> token may itself contain underscores (e.g. "skeleton_passthrough"),
 # matching the host's authoritative parser segment class in
@@ -35,49 +34,9 @@ ASSET_NAME_RE = re.compile(
 )
 # A permissive SPDX identifier shape (not the full SPDX grammar).
 SPDX_RE = re.compile(r"^[A-Za-z0-9.\-+]+$")
-
-
-def asset_name_from_url(url):
-    name = url.rsplit("/", 1)[-1]
-    return name.split("?", 1)[0].split("#", 1)[0]
-
-
-def validate_artifact(errors, plugin_id, index, artifact):
-    where = "plugin '%s' artifact[%d]" % (plugin_id, index)
-    if not isinstance(artifact, dict):
-        errors.append("%s: artifact is not a mapping" % where)
-        return
-
-    platform = artifact.get("platform", "")
-    if not platform:
-        errors.append("%s: missing 'platform'" % where)
-    elif not any(platform == p or platform.startswith(p + "-")
-                 for p in VALID_PLATFORMS):
-        errors.append("%s: platform '%s' is not one of %s"
-                      % (where, platform, ", ".join(VALID_PLATFORMS)))
-
-    if "host_abi" not in artifact or not isinstance(artifact["host_abi"], int):
-        errors.append("%s: 'host_abi' must be an integer" % where)
-
-    url = artifact.get("url", "")
-    if not url:
-        errors.append("%s: missing 'url'" % where)
-
-    sha = artifact.get("sha256", "")
-    if not sha:
-        errors.append("%s: missing mandatory 'sha256'" % where)
-    elif not SHA256_RE.match(str(sha)):
-        errors.append("%s: 'sha256' is not a 64-hex digest" % where)
-
-    name = artifact.get("asset_name") or (asset_name_from_url(url) if url else "")
-    if name:
-        if not name.endswith(VALID_EXTENSIONS):
-            errors.append("%s: artifact name '%s' has no plugin extension"
-                          % (where, name))
-        elif not ASSET_NAME_RE.match(name):
-            errors.append(
-                "%s: artifact name '%s' does not follow "
-                "orc-plugin_<stage>_<platform>[_abi<N>].<ext>" % (where, name))
+GITHUB_REPO_RE = re.compile(
+    r"^https?://(www\.)?github\.com/[^/]+/[^/?#]+/?$"
+)
 
 
 def validate_plugin(errors, index, plugin):
@@ -98,13 +57,19 @@ def validate_plugin(errors, index, plugin):
         errors.append("plugin '%s': 'license_spdx' is not a valid SPDX id"
                       % plugin_id)
 
-    artifacts = plugin.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
-        errors.append("plugin '%s': 'artifacts' must be a non-empty list"
-                      % plugin_id)
-        return
-    for i, artifact in enumerate(artifacts):
-        validate_artifact(errors, plugin_id, i, artifact)
+    repo = plugin.get("source_repo_url", "")
+    if not repo:
+        errors.append("plugin '%s': missing 'source_repo_url'" % plugin_id)
+    elif not GITHUB_REPO_RE.match(str(repo)):
+        errors.append(
+            "plugin '%s': 'source_repo_url' must be a GitHub repository URL "
+            "(https://github.com/<owner>/<repo>)" % plugin_id)
+
+    if "artifacts" in plugin:
+        errors.append(
+            "plugin '%s': schema %d does not pin artifacts; remove the "
+            "'artifacts' list — the host resolves the latest GitHub release "
+            "at runtime" % (plugin_id, KNOWN_SCHEMA_MAJOR))
 
 
 def validate_document(doc):
@@ -115,7 +80,7 @@ def validate_document(doc):
     schema = doc.get("registry_schema")
     if not isinstance(schema, int):
         errors.append("'registry_schema' must be an integer")
-    elif schema < 1 or schema > KNOWN_SCHEMA_MAJOR:
+    elif schema < KNOWN_SCHEMA_MAJOR or schema > KNOWN_SCHEMA_MAJOR:
         errors.append("'registry_schema' %r is not a supported major version "
                       "(this validator understands %d)"
                       % (schema, KNOWN_SCHEMA_MAJOR))
@@ -131,29 +96,43 @@ def validate_document(doc):
     return errors
 
 
+def latest_release_api_url(repo):
+    match = re.match(
+        r"^https?://(?:www\.)?github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$",
+        str(repo))
+    if not match:
+        return None
+    return ("https://api.github.com/repos/%s/%s/releases/latest"
+            % (match.group(1), match.group(2)))
+
+
 def verify_online(doc):
     import urllib.request
 
     errors = []
     for plugin in doc.get("plugins", []) or []:
         pid = plugin.get("id", "<unknown>")
-        for i, artifact in enumerate(plugin.get("artifacts", []) or []):
-            url = artifact.get("url", "")
-            expected = str(artifact.get("sha256", "")).lower()
-            if not url or not expected:
-                continue
-            try:
-                with urllib.request.urlopen(url, timeout=60) as resp:
-                    data = resp.read()
-            except Exception as exc:  # noqa: BLE001 - report any transport error
-                errors.append("plugin '%s' artifact[%d]: url unreachable (%s)"
-                              % (pid, i, exc))
-                continue
-            actual = hashlib.sha256(data).hexdigest()
-            if actual != expected:
-                errors.append(
-                    "plugin '%s' artifact[%d]: sha256 mismatch "
-                    "(declared %s, downloaded %s)" % (pid, i, expected, actual))
+        repo = plugin.get("source_repo_url", "")
+        api_url = latest_release_api_url(repo)
+        if not api_url:
+            continue  # offline checks already reported a bad URL
+        request = urllib.request.Request(
+            api_url, headers={"User-Agent": "decode-orc-index-validator"})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as resp:
+                release = json.load(resp)
+        except Exception as exc:  # noqa: BLE001 - report any transport error
+            errors.append(
+                "plugin '%s': latest release unreachable at %s (%s)"
+                % (pid, api_url, exc))
+            continue
+        assets = [a.get("name", "") for a in release.get("assets", []) or []]
+        if not any(ASSET_NAME_RE.match(name) for name in assets):
+            errors.append(
+                "plugin '%s': latest release %s publishes no asset matching "
+                "orc-plugin_<stage>_<platform>[_abi<N>].<ext> (assets: %s)"
+                % (pid, release.get("tag_name", "<untagged>"),
+                   ", ".join(assets) or "<none>"))
     return errors
 
 
@@ -161,7 +140,8 @@ def main(argv):
     parser = argparse.ArgumentParser(description="Validate a plugin index")
     parser.add_argument("index", help="path to index.yaml")
     parser.add_argument("--online", action="store_true",
-                        help="also verify artifact URLs and digests")
+                        help="also verify each repository's latest release "
+                             "publishes a conforming plugin asset")
     args = parser.parse_args(argv)
 
     try:

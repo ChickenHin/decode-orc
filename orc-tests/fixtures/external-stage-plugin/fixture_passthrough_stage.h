@@ -38,9 +38,7 @@ class FixturePassthroughStage : public orc::DAGStage {
                              1,
                              1,
                              1,
-                             orc::VideoFormatCompatibility::ALL,
-                             orc::SinkCategory::THIRD_PARTY,
-                             "Transform"};
+                             orc::VideoFormatCompatibility::ALL};
   }
 
   std::vector<orc::ArtifactPtr> execute(

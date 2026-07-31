@@ -292,6 +292,27 @@ bool store_has_frame(orc::ObservationStore& store,
   return true;
 }
 
+// Presence-only variant of store_has_frame(): consults memory and the sidecar
+// without loading records into the memory LRU. Used by coverage checks (the
+// prefetch probe and sweep-marker validation) that may test many frames they
+// never read.
+bool store_frame_is_stored(orc::ObservationStore& store,
+                           const std::vector<orc::ObserverInfo>& observers,
+                           const orc::NodeFingerprint& fingerprint,
+                           orc::FrameID frame) {
+  const orc::FieldID field_top(frame * kFieldsPerFrame);
+  const orc::FieldID field_bottom(frame * kFieldsPerFrame + 1);
+  for (const auto& observer : observers) {
+    if (!store.has_stored(
+            {fingerprint, field_top, observer.id, observer.version}) ||
+        !store.has_stored(
+            {fingerprint, field_bottom, observer.id, observer.version})) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Load every observer's stored record for both fields of @p frame into @p out.
 void load_frame_from_store(orc::ObservationStore& store,
                            const std::vector<orc::ObserverInfo>& observers,
@@ -417,6 +438,24 @@ class RenderPresenter::Impl {
   // a node's fingerprint changes.
   std::unordered_map<NodeID, orc::NodeFingerprint> sched_swept_;
 
+  // Observer inventory stamp ("id:version;..." for every standard observer).
+  // Computed once when observers_ is first populated (the inventory is fixed
+  // for the process lifetime) and used both for the sidecar's version-purge
+  // stamp and to validate persisted sweep-complete markers.
+  std::string observer_versions_stamp_;
+
+  // Whole-node sweeps in flight, keyed by fingerprint value with the number of
+  // frames still unaccounted for. When a fingerprint's count reaches zero the
+  // sweep completed in full and a durable "swept:<fingerprint>" marker is
+  // stamped in the sidecar, so the next session skips re-enqueueing the sweep
+  // entirely. Guarded by sweep_mutex_: registered on the coordinator worker
+  // thread, decremented from scheduler-worker completion callbacks.
+  std::mutex sweep_mutex_;
+  std::unordered_map<std::string, std::uint64_t> pending_sweeps_;
+
+  // Meta key prefix for durable sweep-complete markers.
+  static constexpr const char* kSweptMetaPrefix = "swept:";
+
   // A frame observation awaited by an async requestObservations() caller.
   struct PendingObservationRequest {
     uint64_t request_id = 0;
@@ -480,6 +519,26 @@ class RenderPresenter::Impl {
     ctx.total_frames = total_frames;
     ctx.nodes_of_interest = std::move(nodes_of_interest);
     ctx.changed_nodes = std::move(changed_nodes);
+    // Coverage probe for small plans (prefetch): presence-only, so probing a
+    // warm window costs hash lookups / sidecar EXISTS queries, not record
+    // loads. The context is consumed synchronously inside the scheduler's
+    // policy call on this thread, so capturing `this` is safe.
+    if (obs_store_) {
+      auto store = obs_store_;
+      auto fingerprints = fingerprints_shared_;
+      auto observers = observers_;
+      ctx.frame_observed = [store, fingerprints, observers](
+                               NodeID node, orc::FrameID frame) {
+        if (!fingerprints) {
+          return false;
+        }
+        const auto it = fingerprints->find(node);
+        if (it == fingerprints->end() || it->second.value.empty()) {
+          return false;
+        }
+        return store_frame_is_stored(*store, observers, it->second, frame);
+      };
+    }
     return ctx;
   }
 
@@ -513,11 +572,78 @@ class RenderPresenter::Impl {
                                                   /*changed_nodes=*/{}));
   }
 
+  // True when the sidecar carries a valid sweep-complete marker for @p fp: the
+  // marker's observer-version stamp matches the current inventory AND a spot
+  // probe of the first and last frames still finds records (detects a sidecar
+  // GC that removed the fingerprint's records after the marker was written; GC
+  // removes whole fingerprints, so any frame probe suffices).
+  bool sweepMarkerValid(const orc::NodeFingerprint& fp, std::uint64_t total) {
+    if (!obs_persistence_ || !obs_store_ || total == 0) {
+      return false;
+    }
+    if (obs_persistence_->get_meta(std::string(kSweptMetaPrefix) + fp.value) !=
+        observer_versions_stamp_) {
+      return false;
+    }
+    return store_frame_is_stored(*obs_store_, observers_, fp, 0) &&
+           store_frame_is_stored(*obs_store_, observers_, fp, total - 1);
+  }
+
+  // Register a whole-node sweep of @p total frames at @p fp so its completions
+  // can be counted down and, when it finishes in full, a durable marker
+  // written (see noteSweepCompletion). Adding to an existing entry keeps the
+  // count correct when two nodes share a fingerprint and both sweep.
+  void registerPendingSweep(const orc::NodeFingerprint& fp,
+                            std::uint64_t total) {
+    if (fp.value.empty() || total == 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(sweep_mutex_);
+    pending_sweeps_[fp.value] += total;
+  }
+
+  // Count a scheduler completion against any pending sweep of its fingerprint.
+  // Invoked on scheduler worker threads from the completion callback. A failed
+  // or cancelled chunk voids the sweep (the marker must only ever assert full
+  // coverage); when the outstanding count reaches zero the sweep completed in
+  // full and the durable marker is stamped so later sessions skip the sweep.
+  void noteSweepCompletion(const orc::ObservationCompletion& completion) {
+    if (completion.priority != orc::ObservationPriority::kSweep ||
+        completion.fingerprint.value.empty()) {
+      return;
+    }
+    bool completed = false;
+    {
+      std::lock_guard<std::mutex> lock(sweep_mutex_);
+      auto it = pending_sweeps_.find(completion.fingerprint.value);
+      if (it == pending_sweeps_.end()) {
+        return;
+      }
+      if (!completion.succeeded) {
+        pending_sweeps_.erase(it);
+        return;
+      }
+      it->second -= std::min(it->second, completion.frames_observed);
+      if (it->second == 0) {
+        pending_sweeps_.erase(it);
+        completed = true;
+      }
+    }
+    if (completed && obs_persistence_) {
+      obs_persistence_->set_meta(
+          std::string(kSweptMetaPrefix) + completion.fingerprint.value,
+          observer_versions_stamp_);
+    }
+  }
+
   // Enqueue a whole-node background sweep so an observer dialog reading this
   // node has every frame observed ahead of scrubbing. Called from
   // requestObservations() — i.e. only when a dialog actually wants the node —
   // and only once per node provenance, so re-requests and preview navigation
-  // within the node do not re-sweep. Runs on the coordinator worker thread.
+  // within the node do not re-sweep. A durable sweep-complete marker from a
+  // previous session short-circuits the enqueue entirely: the store already
+  // holds every frame, so re-checking each one would only flash progress at
+  // the user. Runs on the coordinator worker thread.
   void sweepNodeForObservation(NodeID node_id) {
     if (!scheduler_) {
       return;
@@ -534,7 +660,12 @@ class RenderPresenter::Impl {
     if (total == 0) {
       return;
     }
+    if (sweepMarkerValid(fp, total)) {
+      sched_swept_[node_id] = fp;  // completed in an earlier session
+      return;
+    }
     sched_swept_[node_id] = fp;
+    registerPendingSweep(fp, total);
     scheduler_->on_project_loaded(makeSchedContext({node_id}, /*preview_pos=*/0,
                                                    total,
                                                    /*changed_nodes=*/{}));
@@ -631,6 +762,7 @@ class RenderPresenter::Impl {
     orc::presenters::ObservationProgressEvent event;
     event.active = workload.active;
     event.percent_complete = workload.percent_complete;
+    event.computing = workload.frames_computed > 0;
     event.outstanding_nodes = workload.outstanding_nodes;
     for (const auto& cb : callbacks) {
       if (cb) {
@@ -660,6 +792,11 @@ class RenderPresenter::Impl {
       }
       sched_have_preview_ = false;
       sched_swept_.clear();
+      {
+        // No scheduler ⇒ no completions: in-flight sweeps can never finish.
+        std::lock_guard<std::mutex> lock(sweep_mutex_);
+        pending_sweeps_.clear();
+      }
       failAllPendingRequests();
       fingerprints_shared_.reset();
       preview_renderer_.reset();
@@ -748,18 +885,39 @@ class RenderPresenter::Impl {
     // skipped entirely. No bulk warm-start either: the store's read-through
     // reloads any persisted record on demand, so memory fills organically
     // with what is actually used.
-    if (obs_persistence_ && !sidecar_initialized_) {
-      std::string versions;
+    if (observer_versions_stamp_.empty()) {
+      // Fixed for the process lifetime; also validates sweep-complete markers
+      // (a version bump changes the stamp, silently invalidating them).
       for (const auto& observer : obs_service_.available_observers()) {
-        versions += observer.id + ":" + observer.version + ";";
+        observer_versions_stamp_ += observer.id + ":" + observer.version + ";";
       }
-      if (obs_persistence_->get_meta("observer_versions") != versions) {
+    }
+    if (obs_persistence_ && !sidecar_initialized_) {
+      if (obs_persistence_->get_meta("observer_versions") !=
+          observer_versions_stamp_) {
         for (const auto& observer : obs_service_.available_observers()) {
           obs_store_->purge_observer_version(observer.id, observer.version);
         }
-        obs_persistence_->set_meta("observer_versions", versions);
+        obs_persistence_->set_meta("observer_versions",
+                                   observer_versions_stamp_);
       }
       sidecar_initialized_ = true;
+    }
+
+    // Drop pending-sweep bookkeeping for fingerprints no longer in the DAG:
+    // their queued work is purged by on_dag_changed() below and never
+    // completes, so the entries would otherwise linger forever.
+    {
+      std::unordered_set<std::string> current_values;
+      current_values.reserve(new_fingerprints.size());
+      for (const auto& [node_id, fp] : new_fingerprints) {
+        current_values.insert(fp.value);
+      }
+      std::lock_guard<std::mutex> lock(sweep_mutex_);
+      for (auto it = pending_sweeps_.begin(); it != pending_sweeps_.end();) {
+        it = current_values.count(it->first) ? std::next(it)
+                                             : pending_sweeps_.erase(it);
+      }
     }
 
     // Garbage-collect the store: retain everything reachable now, plus the
@@ -864,6 +1022,7 @@ class RenderPresenter::Impl {
           worker_count);
       scheduler_->set_completion_callback(
           [this](const orc::ObservationCompletion& completion) {
+            noteSweepCompletion(completion);
             resolvePendingRequests(completion);
           });
       scheduler_->set_workload_callback(
@@ -906,7 +1065,11 @@ class RenderPresenter::Impl {
         }
         if (total != 0) {
           for (const NodeID node : reobserve) {
-            sched_swept_[node] = fingerprintOf(node);
+            const orc::NodeFingerprint fp = fingerprintOf(node);
+            sched_swept_[node] = fp;
+            // The re-observation is a full-range sweep of the new provenance;
+            // track it so its completion stamps a fresh sweep marker.
+            registerPendingSweep(fp, total);
           }
           scheduler_->on_invalidation(makeSchedContext(
               /*nodes_of_interest=*/{}, sched_preview_frame_, total,
@@ -1907,27 +2070,28 @@ bool RenderPresenter::getShowDropouts() const {
 
 RenderPresenter::ImageToFieldMapping RenderPresenter::mapImageToField(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    int image_y, int image_height) {
+    int image_y, int image_height, const std::string& option_id) {
   if (!impl_->preview_renderer_) {
     return {false, 0, 0};
   }
 
   auto result = impl_->preview_renderer_->map_image_to_field(
-      node_id, output_type, output_index, image_y, image_height);
+      node_id, output_type, output_index, image_y, image_height, option_id);
 
   return {result.is_valid, result.field_index, result.field_line};
 }
 
 RenderPresenter::FieldToImageMapping RenderPresenter::mapFieldToImage(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    uint64_t field_index, int field_line, int image_height) {
+    uint64_t field_index, int field_line, int image_height,
+    const std::string& option_id) {
   if (!impl_->preview_renderer_) {
     return {false, 0};
   }
 
   auto result = impl_->preview_renderer_->map_field_to_image(
-      node_id, output_type, output_index, field_index, field_line,
-      image_height);
+      node_id, output_type, output_index, field_index, field_line, image_height,
+      option_id);
 
   return {result.is_valid, result.image_y};
 }

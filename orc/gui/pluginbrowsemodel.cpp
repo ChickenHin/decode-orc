@@ -9,6 +9,8 @@
 
 #include "pluginbrowsemodel.h"
 
+#include <plugin_ux_strings.h>
+
 #include <algorithm>
 #include <cctype>
 
@@ -54,16 +56,25 @@ std::vector<orc::presenters::PluginIndexEntryInfo> PluginBrowseModel::search(
   return matches;
 }
 
+const orc::presenters::PluginRegistryEntryInfo*
+PluginBrowseModel::installedEntry(const std::string& plugin_id) const {
+  if (plugin_id.empty()) {
+    return nullptr;
+  }
+  for (const auto& entry : registry_.entries) {
+    if (entry.plugin_id == plugin_id) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
 std::string PluginBrowseModel::statusMessage() const {
-  if (!index_.available) {
-    return index_.error_message.empty() ? "The plugin index is unavailable."
-                                        : index_.error_message;
-  }
-  const std::string count = std::to_string(index_.entries.size());
-  if (index_.offline && index_.from_cache) {
-    return "Offline — showing " + count + " plugins from the cached index.";
-  }
-  return count + " plugins available.";
+  // Worded once and shared with the CLI banner, so a user who reads one
+  // recognises the other.
+  return plugin_ux::indexStatusMessage(index_.available, index_.offline,
+                                       index_.from_cache, index_.entries.size(),
+                                       index_.error_message);
 }
 
 }  // namespace orc

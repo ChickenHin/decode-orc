@@ -25,11 +25,23 @@ class F3FrameToF2Section : public Decoder {
   F2Section popSection();
   bool isReady() const;
 
+  // F3 frames consumed without output before the first F2 section was
+  // emitted (section-sync acquisition cost). Together with the other
+  // head-loss counters this lets the caller compute how much input time
+  // elapsed before decoded output began (audio/video sync alignment, issue
+  // #231). Constant once the first section has been output.
+  uint64_t headLostF3Frames() const { return m_headLostF3Frames; }
+
   void showStatistics() const;
 
  private:
   void processStateMachine();
   void outputSection(bool showAddress);
+
+  // Adds |frames| to the head-loss statistic while no F2 section has been
+  // output yet; a no-op afterwards (later losses are mid-stream damage, not
+  // an origin shift).
+  void noteHeadLoss(uint64_t frames);
 
   std::queue<F2Section> m_outputBuffer;
 
@@ -69,6 +81,8 @@ class F3FrameToF2Section : public Decoder {
   uint64_t m_discardedF3Frames;
   uint64_t m_paddedF3Frames;
   uint64_t m_lostSyncCounter;
+  uint64_t m_headLostF3Frames;
+  bool m_firstSectionOutput;
 };
 
 #endif  // DEC_F3FRAMETOF2SECTION_H

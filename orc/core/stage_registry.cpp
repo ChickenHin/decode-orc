@@ -499,14 +499,6 @@ void StageRegistry::initialize_runtime_plugins() {
             return false;
           }
 
-          if (node_type_info->menu_category.empty()) {
-            add_plugin_diagnostic(
-                StagePluginDiagnosticSeverity::Error, plugin_path,
-                "Plugin stage '" + stage_name +
-                    "' is missing required menu_category metadata");
-            return false;
-          }
-
           pending_factories[stage_name] = std::move(factory);
           return true;
         });

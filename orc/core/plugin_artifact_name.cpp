@@ -2,7 +2,7 @@
  * File:        plugin_artifact_name.cpp
  * Module:      orc-core
  * Purpose:     Single source of truth for stage-plugin release-artifact naming:
- *              validation, ABI-tag parsing, and host-ABI-aware asset selection
+ *              validation and ABI-tag parsing
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -84,68 +84,6 @@ std::string platform_artifact_token(const std::string& target_platform) {
     return "_macos";
   }
   return "_linux";
-}
-
-ReleaseAssetSelection select_release_asset(
-    const std::vector<ReleaseAssetCandidate>& candidates,
-    const std::string& target_platform, uint32_t host_abi) {
-  ReleaseAssetSelection selection;
-
-  const std::string required_ext = platform_artifact_extension(target_platform);
-  const std::string preferred_token = platform_artifact_token(target_platform);
-
-  int best_index = -1;
-  int best_score = 0;
-  bool best_has_token = false;
-  bool best_abi_ok = false;
-  bool best_abi_bad = false;
-
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    const ReleaseAssetCandidate& candidate = candidates[i];
-    const ParsedReleaseAssetName parsed =
-        parse_release_asset_name(candidate.name);
-    if (!parsed.valid) {
-      continue;
-    }
-    if ("." + parsed.ext != required_ext) {
-      continue;
-    }
-
-    const bool has_token =
-        candidate.name.find(preferred_token) != std::string::npos;
-    const bool abi_ok = parsed.has_abi && parsed.abi == host_abi;
-    const bool abi_bad = parsed.has_abi && parsed.abi != host_abi;
-
-    // Platform correctness dominates; ABI correctness is the tie-breaker;
-    // a wrong ABI tag is only ever a last resort.
-    int score = 0;
-    score += has_token ? 100 : 0;
-    if (abi_ok) {
-      score += 50;
-    } else if (abi_bad) {
-      score -= 1000;
-    } else {
-      score += 10;  // legacy untagged: acceptable, load-time gate validates it
-    }
-
-    // best_index < 0 means no candidate has matched prefix+ext yet, so the
-    // first match always wins regardless of its (possibly negative) score.
-    if (best_index < 0 || score > best_score) {
-      best_score = score;
-      best_index = static_cast<int>(i);
-      best_has_token = has_token;
-      best_abi_ok = abi_ok;
-      best_abi_bad = abi_bad;
-    }
-  }
-
-  selection.index = best_index;
-  if (best_index >= 0) {
-    selection.missing_platform_token = !best_has_token;
-    selection.used_legacy_untagged = !best_abi_ok && !best_abi_bad;
-    selection.abi_mismatch = best_abi_bad;
-  }
-  return selection;
 }
 
 }  // namespace orc

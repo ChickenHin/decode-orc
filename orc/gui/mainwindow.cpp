@@ -718,8 +718,8 @@ void MainWindow::reportPluginRuntimeDiagnostics(bool show_error_dialog) {
     for (const auto& entry : registry.entries) {
       ORC_LOG_DEBUG(
           "  registry entry '{}' enabled={} loaded={} exists={} path='{}'",
-          entry.plugin_id.empty() ? std::string("<unnamed>") : entry.plugin_id,
-          entry.enabled ? "true" : "false", entry.is_loaded ? "true" : "false",
+          entry.selector, entry.enabled ? "true" : "false",
+          entry.is_loaded ? "true" : "false",
           entry.path_exists ? "true" : "false", entry.path);
     }
   }
@@ -4559,7 +4559,7 @@ void MainWindow::onSetCrosshairsFromFrameTiming() {
   auto mapping = render_coordinator_->mapFieldToImage(
       current_view_node_id_, current_output_type_,
       preview_dialog_->previewSlider()->value(), field_offset, line_number,
-      image_height);
+      image_height, current_option_id_);
 
   if (!mapping.is_valid) {
     ORC_LOG_WARN("Failed to map field/line to image coordinates");
@@ -4978,7 +4978,8 @@ void MainWindow::onLineScopeRequested(int image_x, int image_y) {
   // This ensures the GUI doesn't duplicate field ordering logic
   auto mapping = render_coordinator_->mapImageToField(
       current_view_node_id_, current_output_type_,
-      preview_dialog_->previewSlider()->value(), image_y, image_height);
+      preview_dialog_->previewSlider()->value(), image_y, image_height,
+      current_option_id_);
 
   if (!mapping.is_valid) {
     ORC_LOG_WARN("Failed to map image coordinates to field");
@@ -5110,7 +5111,8 @@ void MainWindow::onLineSamplesReady(
 
   auto mapping = render_coordinator_->mapFieldToImage(
       current_view_node_id_, current_output_type_, current_index,
-      effective_field_for_mapping, line_number_0based, preview_image_height);
+      effective_field_for_mapping, line_number_0based, preview_image_height,
+      current_option_id_);
 
   int image_y = 0;
   if (mapping.is_valid) {
@@ -5252,7 +5254,7 @@ void MainWindow::onSampleMarkerMoved(int sample_x) {
   auto image_coords = render_coordinator_->mapFieldToImage(
       current_view_node_id_, current_output_type_,
       preview_dialog_->previewSlider()->value(), last_line_scope_field_index_,
-      last_line_scope_line_number_, image_height);
+      last_line_scope_line_number_, image_height, current_option_id_);
 
   // Use the remapped Y if available, otherwise fall back to the stored Y.
   // For stages like the FFmpeg/raw video sink the field-to-image mapping may
@@ -5313,7 +5315,7 @@ void MainWindow::refreshLineScopeForCurrentStage() {
     auto mapping = render_coordinator_->mapImageToField(
         current_view_node_id_, current_output_type_,
         preview_dialog_->previewSlider()->value(), last_line_scope_image_y_,
-        image_height);
+        image_height, current_option_id_);
 
     if (mapping.is_valid) {
       int preview_image_width =
@@ -5541,12 +5543,12 @@ void MainWindow::onLineNavigation(int direction, uint64_t /*current_field*/,
                            int local_image_height) {
         return render_coordinator_->mapFieldToImage(
             current_view_node_id_, current_output_type_, output_index,
-            field_index, line_number, local_image_height);
+            field_index, line_number, local_image_height, current_option_id_);
       },
       [this, output_index](int image_y, int local_image_height) {
         return render_coordinator_->mapImageToField(
             current_view_node_id_, current_output_type_, output_index, image_y,
-            local_image_height);
+            local_image_height, current_option_id_);
       });
 
   if (!navigation_target.is_valid) {

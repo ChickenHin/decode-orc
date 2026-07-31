@@ -2,7 +2,7 @@
  * File:        plugin_artifact_name.h
  * Module:      orc-core
  * Purpose:     Single source of truth for stage-plugin release-artifact naming:
- *              validation, ABI-tag parsing, and host-ABI-aware asset selection
+ *              validation and ABI-tag parsing
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -46,33 +46,12 @@ std::string platform_artifact_extension(const std::string& target_platform);
 /// "_windows". Unknown platforms default to "_linux".
 std::string platform_artifact_token(const std::string& target_platform);
 
-/// A downloadable release asset considered during selection.
+/// A downloadable release asset listed by a GitHub release. Selection among
+/// candidates is driven by the release manifest (plugin_release_manifest.h);
+/// name-based selection was removed when the manifest became mandatory.
 struct ReleaseAssetCandidate {
   std::string url;
   std::string name;
 };
-
-/// Outcome flags describing how selection resolved, for caller-side warnings.
-struct ReleaseAssetSelection {
-  int index = -1;  ///< index into the candidate vector, or -1 if none matched
-  bool missing_platform_token = false;  ///< chosen asset lacks the platform tag
-  bool used_legacy_untagged = false;    ///< chosen asset carries no `_abi<N>`
-  bool abi_mismatch = false;  ///< chosen asset is tagged for another ABI
-};
-
-/// Choose the best release asset for the given platform and host ABI.
-///
-/// Preference order (highest first), among candidates carrying the
-/// `orc-plugin_` prefix and the platform's extension:
-///   1. platform token present and `_abi<host_abi>` tag        (ideal)
-///   2. platform token present and no ABI tag                  (legacy)
-///   3. no platform token and `_abi<host_abi>` tag
-///   4. no platform token and no ABI tag
-///   5. an ABI tag for a different version                     (last resort)
-/// Ties resolve to the earliest candidate (GitHub returns assets in a stable
-/// order). Returns index -1 when nothing matches prefix + extension.
-ReleaseAssetSelection select_release_asset(
-    const std::vector<ReleaseAssetCandidate>& candidates,
-    const std::string& target_platform, uint32_t host_abi);
 
 }  // namespace orc

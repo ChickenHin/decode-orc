@@ -124,6 +124,11 @@ struct ObservationWorkload {
   int percent_complete = 0;  ///< frames_observed / frames_total, 0..100.
   std::uint64_t frames_observed = 0;  ///< Frames observed in the current batch.
   std::uint64_t frames_total = 0;     ///< Frames enqueued in the current batch.
+  /// Frames the runner actually computed (rendered) in the current batch, as
+  /// opposed to frames it skipped because their records were already stored.
+  /// Lets a consumer distinguish real computation ("Computing…") from a
+  /// coverage check over warm data ("Checking…").
+  std::uint64_t frames_computed = 0;
   std::size_t outstanding_nodes = 0;  ///< Distinct nodes with pending work.
 };
 
@@ -153,8 +158,12 @@ class IObservationTaskRunner {
    * @param observer_ids Requested observer set. Advisory: an implementation
    *                     may observe the full standard set and rely on the
    *                     store's read-through to skip already-present records.
+   * @return True when the frame was actually computed (rendered/observed);
+   *         false when every requested record was already stored and the call
+   *         was a no-op. Drives the workload's computed-vs-checked split so
+   *         the GUI can distinguish real computation from coverage checks.
    */
-  virtual void observe_frame(NodeID node_id, const NodeFingerprint& fingerprint,
+  virtual bool observe_frame(NodeID node_id, const NodeFingerprint& fingerprint,
                              FrameID frame_id,
                              const std::vector<std::string>& observer_ids) = 0;
 
@@ -185,6 +194,13 @@ struct ObservationSchedulingContext {
   std::vector<NodeID> nodes_of_interest;
   /// Nodes whose fingerprint just changed (from an ObservationInvalidation).
   std::vector<NodeID> changed_nodes;
+  /// Optional coverage probe: true when every observer record for the frame at
+  /// the node is already stored, so a policy can avoid enqueueing work that
+  /// would be an immediate no-op (and would still flash progress at the user).
+  /// Only consulted for SMALL plans (the prefetch window); whole-node sweeps
+  /// must not probe per-frame — on a cold store that is a sidecar query per
+  /// frame at enqueue time. Null disables filtering.
+  std::function<bool(NodeID, FrameID)> frame_observed;
 };
 
 /**
@@ -481,11 +497,14 @@ class ObservationScheduler {
 
   // Outstanding-workload counters for the current batch (guarded by mutex_).
   // frames_total grows on enqueue and shrinks only when never-started queued
-  // items are purged; frames_observed grows per observed frame. Both reset to
-  // zero when the queue drains, so the pair always reflects the *current*
-  // outstanding workload and frames_observed never exceeds frames_total.
+  // items are purged; frames_observed grows per observed frame (computed or
+  // skipped-as-stored), and frames_computed only for frames the runner really
+  // rendered. All reset to zero when the queue drains, so the counters always
+  // reflect the *current* outstanding workload and frames_observed never
+  // exceeds frames_total.
   std::uint64_t workload_total_frames_ = 0;
   std::uint64_t workload_observed_frames_ = 0;
+  std::uint64_t workload_computed_frames_ = 0;
 
   // Last snapshot delivered to the workload callback (guarded by mutex_).
   // emit_workload() suppresses deliveries whose consumer-visible fields
@@ -523,7 +542,7 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
 
   ~RendererObservationTaskRunner() override;
 
-  void observe_frame(NodeID node_id, const NodeFingerprint& fingerprint,
+  bool observe_frame(NodeID node_id, const NodeFingerprint& fingerprint,
                      FrameID frame_id,
                      const std::vector<std::string>& observer_ids) override;
 
@@ -545,8 +564,16 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
  * @brief Default scheduling policy: whole-node sweeps, a prefetch window, and
  *        changed-node re-observation.
  *
- * Splits the observer inventory into stateless and stateful sets so stateless
- * frames may be chunked while stateful observers get one ascending-order item.
+ * Emits ONE work item per (node, range) covering the full observer set. The
+ * production runner observes the complete standard set per frame regardless of
+ * a work item's observer_ids (each observer is constructed fresh per frame, so
+ * stored records never depend on processing order); a separate ascending-order
+ * item for the stateful observers would double the enqueued workload and race
+ * the chunked items into rendering the same frames twice.
+ *
+ * Prefetch plans consult the context's frame_observed probe (when set) and
+ * skip frames that are already fully stored, so revisiting a stage does not
+ * enqueue — or report — work that would be a no-op.
  *
  * Thread safety: immutable after construction; safe to share across threads.
  */
@@ -558,7 +585,9 @@ class DefaultObservationSchedulingPolicy final
 
   /**
    * @param observer_ids   Stable ids of every standard observer.
-   * @param stateful_ids   Subset of @p observer_ids that are stateful.
+   * @param stateful_ids   Subset of @p observer_ids that are stateful. Retained
+   *                       for the ObserverInfo contract, but no longer drives a
+   *                       separate ascending-order item (see class comment).
    * @param prefetch_radius Half-width of the prefetch window in frames.
    */
   DefaultObservationSchedulingPolicy(
@@ -581,13 +610,12 @@ class DefaultObservationSchedulingPolicy final
   static NodeFingerprint fingerprint_of(
       NodeID node_id, const ObservationSchedulingContext& context);
 
-  // Build the stateless + stateful work items covering @p frames at @p node.
+  // Emit the single full-observer-set work item covering @p frames at @p node.
   void emit_node_items(NodeID node_id, const NodeFingerprint& fingerprint,
                        FrameIDRange frames, ObservationPriority priority,
                        std::vector<ObservationWorkItem>& out) const;
 
-  std::vector<std::string> stateless_ids_;
-  std::vector<std::string> stateful_ids_;
+  std::vector<std::string> observer_ids_;
   FrameID prefetch_radius_;
 };
 

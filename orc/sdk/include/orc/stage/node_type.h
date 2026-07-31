@@ -32,14 +32,6 @@ enum class VideoFormatCompatibility {
 };
 
 /**
- * @brief Sub-category for sink stages
- *
- * Used by UI/presenter layers to organize sink stages into menus.
- * Meaningful for sink-like stages (NodeType::SINK and NodeType::ANALYSIS_SINK).
- */
-enum class SinkCategory { CORE, ANALYSIS, THIRD_PARTY };
-
-/**
  * @brief Visual configuration status reported by a stage
  *
  * Stages set this in their constructor and whenever set_parameters() is called
@@ -80,6 +72,54 @@ enum class NodeType {
 };
 
 /**
+ * @brief Stage menu category
+ *
+ * The Add Stage menu group a stage belongs to. This is not declared by
+ * plugins; it is derived from the stage's NodeType via stage_category_for()
+ * so a stage can never appear under the wrong (or an invented) category.
+ */
+enum class StageCategory { SOURCE, TRANSFORM, ANALYSIS, SINK };
+
+/**
+ * @brief Derive the menu category from a node's connectivity type
+ *
+ * SOURCE maps to Source, SINK to Sink, ANALYSIS_SINK to Analysis, and all
+ * frame-processing types (TRANSFORM, MERGER, COMPLEX) to Transform.
+ */
+constexpr StageCategory stage_category_for(NodeType type) {
+  switch (type) {
+    case NodeType::SOURCE:
+      return StageCategory::SOURCE;
+    case NodeType::SINK:
+      return StageCategory::SINK;
+    case NodeType::ANALYSIS_SINK:
+      return StageCategory::ANALYSIS;
+    case NodeType::TRANSFORM:
+    case NodeType::MERGER:
+    case NodeType::COMPLEX:
+      break;
+  }
+  return StageCategory::TRANSFORM;
+}
+
+/**
+ * @brief Human-readable label for a stage category
+ */
+constexpr const char* stage_category_label(StageCategory category) {
+  switch (category) {
+    case StageCategory::SOURCE:
+      return "Source";
+    case StageCategory::TRANSFORM:
+      return "Transform";
+    case StageCategory::ANALYSIS:
+      return "Analysis";
+    case StageCategory::SINK:
+      break;
+  }
+  return "Sink";
+}
+
+/**
  * @brief Metadata about a node type
  *
  * Describes the characteristics of a processing stage for GUI rendering
@@ -98,15 +138,11 @@ struct NodeTypeInfo {
   uint32_t max_outputs;  // Maximum number of outputs (0 for SINK, UINT32_MAX
                          // for unlimited)
   VideoFormatCompatibility compatible_formats;  // Video format compatibility
-  SinkCategory sink_category;                   // Sink grouping metadata
-  std::string
-      menu_category;  // Required Add Stage menu group label (plugin-provided)
 
   NodeTypeInfo(NodeType type, std::string stage_name, std::string display_name,
                std::string description, uint32_t min_inputs,
                uint32_t max_inputs, uint32_t min_outputs, uint32_t max_outputs,
-               VideoFormatCompatibility compatible_formats,
-               SinkCategory sink_category, std::string menu_category)
+               VideoFormatCompatibility compatible_formats)
       : type(type),
         stage_name(std::move(stage_name)),
         display_name(std::move(display_name)),
@@ -115,9 +151,10 @@ struct NodeTypeInfo {
         max_inputs(max_inputs),
         min_outputs(min_outputs),
         max_outputs(max_outputs),
-        compatible_formats(compatible_formats),
-        sink_category(sink_category),
-        menu_category(std::move(menu_category)) {}
+        compatible_formats(compatible_formats) {}
+
+  /// Menu category derived from the connectivity type; never plugin-declared.
+  StageCategory category() const { return stage_category_for(type); }
 
   NodeTypeInfo() = delete;
 };

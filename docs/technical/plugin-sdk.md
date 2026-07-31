@@ -787,13 +787,16 @@ Users register your plugin by adding an entry to their plugin registry YAML:
 The host downloads and caches the binary automatically the first time it
 starts with this entry present — but only once the entry is trusted;
 entries with `trust_state: untrusted` are neither downloaded nor loaded.
-Trust is a decision separate from adding or enabling: adding a plugin through
-the GUI Plugin Manager (local file, URL, or from the curated index) prompts an
-explicit trust-confirmation dialog, and toggling **Enabled** never grants
-trust. Entries supplied any other way — such as the hand-written snippet above
-— default to untrusted and must be trusted via the Plugin Manager's **Trusted**
-column or `orc-cli plugins trust <id>` (the CLI `plugins add --trusted` flag
-trusts at add time). Publish the artifact's SHA-256 digest
+Trust is always an explicit confirmation, in both front ends: adding,
+installing, updating or enabling a plugin (local file, URL, or from the
+curated index) asks up front — a dialog in the GUI Plugin Manager, a `[y/N]`
+prompt in `orc-cli plugins`, which takes `--yes` for scripted use. Entries
+supplied any other way — such as the hand-written snippet above — default to
+untrusted; the Plugin Manager shows them unticked in its **Enabled** column
+and ticking it prompts the same confirmation before the entry becomes
+loadable, and `orc-cli plugins enable <selector>` asks the same question.
+`orc-cli plugins trust <selector>` grants it directly. Publish the artifact's
+SHA-256 digest
 so users can record it in the optional `sha256` field: the host then
 verifies the download (and every
 cache hit) against it and quarantines mismatching files. Without a `sha256`
@@ -807,22 +810,27 @@ exactly what is and is not verified.
 
 To reach users without hand-written YAML, list your plugin in the curated
 index ([`orc-plugin-registry/`](../../orc-plugin-registry/README.md)). Open a
-pull request adding an entry with per-(platform, host ABI) artifacts, each
-carrying a mandatory `sha256`; a maintainer's merge publishes it immediately.
-Users then discover and install it without knowing your URL:
+pull request adding an entry naming your repository; a maintainer's merge
+publishes it immediately, and every release you publish afterwards is
+installable without a further index change. Users then discover and install it
+without knowing your URL:
 
 ```console
-$ orc-cli plugins search deinterlace     # find listed plugins
+$ orc-cli plugins search                 # the whole index
+$ orc-cli plugins search deinterlace     # or just the matches
 $ orc-cli plugins info com.example.my-stage
-$ orc-cli plugins install com.example.my-stage   # recorded untrusted
-$ orc-cli plugins trust com.example.my-stage     # confirm trust
+$ orc-cli plugins install com.example.my-stage   # asks to confirm trust
 ```
 
 The GUI exposes the same flow through **Plugin Manager → Browse Plugins…**.
-Installing from the index records the entry with the index-declared `sha256`
-and leaves it untrusted until the user confirms trust. Hosts resolve the
-artifact matching their platform and ABI, so a user on an unsupported host is
-told "no build for this host" instead of downloading an incompatible binary.
+Installing asks the user to confirm that the binary may run — the browse
+dialog with a trust dialog, the CLI with a `[y/N]` prompt (`--yes` to confirm
+without prompting) — and records the entry trusted, with the `sha256` and
+`abi` its [release manifest](plugin-architecture.md#release-manifest)
+declares. Hosts resolve the
+artifact the manifest declares for their platform and ABI, so a user on an
+unsupported host is told "no compatible build for this host" instead of
+downloading an incompatible binary.
 
 ## Versioning and Compatibility Policy
 
@@ -875,6 +883,7 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 9 | 2 | `OrcPluginServices` gains the appended `observation_service` pointer (`IObservationService`, new contract header `<orc/stage/observation/observation_service_interface.h>`): a host-owned service that runs the standard observers by stable string id, reached via `plugin::get_observation_service()`. Guarded by `services_size`; older hosts leave it null. Appended field only — plugins need not be rebuilt to keep working against ABI 8 behaviour |
 | 10 | 2 | The concrete observer classes (the nine `<orc/stage/observation/*_observer.h>` headers — `BiphaseObserver`, `WhiteSNRObserver`, …) and the `Observer` base (`<orc/stage/observation/observer.h>`) are removed from the plugin SDK: observers are now host-internal and reached exclusively through the `IObservationService` added in ABI 9, selected by stable string id. `orc-sdk-support` no longer ships observer object code, and the deprecated pre-tier observation include-path shims (`<orc/stage/observers/...>` and the flat `<orc/stage/observation_*.h>` paths) are removed. `observation_schema.h`, `observation_context*.h`, and `observation_service_interface.h` remain the contract. Source-breaking for any plugin still including the observer classes — migrate to `IObservationService::create_observer(id)` |
 | 11 | 3 | `FrameDescriptor` drops the `colour_frame_index`, `frame_number`, and `timecode` fields. Signal-measured facts are no longer baked in by source stages: colour-sequence phase is measured uniformly for TBC and CVBS sources via the host `colour_frame_phase` observer, reached through the new contract header `<orc/stage/observation/colour_frame_phase_query.h>` (`orc::observation::measure_frame_phase()` / `measure_colour_frame_index()`), and VBI picture numbers / timecodes come from the host `biphase` observer's interpreted `vbi.*` keys (the dropped `frame_number`/`timecode` fields were never populated by any source). The analysis-sink result types in `<orc/stage/common_types.h>` also become canonical per-frame records: the aggregated-per-bucket fields are removed (`FrameDropoutStats` now carries integer `dropout_count` and `dropout_length_samples` in place of the double `dropout_count`/`total_dropout_length`; `FrameSNRStats` drops `field_count`/`white_snr_count`/`black_psnr_count`; `FrameBurstLevelStats` drops `field_count`), each record now representing exactly one analysed frame with display bucketing moved to a host-side decimation utility. `ObserverInfo` in `<orc/stage/observation/observation_service_interface.h>` also gains an appended `bool stateless` field classifying whether an observer's per-frame result is order-independent (stateless) or models a cross-frame stream (stateful, e.g. `closed_caption`, `colour_frame_phase`); it drives background-scheduler frame ordering and never changes a per-frame result. `VideoFrameRepresentation` in `<orc/stage/video_frame_representation.h>` gains an appended virtual `video_passthrough_source(FrameID)` (default nullptr) letting a transform declare, from metadata alone, that a frame's CVBS video content is byte-identical to its upstream input; the host uses it to share frame-content-keyed stored observations across stages instead of re-analysing identical frames. Layout- and source-breaking for any plugin reading the removed fields or these result structs. |
+| 12 | 4 | `NodeTypeInfo` drops the free-text `menu_category` field and the unused `SinkCategory` enum/`sink_category` field. The Add Stage menu category is no longer plugin-declared: it is derived from the stage's `NodeType` via the new `StageCategory` enum and `stage_category_for()` helper (SOURCE → Source, TRANSFORM/MERGER/COMPLEX → Transform, ANALYSIS_SINK → Analysis, SINK → Sink), so a plugin can never place a stage under an invented category. Layout- and source-breaking: the `NodeTypeInfo` constructor loses its trailing `SinkCategory` and `menu_category` parameters. |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 

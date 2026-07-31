@@ -19,6 +19,7 @@
 #include <regex>
 
 #include "include/plugin_artifact_name.h"
+#include "include/plugin_release_manifest.h"
 #include "include/sha256_hash.h"
 #include "orc/abi/orc_plugin_abi.h"
 
@@ -271,6 +272,7 @@ PluginRemoteLoader::resolve_release_asset_from_releases_url(
   std::string response_body;
   std::string fetch_error;
   if (!fetch_text_url(api_url, &response_body, &fetch_error)) {
+    result.unreachable = true;
     result.error_message =
         "Failed to query GitHub release metadata: " + fetch_error;
     return result;
@@ -310,48 +312,102 @@ PluginRemoteLoader::resolve_release_asset_from_releases_url(
 
   const std::string platform =
       target_platform.empty() ? infer_target_platform() : target_platform;
-  const std::string required_ext = platform_artifact_extension(platform);
-  const std::string preferred_token = platform_artifact_token(platform);
 
-  // Prefer the asset tagged for this host's ABI; fall back to a legacy
-  // (untagged) name. Selection is a pure, unit-tested function.
-  const ReleaseAssetSelection selection =
-      select_release_asset(candidates, platform, kStagePluginHostAbiVersion);
-
-  if (selection.index < 0) {
-    result.error_message = "No matching plugin asset found for platform '" +
-                           platform + "' (expected orc-plugin_*" +
-                           required_ext + ")";
+  // The release manifest is mandatory: it is the single source of the
+  // artifact list and its declared ABI/toolchain/digest, so there is exactly
+  // one notion of "compatible" (the load-time gate remains the enforcement
+  // point for what the binary actually is).
+  const ReleaseAssetCandidate* manifest_asset = nullptr;
+  for (const auto& candidate : candidates) {
+    if (candidate.name == kPluginReleaseManifestAssetName) {
+      manifest_asset = &candidate;
+      break;
+    }
+  }
+  if (manifest_asset == nullptr) {
+    result.error_message =
+        "The release does not include " +
+        std::string(kPluginReleaseManifestAssetName) +
+        "; a release manifest is required for a plugin to be installable";
     return result;
   }
 
-  const ReleaseAssetCandidate& selected = candidates[selection.index];
+  std::string manifest_body;
+  std::string manifest_fetch_error;
+  if (!fetch_text_url(manifest_asset->url, &manifest_body,
+                      &manifest_fetch_error)) {
+    result.unreachable = true;
+    result.error_message =
+        "Failed to fetch the release manifest: " + manifest_fetch_error;
+    return result;
+  }
 
+  const auto parsed = parse_plugin_release_manifest_yaml(manifest_body);
   if (warnings) {
-    if (selection.missing_platform_token) {
-      warnings->push_back(
-          "Selected release asset does not include expected platform token '" +
-          preferred_token + "'; using best extension match instead");
+    warnings->insert(warnings->end(), parsed.warnings.begin(),
+                     parsed.warnings.end());
+  }
+  if (!parsed.success) {
+    result.error_message = parsed.error_message;
+    return result;
+  }
+
+  const ManifestArtifactResolution manifest_resolution =
+      resolve_manifest_artifact(parsed.manifest, platform,
+                                kStagePluginHostAbiVersion,
+                                ORC_SDK_TOOLCHAIN_TAG);
+  if (!manifest_resolution.found) {
+    result.error_message = manifest_resolution.error_message;
+    return result;
+  }
+
+  const PluginReleaseManifestArtifact& artifact =
+      parsed.manifest.artifacts[static_cast<size_t>(manifest_resolution.index)];
+
+  if (!is_valid_release_asset_name(artifact.file)) {
+    result.error_message =
+        "The release manifest lists artifact '" + artifact.file +
+        "' which does not follow the plugin naming convention "
+        "(orc-plugin_<stage>_<platform>[_abi<N>].<so|dylib|dll>)";
+    return result;
+  }
+
+  const ReleaseAssetCandidate* declared_asset = nullptr;
+  for (const auto& candidate : candidates) {
+    if (candidate.name == artifact.file) {
+      declared_asset = &candidate;
+      break;
     }
-    if (selection.used_legacy_untagged) {
-      warnings->push_back("No release asset tagged for Orc ABI " +
-                          std::to_string(kStagePluginHostAbiVersion) +
-                          " (_abi" +
-                          std::to_string(kStagePluginHostAbiVersion) +
-                          "); using legacy-named asset '" + selected.name +
-                          "', which is validated at load time");
+  }
+  if (declared_asset == nullptr) {
+    result.error_message = "The release manifest lists artifact '" +
+                           artifact.file +
+                           "' but the release publishes no such asset";
+    return result;
+  }
+
+  result.abi_mismatch = manifest_resolution.abi_mismatch;
+  result.toolchain_mismatch = manifest_resolution.toolchain_mismatch;
+  result.asset_abi = artifact.abi;
+  result.asset_toolchain = artifact.toolchain_tag;
+  result.sha256 = artifact.sha256;
+  if (warnings) {
+    if (result.abi_mismatch) {
+      warnings->push_back("The release manifest declares Orc ABI " +
+                          std::to_string(artifact.abi) + " for '" +
+                          artifact.file + "', but this host requires ABI " +
+                          std::to_string(kStagePluginHostAbiVersion));
     }
-    if (selection.abi_mismatch) {
-      warnings->push_back(
-          "Selected release asset '" + selected.name +
-          "' is tagged for a different Orc ABI than the host (ABI " +
-          std::to_string(kStagePluginHostAbiVersion) +
-          "); it will need a rebuild");
+    if (result.toolchain_mismatch) {
+      warnings->push_back("The release manifest declares toolchain '" +
+                          artifact.toolchain_tag + "' for '" + artifact.file +
+                          "', but this host requires '" +
+                          ORC_SDK_TOOLCHAIN_TAG "'");
     }
   }
 
-  result.release_asset_url = selected.url;
-  result.release_asset_name = selected.name;
+  result.release_asset_url = declared_asset->url;
+  result.release_asset_name = declared_asset->name;
   result.success = true;
   return result;
 }

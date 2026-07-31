@@ -110,6 +110,24 @@ TEST_F(SqliteSidecarTest, LoadOne_ReadsBackSingleRecordByExactKey) {
   EXPECT_FALSE(db.load_one(key("fpA", 8, "white_snr", "1.0.0")).has_value());
 }
 
+TEST_F(SqliteSidecarTest, Exists_ProbesPresenceWithoutLoading) {
+  const auto k = key("fpA", 4, "white_snr", "1.0.0");
+  SqliteObservationPersistence db(db_path_);
+  db.save({PersistedObservation{k, all_variants_record()},
+           PersistedObservation{key("fpA", 6, "white_snr", "1.0.0"),
+                                ObservationRecord{}}});
+
+  EXPECT_TRUE(db.exists(k));
+  // A present-but-empty record (sentinel row) still reports presence.
+  EXPECT_TRUE(db.exists(key("fpA", 6, "white_snr", "1.0.0")));
+  // Never-persisted keys — including near-miss variants of a stored key — do
+  // not.
+  EXPECT_FALSE(db.exists(key("fpA", 8, "white_snr", "1.0.0")));
+  EXPECT_FALSE(db.exists(key("fpB", 4, "white_snr", "1.0.0")));
+  EXPECT_FALSE(db.exists(key("fpA", 4, "black_psnr", "1.0.0")));
+  EXPECT_FALSE(db.exists(key("fpA", 4, "white_snr", "2.0.0")));
+}
+
 TEST_F(SqliteSidecarTest, MergeFrom_AdoptsRowsTheTargetLacks) {
   const std::string cache_path = (dir_ / "quick-cache.sqlite").string();
   const auto shared = key("fpA", 0, "white_snr", "1.0.0");

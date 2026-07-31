@@ -26,6 +26,7 @@
 #include <QtNodes/internal/ConnectionGraphicsObject.hpp>
 #include <QtNodes/internal/NodeGraphicsObject.hpp>
 #include <algorithm>
+#include <array>
 #include <map>
 #include <vector>
 
@@ -128,9 +129,6 @@ QMenu* OrcGraphicsScene::createSceneMenu(QPointF const scenePos) {
 
   QMenu* menu = new QMenu(views().isEmpty() ? nullptr : views().first());
 
-  // Add Stage submenu
-  QMenu* add_node_menu = menu->addMenu("Add Stage");
-
   {
     auto project_format_enum = graph_model_.presenter().getVideoFormat();
     auto project_source_enum = graph_model_.presenter().getSourceType();
@@ -153,9 +151,12 @@ QMenu* OrcGraphicsScene::createSceneMenu(QPointF const scenePos) {
             ? SourceType::YC
             : SourceType::Unknown;
 
-    // Organize stages by plugin-provided category labels.
-    std::map<std::string, std::vector<orc::presenters::StageInfo>>
-        stages_by_category;
+    // Organize stages by the category derived from their node type, keeping
+    // stages from bundled (core) plugins separate from external plugin stages.
+    std::map<orc::StageCategory, std::vector<orc::presenters::StageInfo>>
+        core_stages_by_category;
+    std::map<orc::StageCategory, std::vector<orc::presenters::StageInfo>>
+        plugin_stages_by_category;
 
     for (const auto& stage : stages) {
       if (!is_stage_compatible_with_format(stage.name, project_format)) {
@@ -192,7 +193,9 @@ QMenu* OrcGraphicsScene::createSceneMenu(QPointF const scenePos) {
           break;
       }
 
-      stages_by_category[stage.category].push_back(stage);
+      auto& buckets = stage.is_core_plugin ? core_stages_by_category
+                                           : plugin_stages_by_category;
+      buckets[orc::stage_category_for(stage.node_type)].push_back(stage);
     }
 
     auto add_stages_to_menu =
@@ -229,31 +232,33 @@ QMenu* OrcGraphicsScene::createSceneMenu(QPointF const scenePos) {
           }
         };
 
-    const std::vector<std::string> kCategoryOrder = {
-        "Source", "Transform", "Sink (Core)", "Sink (Analysis)",
-        "Sink (3rd party)"};
+    const std::array<orc::StageCategory, 4> kCategoryOrder = {
+        orc::StageCategory::SOURCE, orc::StageCategory::TRANSFORM,
+        orc::StageCategory::ANALYSIS, orc::StageCategory::SINK};
 
-    for (const auto& category : kCategoryOrder) {
-      auto it = stages_by_category.find(category);
-      if (it == stages_by_category.end() || it->second.empty()) {
+    // Core stage categories at the top level; empty categories are omitted.
+    for (const auto category : kCategoryOrder) {
+      auto it = core_stages_by_category.find(category);
+      if (it == core_stages_by_category.end() || it->second.empty()) {
         continue;
       }
-      QMenu* category_menu =
-          add_node_menu->addMenu(QString::fromStdString(category));
+      QMenu* category_menu = menu->addMenu(orc::stage_category_label(category));
       add_stages_to_menu(category_menu, it->second);
     }
 
-    for (const auto& [category, category_stages] : stages_by_category) {
-      if (category_stages.empty()) {
-        continue;
+    // External plugin stages under a single "Plugins" entry, mirroring the
+    // core category structure; only present when such stages exist.
+    if (!plugin_stages_by_category.empty()) {
+      QMenu* plugins_menu = menu->addMenu("Plugins");
+      for (const auto category : kCategoryOrder) {
+        auto it = plugin_stages_by_category.find(category);
+        if (it == plugin_stages_by_category.end() || it->second.empty()) {
+          continue;
+        }
+        QMenu* category_menu =
+            plugins_menu->addMenu(orc::stage_category_label(category));
+        add_stages_to_menu(category_menu, it->second);
       }
-      if (std::find(kCategoryOrder.begin(), kCategoryOrder.end(), category) !=
-          kCategoryOrder.end()) {
-        continue;
-      }
-      QMenu* category_menu =
-          add_node_menu->addMenu(QString::fromStdString(category));
-      add_stages_to_menu(category_menu, category_stages);
     }
   }
 

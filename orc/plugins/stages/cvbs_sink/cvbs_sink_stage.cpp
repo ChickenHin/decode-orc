@@ -56,9 +56,7 @@ NodeTypeInfo CVBSSinkStage::get_node_type_info() const {
       1,
       0,
       0,
-      VideoFormatCompatibility::ALL,
-      SinkCategory::CORE,
-      "Sink (Core)"};
+      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> CVBSSinkStage::execute(

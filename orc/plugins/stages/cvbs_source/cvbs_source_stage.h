@@ -211,9 +211,7 @@ class FixedFormatCVBSSourceStage : public DAGStage,
                         0,
                         1,
                         UINT32_MAX,
-                        compatible_formats_,
-                        SinkCategory::CORE,
-                        "Source"};
+                        compatible_formats_};
   }
 
   std::vector<ArtifactPtr> execute(

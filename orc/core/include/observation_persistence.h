@@ -127,6 +127,20 @@ class IObservationPersistence {
       const ObservationRecordKey& /*key*/) {
     return std::nullopt;
   }
+
+  /**
+   * @brief Presence-only probe: is a record persisted for @p key?
+   *
+   * Unlike load_one() this must not materialise the record's values — it backs
+   * the store's has_stored() fast path, which coverage checks (background
+   * sweeps deciding whether a frame needs computing) call at high volume.
+   *
+   * Default: falls back to load_one(), so simple implementations stay correct
+   * without overriding (they just pay the load cost).
+   */
+  virtual bool exists(const ObservationRecordKey& key) {
+    return load_one(key).has_value();
+  }
 };
 
 }  // namespace orc

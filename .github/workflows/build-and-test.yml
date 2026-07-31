@@ -149,9 +149,14 @@ jobs:
             python3 cmake/summarize_ctest_junit.py --input build/ctest-results-unit.xml --output build/ctest-results-unit-summary.md --top 25
 
             # --- Enforce performance budget ---
+            # Wall time scales with suite size on a fixed-core runner (the unit
+            # suite is one process per test case, so ~0.07s of spawn overhead
+            # each); it is the p95 gate below that catches an individual test
+            # turning slow. Raise the wall ceiling as the suite legitimately
+            # grows — 1680 tests currently land at ~36s on a 4-vCPU runner.
             python3 cmake/check_ctest_budget.py \
               --input build/ctest-results-unit.xml \
-              --max-wall-seconds 30.0 \
+              --max-wall-seconds 45.0 \
               --min-pass-rate 99.5 \
               --max-p95-seconds 0.105
           "

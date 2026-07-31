@@ -47,5 +47,13 @@ bool stage_matches_category(const orc::presenters::StageInfo& info,
 /// plugins).
 std::map<std::string, orc::presenters::StageInfo> build_stage_index();
 
+/// Parse a video format name, accepting "NTSC", "PAL" or "PAL-M"
+/// (case-insensitive; "PAL_M"/"PALM" too). Shared so every flag that takes a
+/// format — --video-format, and the stage listing's --format — accepts exactly
+/// the same spellings. Returns false, leaving @p out untouched, for anything
+/// else.
+bool parse_video_format_name(const std::string& text,
+                             orc::presenters::VideoFormat* out);
+
 }  // namespace cli
 }  // namespace orc

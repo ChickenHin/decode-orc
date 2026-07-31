@@ -188,8 +188,8 @@ TEST(ObservationStore_Clear_RemovesEverything, Basic) {
 
 TEST(ObservationStore_ConcurrentReadersWriters_StayConsistent, ThreadSafe) {
   ObservationStore store;  // ample budget: no eviction interferes.
-  constexpr int kWriters = 4;
-  constexpr int kPerWriter = 500;
+  static constexpr int kWriters = 4;
+  static constexpr int kPerWriter = 500;
 
   std::vector<std::thread> threads;
   for (int w = 0; w < kWriters; ++w) {

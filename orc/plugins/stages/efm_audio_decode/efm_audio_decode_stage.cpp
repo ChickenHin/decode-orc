@@ -59,16 +59,19 @@ std::vector<int32_t> EFMAudioChannelPairRepresentation::get_audio_samples(
 
   const auto params = source_ ? source_->get_video_parameters() : std::nullopt;
   const VideoSystem system = params ? params->system : VideoSystem::Unknown;
-  const uint32_t block_pairs = audio_pairs_in_frame(id, system);
+  // The cache is indexed from the start of the decode range, so map the
+  // absolute FrameID onto a range-relative index (matching audio_import).
+  const uint64_t index = id - frame_range().first;
+  const uint32_t block_pairs = audio_pairs_in_frame(index, system);
   if (block_pairs == 0) return {};
 
-  // The contract requires exactly audio_pairs_in_frame(id, system) pairs:
+  // The contract requires exactly audio_pairs_in_frame(index, system) pairs:
   // start from silence and overlay whatever the cache holds, so a failed
   // decode or a short cache read still serves a full cadence-sized block.
   std::vector<int32_t> samples(static_cast<size_t>(block_pairs) * 2, 0);
   if (synchronous_audio_ready_) {
     const std::vector<int32_t> cached = deps_->read_synchronous_pairs(
-        audio_pair_offset(id, system), block_pairs);
+        audio_pair_offset(index, system), block_pairs);
     std::copy_n(cached.begin(), std::min(cached.size(), samples.size()),
                 samples.begin());
   }
@@ -106,6 +109,12 @@ void EFMAudioChannelPairRepresentation::ensure_decoded(
     }
     ORC_LOG_INFO("EFMAudioDecode: decoded {} stereo pairs of EFM audio",
                  decode_result.stream_pair_count);
+    ORC_LOG_INFO(
+        "EFMAudioDecode: video-timeline alignment applied: {} stereo pairs "
+        "({:.2f} ms) at the stream head",
+        decode_result.applied_sync_offset_pairs,
+        static_cast<double>(decode_result.applied_sync_offset_pairs) * 1000.0 /
+            kCdSampleRateHz);
 
     // Pull the raw decoded CD audio (44.1 kHz 16-bit stereo) and convert it
     // to the pipeline form: widen to the 24-bit-in-int32 carrier, resample
@@ -213,6 +222,7 @@ std::shared_ptr<const VideoFrameRepresentation> EFMAudioDecodeStage::process(
   // leaves the report disabled even if the box is checked.
   options.report_path = report_ ? report_path_ : std::string{};
   options.pair_name = pair_name_;
+  options.offset_ms = offset_ms_;
   return std::make_shared<EFMAudioChannelPairRepresentation>(
       std::move(source), std::move(deps), options);
 }
@@ -273,6 +283,24 @@ std::vector<ParameterDescriptor> EFMAudioDecodeStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "offset_ms";
+    desc.display_name = "Sync Offset (ms)";
+    desc.description =
+        "Additional sync slip in milliseconds on top of the automatic "
+        "video-timeline alignment. Positive values delay the audio relative "
+        "to the video; negative values advance it. Leave at 0 unless the "
+        "decoded audio still needs nudging.";
+    desc.type = ParameterType::DOUBLE;
+    // A finite range keeps the GUI spin box a sensible width; ±1 hour is far
+    // beyond any real audio/video sync correction.
+    desc.constraints.min_value = -3'600'000.0;
+    desc.constraints.max_value = 3'600'000.0;
+    desc.constraints.default_value = 0.0;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "report";
     desc.display_name = "Write Decode Report";
     desc.description = "Write a detailed decode statistics report file";
@@ -303,6 +331,7 @@ std::map<std::string, ParameterValue> EFMAudioDecodeStage::get_parameters()
           {"no_audio_concealment", no_audio_concealment_},
           {"ignore_preemphasis", ignore_preemphasis_},
           {"pair_name", pair_name_},
+          {"offset_ms", offset_ms_},
           {"report", report_},
           {"report_path", report_path_}};
 }
@@ -325,6 +354,13 @@ bool EFMAudioDecodeStage::set_parameters(
   if (name_it != params.end()) {
     if (const std::string* s = std::get_if<std::string>(&name_it->second)) {
       pair_name_ = *s;
+    }
+  }
+
+  const auto offset_it = params.find("offset_ms");
+  if (offset_it != params.end()) {
+    if (const double* v = std::get_if<double>(&offset_it->second)) {
+      offset_ms_ = *v;
     }
   }
 

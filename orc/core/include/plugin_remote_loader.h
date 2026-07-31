@@ -18,6 +18,7 @@
     "CLI code cannot include core/include/plugin_remote_loader.h. Use ProjectPresenter for plugin-aware stage access."
 #endif
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +36,17 @@ class PluginRemoteLoader {
 
   struct ResolveReleaseAssetResult {
     bool success = false;
+    bool unreachable = false;   ///< The release metadata could not be fetched
+                                ///< (as opposed to no matching asset existing).
+    bool abi_mismatch = false;  ///< The manifest declares a different host
+                                ///< ABI; the load-time gate would reject it.
+    bool toolchain_mismatch = false;  ///< The manifest declares a toolchain
+                                      ///< tag differing from the host's.
+    uint32_t asset_abi = 0;           ///< The manifest-declared ABI.
+    std::string asset_toolchain;  ///< Manifest-declared toolchain tag; empty
+                                  ///< when undeclared.
+    std::string sha256;  ///< Manifest digest for the selected asset; empty
+                         ///< when undeclared.
     std::string source_repo_url;
     std::string release_tag;
     std::string release_asset_url;

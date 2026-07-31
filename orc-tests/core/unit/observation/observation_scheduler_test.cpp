@@ -18,9 +18,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -46,7 +48,7 @@ class MockTaskRunner final : public IObservationTaskRunner {
     FrameID frame;
   };
 
-  void observe_frame(NodeID node, const NodeFingerprint& /*fingerprint*/,
+  bool observe_frame(NodeID node, const NodeFingerprint& /*fingerprint*/,
                      FrameID frame,
                      const std::vector<std::string>& /*ids*/) override {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -59,6 +61,8 @@ class MockTaskRunner final : public IObservationTaskRunner {
     if (gated_) {
       release_cv_.wait(lock, [&] { return released_; });
     }
+    // Frames listed in skip_frames_ report "already stored" (not computed).
+    return skip_frames_.find(frame) == skip_frames_.end();
   }
 
   void update_dag(
@@ -87,6 +91,10 @@ class MockTaskRunner final : public IObservationTaskRunner {
     std::lock_guard<std::mutex> lock(mutex_);
     throw_on_ = std::make_pair(node, frame);
   }
+  void skip_frame(FrameID frame) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    skip_frames_.insert(frame);
+  }
   void arm_gate() {
     std::lock_guard<std::mutex> lock(mutex_);
     gated_ = true;
@@ -108,6 +116,7 @@ class MockTaskRunner final : public IObservationTaskRunner {
   int dag_updates_ = 0;
   int entered_ = 0;
   std::optional<std::pair<NodeID, FrameID>> throw_on_;
+  std::set<FrameID> skip_frames_;
   bool gated_ = false;
   bool released_ = true;
   std::condition_variable entered_cv_;
@@ -203,7 +212,7 @@ class PoolMockRunner final : public IObservationTaskRunner {
  public:
   explicit PoolMockRunner(PoolSink* sink) : sink_(sink) {}
 
-  void observe_frame(NodeID node, const NodeFingerprint& /*fingerprint*/,
+  bool observe_frame(NodeID node, const NodeFingerprint& /*fingerprint*/,
                      FrameID frame,
                      const std::vector<std::string>& /*ids*/) override {
     {
@@ -218,6 +227,7 @@ class PoolMockRunner final : public IObservationTaskRunner {
       sink_->bcv.wait_for(lock, std::chrono::seconds(5),
                           [&] { return sink_->arrived >= sink_->target; });
     }
+    return true;
   }
 
   void update_dag(
@@ -635,7 +645,11 @@ TEST(ObservationScheduler, InteractiveRequestEnqueuesAtTopPriority) {
   EXPECT_EQ(calls[0].frame, 42u);
 }
 
-TEST(DefaultObservationSchedulingPolicy, SweepSplitsStatelessAndStatefulItems) {
+// The runner observes the full standard set per frame (fresh observer instance
+// each frame, so processing order cannot affect stored records); a separate
+// ascending-order stateful item would only double the enqueued workload. The
+// sweep therefore emits exactly ONE chunkable item carrying every observer.
+TEST(DefaultObservationSchedulingPolicy, SweepEmitsOneCombinedItemPerNode) {
   DefaultObservationSchedulingPolicy policy({"white_snr", "closed_caption"},
                                             {"closed_caption"});
 
@@ -648,22 +662,15 @@ TEST(DefaultObservationSchedulingPolicy, SweepSplitsStatelessAndStatefulItems) {
   ctx.nodes_of_interest = {NodeID(1)};
 
   const auto items = policy.plan_sweep(ctx);
-  ASSERT_EQ(items.size(), 2u);
+  ASSERT_EQ(items.size(), 1u);
 
-  const ObservationWorkItem* stateless = nullptr;
-  const ObservationWorkItem* stateful = nullptr;
-  for (const auto& item : items) {
-    (item.stateful ? stateful : stateless) = &item;
-  }
-  ASSERT_NE(stateless, nullptr);
-  ASSERT_NE(stateful, nullptr);
-
-  EXPECT_EQ(stateless->observer_ids, std::vector<std::string>{"white_snr"});
-  EXPECT_EQ(stateful->observer_ids, std::vector<std::string>{"closed_caption"});
-  EXPECT_EQ(stateless->frames.first, 0u);
-  EXPECT_EQ(stateless->frames.last, 49u);
-  EXPECT_EQ(stateful->fingerprint, fp("n1"));
-  EXPECT_EQ(stateless->priority, ObservationPriority::kSweep);
+  const std::vector<std::string> all_ids{"white_snr", "closed_caption"};
+  EXPECT_EQ(items[0].observer_ids, all_ids);
+  EXPECT_FALSE(items[0].stateful);  // chunkable across the worker pool
+  EXPECT_EQ(items[0].frames.first, 0u);
+  EXPECT_EQ(items[0].frames.last, 49u);
+  EXPECT_EQ(items[0].fingerprint, fp("n1"));
+  EXPECT_EQ(items[0].priority, ObservationPriority::kSweep);
 }
 
 TEST(DefaultObservationSchedulingPolicy, PrefetchClampsWindowToPreview) {
@@ -684,6 +691,57 @@ TEST(DefaultObservationSchedulingPolicy, PrefetchClampsWindowToPreview) {
   EXPECT_EQ(items[0].frames.first, 0u);  // 5 - 10 clamped to 0
   EXPECT_EQ(items[0].frames.last, 15u);  // 5 + 10
   EXPECT_EQ(items[0].priority, ObservationPriority::kPrefetch);
+}
+
+// With a coverage probe in the context, prefetch enqueues only the contiguous
+// runs of frames that are NOT already stored, so revisiting an observed
+// position produces no work items at all.
+TEST(DefaultObservationSchedulingPolicy, PrefetchSkipsAlreadyObservedFrames) {
+  DefaultObservationSchedulingPolicy policy({"white_snr"}, {},
+                                            /*prefetch_radius=*/4);
+
+  auto map = std::make_shared<NodeFingerprintMap>();
+  (*map)[NodeID(1)] = fp("n1");
+
+  ObservationSchedulingContext ctx;
+  ctx.fingerprints = map;
+  ctx.total_frames = 1000;
+  ctx.preview_position = 10;  // window: 6..14
+  ctx.nodes_of_interest = {NodeID(1)};
+  // Frames 6..9 and 12 stored; 10, 11, 13, 14 missing → runs 10..11 and 13..14.
+  ctx.frame_observed = [](NodeID, FrameID frame) {
+    return frame <= 9 || frame == 12;
+  };
+
+  const auto items = policy.plan_prefetch(ctx);
+  ASSERT_EQ(items.size(), 2u);
+  EXPECT_EQ(items[0].frames.first, 10u);
+  EXPECT_EQ(items[0].frames.last, 11u);
+  EXPECT_EQ(items[1].frames.first, 13u);
+  EXPECT_EQ(items[1].frames.last, 14u);
+  for (const auto& item : items) {
+    EXPECT_EQ(item.priority, ObservationPriority::kPrefetch);
+    EXPECT_EQ(item.fingerprint, fp("n1"));
+  }
+}
+
+// A fully covered window plans nothing — the caller enqueues no work and the
+// workload never goes active (no phantom "Computing…" flash in the GUI).
+TEST(DefaultObservationSchedulingPolicy, PrefetchOfFullyObservedWindowIsEmpty) {
+  DefaultObservationSchedulingPolicy policy({"white_snr"}, {},
+                                            /*prefetch_radius=*/4);
+
+  auto map = std::make_shared<NodeFingerprintMap>();
+  (*map)[NodeID(1)] = fp("n1");
+
+  ObservationSchedulingContext ctx;
+  ctx.fingerprints = map;
+  ctx.total_frames = 1000;
+  ctx.preview_position = 10;
+  ctx.nodes_of_interest = {NodeID(1)};
+  ctx.frame_observed = [](NodeID, FrameID) { return true; };
+
+  EXPECT_TRUE(policy.plan_prefetch(ctx).empty());
 }
 
 TEST(DefaultObservationSchedulingPolicy, InvalidationTargetsOnlyChangedNodes) {
@@ -838,6 +896,48 @@ TEST(ObservationScheduler, WorkloadPercentStaysBoundedAndEndsIdleOnDrain) {
   EXPECT_EQ(final.outstanding_nodes, 0u);
   ASSERT_FALSE(snapshots.empty());
   EXPECT_FALSE(snapshots.back().active);  // last emitted snapshot is idle
+}
+
+// frames_computed counts only frames the runner actually computed: frames it
+// skipped as already-stored advance frames_observed but not frames_computed,
+// so a coverage pass over warm data reports computing == false end to end.
+TEST(ObservationScheduler, WorkloadSeparatesComputedFromSkippedFrames) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  runner->skip_frame(0);
+  runner->skip_frame(2);
+
+  std::vector<ObservationWorkload> snapshots;
+  scheduler->set_workload_callback(
+      [&](const ObservationWorkload& w) { snapshots.push_back(w); });
+
+  ObservationWorkItem item;
+  item.node_id = NodeID(1);
+  item.fingerprint = fp("a");
+  item.frames = FrameIDRange{0, 3};  // frames 0 and 2 "already stored"
+  scheduler->submit(item);
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  std::uint64_t max_computed = 0;
+  for (const auto& w : snapshots) {
+    EXPECT_LE(w.frames_computed, w.frames_observed);
+    max_computed = std::max(max_computed, w.frames_computed);
+  }
+  EXPECT_EQ(max_computed, 2u);  // frames 1 and 3 were computed
+
+  // An all-skipped batch never reports a computed frame.
+  snapshots.clear();
+  runner->skip_frame(1);
+  runner->skip_frame(3);
+  scheduler->submit(item);
+  while (scheduler->process_one_for_testing()) {
+  }
+  for (const auto& w : snapshots) {
+    EXPECT_EQ(w.frames_computed, 0u);
+  }
 }
 
 TEST(ObservationScheduler, EnqueueAfterDrainReactivatesWorkloadAtZeroPercent) {

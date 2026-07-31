@@ -34,9 +34,13 @@ inline int roundObservationPercent(std::uint64_t frames_observed,
 
 // Status-bar text for a background-observation workload. Returns an empty
 // string when the workload is idle (@p active == false), so the caller clears
-// the message; otherwise "Computing observations… N%" with @p percent_complete
-// clamped to [0, 100].
-inline std::string formatObservationStatus(bool active, int percent_complete) {
+// the message. While active the text is honest about what the batch is doing:
+// "Computing observations… N%" once at least one frame has actually been
+// computed (@p computing == true), and "Checking observations… N%" while the
+// batch is only verifying that already-stored frames are covered. @p
+// percent_complete is clamped to [0, 100].
+inline std::string formatObservationStatus(bool active, int percent_complete,
+                                           bool computing = true) {
   if (!active) {
     return {};
   }
@@ -46,7 +50,9 @@ inline std::string formatObservationStatus(bool active, int percent_complete) {
   } else if (pct > 100) {
     pct = 100;
   }
-  return "Computing observations\xE2\x80\xA6 " + std::to_string(pct) + "%";
+  const char* verb = computing ? "Computing" : "Checking";
+  return std::string(verb) + " observations\xE2\x80\xA6 " +
+         std::to_string(pct) + "%";
 }
 
 }  // namespace orc::gui

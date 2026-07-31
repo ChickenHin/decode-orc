@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <system_error>
 
@@ -24,6 +25,10 @@ namespace orc {
 namespace {
 
 constexpr uint64_t kBytesPerStereoPair = 4;  // 2 channels x int16_t
+
+// IEC 60908: CD audio is 44.1 kHz; used to convert the user's millisecond
+// sync slip into decoder stream pairs.
+constexpr double kCdSampleRateHz = 44100.0;
 
 // 2 channels x int32_t in the converted synchronous cache.
 constexpr uint64_t kBytesPerSynchronousStereoPair = 8;
@@ -82,6 +87,14 @@ EFMAudioDecodeResult EFMAudioDecodeDeps::decode_to_cache(
   processor.setNoTimecodes(options.no_timecodes);
   processor.setNoAudioConcealment(options.no_audio_concealment);
   processor.setIgnorePreemphasis(options.ignore_preemphasis);
+
+  // Issue #231: the EFM t-values are demodulated from the same FM signal as
+  // the video, so the decoded audio has a fixed, computable relationship to
+  // the video timeline. Align the stream head so cache pair 0 really is
+  // synchronous with the first frame of the decode range, plus any user slip.
+  processor.setAudioSyncOffset(true);
+  processor.setAudioSyncSlipPairs(static_cast<int64_t>(
+      std::llround(options.offset_ms * kCdSampleRateHz / 1000.0)));
 
   // The decode targets a scratch cache, so point the report at the
   // user-chosen path rather than letting it default to "<cache>.txt".
@@ -164,7 +177,8 @@ EFMAudioDecodeResult EFMAudioDecodeDeps::decode_to_cache(
   }
 
   cache_path_ = cache_path;
-  return {true, "", cache_bytes / kBytesPerStereoPair};
+  return {true, "", cache_bytes / kBytesPerStereoPair,
+          processor.appliedAudioSyncOffsetPairs()};
 }
 
 std::vector<int16_t> EFMAudioDecodeDeps::read_cache_pairs(

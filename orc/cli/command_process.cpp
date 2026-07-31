@@ -47,8 +47,8 @@ void log_plugin_runtime_state(
     for (const auto& entry : registry.entries) {
       ORC_LOG_DEBUG(
           "  registry entry '{}' enabled={} loaded={} exists={} path='{}'",
-          entry.plugin_id.empty() ? std::string("<unnamed>") : entry.plugin_id,
-          entry.enabled ? "true" : "false", entry.is_loaded ? "true" : "false",
+          entry.selector, entry.enabled ? "true" : "false",
+          entry.is_loaded ? "true" : "false",
           entry.path_exists ? "true" : "false", entry.path);
     }
   }

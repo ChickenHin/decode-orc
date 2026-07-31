@@ -29,18 +29,6 @@ bool contains_ci(const std::string& haystack, const std::string& needle_lower) {
   return to_lower(haystack).find(needle_lower) != std::string::npos;
 }
 
-// Platform match: exact token, or the artifact is a more specific value that
-// begins with the host token (e.g. host "linux" matches "linux-x86_64").
-bool platform_matches(const std::string& artifact_platform,
-                      const std::string& target_platform) {
-  if (artifact_platform.empty() || target_platform.empty()) {
-    return false;
-  }
-  const std::string a = to_lower(artifact_platform);
-  const std::string t = to_lower(target_platform);
-  return a == t || a.rfind(t, 0) == 0 || t.rfind(a, 0) == 0;
-}
-
 std::string env_or_empty(const char* name) {
   const char* value = std::getenv(name);
   return value ? std::string(value) : std::string();
@@ -122,44 +110,6 @@ PluginIndexClient::RefreshResult PluginIndexClient::refresh(
           ? "Fetched plugin index could not be parsed and no valid cache exists"
           : response.error_message;
   return result;
-}
-
-PluginIndexClient::ArtifactResolution PluginIndexClient::resolve_artifact(
-    const PluginIndexEntry& entry, const std::string& target_platform,
-    uint32_t host_abi) {
-  ArtifactResolution resolution;
-  const PluginIndexArtifact* abi_agnostic = nullptr;
-
-  for (const auto& artifact : entry.artifacts) {
-    if (!platform_matches(artifact.platform, target_platform)) {
-      continue;
-    }
-    resolution.platform_available = true;
-    if (artifact.host_abi == host_abi) {
-      resolution.found = true;
-      resolution.artifact = artifact;
-      return resolution;
-    }
-    if (artifact.host_abi == 0 && abi_agnostic == nullptr) {
-      abi_agnostic = &artifact;
-    }
-  }
-
-  if (abi_agnostic != nullptr) {
-    resolution.found = true;
-    resolution.artifact = *abi_agnostic;
-    return resolution;
-  }
-
-  if (resolution.platform_available) {
-    resolution.abi_incompatible = true;
-    resolution.message = "'" + entry.id + "' has no build for Orc ABI " +
-                         std::to_string(host_abi) + " on this platform";
-  } else {
-    resolution.message = "'" + entry.id + "' has no build for platform '" +
-                         target_platform + "'";
-  }
-  return resolution;
 }
 
 std::vector<PluginIndexEntry> PluginIndexClient::search(

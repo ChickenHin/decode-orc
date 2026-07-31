@@ -23,6 +23,7 @@ TvaluesToChannel::TvaluesToChannel() {
   m_consumedTValues = 0;
   m_discardedTValues = 0;
   m_channelFrameCount = 0;
+  m_headDiscardedBits = 0;
 
   m_perfectFrames = 0;
   m_longFrames = 0;
@@ -52,6 +53,18 @@ std::vector<uint8_t> TvaluesToChannel::popFrame() {
   std::vector<uint8_t> frame = std::move(m_outputBuffer.front());
   m_outputBuffer.pop();
   return frame;
+}
+
+// Accumulate the channel-bit length of a discarded buffer range into the
+// head-discard statistic. Only bits lost before the first channel frame count:
+// they are what shifts the decoded stream's origin relative to the input
+// timeline (issue #231); later discards are mid-stream damage, not an origin
+// shift.
+void TvaluesToChannel::noteHeadDiscard(int32_t startPosition,
+                                       int32_t endPosition) {
+  if (m_channelFrameCount != 0) return;
+  m_headDiscardedBits +=
+      countBits(m_internalBuffer, startPosition, endPosition);
 }
 
 bool TvaluesToChannel::isReady() const {
@@ -118,6 +131,7 @@ TvaluesToChannel::State TvaluesToChannel::expectingInitialSync() {
     nextState = ExpectingSync;
   } else {
     // Drop all but the last T-value in the buffer
+    noteHeadDiscard(0, static_cast<int32_t>(m_internalBuffer.size()) - 1);
     m_tvalueDiscardCount += static_cast<int32_t>(m_internalBuffer.size()) - 1;
     m_discardedTValues += static_cast<int32_t>(m_internalBuffer.size()) - 1;
     m_internalBuffer.erase(m_internalBuffer.begin(),
@@ -200,6 +214,7 @@ TvaluesToChannel::State TvaluesToChannel::expectingSync() {
         "lost - dropping {} T-values",
         m_internalBuffer.size());
 
+    noteHeadDiscard(0, static_cast<int32_t>(m_internalBuffer.size()));
     m_discardedTValues += m_internalBuffer.size();
     m_internalBuffer.clear();
     nextState = ExpectingInitialSync;
@@ -235,6 +250,7 @@ TvaluesToChannel::State TvaluesToChannel::handleUndershoot() {
         "Sync lost.  Dropping {} T-values",
         m_internalBuffer.size() - 1);
 
+    noteHeadDiscard(0, static_cast<int32_t>(m_internalBuffer.size()) - 1);
     m_discardedTValues += static_cast<int32_t>(m_internalBuffer.size()) - 1;
     m_internalBuffer.erase(m_internalBuffer.begin(),
                            m_internalBuffer.end() - 1);
@@ -308,6 +324,10 @@ TvaluesToChannel::State TvaluesToChannel::handleUndershoot() {
           "TvaluesToChannel::handleUndershoot() - Undershoot frame - Value "
           "from second to third sync_header = {} bits - treating as valid",
           sttBitCount);
+      // The prefix [0, secondSyncIndex) is discarded below; account for it
+      // BEFORE the frame push flips m_channelFrameCount and closes the
+      // head-discard gate (the prefix precedes the very first frame).
+      noteHeadDiscard(0, secondSyncIndex);
       // Valid frame between the second and third sync headers
       std::vector<uint8_t> frameData(m_internalBuffer.begin() + secondSyncIndex,
                                      m_internalBuffer.begin() + thirdSyncIndex);
@@ -334,7 +354,8 @@ TvaluesToChannel::State TvaluesToChannel::handleUndershoot() {
       if (sttBitCount > efm::kEfmFrameChannelBits) m_longFrames++;
       if (sttBitCount < efm::kEfmFrameChannelBits) m_shortFrames++;
 
-      // Remove the frame data from the internal buffer
+      // Remove the frame data from the internal buffer (head accounting for
+      // the dropped prefix happened above, before the frame push)
       m_discardedTValues += secondSyncIndex;
       m_internalBuffer.erase(m_internalBuffer.begin(),
                              m_internalBuffer.begin() + thirdSyncIndex);
@@ -346,7 +367,9 @@ TvaluesToChannel::State TvaluesToChannel::handleUndershoot() {
           fttBitCount, sttBitCount);
       nextState = ExpectingSync;
 
-      // Remove the frame data from the internal buffer
+      // Remove the frame data from the internal buffer (nothing was output, so
+      // the whole erased range is head loss, not just the counted prefix)
+      noteHeadDiscard(0, thirdSyncIndex);
       m_discardedTValues += secondSyncIndex;
       m_internalBuffer.erase(m_internalBuffer.begin(),
                              m_internalBuffer.begin() + thirdSyncIndex);
@@ -467,6 +490,9 @@ TvaluesToChannel::State TvaluesToChannel::handleOvershoot() {
           "TvaluesToChannel::handleOvershoot() - Overshoot by {} bits, but no "
           "sync header found, dropping {} T-values",
           bitCount, m_internalBuffer.size() - 1);
+      // The extracted frameData (bitCount bits) was dropped without output too.
+      if (m_channelFrameCount == 0) m_headDiscardedBits += bitCount;
+      noteHeadDiscard(0, static_cast<int32_t>(m_internalBuffer.size()) - 1);
       m_discardedTValues += static_cast<int32_t>(m_internalBuffer.size()) - 1;
       m_internalBuffer.erase(m_internalBuffer.begin(),
                              m_internalBuffer.end() - 1);

@@ -9,9 +9,11 @@
 #ifndef WRITER_WAV_H
 #define WRITER_WAV_H
 
+#include <cstdint>
 #include <fstream>
 #include <string>
 
+#include "audio_head_offset.h"
 #include "section.h"
 
 class WriterWav {
@@ -25,8 +27,14 @@ class WriterWav {
   int64_t size();
   bool isOpen() const { return m_file.is_open(); };
 
+  // Head alignment (issue #231): positive prepends that many silent stereo
+  // pairs before the first decoded pair; negative drops the first |pairs|
+  // decoded pairs. Must be set before the first write().
+  void setHeadOffsetPairs(int64_t pairs) { m_headOffset.setOffsetPairs(pairs); }
+
  private:
   std::ofstream m_file;
+  AudioHeadOffset m_headOffset;
 };
 
 #endif  // WRITER_WAV_H

@@ -12,20 +12,23 @@ a plugin locally). Reference material lives in
 
 ---
 
-## 1. Repository naming
+## 1. Repository naming (recommended)
 
-Host your plugin in its own repository named with the `orc-plugin_` prefix:
+Prefer hosting your plugin in its own repository named with the `orc-plugin_`
+prefix:
 
 ```
 orc-plugin_<stage-name>     e.g.  orc-plugin_deinterlace
 ```
 
-This convention is used across the ecosystem and matches the release-asset
-naming below.
+This convention matches the release-asset naming below and makes plugin
+repositories easy to recognise, but it is not enforced — a plugin may live in
+a repository with any name (or a subdirectory of a larger project) as long as
+its releases publish conforming assets and the release manifest in §3.
 
 ---
 
-## 2. Release-asset naming (ABI-tagged)
+## 2. Release-asset naming
 
 Publish platform binaries as GitHub release assets using:
 
@@ -38,43 +41,48 @@ where `<platform>` is `linux` / `macos` / `windows`, `<ext>` is
 the binary was built against:
 
 ```
-orc-plugin_deinterlace_linux_abi8.so       # ABI-tagged (recommended)
-orc-plugin_deinterlace_macos_abi8.dylib
-orc-plugin_deinterlace_windows_abi8.dll
-orc-plugin_deinterlace_linux.so            # legacy, untagged (still valid)
+orc-plugin_deinterlace_linux_abi12.so
+orc-plugin_deinterlace_macos_abi12.dylib
+orc-plugin_deinterlace_windows_abi12.dll
 ```
 
-Tag your assets with the ABI token. It lets a single release ship builds for
-several host ABI versions side by side: when resolving a release the host
-prefers the asset tagged for its own ABI (`_abi<host>`), falls back to a legacy
-untagged name (validated at load), and only selects a differently-tagged asset
-as a last resort — reporting "needs a rebuild for Orc ABI N" *before* it
-downloads a binary it cannot load.
-
-Find the ABI number you built against in the
-[SDK version history](plugin-sdk.md#version-history) (`host_abi_version`).
+The name is a validity convention (the host rejects downloads whose names do
+not match it); which asset a host actually installs is decided by the release
+manifest below, not by parsing names. Find the ABI number you built against
+in the [SDK version history](plugin-sdk.md#version-history)
+(`host_abi_version`).
 
 The skeleton CI workflows produce and upload these artifacts automatically on
 tagged releases.
 
 ---
 
-## 3. Generate and publish SHA-256 digests
+## 3. Release manifest (required)
 
-Digests let the host verify every download and every cache hit, and quarantine
-mismatching files. They are **optional** in a hand-written registry entry (a
-missing digest loads with an integrity warning) but **mandatory** for a curated
-index entry.
+Every release **must** include an `orc-plugin-manifest.yaml` asset declaring
+each binary's platform, host ABI, toolchain tag, and SHA-256 digest — a
+release without one cannot be browsed, installed, or updated to:
 
-Compute the digest of each asset and publish it alongside the release:
-
-```bash
-sha256sum orc-plugin_deinterlace_linux_abi8.so
-# 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08  orc-plugin_...
+```yaml
+manifest_schema: 1
+plugin_id: org.example.stage.deinterlace
+plugin_version: 1.0.0
+artifacts:
+  - file: orc-plugin_deinterlace_linux_abi12.so
+    platform: linux
+    abi: 12
+    toolchain_tag: gcc14/libstdc++
+    sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 ```
 
-(On macOS: `shasum -a 256 <file>`.) Record the hex digest in the entry's
-`sha256` field.
+`file`, `platform`, and a non-zero `abi` are required per artifact;
+`toolchain_tag` (the `ORC_SDK_TOOLCHAIN_TAG` your build produced) and `sha256`
+are strongly recommended — the host uses them to refuse installs that are
+guaranteed to fail at load, and to verify (and quarantine on mismatch) every
+download and cache hit. Compute digests with `sha256sum <file>` (macOS:
+`shasum -a 256 <file>`). See
+[Release manifest](plugin-architecture.md#release-manifest) for the full
+schema and matching rules.
 
 > Plugin binaries are **not code-signed**. See
 > [Distribution integrity](plugin-architecture.md#distribution-integrity) for
@@ -120,11 +128,11 @@ registry YAML:
   plugin_version:     "1.0.0"
   source_repo_url:    https://github.com/example/orc-plugin_deinterlace
   artifact_source:    github_release_asset
-  release_asset_url:  https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi8.so
+  release_asset_url:  https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi12.so
   release_tag:        v1.0.0
-  release_asset_name: orc-plugin_deinterlace_linux_abi8.so
+  release_asset_name: orc-plugin_deinterlace_linux_abi12.so
   target_platform:    linux
-  required_host_abi:  8
+  required_host_abi:  12
   enabled:            true
   trust_state:        untrusted
   license_spdx:       GPL-3.0-or-later
@@ -134,8 +142,8 @@ registry YAML:
 Set `required_host_abi` so an incompatible entry is reported (and neither
 downloaded nor loaded) instead of failing late at `dlopen`. Entries default to
 `trust_state: untrusted`; the host downloads and loads only after the user
-grants trust (Plugin Manager **Trusted** column, or `orc-cli plugins trust
-<id>`). See [Registry entry](plugin-sdk.md#registry-entry).
+grants trust (ticking **Enabled** in the Plugin Manager, or `orc-cli plugins
+trust <id>`). See [Registry entry](plugin-sdk.md#registry-entry).
 
 ---
 
@@ -147,10 +155,16 @@ Plugins…** and query with `orc-cli plugins search / info / install`. It lives 
 the default-branch head over HTTPS — **a merged pull request publishes
 immediately**, with no Decode-Orc release and no registry tag.
 
+The index curates **which plugins are offered, not their versions**: the host
+resolves your repository's **latest published release** at browse and install
+time, and offers each new release to installed users as an update. Publishing
+a new release therefore requires **no** registry change — keep your latest
+release working and correctly named, because it is what users get.
+
 Submit an entry:
 
 1. Fork the registry and append your plugin under `plugins:` in `index.yaml`,
-   following [`registry_schema: 1`](../../orc-plugin-registry/README.md):
+   following [`registry_schema: 2`](../../orc-plugin-registry/README.md):
 
    ```yaml
    - id: com.example.deinterlace
@@ -160,56 +174,58 @@ Submit an entry:
      license_spdx: GPL-3.0-or-later
      source_repo_url: https://github.com/example/orc-plugin_deinterlace
      tags: [transform, video]
-     artifacts:                       # one per (platform, host ABI) you support
-       - platform: linux
-         host_abi: 8
-         url: https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi8.so
-         sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
-         plugin_version: 1.0.0
-         min_host_app_version: 1.0.0  # optional
    ```
 
-2. Provide one artifact per **(platform, host ABI)** you support. The host
-   selects by that pair, so a user on an unsupported host is told "no build for
-   this host" rather than downloading an incompatible binary.
+2. Make sure your **latest GitHub release** publishes one conforming binary
+   per platform you support **and the `orc-plugin-manifest.yaml` from §3** —
+   without the manifest the host refuses to browse, install, or update to the
+   release. The host installs exactly what the manifest declares for the
+   user's platform, and a user on an unsupported platform, ABI, or toolchain
+   is told precisely why rather than downloading an incompatible binary. Tag
+   releases `v<version>` so the host can report and compare versions.
 
 3. Validate locally before opening the PR:
 
    ```bash
-   # Offline: schema, naming, license, digest presence
+   # Offline: schema, license, repository URL
    python3 orc-plugin-registry/tools/validate_index.py orc-plugin-registry/index.yaml
 
-   # Online as well: URL reachability + digest match
+   # Online as well: latest release publishes a conforming plugin asset
    python3 orc-plugin-registry/tools/validate_index.py --online orc-plugin-registry/index.yaml
    ```
 
-4. Open the pull request. CI validates schema conformance, artifact naming
-   (including the ABI token), that every `url` resolves, that each downloaded
-   artifact's digest equals its `sha256`, and that a valid SPDX `license_spdx`
-   is present. Only GPLv3-compatible licenses are accepted.
+4. Open the pull request. CI validates schema conformance, a valid SPDX
+   `license_spdx`, a GitHub `source_repo_url`, and that your latest release
+   publishes a conforming plugin asset. Only GPLv3-compatible licenses are
+   accepted.
 
-**A maintainer's merge is the curation and trust decision** and publishes the
-entry. Users then install with:
+**A maintainer's merge is the curation decision** and publishes the entry —
+it endorses your repository, so every release you publish afterwards is
+offered to users automatically. Users then install with:
 
 ```console
 $ orc-cli plugins search deinterlace
 $ orc-cli plugins info com.example.deinterlace
-$ orc-cli plugins install com.example.deinterlace   # recorded untrusted
+$ orc-cli plugins install com.example.deinterlace   # latest release, untrusted
 $ orc-cli plugins trust com.example.deinterlace      # user confirms trust
 ```
 
-Installing from the index records the entry with the index-declared `sha256`
-and leaves it untrusted until the user confirms — the same trust flow as the GUI
-**Browse Plugins…** dialog.
+Installing from the index records an entry pointing at your latest release and
+leaves it untrusted until the user confirms — the same trust flow as the GUI
+**Browse Plugins…** dialog. Users are re-asked to confirm trust after every
+update, since each release is a new binary.
 
 ---
 
 ## 7. Checklist
 
-- [ ] Repository named `orc-plugin_<stage-name>`.
+- [ ] Repository named `orc-plugin_<stage-name>` (recommended).
 - [ ] Release assets named `orc-plugin_<stage>_<platform>_abi<N>.<ext>`.
-- [ ] SHA-256 digest computed and published for every asset.
-- [ ] Rebuilt and re-tagged for each supported host ABI; older-ABI assets kept.
+- [ ] `orc-plugin-manifest.yaml` uploaded with the release, declaring every
+      binary's `file`/`platform`/`abi` plus `toolchain_tag` and `sha256`.
+- [ ] Latest release is the one users should get (the index resolves it at
+      install time); releases tagged `v<version>`.
+- [ ] Rebuilt (and manifest updated) for each host ABI bump.
 - [ ] `instructions.md` shipped beside each binary and up to date.
 - [ ] Enforcement gates pass in standalone mode.
-- [ ] Curated-index PR validated locally, one artifact per (platform, host ABI).
+- [ ] Curated-index PR validated locally.

@@ -9,54 +9,67 @@ branch over plain HTTPS. Because it reads the branch head, **a merged pull
 request publishes immediately** — no Decode-Orc release and no registry tag are
 required.
 
+The index curates **which plugins are offered, not their versions**. Once a
+plugin is accepted, the host resolves its **latest published GitHub release**
+at browse and install time, and keeps offering newer releases as updates after
+install — so a new upstream release needs **no** registry change. The
+maintainer's merge therefore endorses the plugin repository (and its future
+releases), not one reviewed binary; users confirm trust explicitly on first
+install and again after every update.
+
 > The index currently lives in the Decode-Orc repository for convenience. It is
 > expected to move to a dedicated `orc-plugin-registry` repository later; the
 > schema and contribution model below are written so that move is transparent
 > to hosts (the fetch URL is configurable via `ORC_PLUGIN_INDEX_URL`).
 
-## Schema (`registry_schema: 1`)
+## Schema (`registry_schema: 2`)
 
 ```yaml
-registry_schema: 1          # index schema major version (required)
+registry_schema: 2          # index schema major version (required)
 plugins:
   - id: com.example.deinterlace          # unique plugin id (required)
     display_name: Example Deinterlacer    # human-readable name
     description: Motion-adaptive deinterlacing for PAL/NTSC
     maintainer: Example Author
     license_spdx: GPL-3.0-or-later        # SPDX identifier (required)
-    source_repo_url: https://github.com/example/orc-plugin_deinterlace
+    source_repo_url: https://github.com/example/orc-plugin_deinterlace  # required
     tags: [transform, video]
-    artifacts:                            # at least one (required)
-      - platform: linux                   # linux | macos | windows (required)
-        host_abi: 8                       # target host ABI (required)
-        url: https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi8.so
-        sha256: <64-hex digest>           # mandatory
-        plugin_version: 1.0.0
-        min_host_app_version: 1.0.0       # optional
 ```
+
+There is **no artifact list**: the host queries the repository's latest GitHub
+release and selects the asset for its platform and ABI. (Schema 1 pinned
+per-release artifacts with sha256 digests; a schema-2 entry carrying an
+`artifacts` list is rejected by validation.)
+
+### Requirements on the plugin repository
+
+- Publish plugin binaries as **GitHub release assets** on the repository named
+  by `source_repo_url`.
+- Asset filenames must follow the convention
+  `orc-plugin_<stage>_<platform>[-<arch>][_abi<N>].<so|dylib|dll>` —
+  the host selects the asset for its platform and prefers the one tagged with
+  its ABI (`_abi<N>`).
+- The **latest release** is what users get: keep it working, and tag releases
+  `v<version>` so the host can report and compare versions.
 
 ### Forward compatibility
 
-- Hosts **ignore unknown fields**, so additions within schema major `1` are
+- Hosts **ignore unknown fields**, so additions within schema major `2` are
   non-breaking. Older hosts tolerate a newer index and simply skip fields and
   entries they do not understand.
-- An artifact is selected by **(platform, host ABI)**. Publish one artifact per
-  platform and host ABI you support; an older host that finds no matching build
-  reports "no build for this host" instead of downloading an incompatible one.
-- Artifact filenames must follow the convention
-  `orc-plugin_<stage>_<platform>[_abi<N>].<so|dylib|dll>`.
 
 ## Contributing
 
-1. Fork and add (or update) your plugin's entry in `index.yaml`.
-2. Ensure every artifact carries a reachable `url` and a correct `sha256`.
+1. Fork and add your plugin's entry in `index.yaml`.
+2. Ensure `source_repo_url` points at your GitHub repository and its latest
+   release publishes assets following the naming convention above.
 3. Open a pull request. The validation workflow
    (`.github/workflows/validate-plugin-index.yml`) checks: schema conformance,
-   artifact naming (including the ABI token), that every `url` resolves, that
-   each downloaded artifact's digest equals its `sha256`, and that a valid SPDX
-   `license_spdx` is present.
-4. **A maintainer's merge is the curation and trust decision.** There is no
-   separate release step; the list goes live when the PR merges.
+   a valid SPDX `license_spdx`, a GitHub `source_repo_url`, and — online —
+   that the repository's latest release publishes a conforming plugin asset.
+4. **A maintainer's merge is the curation decision.** There is no separate
+   release step; the list goes live when the PR merges, and every release you
+   publish afterwards is offered to users automatically.
 
 Only GPLv3-compatible licenses are accepted (GPLv3, GPLv2, LGPL, BSD, MIT,
 Apache-2.0, ISC and similar).
@@ -64,9 +77,14 @@ Apache-2.0, ISC and similar).
 ## Validation locally
 
 ```bash
-# Offline checks (schema, naming, license, digest presence):
+# Offline checks (schema, license, repository URL):
 python3 tools/validate_index.py index.yaml
 
-# Online checks as well (URL reachability + digest match):
+# Online checks as well (latest release publishes a conforming asset):
 python3 tools/validate_index.py --online index.yaml
 ```
+
+The fixtures under [`tests/`](tests/) pin the validator's behaviour: the good
+fixtures must pass and each bad fixture must fail
+(`cmake/check_plugin_index.sh` enforces this in CI and via
+`ctest -R PluginIndexValidation`).

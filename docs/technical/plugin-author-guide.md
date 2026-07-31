@@ -133,9 +133,7 @@ class MyFilterStage : public orc::DAGStage {
                              1,                           // max inputs
                              1,                           // min outputs
                              1,                           // max outputs
-                             orc::VideoFormatCompatibility::ALL,
-                             orc::SinkCategory::THIRD_PARTY,
-                             "Transform"};                // category label
+                             orc::VideoFormatCompatibility::ALL};
   }
 
   std::vector<orc::ArtifactPtr> execute(

@@ -438,13 +438,15 @@ TEST(RenderCoordinatorTest, ObservationProgress_ForwardedToSignal) {
   orc::presenters::ObservationProgressEvent event;
   event.active = true;
   event.percent_complete = 42;
+  event.computing = true;
   event.outstanding_nodes = 3;
   mock_presenter->fireProgress(event);
 
   ASSERT_TRUE(waitForCount(progress_spy, 1));
   EXPECT_TRUE(progress_spy.at(0).at(0).toBool());
   EXPECT_EQ(progress_spy.at(0).at(1).toInt(), 42);
-  EXPECT_EQ(progress_spy.at(0).at(2).toULongLong(), 3ull);
+  EXPECT_TRUE(progress_spy.at(0).at(2).toBool());
+  EXPECT_EQ(progress_spy.at(0).at(3).toULongLong(), 3ull);
 
   // Idle snapshot delivered when the queue drains.
   orc::presenters::ObservationProgressEvent idle;

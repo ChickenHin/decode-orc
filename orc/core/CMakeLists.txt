@@ -5,6 +5,7 @@ add_library(orc-core SHARED
     dag_executor.cpp
     frame_provenance.cpp
     dag_frame_renderer.cpp
+    preview_frame_layout.cpp
     preview_renderer.cpp
     preview_view_registry.cpp
 
@@ -98,12 +99,14 @@ add_library(orc-core SHARED
     stage_plugin_registry.cpp
     plugin_remote_loader.cpp
     plugin_artifact_name.cpp
+    plugin_release_manifest.cpp
     sha256_hash.cpp
 
     # Curated plugin index discovery
     curl_http_fetcher.cpp
     plugin_index.cpp
     plugin_index_client.cpp
+    plugin_update_checker.cpp
 
     # Project file I/O
     project.cpp

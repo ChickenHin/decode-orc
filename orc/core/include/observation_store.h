@@ -132,6 +132,13 @@ class ObservationStore {
   /// most-recently-used).
   bool has(const ObservationRecordKey& key);
 
+  /// Presence-only variant of has(): true if a record exists in memory or in
+  /// the sidecar, WITHOUT loading it into memory or touching LRU order. Use for
+  /// coverage checks (e.g. "does this frame still need observing?") that probe
+  /// many keys they may never read — has() would churn the LRU and pull every
+  /// probed record through the sidecar.
+  bool has_stored(const ObservationRecordKey& key);
+
   /// Return the stored record for @p key, or nullopt on miss (after reading
   /// through to the sidecar). Marks the record most-recently-used on a hit.
   std::optional<ObservationRecord> get(const ObservationRecordKey& key);

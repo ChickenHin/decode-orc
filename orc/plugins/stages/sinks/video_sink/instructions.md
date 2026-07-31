@@ -110,6 +110,18 @@ FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output on
 ### embed_chapter_metadata (bool)
 FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
 
+## Preview
+
+The stage preview shows the decoded colour frame using the configured decoder
+and chroma settings. Two display modes are available in the preview mode
+selector:
+
+- **Interlaced** — the broadcast frame with both fields weaved together
+  (natural temporal order, field 1 on top).
+- **Sequential** — the two fields shown as separate blocks, field 1 stacked
+  above field 2. Useful for inspecting per-field content such as field-order
+  or comb artefacts.
+
 ## Tools
 
 ### FFmpeg Preset Config

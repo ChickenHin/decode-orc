@@ -189,3 +189,17 @@ history:
       frame-content-keyed stored observations across stages instead of
       re-analysing identical frames. Layout- and source-breaking for any plugin
       reading the removed fields or these result structs.
+  - abi: 12
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/node_type.h
+    summary: >-
+      `NodeTypeInfo` drops the free-text `menu_category` field and the unused
+      `SinkCategory` enum/`sink_category` field. The Add Stage menu category is
+      no longer plugin-declared: it is derived from the stage's `NodeType` via
+      the new `StageCategory` enum and `stage_category_for()` helper (SOURCE →
+      Source, TRANSFORM/MERGER/COMPLEX → Transform, ANALYSIS_SINK → Analysis,
+      SINK → Sink), so a plugin can never place a stage under an invented
+      category. Layout- and source-breaking: the `NodeTypeInfo` constructor
+      loses its trailing `SinkCategory` and `menu_category` parameters.

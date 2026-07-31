@@ -134,15 +134,25 @@ TEST(EFMAudioDecodeStageTest, Descriptors_DefaultsRoundTripThroughSetGet) {
   EXPECT_FALSE(std::get<bool>(params.at("report")));
   EXPECT_TRUE(std::get<std::string>(params.at("report_path")).empty());
 
+  // offset_ms is a DOUBLE sync slip defaulting to 0 (issue #231).
+  const auto* offset = find_descriptor(descriptors, "offset_ms");
+  ASSERT_NE(offset, nullptr);
+  EXPECT_EQ(offset->type, orc::ParameterType::DOUBLE);
+  ASSERT_TRUE(offset->constraints.default_value.has_value());
+  EXPECT_EQ(std::get<double>(*offset->constraints.default_value), 0.0);
+  EXPECT_EQ(std::get<double>(params.at("offset_ms")), 0.0);
+
   // Round-trip non-default values.
   EXPECT_TRUE(
       stage.set_parameters({{"no_timecodes", true},
                             {"no_audio_concealment", true},
+                            {"offset_ms", 12.5},
                             {"report", true},
                             {"report_path", std::string("/tmp/decode.txt")}}));
   params = stage.get_parameters();
   EXPECT_TRUE(std::get<bool>(params.at("no_timecodes")));
   EXPECT_TRUE(std::get<bool>(params.at("no_audio_concealment")));
+  EXPECT_EQ(std::get<double>(params.at("offset_ms")), 12.5);
   EXPECT_TRUE(std::get<bool>(params.at("report")));
   EXPECT_EQ(std::get<std::string>(params.at("report_path")), "/tmp/decode.txt");
 }
@@ -231,7 +241,7 @@ TEST(EFMAudioDecodeStageTest, SampleAccess_DecodesResamplesAndCachesOnce_Pal) {
   stage.set_deps_override(deps);
 
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  constexpr size_t kFrames = 2;
+  static constexpr size_t kFrames = 2;
   configure_video(*vfr, orc::VideoSystem::PAL, kFrames);
   auto output = make_output(stage, vfr, 1);
 
@@ -279,7 +289,7 @@ TEST(EFMAudioDecodeStageTest, Prime_RunsDecodeOnceAndForwardsProgress) {
   stage.set_deps_override(deps);
 
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  constexpr size_t kFrames = 2;
+  static constexpr size_t kFrames = 2;
   configure_video(*vfr, orc::VideoSystem::PAL, kFrames);
   auto output = make_output(stage, vfr, 0);
 
@@ -336,7 +346,7 @@ TEST(EFMAudioDecodeStageTest, Prime_ForwardsThroughInterveningWrapper) {
   stage.set_deps_override(deps);
 
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  constexpr size_t kFrames = 2;
+  static constexpr size_t kFrames = 2;
   configure_video(*vfr, orc::VideoSystem::PAL, kFrames);
   auto output = make_output(stage, vfr, 0);
 
@@ -463,6 +473,7 @@ TEST(EFMAudioDecodeStageTest, Parameters_ArePassedToDecode) {
       stage.execute({vfr},
                     {{"no_timecodes", true},
                      {"no_audio_concealment", true},
+                     {"offset_ms", -7.25},
                      {"report", true},
                      {"report_path", std::string("/tmp/decode.txt")}},
                     ctx);
@@ -476,6 +487,7 @@ TEST(EFMAudioDecodeStageTest, Parameters_ArePassedToDecode) {
                    const orc::IEFMAudioDecodeDeps::ProgressFn&) {
         EXPECT_TRUE(options.no_timecodes);
         EXPECT_TRUE(options.no_audio_concealment);
+        EXPECT_EQ(options.offset_ms, -7.25);
         EXPECT_EQ(options.report_path, "/tmp/decode.txt");
         // Failing the decode keeps the test focused on option forwarding.
         return orc::EFMAudioDecodeResult{false, "stop here", 0};

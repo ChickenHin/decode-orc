@@ -97,6 +97,7 @@ void ObservationScheduler::stop() {
   // fired here: no workload snapshot is delivered after shutdown.
   workload_total_frames_ = 0;
   workload_observed_frames_ = 0;
+  workload_computed_frames_ = 0;
 }
 
 bool ObservationScheduler::is_running() const {
@@ -333,6 +334,7 @@ ObservationWorkload ObservationScheduler::build_workload_locked() const {
   w.frames_total = workload_total_frames_;
   w.frames_observed =
       std::min(workload_observed_frames_, workload_total_frames_);
+  w.frames_computed = workload_computed_frames_;
   w.active = workload_total_frames_ > 0;
   if (workload_total_frames_ > 0) {
     // Rounded percentage, clamped to 100 (observed never exceeds total).
@@ -370,11 +372,13 @@ void ObservationScheduler::emit_workload() {
     // observed frame across the whole pool; without the gate a fast sweep
     // (thousands of frames/second) floods the GUI event queue with queued
     // status updates and starves painting. The forwarded view payload is
-    // exactly {active, percent, outstanding_nodes}, so gating on those fields
-    // is lossless for every consumer.
+    // exactly {active, percent, outstanding_nodes, computed-anything}, so
+    // gating on those fields is lossless for every consumer.
     if (workload_emitted_once_ && snapshot.active == last_workload_.active &&
         snapshot.percent_complete == last_workload_.percent_complete &&
-        snapshot.outstanding_nodes == last_workload_.outstanding_nodes) {
+        snapshot.outstanding_nodes == last_workload_.outstanding_nodes &&
+        (snapshot.frames_computed > 0) ==
+            (last_workload_.frames_computed > 0)) {
       return;
     }
     last_workload_ = snapshot;
@@ -412,6 +416,7 @@ void ObservationScheduler::reset_workload_if_drained() {
     // last delivery so emit_workload()'s change gate stays consistent.
     workload_total_frames_ = 0;
     workload_observed_frames_ = 0;
+    workload_computed_frames_ = 0;
     last_workload_ = ObservationWorkload{};
     workload_emitted_once_ = true;
     cb = workload_cb_;
@@ -488,9 +493,10 @@ void ObservationScheduler::process_item(Worker* worker,
         cancelled = true;
         break;
       }
+      bool computed = false;
       try {
-        worker->runner->observe_frame(item.node_id, item.fingerprint, frame,
-                                      item.observer_ids);
+        computed = worker->runner->observe_frame(item.node_id, item.fingerprint,
+                                                 frame, item.observer_ids);
       } catch (...) {
         // A stage/decode error fails the item but never the worker.
         failed = true;
@@ -500,6 +506,9 @@ void ObservationScheduler::process_item(Worker* worker,
       {
         std::lock_guard<std::mutex> lock(mutex_);
         ++workload_observed_frames_;
+        if (computed) {
+          ++workload_computed_frames_;
+        }
       }
       emit_workload();
       if (prog_cb) {
@@ -627,29 +636,28 @@ RendererObservationTaskRunner::RendererObservationTaskRunner(
 
 RendererObservationTaskRunner::~RendererObservationTaskRunner() = default;
 
-void RendererObservationTaskRunner::observe_frame(
+bool RendererObservationTaskRunner::observe_frame(
     NodeID node_id, const NodeFingerprint& fingerprint, FrameID frame_id,
     const std::vector<std::string>& /*observer_ids*/) {
   // Fast path: if every observer's records for both fields of this frame are
   // already stored, there is nothing to compute — skip the expensive render.
   // Observation is per-frame independent (a fresh observer runs each frame), so
   // a store hit is authoritative regardless of which chunk/worker produced it.
-  // This eliminates the redundant second whole-node pass (the policy emits a
-  // stateless and a stateful item for the same range) and makes re-sweeps and
-  // warm-started frames cheap.
+  // has_stored() is presence-only: probing a warm sweep must not drag every
+  // record through the sidecar into the memory LRU just to prove it exists.
   if (store_ && !fingerprint.value.empty() && !observer_keys_.empty()) {
     const FieldID field_top(frame_id * 2);
     const FieldID field_bottom(frame_id * 2 + 1);
     bool all_present = true;
     for (const auto& [id, version] : observer_keys_) {
-      if (!store_->has({fingerprint, field_top, id, version}) ||
-          !store_->has({fingerprint, field_bottom, id, version})) {
+      if (!store_->has_stored({fingerprint, field_top, id, version}) ||
+          !store_->has_stored({fingerprint, field_bottom, id, version})) {
         all_present = false;
         break;
       }
     }
     if (all_present) {
-      return;
+      return false;  // already covered — nothing computed
     }
   }
 
@@ -662,6 +670,7 @@ void RendererObservationTaskRunner::observe_frame(
     // Surface as a work-item failure so the scheduler reports it and moves on.
     throw DAGFrameRenderError(result.error_message);
   }
+  return true;
 }
 
 void RendererObservationTaskRunner::update_dag(
@@ -678,15 +687,13 @@ void RendererObservationTaskRunner::update_dag(
 DefaultObservationSchedulingPolicy::DefaultObservationSchedulingPolicy(
     std::vector<std::string> observer_ids,
     std::vector<std::string> stateful_ids, FrameID prefetch_radius)
-    : stateful_ids_(std::move(stateful_ids)),
+    : observer_ids_(std::move(observer_ids)),
       prefetch_radius_(prefetch_radius) {
-  const std::unordered_set<std::string> stateful(stateful_ids_.begin(),
-                                                 stateful_ids_.end());
-  for (auto& id : observer_ids) {
-    if (stateful.find(id) == stateful.end()) {
-      stateless_ids_.push_back(std::move(id));
-    }
-  }
+  // stateful_ids is accepted for the ObserverInfo contract but no longer
+  // splits the plan: the runner observes the full set per frame with a fresh
+  // observer instance, so processing order cannot affect stored records and a
+  // second ascending-order item over the same range would only duplicate work.
+  (void)stateful_ids;
 }
 
 NodeFingerprint DefaultObservationSchedulingPolicy::fingerprint_of(
@@ -701,29 +708,19 @@ NodeFingerprint DefaultObservationSchedulingPolicy::fingerprint_of(
 void DefaultObservationSchedulingPolicy::emit_node_items(
     NodeID node_id, const NodeFingerprint& fingerprint, FrameIDRange frames,
     ObservationPriority priority, std::vector<ObservationWorkItem>& out) const {
-  if (frames.empty()) {
+  if (frames.empty() || observer_ids_.empty()) {
     return;
   }
-  if (!stateless_ids_.empty()) {
-    ObservationWorkItem item;
-    item.node_id = node_id;
-    item.fingerprint = fingerprint;
-    item.frames = frames;
-    item.observer_ids = stateless_ids_;
-    item.stateful = false;
-    item.priority = priority;
-    out.push_back(std::move(item));
-  }
-  if (!stateful_ids_.empty()) {
-    ObservationWorkItem item;
-    item.node_id = node_id;
-    item.fingerprint = fingerprint;
-    item.frames = frames;
-    item.observer_ids = stateful_ids_;
-    item.stateful = true;
-    item.priority = priority;
-    out.push_back(std::move(item));
-  }
+  // One item, full observer set, chunkable (stateful = false): see the class
+  // comment for why a separate ascending-order stateful item is not emitted.
+  ObservationWorkItem item;
+  item.node_id = node_id;
+  item.fingerprint = fingerprint;
+  item.frames = frames;
+  item.observer_ids = observer_ids_;
+  item.stateful = false;
+  item.priority = priority;
+  out.push_back(std::move(item));
 }
 
 std::vector<ObservationWorkItem> DefaultObservationSchedulingPolicy::plan_sweep(
@@ -753,8 +750,36 @@ DefaultObservationSchedulingPolicy::plan_prefetch(
   }
   const FrameIDRange window{first, last};
   for (const NodeID node : context.nodes_of_interest) {
-    emit_node_items(node, fingerprint_of(node, context), window,
-                    ObservationPriority::kPrefetch, out);
+    const NodeFingerprint fingerprint = fingerprint_of(node, context);
+    if (!context.frame_observed) {
+      emit_node_items(node, fingerprint, window, ObservationPriority::kPrefetch,
+                      out);
+      continue;
+    }
+    // Coverage-filtered prefetch: enqueue only the contiguous runs of frames
+    // that are not already fully stored, so revisiting an observed position
+    // enqueues nothing (and the GUI reports no phantom work). The window is
+    // small (2 * radius + 1 frames), so probing per frame is cheap.
+    bool in_run = false;
+    FrameID run_start = window.first;
+    for (FrameID frame = window.first;; ++frame) {
+      const bool needed = !context.frame_observed(node, frame);
+      if (needed && !in_run) {
+        in_run = true;
+        run_start = frame;
+      } else if (!needed && in_run) {
+        in_run = false;
+        emit_node_items(node, fingerprint, FrameIDRange{run_start, frame - 1},
+                        ObservationPriority::kPrefetch, out);
+      }
+      if (frame == window.last) {
+        break;  // guards against wrap-around when last == UINT64_MAX
+      }
+    }
+    if (in_run) {
+      emit_node_items(node, fingerprint, FrameIDRange{run_start, window.last},
+                      ObservationPriority::kPrefetch, out);
+    }
   }
   return out;
 }
@@ -781,9 +806,7 @@ ObservationWorkItem DefaultObservationSchedulingPolicy::plan_interactive(
   item.node_id = node_id;
   item.fingerprint = fingerprint_of(node_id, context);
   item.frames = FrameIDRange{frame_id, frame_id};
-  item.observer_ids = stateless_ids_;
-  item.observer_ids.insert(item.observer_ids.end(), stateful_ids_.begin(),
-                           stateful_ids_.end());
+  item.observer_ids = observer_ids_;
   item.stateful = false;  // single frame — ordering is irrelevant
   item.priority = ObservationPriority::kInteractive;
   return item;

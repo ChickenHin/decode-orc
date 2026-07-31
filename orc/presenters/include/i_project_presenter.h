@@ -89,17 +89,27 @@ class IProjectPresenter {
       const PluginRegistryEntryInfo& entry_info) const = 0;
   virtual PluginRegistryMutationResult addPluginFromUrl(
       const std::string& releases_url, bool trusted) const = 0;
-  virtual PluginRegistryMutationResult removePlugin(
-      const std::string& plugin_id) const = 0;
+  /// Resolve any selector a front end printed back to a registry entry. Every
+  /// caller passes the selector straight through; nobody matches identity
+  /// fields themselves.
+  virtual PluginSelectorResolution resolvePluginSelector(
+      const std::string& selector) const = 0;
+  virtual PluginRegistryMutationResult removePluginEntry(
+      const std::string& selector) const = 0;
   virtual PluginRegistryMutationResult setPluginEnabled(
-      const std::string& plugin_id, bool enabled) const = 0;
+      const std::string& selector, bool enabled) const = 0;
   virtual PluginRegistryMutationResult setPluginTrusted(
-      const std::string& plugin_id, bool trusted) const = 0;
+      const std::string& selector, bool trusted) const = 0;
 
   // === Curated plugin index discovery ===
   virtual PluginIndexInfo fetchPluginIndex() const = 0;
   virtual PluginRegistryMutationResult installPluginFromIndex(
       const std::string& plugin_id) const = 0;
+
+  // === Plugin update checks ===
+  virtual std::vector<PluginUpdateStatusInfo> checkPluginUpdates() const = 0;
+  virtual PluginRegistryMutationResult updatePluginToLatestRelease(
+      const std::string& selector) const = 0;
 
   // === Batch Operations ===
   virtual bool canTriggerNode(NodeID node_id, std::string* reason) const = 0;

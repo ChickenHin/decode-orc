@@ -15,6 +15,7 @@
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
+#include <plugin_ux_strings.h>
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -30,10 +32,13 @@
 #include "../core/include/curl_http_fetcher.h"
 #include "../core/include/plugin_index_client.h"
 #include "../core/include/plugin_remote_loader.h"
+#include "../core/include/plugin_update_checker.h"
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
 #include "../core/include/stage_plugin_registry.h"
 #include "../core/include/stage_registry.h"
+#include "plugin_load_state.h"
+#include "plugin_selector.h"
 
 namespace orc::presenters {
 
@@ -623,11 +628,15 @@ std::vector<StageInfo> ProjectPresenter::getAvailableStages(
   auto& registry = orc::StageRegistry::instance();
   auto stage_names = registry.get_registered_stages();
   const auto loaded_plugins = registry.get_loaded_plugins();
-  std::map<std::string, std::string> stage_to_plugin_id;
+  struct StagePluginOrigin {
+    std::string plugin_id;
+    bool is_core_plugin = false;
+  };
+  std::map<std::string, StagePluginOrigin> stage_to_plugin;
 
   for (const auto& plugin : loaded_plugins) {
     for (const auto& stage_name : plugin.registered_stage_names) {
-      stage_to_plugin_id[stage_name] = plugin.plugin_id;
+      stage_to_plugin[stage_name] = {plugin.plugin_id, plugin.is_core_plugin};
     }
   }
 
@@ -671,24 +680,21 @@ std::vector<StageInfo> ProjectPresenter::getAvailableStages(
       info.name = node_type_info.stage_name;
       info.display_name = node_type_info.display_name;
       info.description = node_type_info.description;
-      info.category = node_type_info.menu_category;
       if (info.display_name.empty()) {
         throw std::runtime_error("Stage '" + stage_name +
                                  "' is missing required display_name metadata");
-      }
-      if (info.category.empty()) {
-        throw std::runtime_error(
-            "Stage '" + stage_name +
-            "' is missing required menu_category metadata");
       }
       info.node_type = node_type_info.type;
       info.is_source = (node_type_info.type == orc::NodeType::SOURCE);
       info.is_sink = (node_type_info.type == orc::NodeType::SINK ||
                       node_type_info.type == orc::NodeType::ANALYSIS_SINK);
-      auto plugin_it = stage_to_plugin_id.find(stage_name);
-      if (plugin_it != stage_to_plugin_id.end()) {
-        info.is_runtime_plugin_stage = true;
-        info.owning_plugin_id = plugin_it->second;
+      auto plugin_it = stage_to_plugin.find(stage_name);
+      if (plugin_it != stage_to_plugin.end()) {
+        info.owning_plugin_id = plugin_it->second.plugin_id;
+        info.is_core_plugin = plugin_it->second.is_core_plugin;
+      } else {
+        // Stages registered directly by the host (not via a plugin) are core.
+        info.is_core_plugin = true;
       }
 
       result.push_back(info);
@@ -799,10 +805,32 @@ PluginRegistryInfo ProjectPresenter::readPluginRegistry() {
     info.path_exists = !entry.path.empty() &&
                        std::filesystem::exists(entry.path, error_code) &&
                        !error_code;
+
+    // Identity, provenance and load state are derived here, once, so that
+    // neither front end re-derives them and the two can never disagree.
+    info.selector = makePluginSelector(info, result.entries.size());
+    info.source_label =
+        info.is_core_plugin
+            ? std::string(plugin_ux::kSourceCore)
+            : (!info.release_asset_url.empty()
+                   ? info.release_asset_url
+                   : (info.source_repo_url.empty() ? info.path
+                                                   : info.source_repo_url));
+    info.load_state = computePluginLoadState(info, &info.load_state_detail);
+
     result.entries.push_back(std::move(info));
   }
 
   return result;
+}
+
+PluginSelectorResolution ProjectPresenter::resolvePluginRegistrySelector(
+    const std::string& selector) {
+  // The loaded-plugins overload, so that a runtime id resolves here exactly as
+  // it does for the mutation paths — `remove --dry-run` must never disagree
+  // with `remove` about what a selector means.
+  return orc::presenters::resolvePluginSelector(readPluginRegistry().entries,
+                                                getLoadedPlugins(), selector);
 }
 
 PluginRegistryMutationResult ProjectPresenter::addPluginToRegistry(
@@ -815,7 +843,8 @@ PluginRegistryMutationResult ProjectPresenter::addPluginToRegistry(
   entry_info.plugin_version = plugin_version;
   entry_info.license_spdx = license_spdx;
   entry_info.is_core_plugin = is_core_plugin;
-  entry_info.trust_state = trusted ? "trusted" : "untrusted";
+  entry_info.trust_state =
+      trusted ? kPluginTrustStateTrusted : kPluginTrustStateUntrusted;
   entry_info.enabled = true;
   entry_info.artifact_source = "local_path";
   return addPluginRegistryEntry(entry_info);
@@ -940,7 +969,25 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
           releases_url, target_platform, &warnings);
 
   if (!resolved.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
     result.error_message = resolved.error_message;
+    return result;
+  }
+  // A manifest-declared mismatch is authoritative: the load-time gate is
+  // guaranteed to reject the binary, so recording it would only leave a
+  // broken registry entry.
+  if (resolved.abi_mismatch || resolved.toolchain_mismatch) {
+    result.error_message =
+        resolved.abi_mismatch
+            ? ("This release is built for Orc ABI " +
+               std::to_string(resolved.asset_abi) +
+               ", but this host requires ABI " +
+               std::to_string(kStagePluginHostAbiVersion) +
+               "; it cannot load here")
+            : ("This release is built with toolchain '" +
+               resolved.asset_toolchain +
+               "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
+               "'; it cannot load here");
     return result;
   }
 
@@ -951,12 +998,15 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
   entry_info.release_asset_url = resolved.release_asset_url;
   entry_info.release_asset_name = resolved.release_asset_name;
   entry_info.target_platform = target_platform;
+  entry_info.sha256 = resolved.sha256;
+  entry_info.required_host_abi = resolved.asset_abi;
   entry_info.enabled = true;
   // Adding a URL and trusting the binary it points at are distinct decisions:
   // the entry is recorded untrusted unless the caller has obtained explicit
   // trust confirmation from the user. The trust gate blocks download and load
   // of untrusted entries until they are trusted.
-  entry_info.trust_state = trusted ? "trusted" : "untrusted";
+  entry_info.trust_state =
+      trusted ? kPluginTrustStateTrusted : kPluginTrustStateUntrusted;
 
   auto add_result = addPluginRegistryEntry(entry_info);
   if (!add_result.success) {
@@ -982,28 +1032,6 @@ std::string host_platform_token() {
 #else
   return "linux";
 #endif
-}
-
-// Last path component of a URL, used as the release asset filename.
-std::string asset_name_from_url(const std::string& url) {
-  const auto slash = url.find_last_of('/');
-  std::string name = slash == std::string::npos ? url : url.substr(slash + 1);
-  const auto query = name.find_first_of("?#");
-  if (query != std::string::npos) {
-    name = name.substr(0, query);
-  }
-  return name;
-}
-
-PluginIndexArtifactInfo to_artifact_info(const orc::PluginIndexArtifact& a) {
-  PluginIndexArtifactInfo info;
-  info.platform = a.platform;
-  info.host_abi = a.host_abi;
-  info.url = a.url;
-  info.sha256 = a.sha256;
-  info.plugin_version = a.plugin_version;
-  info.min_host_app_version = a.min_host_app_version;
-  return info;
 }
 
 // Build a PluginIndexClient wired to the on-disk last-good cache.
@@ -1066,7 +1094,11 @@ PluginIndexInfo ProjectPresenter::readPluginIndex() {
     }
   }
 
+  // The index no longer pins versions: resolve each entry's latest release
+  // from its source repository (one API call per distinct repository).
   const std::string platform = host_platform_token();
+  std::map<std::string, orc::PluginRemoteLoader::ResolveReleaseAssetResult>
+      resolved_by_repo;
   for (const auto& entry : refreshed.index.entries) {
     PluginIndexEntryInfo info;
     info.id = entry.id;
@@ -1076,15 +1108,45 @@ PluginIndexInfo ProjectPresenter::readPluginIndex() {
     info.license_spdx = entry.license_spdx;
     info.source_repo_url = entry.source_repo_url;
     info.tags = entry.tags;
-    for (const auto& artifact : entry.artifacts) {
-      info.artifacts.push_back(to_artifact_info(artifact));
+
+    if (entry.source_repo_url.empty()) {
+      info.compatibility_message =
+          "No source repository recorded for this plugin";
+    } else {
+      auto it = resolved_by_repo.find(entry.source_repo_url);
+      if (it == resolved_by_repo.end()) {
+        it = resolved_by_repo
+                 .emplace(entry.source_repo_url,
+                          orc::PluginRemoteLoader::
+                              resolve_release_asset_from_releases_url(
+                                  entry.source_repo_url, platform, nullptr))
+                 .first;
+      }
+      const auto& resolved = it->second;
+      info.latest_tag = resolved.release_tag;
+      info.version =
+          orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
+      // A declared ABI/toolchain mismatch resolves (so the version can be
+      // shown) but the load-time gate would reject it, so it is not
+      // installable from here.
+      info.has_compatible_build = resolved.success && !resolved.abi_mismatch &&
+                                  !resolved.toolchain_mismatch;
+      info.release_unreachable = resolved.unreachable;
+      if (!resolved.success) {
+        info.compatibility_message = resolved.error_message;
+      } else if (resolved.abi_mismatch) {
+        info.compatibility_message = "Latest release is built for Orc ABI " +
+                                     std::to_string(resolved.asset_abi) +
+                                     "; this host requires ABI " +
+                                     std::to_string(kStagePluginHostAbiVersion);
+      } else if (resolved.toolchain_mismatch) {
+        info.compatibility_message =
+            "Latest release is built with toolchain '" +
+            resolved.asset_toolchain + "'; this host requires '" +
+            ORC_SDK_TOOLCHAIN_TAG "'";
+      }
     }
-    const auto resolution = orc::PluginIndexClient::resolve_artifact(
-        entry, platform, kStagePluginHostAbiVersion);
-    info.has_compatible_build = resolution.found;
-    if (!resolution.found) {
-      info.compatibility_message = resolution.message;
-    }
+
     info.already_installed = installed_ids.count(entry.id) > 0;
     result.entries.push_back(std::move(info));
   }
@@ -1103,6 +1165,7 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   const orc::CurlHttpFetcher fetcher;
   const auto refreshed = refresh_plugin_index(fetcher);
   if (!refreshed.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
     result.error_message = refreshed.error_message.empty()
                                ? "The plugin index could not be loaded"
                                : refreshed.error_message;
@@ -1112,50 +1175,163 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   const orc::PluginIndexEntry* entry =
       orc::PluginIndexClient::find(refreshed.index, plugin_id);
   if (entry == nullptr) {
+    result.failure = PluginMutationFailure::NotFound;
     result.error_message =
         "No plugin with id '" + plugin_id + "' is listed in the index";
     return result;
   }
 
-  const auto resolution = orc::PluginIndexClient::resolve_artifact(
-      *entry, host_platform_token(), kStagePluginHostAbiVersion);
-  if (!resolution.found) {
-    result.error_message = resolution.message;
+  if (entry->source_repo_url.empty()) {
+    result.error_message = "Plugin '" + plugin_id +
+                           "' has no source repository recorded in the index";
+    return result;
+  }
+
+  // Install the latest published release from the plugin's repository — the
+  // same resolution as adding by URL and as the registry update path.
+  std::vector<std::string> warnings;
+  const std::string target_platform = host_platform_token();
+  const auto resolved =
+      orc::PluginRemoteLoader::resolve_release_asset_from_releases_url(
+          entry->source_repo_url, target_platform, &warnings);
+  if (!resolved.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
+    result.error_message = resolved.error_message;
+    return result;
+  }
+  if (resolved.abi_mismatch) {
+    result.error_message =
+        "The latest release of '" + plugin_id + "' is built for Orc ABI " +
+        std::to_string(resolved.asset_abi) + ", but this host requires ABI " +
+        std::to_string(kStagePluginHostAbiVersion) + "; it cannot load here";
+    return result;
+  }
+  if (resolved.toolchain_mismatch) {
+    result.error_message = "The latest release of '" + plugin_id +
+                           "' is built with toolchain '" +
+                           resolved.asset_toolchain +
+                           "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
+                           "'; it cannot load here";
     return result;
   }
 
   PluginRegistryEntryInfo entry_info;
   entry_info.plugin_id = entry->id;
-  entry_info.plugin_version = resolution.artifact.plugin_version;
+  entry_info.plugin_version =
+      orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
   entry_info.artifact_source = "github_release_asset";
-  entry_info.source_repo_url = entry->source_repo_url;
-  entry_info.release_asset_url = resolution.artifact.url;
-  entry_info.release_asset_name = asset_name_from_url(resolution.artifact.url);
-  entry_info.target_platform = host_platform_token();
+  entry_info.source_repo_url = resolved.source_repo_url;
+  entry_info.release_tag = resolved.release_tag;
+  entry_info.release_asset_url = resolved.release_asset_url;
+  entry_info.release_asset_name = resolved.release_asset_name;
+  entry_info.target_platform = target_platform;
   entry_info.license_spdx = entry->license_spdx;
-  entry_info.required_host_abi = resolution.artifact.host_abi;
-  entry_info.sha256 = resolution.artifact.sha256;
+  // The manifest digest (when declared) pins the download so the existing
+  // verify-and-quarantine path can check it; the declared ABI is recorded so
+  // the registry view can flag a mismatch after a host upgrade.
+  entry_info.sha256 = resolved.sha256;
+  entry_info.required_host_abi = resolved.asset_abi;
   entry_info.enabled = true;
   // Installing from the index records the entry but does not grant trust:
   // the user confirms trust explicitly before the binary is downloaded or
   // loaded, consistent with the URL-add and hand-edited-registry paths.
-  entry_info.trust_state = "untrusted";
+  entry_info.trust_state = kPluginTrustStateUntrusted;
 
-  return addPluginRegistryEntry(entry_info);
+  auto add_result = addPluginRegistryEntry(entry_info);
+  if (add_result.success && !warnings.empty()) {
+    add_result.error_message = warnings.front();
+  }
+  return add_result;
 }
 
-PluginRegistryMutationResult ProjectPresenter::removePluginFromRegistry(
-    const std::string& plugin_id) {
-  return removePluginRegistryEntry(plugin_id, std::string(), std::string());
+// Defined later in this file; used by the update path below.
+static std::vector<orc::StagePluginRegistryEntry>::iterator
+findRegistryEntryBySelector(std::vector<orc::StagePluginRegistryEntry>& entries,
+                            const std::string& selector, std::string* error);
+
+namespace {
+
+// Transport wrapper that memoises responses per URL so one update sweep
+// queries each distinct repository at most once.
+class MemoisingFetcher : public orc::IHttpFetcher {
+ public:
+  explicit MemoisingFetcher(const orc::IHttpFetcher& inner) : inner_(inner) {}
+
+  orc::HttpFetchResult fetch(const std::string& url) const override {
+    auto it = cache_.find(url);
+    if (it != cache_.end()) {
+      return it->second;
+    }
+    auto result = inner_.fetch(url);
+    cache_.emplace(url, result);
+    return result;
+  }
+
+ private:
+  const orc::IHttpFetcher& inner_;
+  mutable std::map<std::string, orc::HttpFetchResult> cache_;
+};
+
+PluginUpdateStatus to_update_status(orc::PluginUpdateChecker::Status status) {
+  switch (status) {
+    case orc::PluginUpdateChecker::Status::UpToDate:
+      return PluginUpdateStatus::UpToDate;
+    case orc::PluginUpdateChecker::Status::UpdateAvailable:
+      return PluginUpdateStatus::UpdateAvailable;
+    case orc::PluginUpdateChecker::Status::Unreachable:
+      return PluginUpdateStatus::Unreachable;
+    case orc::PluginUpdateChecker::Status::Unknown:
+      return PluginUpdateStatus::Unknown;
+    case orc::PluginUpdateChecker::Status::NotApplicable:
+      break;
+  }
+  return PluginUpdateStatus::NotApplicable;
 }
 
-PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
-    const std::string& plugin_id, const std::string& path,
-    const std::string& release_asset_url) {
+}  // namespace
+
+std::vector<PluginUpdateStatusInfo>
+ProjectPresenter::checkRegisteredPluginUpdates() {
+  std::vector<PluginUpdateStatusInfo> results;
+
+  const auto persisted_registry = orc::StagePluginRegistry::load_default();
+
+  const orc::CurlHttpFetcher transport;
+  const MemoisingFetcher fetcher(transport);
+  const orc::PluginUpdateChecker checker(fetcher);
+
+  for (const auto& entry : persisted_registry.entries) {
+    // Core plugins ship and update with the application itself.
+    if (entry.is_core_plugin || entry.plugin_id.empty()) {
+      continue;
+    }
+
+    PluginUpdateStatusInfo info;
+    info.plugin_id = entry.plugin_id;
+    info.installed_version =
+        !entry.plugin_version.empty()
+            ? entry.plugin_version
+            : orc::PluginUpdateChecker::normalize_version(entry.release_tag);
+
+    const auto checked =
+        checker.check(entry.source_repo_url, info.installed_version);
+    info.status = to_update_status(checked.status);
+    info.latest_tag = checked.latest_tag;
+    info.latest_version = checked.latest_version;
+    info.message = checked.message;
+    results.push_back(std::move(info));
+  }
+
+  return results;
+}
+
+PluginRegistryMutationResult
+ProjectPresenter::updateRegisteredPluginToLatestRelease(
+    const std::string& selector) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty() && path.empty() && release_asset_url.empty()) {
-    result.error_message = "No plugin identifier was provided for removal";
+  if (selector.empty()) {
+    result.error_message = "Plugin selector cannot be empty";
     return result;
   }
 
@@ -1163,24 +1339,169 @@ PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto matches_identity = [&](const orc::StagePluginRegistryEntry& e) {
-    if (!plugin_id.empty() && e.plugin_id == plugin_id) {
-      return true;
-    }
-    if (!path.empty() && e.path == path) {
-      return true;
-    }
-    if (!release_asset_url.empty() &&
-        e.release_asset_url == release_asset_url) {
-      return true;
-    }
-    return false;
-  };
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
+  if (it == entries.end()) {
+    result.failure = PluginMutationFailure::NotFound;
+    return result;
+  }
 
-  auto it = std::find_if(entries.begin(), entries.end(), matches_identity);
+  if (it->is_core_plugin) {
+    result.error_message = "Core plugins update with the application";
+    return result;
+  }
+
+  if (it->source_repo_url.empty()) {
+    result.error_message =
+        "Plugin '" + selector +
+        "' has no source repository recorded, so it cannot be updated";
+    return result;
+  }
+
+  std::vector<std::string> warnings;
+  const std::string target_platform =
+      it->target_platform.empty() ? host_platform_token() : it->target_platform;
+  const auto resolved =
+      orc::PluginRemoteLoader::resolve_release_asset_from_releases_url(
+          it->source_repo_url, target_platform, &warnings);
+  if (!resolved.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
+    result.error_message = resolved.error_message;
+    return result;
+  }
+  // A declared mismatch means the load-time gate is guaranteed to reject the
+  // new binary; updating would only trade a working plugin for a broken,
+  // trust-reset registry entry.
+  if (resolved.abi_mismatch || resolved.toolchain_mismatch) {
+    result.error_message =
+        resolved.abi_mismatch
+            ? ("The latest release of '" + selector +
+               "' is built for Orc ABI " + std::to_string(resolved.asset_abi) +
+               ", but this host requires ABI " +
+               std::to_string(kStagePluginHostAbiVersion) +
+               "; it cannot load here")
+            : ("The latest release of '" + selector +
+               "' is built with toolchain '" + resolved.asset_toolchain +
+               "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
+               "'; it cannot load here");
+    return result;
+  }
+
+  if (!resolved.release_tag.empty() &&
+      resolved.release_tag == it->release_tag &&
+      resolved.release_asset_url == it->release_asset_url) {
+    // Already pointing at the latest release; nothing to rewrite.
+    result.success = true;
+    return result;
+  }
+
+  it->artifact_source = "github_release_asset";
+  it->source_repo_url = resolved.source_repo_url;
+  it->release_tag = resolved.release_tag;
+  it->release_asset_url = resolved.release_asset_url;
+  it->release_asset_name = resolved.release_asset_name;
+  it->target_platform = target_platform;
+  it->plugin_version =
+      orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
+  // The previous sha256/ABI pinned the old artifact. A release manifest
+  // supplies fresh values for the new one; without a manifest they clear so
+  // the download is not quarantined against a stale digest.
+  it->sha256 = resolved.sha256;
+  it->required_host_abi = resolved.asset_abi;
+  // Drop any resolved cache path so the next startup downloads the new asset.
+  it->path.clear();
+  // A different binary means the previous trust decision no longer applies:
+  // the user must explicitly re-confirm trust before download or load.
+  it->trust_state = kPluginTrustStateUntrusted;
+
+  std::string error;
+  if (!orc::StagePluginRegistry::save(registry_path, entries, &error)) {
+    result.error_message = "Failed to save registry: " + error;
+    return result;
+  }
+
+  result.success = true;
+  if (!warnings.empty()) {
+    result.error_message = warnings.front();
+  }
+  return result;
+}
+
+// Project the persisted entries onto the identity fields the selector
+// resolver reads, preserving order so a resolved index maps straight back onto
+// the persisted vector.
+static std::vector<PluginRegistryEntryInfo> makeSelectorView(
+    const std::vector<orc::StagePluginRegistryEntry>& entries) {
+  std::vector<PluginRegistryEntryInfo> view;
+  view.reserve(entries.size());
+
+  for (const auto& entry : entries) {
+    PluginRegistryEntryInfo info;
+    info.plugin_id = entry.plugin_id;
+    info.path = entry.path;
+    info.local_dev_path = entry.local_dev_path;
+    info.release_asset_url = entry.release_asset_url;
+    info.selector = makePluginSelector(info, view.size());
+    view.push_back(std::move(info));
+  }
+
+  return view;
+}
+
+// Resolve a selector against the persisted registry. Every mutation goes
+// through the same loaded-plugins-aware overload as `resolvePluginRegistry-
+// Selector`, so the GUI, the CLI, and `remove --dry-run` address exactly the
+// same entry for the same string. On failure @p error carries the message to
+// report.
+static std::vector<orc::StagePluginRegistryEntry>::iterator
+findRegistryEntryBySelector(std::vector<orc::StagePluginRegistryEntry>& entries,
+                            const std::string& selector, std::string* error) {
+  const auto resolution =
+      resolvePluginSelector(makeSelectorView(entries),
+                            ProjectPresenter::getLoadedPlugins(), selector);
+
+  if (resolution.status == PluginSelectorStatus::Resolved) {
+    auto it =
+        entries.begin() + static_cast<std::ptrdiff_t>(resolution.entry_index);
+    if (resolution.resolved_via_runtime_id && it->plugin_id.empty()) {
+      // The selector was a loaded plugin's runtime id matched by path;
+      // backfill the id so later id-based lookups hit directly.
+      it->plugin_id = selector;
+    }
+    return it;
+  }
+
+  if (resolution.status == PluginSelectorStatus::Ambiguous) {
+    if (error != nullptr) {
+      *error = describeAmbiguousPluginSelector(selector, resolution.candidates);
+    }
+    return entries.end();
+  }
+
+  if (error != nullptr) {
+    *error = "No plugin matching '" + selector + "' found in registry";
+  }
+  return entries.end();
+}
+
+PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
+    const std::string& selector) {
+  PluginRegistryMutationResult result;
+
+  if (selector.empty()) {
+    result.error_message = "No plugin selector was provided for removal";
+    return result;
+  }
+
+  const auto persisted_registry = orc::StagePluginRegistry::load_default();
+  auto entries = persisted_registry.entries;
+  const std::string registry_path = persisted_registry.registry_path;
+
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
 
   if (it == entries.end()) {
-    result.error_message = "No matching plugin entry found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1196,46 +1517,12 @@ PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
   return result;
 }
 
-// Find a registry entry by plugin_id. If no direct match exists, fall back
-// to matching a loaded plugin's path against entries whose plugin_id is
-// still empty (happens when plugins are added via file before their ID is
-// known) and backfill the id.
-static std::vector<orc::StagePluginRegistryEntry>::iterator
-findRegistryEntryByPluginId(std::vector<orc::StagePluginRegistryEntry>& entries,
-                            const std::string& plugin_id) {
-  auto it = std::find_if(entries.begin(), entries.end(),
-                         [&plugin_id](const orc::StagePluginRegistryEntry& e) {
-                           return e.plugin_id == plugin_id;
-                         });
-
-  if (it == entries.end()) {
-    const auto& loaded_plugins =
-        orc::StageRegistry::instance().get_loaded_plugins();
-    auto loaded_it = std::find_if(
-        loaded_plugins.begin(), loaded_plugins.end(),
-        [&plugin_id](const auto& lp) { return lp.plugin_id == plugin_id; });
-
-    if (loaded_it != loaded_plugins.end()) {
-      it = std::find_if(entries.begin(), entries.end(),
-                        [&loaded_it](const orc::StagePluginRegistryEntry& e) {
-                          return !e.path.empty() && e.path == loaded_it->path;
-                        });
-
-      if (it != entries.end() && it->plugin_id.empty()) {
-        it->plugin_id = plugin_id;
-      }
-    }
-  }
-
-  return it;
-}
-
 PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryEnabled(
-    const std::string& plugin_id, bool enabled) {
+    const std::string& selector, bool enabled) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty()) {
-    result.error_message = "Plugin id cannot be empty";
+  if (selector.empty()) {
+    result.error_message = "Plugin selector cannot be empty";
     return result;
   }
 
@@ -1243,11 +1530,11 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryEnabled(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto it = findRegistryEntryByPluginId(entries, plugin_id);
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
 
   if (it == entries.end()) {
-    result.error_message =
-        "No plugin with id '" + plugin_id + "' found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1264,11 +1551,11 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryEnabled(
 }
 
 PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryTrusted(
-    const std::string& plugin_id, bool trusted) {
+    const std::string& selector, bool trusted) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty()) {
-    result.error_message = "Plugin id cannot be empty";
+  if (selector.empty()) {
+    result.error_message = "Plugin selector cannot be empty";
     return result;
   }
 
@@ -1276,11 +1563,11 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryTrusted(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto it = findRegistryEntryByPluginId(entries, plugin_id);
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
 
   if (it == entries.end()) {
-    result.error_message =
-        "No plugin with id '" + plugin_id + "' found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1291,7 +1578,8 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryTrusted(
     return result;
   }
 
-  it->trust_state = trusted ? "trusted" : "untrusted";
+  it->trust_state =
+      trusted ? kPluginTrustStateTrusted : kPluginTrustStateUntrusted;
 
   std::string error;
   if (!orc::StagePluginRegistry::save(registry_path, entries, &error)) {

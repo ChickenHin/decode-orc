@@ -40,17 +40,12 @@ std::vector<int32_t> AudioResampler::resample(
   if (input_stereo.empty()) return {};
   if (in_rate == out_rate) return input_stereo;
 
-  constexpr unsigned kChannels = 2;
+  // static: the drain lambda below reads kChannels without a default capture
+  // mode, which MSVC rejects for an automatic constexpr (C3493). A static has
+  // no capture question to answer.
+  static constexpr unsigned kChannels = 2;
   const size_t in_frames = input_stereo.size() / kChannels;
   if (in_frames == 0) return {};
-
-  // Estimate output frame count with a small safety margin.
-  const size_t out_estimate =
-      static_cast<size_t>(
-          std::lround(static_cast<double>(in_frames) * out_rate / in_rate)) +
-      static_cast<size_t>(kChannels) * 16;
-
-  std::vector<int32_t> output((out_estimate + 64) * kChannels, 0);
 
   // SoXR HQ quality, int32 interleaved I/O.
   // SOXR_INT32_I = signed 32-bit interleaved (all channels in one array).
@@ -69,28 +64,82 @@ std::vector<int32_t> AudioResampler::resample(
     return {};
   }
 
-  size_t idone = 0;
-  size_t odone = 0;
+  std::vector<int32_t> output;
+  // Estimate the output frame count with a small safety margin so the whole
+  // result lands in one allocation.
+  output.reserve((static_cast<size_t>(std::lround(
+                      static_cast<double>(in_frames) * out_rate / in_rate)) +
+                  64) *
+                 kChannels);
 
-  // Process input.
-  err = soxr_process(soxr, input_stereo.data(), in_frames, &idone,
-                     output.data(), out_estimate, &odone);
-  if (err) {
-    ORC_LOG_WARN("AudioResampler: soxr_process error: {}", err);
-    soxr_delete(soxr);
-    output.resize(odone * kChannels);
-    return output;
+  // The stream is fed to SoXR in fixed-size chunks rather than in a single
+  // whole-stream call. SoXR buffers everything handed to it in an internal
+  // FIFO that grows by exactly one block per realloc (soxr fifo.h:
+  // `allocation += n`, never doubling), so a one-shot call makes the resample
+  // quadratic on any allocator that cannot extend a large block in place. On
+  // glibc that is hidden by mremap, but the Windows heap copies every time,
+  // and an hour-long capture (~150 M frames) spent nearly an hour here
+  // shifting tens of terabytes (issue #230). Chunking bounds the FIFO to a
+  // few hundred KB and makes the cost linear on every platform; the output is
+  // byte-identical to the one-shot call.
+  constexpr size_t kChunkFrames = 65536;
+  // Per-chunk output capacity. A short capacity is not lossy — SoXR simply
+  // consumes less input and the loop comes back for the rest — but sizing it
+  // to the rate ratio plus slack keeps the common case to one pass per chunk.
+  const size_t chunk_capacity =
+      static_cast<size_t>(
+          std::ceil(static_cast<double>(kChunkFrames) * out_rate / in_rate)) +
+      256;
+
+  std::vector<int32_t> chunk(chunk_capacity * kChannels);
+  const auto drain = [&output, &chunk](size_t frames) {
+    output.insert(
+        output.end(), chunk.begin(),
+        chunk.begin() + static_cast<std::ptrdiff_t>(frames * kChannels));
+  };
+
+  size_t consumed = 0;
+  while (consumed < in_frames) {
+    const size_t want = std::min(kChunkFrames, in_frames - consumed);
+    size_t idone = 0;
+    size_t odone = 0;
+    err = soxr_process(soxr, input_stereo.data() + consumed * kChannels, want,
+                       &idone, chunk.data(), chunk_capacity, &odone);
+    if (err) {
+      ORC_LOG_WARN("AudioResampler: soxr_process error: {}", err);
+      soxr_delete(soxr);
+      drain(odone);
+      return output;
+    }
+    drain(odone);
+    // No input accepted and no output produced means SoXR cannot make
+    // progress; stop rather than spin. Output alone still counts as progress
+    // (the FIFO drained, so the next call can take input).
+    if (idone == 0 && odone == 0) {
+      ORC_LOG_WARN(
+          "AudioResampler: SoXR stalled after {} of {} input frames; the "
+          "remainder is dropped",
+          consumed, in_frames);
+      break;
+    }
+    consumed += idone;
   }
 
-  // Flush residual samples (nullptr input signals end-of-stream to SoXR).
-  const size_t headroom = (output.size() / kChannels) - odone;
-  size_t odone2 = 0;
-  soxr_process(soxr, nullptr, 0, nullptr, output.data() + odone * kChannels,
-               headroom, &odone2);
-  odone += odone2;
+  // Flush residual samples (nullptr input signals end-of-stream to SoXR),
+  // draining until it stops producing.
+  for (;;) {
+    size_t odone = 0;
+    err = soxr_process(soxr, nullptr, 0, nullptr, chunk.data(), chunk_capacity,
+                       &odone);
+    if (err) {
+      ORC_LOG_WARN("AudioResampler: soxr_process flush error: {}", err);
+      break;
+    }
+    if (odone == 0) break;
+    drain(odone);
+  }
 
   soxr_delete(soxr);
-  output.resize(odone * kChannels);
   return output;
 }
 

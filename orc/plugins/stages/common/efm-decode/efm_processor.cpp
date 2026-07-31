@@ -67,6 +67,14 @@ void EfmProcessor::setNoWavHeader(bool noWavHeader) {
   m_noWavHeader = noWavHeader;
 }
 
+void EfmProcessor::setAudioSyncOffset(bool audioSyncOffset) {
+  m_audioSyncOffset = audioSyncOffset;
+}
+
+void EfmProcessor::setAudioSyncSlipPairs(int64_t slipPairs) {
+  m_audioSyncSlipPairs = slipPairs;
+}
+
 void EfmProcessor::setOutputMetadata(bool outputMetadata) {
   m_outputMetadata = outputMetadata;
 }
@@ -91,6 +99,17 @@ bool EfmProcessor::beginStream(const std::string& outputFilename,
   m_processedTValues = 0;
   m_lastProgress = 0;
   m_lastError.clear();
+  m_headSkipCaptured = false;
+  m_headSkipPairs = 0;
+  m_audioSyncApplied = false;
+  m_appliedAudioSyncOffsetPairs = 0;
+
+  if (m_audioSyncOffset && m_zeroPad) {
+    ORC_LOG_WARN(
+        "EfmProcessor: zero-pad anchors the audio to disc absolute time "
+        "00:00:00, so the input-timeline (video) sync alignment is disabled "
+        "for this decode");
+  }
 
   // Apply decoder configuration
   m_f2SectionCorrection.setNoTimecodes(m_noTimecodes);
@@ -288,6 +307,13 @@ bool EfmProcessor::drainFrontEnd() {
           std::chrono::high_resolution_clock::now() - t0)
           .count();
 
+  // The input consumed ahead of the first output section is fully known the
+  // moment that section becomes ready; snapshot it on this (front-end) thread
+  // before the hand-off so the back end never races the live counters.
+  if (!m_headSkipCaptured && m_f2SectionCorrection.isReady()) {
+    captureHeadSkip();
+  }
+
   // Hand every completed F2 section to the back-end thread. push() blocks while
   // the queue is full (back-pressure) and returns false only if the back end
   // has aborted (error / cancel), in which case we stop feeding - the stored
@@ -298,6 +324,77 @@ bool EfmProcessor::drainFrontEnd() {
     }
   }
   return true;
+}
+
+// Sum the front-end head-loss counters into the number of 44.1 kHz stereo
+// pairs of input time that elapsed before the first output section: channel
+// bits discarded during EFM sync acquisition, F3 frames lost during section
+// sync acquisition, and whole sections dropped by the settle logic or skipped
+// as lead-in. Runs on the front-end thread; the section-queue mutex orders the
+// write before any back-end read.
+void EfmProcessor::captureHeadSkip() {
+  const uint64_t headBits = m_tValuesToChannel.headDiscardedBits();
+  const uint64_t headF3Frames = m_f3FrameToF2Section.headLostF3Frames();
+  const uint64_t headSections = m_f2SectionCorrection.preLeadinSections() +
+                                m_f2SectionCorrection.leadinSections();
+
+  const int64_t bitPairs = static_cast<int64_t>(
+      (headBits + efm::kChannelBitsPerStereoPair / 2) /
+      efm::kChannelBitsPerStereoPair);  // round to nearest whole pair
+  m_headSkipPairs =
+      bitPairs +
+      static_cast<int64_t>(headF3Frames) * efm::kSamplesPerChannelPerF1Frame +
+      static_cast<int64_t>(headSections) * efm::kStereoPairsPerSection;
+  m_headSkipCaptured = true;
+
+  ORC_LOG_DEBUG(
+      "EfmProcessor::captureHeadSkip(): head skip is {} stereo pairs ({} "
+      "channel bits + {} F3 frames + {} sections)",
+      m_headSkipPairs, headBits, headF3Frames, headSections);
+}
+
+// Decide the net head adjustment and hand it to the active audio writer.
+// Called at the top of every audio drain; does its work exactly once, before
+// the first audio section reaches a writer. Runs on the back-end thread: the
+// first audio section only exists after the first F2 section crossed the
+// queue, so m_headSkipPairs is already frozen and visible.
+void EfmProcessor::applyAudioSyncOffset() {
+  if (m_audioSyncApplied) return;
+  if (!m_audioMode) return;
+
+  // Zero-pad anchors the stream to disc absolute time instead; only the user
+  // slip remains meaningful in that mode.
+  const bool align = m_audioSyncOffset && !m_zeroPad;
+  if (!align && m_audioSyncSlipPairs == 0) {
+    m_audioSyncApplied = true;
+    return;
+  }
+  if (align && !m_headSkipCaptured) return;  // no section handed over yet
+
+  int64_t offsetPairs = m_audioSyncSlipPairs;
+  if (align) {
+    // The decoded stream starts with kDeinterleaveLatencySamples pairs of
+    // CIRC warm-up filler (dropped), preceded on the input timeline by
+    // m_headSkipPairs of consumed-but-undecoded input (restored as silence).
+    offsetPairs += m_headSkipPairs - efm::kDeinterleaveLatencySamples;
+  }
+
+  m_appliedAudioSyncOffsetPairs = offsetPairs;
+  m_audioSyncApplied = true;
+  if (offsetPairs == 0) return;
+
+  if (m_noWavHeader) {
+    m_writerRaw.setHeadOffsetPairs(offsetPairs);
+  } else {
+    m_writerWav.setHeadOffsetPairs(offsetPairs);
+  }
+  ORC_LOG_INFO(
+      "EfmProcessor: aligning decoded audio with the input timeline: {} "
+      "stereo pairs ({:.2f} ms) {} at the stream head",
+      offsetPairs >= 0 ? offsetPairs : -offsetPairs,
+      static_cast<double>(offsetPairs >= 0 ? offsetPairs : -offsetPairs) *
+          1000.0 / 44100.0,
+      offsetPairs >= 0 ? "of silence prepended" : "dropped");
 }
 
 void EfmProcessor::backEndLoop() {
@@ -428,6 +525,7 @@ void EfmProcessor::drainBackEnd(bool& zeroPadApplied) {
 }
 
 void EfmProcessor::drainAudioPipeline() {
+  applyAudioSyncOffset();
   if (m_noAudioConcealment) {
     // Bypass correction — write decoded audio directly
     while (m_data24ToAudio.isReady()) {
@@ -1134,6 +1232,19 @@ void EfmProcessor::showDecodeBoundaries() const {
       "{:.1f} ms)",
       efm::kDeinterleaveLatencyF1Frames, efm::kDeinterleaveLatencySamples,
       static_cast<double>(efm::kDeinterleaveLatencySamples) * 1000.0 / 44100.0);
+
+  if (m_audioSyncApplied) {
+    const uint64_t offsetMagnitude = static_cast<uint64_t>(
+        m_appliedAudioSyncOffsetPairs >= 0 ? m_appliedAudioSyncOffsetPairs
+                                           : -m_appliedAudioSyncOffsetPairs);
+    ORC_LOG_INFO(
+        "    Input-timeline align  : {} stereo pair(s) ({:.2f} ms) {} at the "
+        "stream head",
+        commas(offsetMagnitude),
+        static_cast<double>(offsetMagnitude) * 1000.0 / 44100.0,
+        m_appliedAudioSyncOffsetPairs >= 0 ? "of silence prepended"
+                                           : "dropped");
+  }
 
   if (totalF1Frames > warmupFrames + drainFrames) {
     ORC_LOG_INFO("    Recoverable window    : F1 frames {} - {} of {}",

@@ -1,0 +1,14 @@
+# Fixture: schema-2 entry carrying a pinned artifacts list (must fail — the
+# index curates plugins, not versions; releases resolve at runtime).
+registry_schema: 2
+plugins:
+  - id: com.example.deinterlace
+    display_name: Example Deinterlacer
+    license_spdx: GPL-3.0-or-later
+    source_repo_url: https://github.com/example/orc-plugin_deinterlace
+    artifacts:
+      - platform: linux
+        host_abi: 8
+        url: https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi8.so
+        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        plugin_version: 1.0.0

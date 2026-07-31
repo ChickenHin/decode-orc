@@ -4,6 +4,10 @@
 
 add_library(orc-presenters STATIC
     src/project_presenter.cpp
+    src/plugin_details.cpp
+    src/plugin_load_state.cpp
+    src/plugin_selector.cpp
+    src/stage_details.cpp
     src/filtergraph_parser.cpp
     src/filtergraph_import.cpp
     src/render_presenter.cpp

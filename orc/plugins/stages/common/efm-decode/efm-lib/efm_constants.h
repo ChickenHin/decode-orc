@@ -49,6 +49,15 @@ constexpr int kSamplesPerChannelPerF1Frame = 6;
 constexpr int kDeinterleaveLatencySamples =
     kDeinterleaveLatencyF1Frames * kSamplesPerChannelPerF1Frame;  // 666
 
+// One frame spans 588 channel bits and carries 6 stereo pairs, so one stereo
+// pair of audio corresponds to 98 channel bits of EFM; a 98-frame section
+// carries 588 stereo pairs. Used to convert head-loss counters into audio
+// pairs for input-timeline (video) sync alignment.
+constexpr int kChannelBitsPerStereoPair =
+    kEfmFrameChannelBits / kSamplesPerChannelPerF1Frame;  // 98
+constexpr int kStereoPairsPerSection =
+    kFramesPerSection * kSamplesPerChannelPerF1Frame;  // 588
+
 // A raw (unscrambled) CD sector is 2352 bytes. (ECMA-130 §14 "Sector".)
 constexpr int kRawSectorSize = 2352;
 

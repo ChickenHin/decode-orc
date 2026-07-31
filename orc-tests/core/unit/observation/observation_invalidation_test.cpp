@@ -53,8 +53,7 @@ class MockStage : public DAGStage {
         type_, name_, name_, "", static_cast<uint32_t>(input_count_),
         static_cast<uint32_t>(input_count_),
         static_cast<uint32_t>(output_count_),
-        static_cast<uint32_t>(output_count_), VideoFormatCompatibility::ALL,
-        SinkCategory::CORE, "Test");
+        static_cast<uint32_t>(output_count_), VideoFormatCompatibility::ALL);
   }
 
   std::vector<ArtifactPtr> execute(

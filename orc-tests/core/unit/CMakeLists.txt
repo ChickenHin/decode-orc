@@ -189,6 +189,10 @@ orc_add_core_unit_tests(
 
         presenters/project_presenter_validation_test.cpp
         presenters/filtergraph_import_test.cpp
+        presenters/plugin_details_test.cpp
+        presenters/plugin_load_state_test.cpp
+        presenters/plugin_selector_test.cpp
+        presenters/stage_details_test.cpp
 )
 target_link_libraries(orc-core-unit-tests-presenters orc-presenters)
 
@@ -302,6 +306,20 @@ gtest_discover_tests(orc-core-unit-tests-efm-section-framing
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# Audio/video sync head alignment (issue #231): the writer-level pad/trim
+# primitive and the decoder head-loss counters (t-value bits and F3 frames
+# consumed before first output) that the alignment offset is computed from.
+# Links the shared EFM decode library directly, as with the de-emphasis DSP.
+add_executable(orc-core-unit-tests-efm-sync-head-offset
+        stages/efm_common/audio_sync_head_offset_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-sync-head-offset
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-sync-head-offset
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # End-to-end boundary attribution: a stream that is clean by construction is run
 # through the real F2 -> F1 -> Data24 -> Audio -> concealment chain and must
 # report no input defects at all. Guards the regression where drain codewords
@@ -351,7 +369,9 @@ orc_add_core_unit_tests(
         metadata/stage_registry_trust_test.cpp
         metadata/plugin_remote_loader_test.cpp
         metadata/plugin_artifact_name_test.cpp
+        metadata/plugin_release_manifest_test.cpp
         metadata/plugin_index_client_test.cpp
+        metadata/plugin_update_checker_test.cpp
         metadata/sha256_hash_test.cpp
         metadata/skeleton_plugin_registry_test.cpp
         metadata/dropout_util_test.cpp
@@ -410,6 +430,7 @@ orc_add_core_unit_tests(
 
                 preview_types/preview_types_test.cpp
                 preview_types/preview_carrier_conversion_test.cpp
+                preview_types/preview_frame_layout_test.cpp
                 preview_types/preview_helpers_test.cpp
                 preview_types/preview_view_registry_test.cpp
         )

@@ -20,7 +20,7 @@
  * parameters)
  *   - TriggerableStage mixin (optional; sink stages that can be triggered to
  * run)
- *   - NodeTypeInfo, NodeType, VideoFormatCompatibility, SinkCategory
+ *   - NodeTypeInfo, NodeType, VideoFormatCompatibility, StageCategory
  *   - ParameterValue, ParameterType, ParameterConstraints, ParameterDescriptor
  *   - VideoSystem, SourceType (format/source enums used in parameter
  * descriptors)
@@ -46,7 +46,7 @@
 #include <orc/stage/common_types.h>
 
 // Node metadata types: NodeTypeInfo, NodeType, VideoFormatCompatibility,
-// SinkCategory.
+// StageCategory.
 #include <orc/stage/node_type.h>
 
 // ParameterizedStage mixin interface: get_parameter_descriptors(),

@@ -423,6 +423,26 @@ std::optional<ObservationRecord> SqliteObservationPersistence::load_one(
   return record;
 }
 
+bool SqliteObservationPersistence::exists(const ObservationRecordKey& key) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_) return false;
+
+  // Presence probe on the primary-key prefix; LIMIT 1 stops at the first
+  // value row so a large record costs no more than an empty one.
+  Statement stmt(db_,
+                 "SELECT 1 FROM observation_record"
+                 " WHERE node_fingerprint = ? AND field_id = ?"
+                 " AND observer_id = ? AND observer_version = ? LIMIT 1");
+  if (!stmt) return false;
+
+  bind_text(stmt.get(), 1, key.fingerprint.value);
+  sqlite3_bind_int64(stmt.get(), 2,
+                     static_cast<sqlite3_int64>(key.field_id.value()));
+  bind_text(stmt.get(), 3, key.observer_id);
+  bind_text(stmt.get(), 4, key.observer_version);
+  return sqlite3_step(stmt.get()) == SQLITE_ROW;
+}
+
 std::string SqliteObservationPersistence::get_meta(const std::string& key) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!db_) return {};

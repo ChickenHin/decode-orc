@@ -116,6 +116,57 @@ TEST(AudioResamplerTest, Resample_PreservesDCLevel) {
               512.0);
 }
 
+TEST(AudioResamplerTest, Resample_SpansManyInternalChunksContinuously) {
+  // The resampler drives SoXR in fixed 65536-frame chunks (issue #230: a
+  // single whole-stream call is quadratic on allocators that cannot extend a
+  // large block in place). A stream several chunks long must come back as one
+  // continuous signal — no dropped, duplicated or discontinuous material at
+  // the internal chunk seams.
+  const size_t in_pairs = 65536 * 4 + 12345;  // deliberately not chunk-aligned
+  const int32_t level = 1000 << 8;
+  const auto input = make_dc_pairs(in_pairs, level);
+  const auto output = AudioResampler::resample(input, 44100.0, 48000.0);
+
+  ASSERT_EQ(output.size() % 2, 0u);
+  const auto out_pairs = static_cast<int64_t>(output.size() / 2);
+  const auto expected = static_cast<int64_t>(
+      std::llround(static_cast<double>(in_pairs) * 48000.0 / 44100.0));
+  EXPECT_NEAR(static_cast<double>(out_pairs), static_cast<double>(expected),
+              2.0);
+
+  // A chunk seam would show up as a step away from DC. Check across the whole
+  // stream, skipping the filter warm-up and drain at the very ends.
+  const size_t skip = 2000;
+  ASSERT_GT(output.size(), skip * 2 * 2);
+  for (size_t i = skip * 2; i < output.size() - skip * 2; ++i) {
+    ASSERT_NEAR(static_cast<double>(output[i]), static_cast<double>(level),
+                512.0)
+        << "discontinuity at sample " << i;
+  }
+}
+
+TEST(AudioResamplerTest, Resample_RampSurvivesChunkSeamsInOrder) {
+  // A monotonic ramp exposes reordering or loss at the chunk seams that a DC
+  // signal cannot: resampled output must stay monotonically non-decreasing.
+  const size_t in_pairs = 65536 * 3;
+  std::vector<int32_t> input;
+  input.reserve(in_pairs * 2);
+  for (size_t i = 0; i < in_pairs; ++i) {
+    const auto v = static_cast<int32_t>(i * 32);
+    input.push_back(v);
+    input.push_back(v);
+  }
+  const auto output = AudioResampler::resample(input, 44100.0, 48000.0);
+  ASSERT_FALSE(output.empty());
+
+  const size_t skip = 2000;
+  ASSERT_GT(output.size() / 2, skip * 2);
+  for (size_t p = skip + 1; p < output.size() / 2 - skip; ++p) {
+    ASSERT_GE(output[p * 2], output[(p - 1) * 2])
+        << "ramp went backwards at pair " << p;
+  }
+}
+
 // ===========================================================================
 // resample_to_synchronous
 // ===========================================================================

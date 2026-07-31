@@ -154,7 +154,7 @@ class MainWindow : public QMainWindow {
       uint64_t request_id, bool available, qulonglong field_id_value,
       orc::presenters::VideoParameterObservationView video_params,
       orc::presenters::NtscFieldObservationsView ntsc);
-  void onObservationProgress(bool active, int percent_complete,
+  void onObservationProgress(bool active, int percent_complete, bool computing,
                              qulonglong outstanding_nodes);
   void onObservationsInvalidated(QVector<int> changed_node_ids);
   void onAvailableOutputsReady(uint64_t request_id,
