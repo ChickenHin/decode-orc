@@ -128,4 +128,5 @@ orc_add_gui_unit_tests(
         preview_dialog_playback_test.cpp
         theme_controller_test.cpp
         plugin_browse_dialog_test.cpp
+        plugin_manager_dialog_test.cpp
 )

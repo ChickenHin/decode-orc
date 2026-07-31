@@ -21,11 +21,15 @@ The CLI uses the same core processing library as the GUI (`orc-gui`), ensuring t
 
 ```bash
 orc-cli <project-file> [options]
+orc-cli --source/--filters/--sink <...>
+orc-cli plugins <subcommand> [options]
+orc-cli stages <subcommand> [options]
 ```
 
 ### Required Arguments
 
-- `<project-file>`: Path to an Orc project file (`.orcprj`)
+- `<project-file>`: Path to an Orc project file (`.orcprj`) — not needed by the
+  `plugins` and `stages` subcommands, which do not run a pipeline
 
 ### Options
 
@@ -212,9 +216,8 @@ Every stage's parameter names, types, and which ones are required come from
 the same descriptors the GUI uses (`getStageParameters()`), so a mismatch
 between a filtergraph and what a stage actually accepts is caught before
 anything runs — see the "Missing required parameter" and "not recognised"
-errors below. There is currently no CLI subcommand to list available stages
-directly; check the GUI's stage palette, or a stage's own documentation, for
-its exact name and parameters.
+errors below. Ask `orc-cli stages` for the exact name and parameters of any
+stage this build can run; see [Stage introspection](#stage-introspection).
 
 ## Processing Workflow
 
@@ -241,10 +244,258 @@ During processing, you'll see progress updates like:
 [2026-02-08 10:25:34.890] [cli] [info] [Progress: 100%] Decode complete
 ```
 
+## Plugin management
+
+`orc-cli plugins` edits the same registry file the GUI's **Plugin Manager**
+edits,
+and uses the same words for the same things. Changes take effect at the next
+application launch, never mid-run.
+
+### Selectors
+
+Every identifier `plugins list` prints is accepted verbatim by the commands
+that take one, so a line of listing output is usable as input without editing.
+A **selector** is the entry's plugin id when it has one, and otherwise a
+`path:<path>` or `url:<asset-url>` handle; bare paths and asset URLs are
+accepted too. A selector that matches more than one entry is an error listing
+the candidates, never a guess.
+
+### Installed plugins
+
+```bash
+orc-cli plugins list                    # plugins you installed
+orc-cli plugins list --core             # ...and the ones that ship with Orc
+orc-cli plugins list --check-updates    # ...with each entry's update status
+```
+
+**Core plugins are hidden by default**, matching the Plugin Manager's unticked
+**Show core plugins**; `--core` (or `--all`) includes them. Each entry reports
+its `selector`, `source` and a single `status` — `Enabled` when it will load at
+the next launch, otherwise the one reason it will not (`Disabled`,
+`Not trusted yet`, `Needs a rebuild` — with the Orc ABI number it needs a
+rebuild for — `Binary missing`, `Core plugin`).
+
+`plugins list` never goes to the network unless `--check-updates` is passed.
+
+### Trust
+
+Plugins execute code locally, so **adding, installing, updating and enabling a
+plugin ask for confirmation before the binary is allowed to run** — the same
+warning the GUI shows. Pass `--yes` to confirm without prompting. When stdin is
+not a terminal and `--yes` is absent, the command fails immediately naming
+`--yes` rather than waiting for an answer that cannot arrive.
+
+```bash
+orc-cli plugins add /path/to/plugin.so --yes
+orc-cli plugins add --url https://github.com/owner/repo/releases --yes
+orc-cli plugins enable com.example.myplugin --yes
+orc-cli plugins remove --dry-run com.example.myplugin   # resolve, write nothing
+```
+
+Withdrawing a permission grants nothing, so the commands that only take
+capability away never prompt (each still accepts `--yes`, so a script can
+pass the flag uniformly):
+
+```bash
+orc-cli plugins disable com.example.myplugin
+orc-cli plugins untrust com.example.myplugin
+orc-cli plugins remove com.example.myplugin
+```
+
+`plugins trust` and `plugins untrust` remain as explicit primitives for
+scripts. `trust` is what `enable` does implicitly, so it asks the same
+question; the GUI has no separate trust control, because there adding,
+installing and ticking **Enabled** are the trust-granting actions.
+
+### Available plugins
+
+```bash
+orc-cli plugins search                       # the whole curated index
+orc-cli plugins search chroma --compatible   # ...matching, with a build for this host
+orc-cli plugins search --installed           # ...already installed
+orc-cli plugins info org.example.plugin
+orc-cli plugins install org.example.plugin --yes
+```
+
+Entries are annotated `installed`, `incompatible` or `unreachable`, exactly as
+the GUI's **Browse Plugins…** dialog labels them. The id printed for an entry
+is what `info` and `install` take, and for an installed entry it is also its
+registry selector.
+
+### Inspecting one plugin
+
+```bash
+orc-cli plugins info com.example.myplugin        # installed, indexed, or both
+orc-cli plugins info path:/plugins/example.so    # an entry with no plugin id
+```
+
+`plugins info` accepts any selector `plugins list` prints and any id
+`plugins search` prints: it describes the installed copy, the index entry, or
+both when a plugin is both offered and installed. The fields it prints — and
+their order — are what the Plugin Manager's **Details** pane and the **Browse
+Plugins…** details pane show, so the two front ends describe a plugin
+identically; for an installed copy the `installed` field says which version you
+have and whether a newer release is published. An id found in neither place
+fails with a message naming both places searched. A `path:` or `url:` selector
+is registry-only, so it never goes to the network.
+
+### Diagnostics
+
+```bash
+orc-cli plugins doctor
+```
+
+Reports the registry path, the runtime plugin search paths, and every
+diagnostic the plugin runtime recorded while loading — the same lines the
+Plugin Manager's **Diagnostics** section shows, prefixed `Info`, `Warning` or
+`Error`. It reports rather than judges: finding problems is the answer to the
+question, so it still exits `0`.
+
+### Updating
+
+```bash
+orc-cli plugins updates                      # check every registered plugin
+orc-cli plugins update com.example.myplugin --yes
+orc-cli plugins update --all --yes           # every plugin with an update
+```
+
+An update downloads a fresh binary, so it is confirmed like an install;
+`--all` confirms once for the whole batch and lists what it will update first.
+
+## Stage introspection
+
+`orc-cli stages` answers, without opening the GUI, what a stage is called, what
+it takes and what it does — the same information the GUI's Add Stage menu,
+parameter dialog and **Help...** dialog show, from the same source.
+
+A **stage name** is the internal token — `tbc_source`, not "TBC Source". It is
+what `stages info`, `stages help` and `--source`/`--filters`/`--sink` all
+accept; the display name is reported as a separate field and is never accepted
+where a name belongs.
+
+### Listing stages
+
+```bash
+orc-cli stages list --core                 # every stage this build can run
+orc-cli stages list --kind source --core   # just the source stages
+orc-cli stages list --plugin com.example.myplugin
+orc-cli stages list --format PAL --core    # only stages usable with PAL
+```
+
+**Core stages are hidden by default**, matching `plugins list` and the Plugin
+Manager's unticked **Show core plugins**; `--core` (or `--all`) includes them,
+and a note reports how many were hidden. `--kind` takes `source`, `filter`
+(equivalently `transform`), `analysis` or `sink` — the categories the GUI's Add
+Stage menu groups by. `sink` lists everything the `--sink` slot accepts,
+analysis sinks included; `analysis` narrows to those alone. The plugin id each entry reports is a plugin selector, so
+it feeds `plugins info` and `stages list --plugin` unchanged.
+
+### Describing one stage
+
+```bash
+orc-cli stages info tbc_source
+orc-cli stages info video_sink --format NTSC
+```
+
+Reports the stage's identity, then every parameter with its display name,
+description, type, whether it is required, its default, any minimum, maximum or
+allowed values, what it depends on, and the file-extension hint — the same
+descriptor data the GUI's parameter dialog renders. `--format` reports the
+defaults that video format selects, as the GUI does for a project of that
+format.
+
+Frame and line numbers are shown 1-based, as the GUI shows them, even though a
+project file stores them 0-based.
+
+### Pasting a stage into a project or a filtergraph
+
+```bash
+orc-cli stages info frame_map --yaml         # a .orcprj parameter block
+orc-cli stages info frame_map --filtergraph  # stage=key=value:key=value
+```
+
+`--yaml` emits a node `parameters:` block with every default filled in, shaped
+and indented exactly as the project writer emits one under `dag: nodes:`, so
+it loads unmodified when pasted under a node in a `.orcprj` file. `--filtergraph` emits the form
+`--source`/`--filters`/`--sink` take, quoted so it runs unmodified. Both carry
+the **0-based** values a project file and the filtergraph parser read back,
+not the 1-based numbers `stages info` displays.
+
+### Stage instructions
+
+```bash
+orc-cli stages help tbc_source
+```
+
+Prints the stage's `instructions.md` as Markdown — the same document the GUI's
+**Help...** context-menu action renders, read at runtime from beside the plugin
+binary. A stage that ships no instructions reports that and exits non-zero,
+rather than succeeding with nothing to say.
+
+## Machine-readable output
+
+Every query command takes `--json`:
+
+```bash
+orc-cli plugins list --json
+orc-cli plugins search --json
+orc-cli plugins info com.example.myplugin --json
+orc-cli plugins updates --json
+orc-cli plugins doctor --json
+orc-cli stages list --core --json
+orc-cli stages info tbc_source --json
+```
+
+`plugins list`, `plugins search`, `plugins info` and `plugins doctor` emit one
+object; `plugins updates` and `stages list` emit an array. Keys are the
+presenter's own field names — lower case with underscores, never a display
+label — and a field with nothing to say is still there, as `""`, `[]` or
+`null`, so every entry has the same shape.
+
+```bash
+# Enable everything that is registered but not trusted yet
+orc-cli plugins list --json \
+  | python3 -c 'import json,sys
+for e in json.load(sys.stdin)["entries"]:
+    if e["load_state"] == "not_trusted": print(e["selector"])' \
+  | xargs -rn1 orc-cli plugins enable --yes
+```
+
+Points to script against:
+
+- **Identifiers come back verbatim.** Every plugin object carries `selector`
+  and every stage object carries `name`; pass either straight back to the
+  commands that take one. No string surgery on the other fields.
+- **States are stable ids, not the words the table prints.** `load_state` is
+  `will_load` / `disabled` / `not_trusted` / `abi_mismatch` / `file_missing` /
+  `core`; an update `status` is `up_to_date` / `update_available` /
+  `unreachable` / `unknown` / `not_applicable`; a diagnostic `severity` is
+  `info` / `warning` / `error`; a stage `kind` is the word `--kind` accepts.
+  The labels stay in the human output, where they can be reworded.
+- **Booleans and numbers are JSON booleans and numbers**, not the `yes`/`no`
+  the table prints.
+- **Parameter defaults are the stored, 0-based values**, matching `--yaml` and
+  `--filtergraph` rather than the 1-based frame and line numbers `stages info`
+  displays — this side is read by a machine, so it carries what a project file
+  stores.
+- **Only the document is on stdout.** Runtime log lines go to stderr in this
+  mode, so `--json` output can be piped straight into a parser.
+- `stages info` emits one format at a time: `--json`, `--yaml` or
+  `--filtergraph`, not several.
+
 ## Exit Codes
 
 - `0`: Success - all operations completed successfully
 - `1`: Error - processing failed or invalid arguments
+
+The `plugins` and `stages` subcommands add more specific codes so a script can
+tell the cases apart:
+
+- `2`: Not found - no plugin matched the selector, or it matched more than one;
+  or no stage of that name is registered (near matches are listed)
+- `3`: Unavailable - the curated index or a release could not be reached
+- `4`: Trust declined - confirmation was required and not given; nothing was
+  recorded
 
 Always check the exit code in scripts:
 

@@ -30,10 +30,20 @@ class PluginBrowseModel {
   explicit PluginBrowseModel(orc::presenters::IProjectPresenter& presenter)
       : presenter_(presenter) {}
 
-  // Fetch the index (network or cached fallback) and store it.
-  void refresh() { index_ = presenter_.fetchPluginIndex(); }
+  // Fetch the index (network or cached fallback) and store it, together with
+  // the local registry so an entry's installed copy can be described alongside
+  // the release the index offers.
+  void refresh() {
+    index_ = presenter_.fetchPluginIndex();
+    registry_ = presenter_.getPluginRegistry();
+  }
 
   const orc::presenters::PluginIndexInfo& index() const { return index_; }
+
+  /// The registry entry for an index id, or nullptr when it is not installed.
+  const orc::presenters::PluginRegistryEntryInfo* installedEntry(
+      const std::string& plugin_id) const;
+
   bool available() const { return index_.available; }
   bool offline() const { return index_.offline; }
   bool fromCache() const { return index_.from_cache; }
@@ -60,6 +70,7 @@ class PluginBrowseModel {
  private:
   orc::presenters::IProjectPresenter& presenter_;
   orc::presenters::PluginIndexInfo index_;
+  orc::presenters::PluginRegistryInfo registry_;
 };
 
 }  // namespace orc

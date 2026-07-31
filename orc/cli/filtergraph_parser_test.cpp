@@ -10,13 +10,19 @@
 #include "filtergraph_parser.h"
 
 #include <gtest/gtest.h>
+#include <orc/stage/params/parameter_types.h>
 
 #include <cstddef>
+#include <string>
 #include <utility>
+#include <vector>
+
+#include "stage_details.h"
 
 namespace {
 
 using orc::presenters::FilterGraph;
+using orc::presenters::makeStageFiltergraphSpec;
 using orc::presenters::parse_filtergraph;
 
 bool HasEdge(const FilterGraph& g, std::size_t from, std::size_t to) {
@@ -245,6 +251,56 @@ TEST(FiltergraphParser, DoubleQuotedTwoWindowsPathsInOneStage) {
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.graph.stages[0].params.at("input_path"), "C:\\in\\a.tbc");
   EXPECT_EQ(r.graph.stages[0].params.at("output_path"), "D:\\out\\b.rgb");
+}
+
+// ---------------------------------------------------------------------------
+// Round trip with `stages info --filtergraph`
+// ---------------------------------------------------------------------------
+//
+// What `stages info --filtergraph` prints has to run unmodified through
+// --source/--filters/--sink, so the emitter is pinned against the parser here
+// rather than trusted to keep its own quoting rules straight.
+
+orc::ParameterDescriptor MakeStringParam(const std::string& name,
+                                         const std::string& default_value) {
+  orc::ParameterDescriptor descriptor;
+  descriptor.name = name;
+  descriptor.type = orc::ParameterType::STRING;
+  descriptor.constraints.default_value = default_value;
+  return descriptor;
+}
+
+TEST(FiltergraphParser, ParsesAStageSpecEmittedByStagesInfo) {
+  const std::vector<orc::ParameterDescriptor> descriptors = {
+      MakeStringParam("input_path", "/media/my captures/a.tbc"),
+      MakeStringParam("ranges", "0-9,20-29"),
+      MakeStringParam("label", "he said \"go\""),
+      MakeStringParam("empty", ""),
+  };
+
+  const std::string spec = makeStageFiltergraphSpec("frame_map", descriptors);
+  auto r = parse_filtergraph(spec);
+
+  ASSERT_TRUE(r.ok) << r.error << " for: " << spec;
+  ASSERT_EQ(r.graph.stages.size(), 1u);
+  EXPECT_EQ(r.graph.stages[0].stage_name, "frame_map");
+  EXPECT_EQ(r.graph.stages[0].params.at("input_path"),
+            "/media/my captures/a.tbc");
+  EXPECT_EQ(r.graph.stages[0].params.at("ranges"), "0-9,20-29");
+  EXPECT_EQ(r.graph.stages[0].params.at("label"), "he said \"go\"");
+  EXPECT_EQ(r.graph.stages[0].params.at("empty"), "");
+}
+
+TEST(FiltergraphParser, ParsesAnEmittedSpecChainedWithAnother) {
+  const std::string source = makeStageFiltergraphSpec(
+      "tbc_source", {MakeStringParam("input_path", "/a/b c.tbc")});
+  auto r = parse_filtergraph(source + ", video_sink");
+
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.graph.stages.size(), 2u);
+  EXPECT_EQ(r.graph.stages[0].params.at("input_path"), "/a/b c.tbc");
+  EXPECT_EQ(r.graph.stages[1].stage_name, "video_sink");
+  EXPECT_TRUE(HasEdge(r.graph, 0, 1));
 }
 
 // ---------------------------------------------------------------------------

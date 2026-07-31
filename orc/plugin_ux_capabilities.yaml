@@ -1,0 +1,288 @@
+# Plugin and stage UX capability manifest — the parity contract between
+# `orc-gui` and `orc-cli`.
+#
+# Every plugin/stage action a user can take is recorded here once, with the
+# command that performs it and the control that performs it. The
+# PluginUxCapabilityParity CTest (cmake/check_plugin_ux_parity.sh, label
+# "unit;cli") reads this file and fails when either side goes missing, so a
+# front end cannot quietly grow or lose a capability the other one has.
+#
+# Entry fields:
+#   id           Stable capability identifier. Never reused for another action.
+#   cli          The invocation a user types. `none` when there is no CLI form.
+#   cli_group    Which help output owns it: `plugins`, `stages`, or `none`.
+#   cli_help     Exact substring that must appear in that group's --help text.
+#                Required whenever cli_group is not `none`.
+#   gui          The control that performs it. `none` when there is no GUI form.
+#   gui_evidence Literal that must appear under orc/gui. Pick a string that
+#                names the control's construction (a widget member, an object
+#                name, a distinctive label literal) so deleting the control
+#                removes the evidence; a word that appears all over the GUI
+#                proves nothing. Defaults to the `gui` value.
+#   reason       Required when either side is `none`: why the asymmetry is
+#                intended rather than a gap.
+#
+# What the gate can and cannot see: it verifies every recorded CLI form against
+# the live --help text, and that every subcommand the --help text offers is
+# recorded here. A GUI-side addition has no equivalent machine signal, so the
+# `gui` field is checked for evidence in the sources but its completeness rests
+# on this file being updated with the change — which is what reviewing a diff
+# against this manifest is for.
+
+capabilities:
+  # --- Installed plugins ----------------------------------------------------
+
+  - id: plugins.list
+    cli: orc-cli plugins list
+    cli_group: plugins
+    cli_help: "list [options]"
+    gui: Plugin Manager table
+    gui_evidence: "Plugin Manager"
+
+  - id: plugins.list.core
+    cli: orc-cli plugins list --core
+    cli_group: plugins
+    cli_help: "--core, --all"
+    gui: Show core plugins
+    gui_evidence: "Show core plugins"
+
+  - id: plugins.list.check_updates
+    cli: orc-cli plugins list --check-updates
+    cli_group: plugins
+    cli_help: "--check-updates"
+    gui: Update column
+    gui_evidence: "COL_UPDATE"
+
+  - id: plugins.details
+    cli: orc-cli plugins info <selector>
+    cli_group: plugins
+    cli_help: "info <selector>"
+    gui: Details
+    gui_evidence: "pluginDetailsLabel"
+
+  - id: plugins.doctor
+    cli: orc-cli plugins doctor
+    cli_group: plugins
+    cli_help: "doctor"
+    gui: Diagnostics
+    gui_evidence: "pluginDiagnosticsGroup"
+
+  # --- Registry management --------------------------------------------------
+
+  - id: plugins.add.local
+    cli: orc-cli plugins add <path>
+    cli_group: plugins
+    cli_help: "add <path> [options]"
+    gui: Add Plugin...
+    gui_evidence: "Add Plugin..."
+
+  - id: plugins.add.url
+    cli: orc-cli plugins add --url <releases-url>
+    cli_group: plugins
+    cli_help: "add --url <releases-url>"
+    gui: Add Plugin...
+    gui_evidence: "Add Plugin..."
+
+  - id: plugins.remove
+    cli: orc-cli plugins remove <selector>
+    cli_group: plugins
+    cli_help: "remove [--dry-run] <selector>"
+    gui: Remove
+    gui_evidence: "remove_button_"
+
+  - id: plugins.remove.dry_run
+    cli: orc-cli plugins remove --dry-run <selector>
+    cli_group: plugins
+    cli_help: "--dry-run"
+    gui: none
+    reason: >-
+      Resolving a selector without writing is a scripting affordance; the GUI
+      shows the row it would remove before you press the button.
+
+  - id: plugins.enable
+    cli: orc-cli plugins enable <selector>
+    cli_group: plugins
+    cli_help: "enable <selector>"
+    gui: Enabled
+    gui_evidence: "makePluginRowPresentation"
+
+  - id: plugins.disable
+    cli: orc-cli plugins disable <selector>
+    cli_group: plugins
+    cli_help: "disable <selector>"
+    gui: Enabled
+    gui_evidence: "makePluginRowPresentation"
+
+  # --- Trust ----------------------------------------------------------------
+
+  - id: plugins.trust.confirmation
+    cli: orc-cli plugins add / install / update / enable
+    cli_group: plugins
+    cli_help: "--yes"
+    gui: Plugin Trust
+    gui_evidence: "kTrustWarning"
+
+  - id: plugins.trust
+    cli: orc-cli plugins trust <selector>
+    cli_group: plugins
+    cli_help: "trust <selector>"
+    gui: Enabled
+    gui_evidence: "makePluginRowPresentation"
+    reason: >-
+      Trust has no control of its own in the GUI by design; ticking Enabled is
+      the trust-granting action, so this is that same capability scripted.
+
+  - id: plugins.untrust
+    cli: orc-cli plugins untrust <selector>
+    cli_group: plugins
+    cli_help: "untrust <selector>"
+    gui: none
+    reason: >-
+      Deliberate: the GUI has no standalone trust control to withdraw from.
+      Untrusting stays a scriptable primitive.
+
+  # --- Available plugins ----------------------------------------------------
+
+  - id: plugins.search
+    cli: orc-cli plugins search [term]
+    cli_group: plugins
+    cli_help: "search [term] [filters]"
+    gui: Browse Plugins...
+    gui_evidence: "Browse Plugins"
+
+  - id: plugins.search.filters
+    cli: orc-cli plugins search --installed / --available / --compatible
+    cli_group: plugins
+    cli_help: "--compatible"
+    gui: Browse Plugins...
+    gui_evidence: "Browse Plugins"
+
+  - id: plugins.install
+    cli: orc-cli plugins install <id>
+    cli_group: plugins
+    cli_help: "install <id>"
+    gui: Install…
+    gui_evidence: "install_button_"
+
+  # --- Updating -------------------------------------------------------------
+
+  - id: plugins.updates
+    cli: orc-cli plugins updates
+    cli_group: plugins
+    cli_help: "updates"
+    gui: Update column
+    gui_evidence: "COL_UPDATE"
+
+  - id: plugins.update
+    cli: orc-cli plugins update <selector>
+    cli_group: plugins
+    cli_help: "update <selector> | --all"
+    gui: Update
+    gui_evidence: "update_button_"
+
+  - id: plugins.update.all
+    cli: orc-cli plugins update --all
+    cli_group: plugins
+    cli_help: "update <selector> | --all"
+    gui: none
+    reason: >-
+      No bulk control in the Plugin Manager; the Update button acts on the
+      selected row.
+
+  - id: plugins.restart_prompt
+    cli: none
+    cli_group: none
+    gui: Restart Required
+    gui_evidence: "Restart Required"
+    reason: >-
+      Only a running GUI has a session to restart. The CLI prints the same
+      registry-change note instead.
+
+  # --- Stage introspection --------------------------------------------------
+
+  - id: stages.list
+    cli: orc-cli stages list
+    cli_group: stages
+    cli_help: "list [options]"
+    gui: Add-stage context menu
+    gui_evidence: "stage_category_label"
+
+  - id: stages.list.core
+    cli: orc-cli stages list --core
+    cli_group: stages
+    cli_help: "--core, --all"
+    gui: Add-stage context menu
+    gui_evidence: "stage_category_label"
+
+  - id: stages.list.kind
+    cli: orc-cli stages list --kind KIND
+    cli_group: stages
+    cli_help: "--kind KIND"
+    gui: Add-stage context menu categories
+    gui_evidence: "stage_category_label"
+
+  - id: stages.list.plugin
+    cli: orc-cli stages list --plugin ID
+    cli_group: stages
+    cli_help: "--plugin ID"
+    gui: Plugins submenu
+    gui_evidence: "plugins_menu"
+
+  - id: stages.list.format
+    cli: orc-cli stages list --format NTSC|PAL|PAL-M
+    cli_group: stages
+    cli_help: "--format NTSC|PAL|PAL-M"
+    gui: Add-stage context menu
+    gui_evidence: "stage_category_label"
+
+  - id: stages.info
+    cli: orc-cli stages info <stage>
+    cli_group: stages
+    cli_help: "info <stage> [options]"
+    gui: Edit Parameters...
+    gui_evidence: "Edit Parameters..."
+
+  - id: stages.info.yaml
+    cli: orc-cli stages info <stage> --yaml
+    cli_group: stages
+    cli_help: "--yaml"
+    gui: none
+    reason: >-
+      A paste-ready project fragment answers a text-editing question; the GUI
+      edits the same values in place.
+
+  - id: stages.info.filtergraph
+    cli: orc-cli stages info <stage> --filtergraph
+    cli_group: stages
+    cli_help: "--filtergraph"
+    gui: none
+    reason: >-
+      The filtergraph form exists to be typed on a command line; the GUI has
+      the graph editor instead.
+
+  - id: stages.help
+    cli: orc-cli stages help <stage>
+    cli_group: stages
+    cli_help: "help <stage>"
+    gui: Help...
+    gui_evidence: "StageHelpDialog"
+
+  # --- Scripting contract ---------------------------------------------------
+
+  - id: plugins.json
+    cli: orc-cli plugins list / search / info / updates / doctor --json
+    cli_group: plugins
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      Machine-readable output has no meaning in a dialog; the GUI's rendering
+      of the same presenter structs is its projection.
+
+  - id: stages.json
+    cli: orc-cli stages list / info --json
+    cli_group: stages
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      As above: the JSON surface is the scripting projection of the structs the
+      GUI renders.

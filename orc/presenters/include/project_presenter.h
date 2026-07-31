@@ -377,17 +377,21 @@ class ProjectPresenter : public IProjectPresenter {
                                                 bool trusted) const override {
     return ProjectPresenter::addPluginFromReleasesUrl(releases_url, trusted);
   }
-  PluginRegistryMutationResult removePlugin(
-      const std::string& plugin_id) const override {
-    return ProjectPresenter::removePluginFromRegistry(plugin_id);
+  PluginSelectorResolution resolvePluginSelector(
+      const std::string& selector) const override {
+    return ProjectPresenter::resolvePluginRegistrySelector(selector);
   }
-  PluginRegistryMutationResult setPluginEnabled(const std::string& plugin_id,
+  PluginRegistryMutationResult removePluginEntry(
+      const std::string& selector) const override {
+    return ProjectPresenter::removePluginRegistryEntry(selector);
+  }
+  PluginRegistryMutationResult setPluginEnabled(const std::string& selector,
                                                 bool enabled) const override {
-    return ProjectPresenter::setPluginRegistryEntryEnabled(plugin_id, enabled);
+    return ProjectPresenter::setPluginRegistryEntryEnabled(selector, enabled);
   }
-  PluginRegistryMutationResult setPluginTrusted(const std::string& plugin_id,
+  PluginRegistryMutationResult setPluginTrusted(const std::string& selector,
                                                 bool trusted) const override {
-    return ProjectPresenter::setPluginRegistryEntryTrusted(plugin_id, trusted);
+    return ProjectPresenter::setPluginRegistryEntryTrusted(selector, trusted);
   }
   PluginIndexInfo fetchPluginIndex() const override {
     return ProjectPresenter::readPluginIndex();
@@ -400,8 +404,8 @@ class ProjectPresenter : public IProjectPresenter {
     return ProjectPresenter::checkRegisteredPluginUpdates();
   }
   PluginRegistryMutationResult updatePluginToLatestRelease(
-      const std::string& plugin_id) const override {
-    return ProjectPresenter::updateRegisteredPluginToLatestRelease(plugin_id);
+      const std::string& selector) const override {
+    return ProjectPresenter::updateRegisteredPluginToLatestRelease(selector);
   }
 
   // === Stage Registry ===
@@ -447,6 +451,16 @@ class ProjectPresenter : public IProjectPresenter {
   static PluginRegistryInfo readPluginRegistry();
 
   /**
+   * @brief Resolve a plugin selector against the persistent registry
+   *
+   * Accepts anything the registry listing prints for an entry: its plugin id,
+   * a `path:`/`url:` selector, or a bare path or release asset URL. Reports
+   * Ambiguous (with candidates) rather than guessing between matches.
+   */
+  static PluginSelectorResolution resolvePluginRegistrySelector(
+      const std::string& selector);
+
+  /**
    * @brief Add a plugin entry to the persistent registry
    */
   static PluginRegistryMutationResult addPluginToRegistry(
@@ -471,24 +485,16 @@ class ProjectPresenter : public IProjectPresenter {
       const std::string& releases_url, bool trusted = false);
 
   /**
-   * @brief Remove a plugin entry from the persistent registry by plugin_id
-   */
-  static PluginRegistryMutationResult removePluginFromRegistry(
-      const std::string& plugin_id);
-
-  /**
-   * @brief Remove a plugin entry from the persistent registry by identity
-   * fields
+   * @brief Remove a plugin entry from the persistent registry by selector
    */
   static PluginRegistryMutationResult removePluginRegistryEntry(
-      const std::string& plugin_id, const std::string& path,
-      const std::string& release_asset_url);
+      const std::string& selector);
 
   /**
    * @brief Enable or disable a plugin entry in the persistent registry
    */
   static PluginRegistryMutationResult setPluginRegistryEntryEnabled(
-      const std::string& plugin_id, bool enabled);
+      const std::string& selector, bool enabled);
 
   /**
    * @brief Mark a plugin entry as trusted or untrusted in the persistent
@@ -498,7 +504,7 @@ class ProjectPresenter : public IProjectPresenter {
    * Core plugin entries are implicitly trusted and cannot be changed.
    */
   static PluginRegistryMutationResult setPluginRegistryEntryTrusted(
-      const std::string& plugin_id, bool trusted);
+      const std::string& selector, bool trusted);
 
   /**
    * @brief Clear persistent plugin registry entries for safe startup mode
@@ -552,7 +558,7 @@ class ProjectPresenter : public IProjectPresenter {
    * downloaded or loaded.
    */
   static PluginRegistryMutationResult updateRegisteredPluginToLatestRelease(
-      const std::string& plugin_id);
+      const std::string& selector);
 
   /**
    * @brief Get stage instance for parameter editing

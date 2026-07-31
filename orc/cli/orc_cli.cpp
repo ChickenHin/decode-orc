@@ -19,6 +19,7 @@
 #include "command_filter.h"
 #include "command_plugins.h"
 #include "command_process.h"
+#include "command_stages.h"
 #include "crash_handler.h"
 #include "logging.h"
 #include "project_presenter.h"
@@ -41,6 +42,7 @@ void print_usage(const char* program_name) {
   std::cerr << "       " << program_name
             << " --source/--filters/--sink <...>\n";
   std::cerr << "       " << program_name << " plugins <subcommand> [options]\n";
+  std::cerr << "       " << program_name << " stages <subcommand> [options]\n";
   std::cerr << "\n";
   std::cerr << "Commands:\n";
   std::cerr << "  --process                      Process the whole DAG chain "
@@ -88,21 +90,40 @@ void print_usage(const char* program_name) {
                "--source-type above for the\n";
   std::cerr << "rare exception).\n";
   std::cerr << "\n";
-  std::cerr << "Plugin Management:\n";
-  std::cerr << "  plugins list                   List registry entries and "
-               "loaded plugins\n";
-  std::cerr << "  plugins add <path> [options]   Add a plugin to the "
+  std::cerr << "Plugin Management (see 'plugins --help' for options):\n";
+  std::cerr << "  plugins list                   Show installed plugins (core "
+               "plugins are hidden)\n";
+  std::cerr << "  plugins add <path>|--url URL   Add a plugin from a local "
+               "file or releases URL\n";
+  std::cerr << "  plugins remove <selector>      Remove a plugin from the "
                "persistent registry\n";
-  std::cerr << "  plugins remove <id>            Remove a plugin from the "
-               "persistent registry\n";
-  std::cerr << "  plugins enable <id>            Enable a registered plugin\n";
-  std::cerr << "  plugins disable <id>           Disable a registered plugin\n";
-  std::cerr << "  plugins search <term>          Search the curated plugin "
-               "index\n";
-  std::cerr << "  plugins info <id>              Show details for an indexed "
-               "plugin\n";
+  std::cerr << "  plugins enable <selector>      Enable a registered plugin "
+               "(grants trust if needed)\n";
+  std::cerr << "  plugins disable <selector>     Disable a registered plugin\n";
+  std::cerr << "  plugins trust <selector>       Mark a registered plugin as "
+               "trusted\n";
+  std::cerr << "  plugins untrust <selector>     Mark a registered plugin as "
+               "untrusted\n";
+  std::cerr << "  plugins search [term]          List or search the available "
+               "plugins in the curated index\n";
+  std::cerr << "  plugins info <selector>        Show details for an installed "
+               "or available plugin\n";
   std::cerr << "  plugins install <id>           Install a plugin from the "
                "curated index\n";
+  std::cerr << "  plugins updates                Check registered plugins for "
+               "newer releases\n";
+  std::cerr << "  plugins update <selector>|--all  Update registered plugins "
+               "to their latest release\n";
+  std::cerr << "  plugins doctor                 Report plugin search paths "
+               "and load diagnostics\n";
+  std::cerr << "\n";
+  std::cerr << "Stage Introspection:\n";
+  std::cerr << "  stages list                    List the stages this build "
+               "can run\n";
+  std::cerr << "  stages info <stage>            Describe a stage and every "
+               "parameter it takes\n";
+  std::cerr << "  stages help <stage>            Show the instructions shipped "
+               "with a stage\n";
   std::cerr << "\n";
   std::cerr << "Options:\n";
   std::cerr << "  --log-level LEVEL              Set logging verbosity\n";
@@ -135,6 +156,8 @@ void print_usage(const char* program_name) {
   std::cerr << "  " << program_name
             << " plugins add /path/to/libmyplugin.so --id com.example.my "
                "--license MIT\n";
+  std::cerr << "  " << program_name << " stages list --kind source --core\n";
+  std::cerr << "  " << program_name << " stages info tbc_source\n";
 }
 
 /**
@@ -230,6 +253,21 @@ int main(int argc, char* argv[]) {
       }
       return cli::plugins_command(static_cast<int>(plugins_argv.size()),
                                   plugins_argv.data());
+    }
+
+    // Route 'stages' the same way: introspection needs no project file, and
+    // --safe-core-plugins has already been applied above.
+    if (first_arg == "stages") {
+      std::vector<char*> stages_argv;
+      stages_argv.push_back(argv[0]);
+      for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--safe-core-plugins") {
+          continue;
+        }
+        stages_argv.push_back(argv[i]);
+      }
+      return cli::stages_command(static_cast<int>(stages_argv.size()),
+                                 stages_argv.data());
     }
 
     // Parse all arguments

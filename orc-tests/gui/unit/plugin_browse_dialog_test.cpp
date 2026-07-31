@@ -9,6 +9,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <plugin_ux_strings.h>
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -18,6 +19,7 @@
 
 #include "mocks/mock_project_presenter.h"
 #include "pluginbrowsedialog.h"
+#include "presenters/include/plugin_details.h"
 
 namespace gui_unit_test {
 
@@ -68,6 +70,15 @@ void drainEvents(int milliseconds) {
   while (!deadline.hasExpired()) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
   }
+}
+
+// The details pane's text, wherever it ends up in the layout.
+QString detailsText(QWidget* dialog) {
+  QString combined;
+  for (auto* label : dialog->findChildren<QLabel*>()) {
+    combined += label->text() + "\n";
+  }
+  return combined;
 }
 
 }  // namespace
@@ -172,6 +183,56 @@ TEST(PluginBrowseDialogTest, AbiMismatchEntryShowsIncompatible) {
     }
   }
   EXPECT_TRUE(message_shown);
+  dialog.reset();
+}
+
+// The pane's field labels are the shared ones, so the dialog and
+// 'orc-cli plugins info' name the same things.
+TEST(PluginBrowseDialogTest, DetailsLabelsComeFromTheSharedStrings) {
+  ensureApplication();
+  NiceMock<orc::presenters::test::MockProjectPresenter> mock;
+  const auto index = makeIndex(/*offline=*/false);
+  ON_CALL(mock, fetchPluginIndex()).WillByDefault(Return(index));
+
+  auto dialog = std::make_unique<orc::PluginBrowseDialog>(mock);
+  drainEvents(500);
+
+  const QString text = detailsText(dialog.get());
+  for (const auto& field : orc::presenters::makePluginDetails(
+           nullptr, &index.entries[0], nullptr)) {
+    EXPECT_TRUE(text.contains(QString::fromStdString(field.label) + ":"))
+        << "missing label " << field.label;
+    EXPECT_TRUE(text.contains(QString::fromStdString(field.value)))
+        << "missing value for " << field.label;
+  }
+  dialog.reset();
+}
+
+// An installed copy behind the latest release reads the same here as it does
+// from the CLI: which version is installed, and what is available.
+TEST(PluginBrowseDialogTest, InstalledOutdatedEntryShowsTheVersionRelation) {
+  ensureApplication();
+  NiceMock<orc::presenters::test::MockProjectPresenter> mock;
+  auto index = makeIndex(/*offline=*/false);
+  index.entries[0].version = "1.0.6";
+  index.entries[0].already_installed = true;
+  ON_CALL(mock, fetchPluginIndex()).WillByDefault(Return(index));
+
+  orc::presenters::PluginRegistryInfo registry;
+  orc::presenters::PluginRegistryEntryInfo installed;
+  installed.selector = "acme.deint";
+  installed.plugin_id = "acme.deint";
+  installed.plugin_version = "1.0.5";
+  registry.entries = {installed};
+  ON_CALL(mock, getPluginRegistry()).WillByDefault(Return(registry));
+
+  auto dialog = std::make_unique<orc::PluginBrowseDialog>(mock);
+  drainEvents(500);
+
+  const QString text = detailsText(dialog.get());
+  EXPECT_TRUE(text.contains(QString::fromStdString(
+      orc::plugin_ux::installedValue(true, "1.0.5", "1.0.6"))));
+  EXPECT_TRUE(text.contains("1.0.6"));
   dialog.reset();
 }
 

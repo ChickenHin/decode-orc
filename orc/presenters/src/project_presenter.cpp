@@ -15,6 +15,7 @@
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
+#include <plugin_ux_strings.h>
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -36,6 +37,8 @@
 #include "../core/include/project_to_dag.h"
 #include "../core/include/stage_plugin_registry.h"
 #include "../core/include/stage_registry.h"
+#include "plugin_load_state.h"
+#include "plugin_selector.h"
 
 namespace orc::presenters {
 
@@ -802,10 +805,32 @@ PluginRegistryInfo ProjectPresenter::readPluginRegistry() {
     info.path_exists = !entry.path.empty() &&
                        std::filesystem::exists(entry.path, error_code) &&
                        !error_code;
+
+    // Identity, provenance and load state are derived here, once, so that
+    // neither front end re-derives them and the two can never disagree.
+    info.selector = makePluginSelector(info, result.entries.size());
+    info.source_label =
+        info.is_core_plugin
+            ? std::string(plugin_ux::kSourceCore)
+            : (!info.release_asset_url.empty()
+                   ? info.release_asset_url
+                   : (info.source_repo_url.empty() ? info.path
+                                                   : info.source_repo_url));
+    info.load_state = computePluginLoadState(info, &info.load_state_detail);
+
     result.entries.push_back(std::move(info));
   }
 
   return result;
+}
+
+PluginSelectorResolution ProjectPresenter::resolvePluginRegistrySelector(
+    const std::string& selector) {
+  // The loaded-plugins overload, so that a runtime id resolves here exactly as
+  // it does for the mutation paths — `remove --dry-run` must never disagree
+  // with `remove` about what a selector means.
+  return orc::presenters::resolvePluginSelector(readPluginRegistry().entries,
+                                                getLoadedPlugins(), selector);
 }
 
 PluginRegistryMutationResult ProjectPresenter::addPluginToRegistry(
@@ -818,7 +843,8 @@ PluginRegistryMutationResult ProjectPresenter::addPluginToRegistry(
   entry_info.plugin_version = plugin_version;
   entry_info.license_spdx = license_spdx;
   entry_info.is_core_plugin = is_core_plugin;
-  entry_info.trust_state = trusted ? "trusted" : "untrusted";
+  entry_info.trust_state =
+      trusted ? kPluginTrustStateTrusted : kPluginTrustStateUntrusted;
   entry_info.enabled = true;
   entry_info.artifact_source = "local_path";
   return addPluginRegistryEntry(entry_info);
@@ -943,6 +969,7 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
           releases_url, target_platform, &warnings);
 
   if (!resolved.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
     result.error_message = resolved.error_message;
     return result;
   }
@@ -978,7 +1005,8 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
   // the entry is recorded untrusted unless the caller has obtained explicit
   // trust confirmation from the user. The trust gate blocks download and load
   // of untrusted entries until they are trusted.
-  entry_info.trust_state = trusted ? "trusted" : "untrusted";
+  entry_info.trust_state =
+      trusted ? kPluginTrustStateTrusted : kPluginTrustStateUntrusted;
 
   auto add_result = addPluginRegistryEntry(entry_info);
   if (!add_result.success) {
@@ -1137,6 +1165,7 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   const orc::CurlHttpFetcher fetcher;
   const auto refreshed = refresh_plugin_index(fetcher);
   if (!refreshed.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
     result.error_message = refreshed.error_message.empty()
                                ? "The plugin index could not be loaded"
                                : refreshed.error_message;
@@ -1146,6 +1175,7 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   const orc::PluginIndexEntry* entry =
       orc::PluginIndexClient::find(refreshed.index, plugin_id);
   if (entry == nullptr) {
+    result.failure = PluginMutationFailure::NotFound;
     result.error_message =
         "No plugin with id '" + plugin_id + "' is listed in the index";
     return result;
@@ -1165,6 +1195,7 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
       orc::PluginRemoteLoader::resolve_release_asset_from_releases_url(
           entry->source_repo_url, target_platform, &warnings);
   if (!resolved.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
     result.error_message = resolved.error_message;
     return result;
   }
@@ -1204,7 +1235,7 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   // Installing from the index records the entry but does not grant trust:
   // the user confirms trust explicitly before the binary is downloaded or
   // loaded, consistent with the URL-add and hand-edited-registry paths.
-  entry_info.trust_state = "untrusted";
+  entry_info.trust_state = kPluginTrustStateUntrusted;
 
   auto add_result = addPluginRegistryEntry(entry_info);
   if (add_result.success && !warnings.empty()) {
@@ -1215,8 +1246,8 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
 
 // Defined later in this file; used by the update path below.
 static std::vector<orc::StagePluginRegistryEntry>::iterator
-findRegistryEntryByPluginId(std::vector<orc::StagePluginRegistryEntry>& entries,
-                            const std::string& plugin_id);
+findRegistryEntryBySelector(std::vector<orc::StagePluginRegistryEntry>& entries,
+                            const std::string& selector, std::string* error);
 
 namespace {
 
@@ -1296,11 +1327,11 @@ ProjectPresenter::checkRegisteredPluginUpdates() {
 
 PluginRegistryMutationResult
 ProjectPresenter::updateRegisteredPluginToLatestRelease(
-    const std::string& plugin_id) {
+    const std::string& selector) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty()) {
-    result.error_message = "Plugin id cannot be empty";
+  if (selector.empty()) {
+    result.error_message = "Plugin selector cannot be empty";
     return result;
   }
 
@@ -1308,10 +1339,10 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto it = findRegistryEntryByPluginId(entries, plugin_id);
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
   if (it == entries.end()) {
-    result.error_message =
-        "No plugin with id '" + plugin_id + "' found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1322,7 +1353,7 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
 
   if (it->source_repo_url.empty()) {
     result.error_message =
-        "Plugin '" + plugin_id +
+        "Plugin '" + selector +
         "' has no source repository recorded, so it cannot be updated";
     return result;
   }
@@ -1334,6 +1365,7 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
       orc::PluginRemoteLoader::resolve_release_asset_from_releases_url(
           it->source_repo_url, target_platform, &warnings);
   if (!resolved.success) {
+    result.failure = PluginMutationFailure::IndexUnavailable;
     result.error_message = resolved.error_message;
     return result;
   }
@@ -1343,12 +1375,12 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
   if (resolved.abi_mismatch || resolved.toolchain_mismatch) {
     result.error_message =
         resolved.abi_mismatch
-            ? ("The latest release of '" + plugin_id +
+            ? ("The latest release of '" + selector +
                "' is built for Orc ABI " + std::to_string(resolved.asset_abi) +
                ", but this host requires ABI " +
                std::to_string(kStagePluginHostAbiVersion) +
                "; it cannot load here")
-            : ("The latest release of '" + plugin_id +
+            : ("The latest release of '" + selector +
                "' is built with toolchain '" + resolved.asset_toolchain +
                "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
                "'; it cannot load here");
@@ -1380,7 +1412,7 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
   it->path.clear();
   // A different binary means the previous trust decision no longer applies:
   // the user must explicitly re-confirm trust before download or load.
-  it->trust_state = "untrusted";
+  it->trust_state = kPluginTrustStateUntrusted;
 
   std::string error;
   if (!orc::StagePluginRegistry::save(registry_path, entries, &error)) {
@@ -1395,18 +1427,69 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
   return result;
 }
 
-PluginRegistryMutationResult ProjectPresenter::removePluginFromRegistry(
-    const std::string& plugin_id) {
-  return removePluginRegistryEntry(plugin_id, std::string(), std::string());
+// Project the persisted entries onto the identity fields the selector
+// resolver reads, preserving order so a resolved index maps straight back onto
+// the persisted vector.
+static std::vector<PluginRegistryEntryInfo> makeSelectorView(
+    const std::vector<orc::StagePluginRegistryEntry>& entries) {
+  std::vector<PluginRegistryEntryInfo> view;
+  view.reserve(entries.size());
+
+  for (const auto& entry : entries) {
+    PluginRegistryEntryInfo info;
+    info.plugin_id = entry.plugin_id;
+    info.path = entry.path;
+    info.local_dev_path = entry.local_dev_path;
+    info.release_asset_url = entry.release_asset_url;
+    info.selector = makePluginSelector(info, view.size());
+    view.push_back(std::move(info));
+  }
+
+  return view;
+}
+
+// Resolve a selector against the persisted registry. Every mutation goes
+// through the same loaded-plugins-aware overload as `resolvePluginRegistry-
+// Selector`, so the GUI, the CLI, and `remove --dry-run` address exactly the
+// same entry for the same string. On failure @p error carries the message to
+// report.
+static std::vector<orc::StagePluginRegistryEntry>::iterator
+findRegistryEntryBySelector(std::vector<orc::StagePluginRegistryEntry>& entries,
+                            const std::string& selector, std::string* error) {
+  const auto resolution =
+      resolvePluginSelector(makeSelectorView(entries),
+                            ProjectPresenter::getLoadedPlugins(), selector);
+
+  if (resolution.status == PluginSelectorStatus::Resolved) {
+    auto it =
+        entries.begin() + static_cast<std::ptrdiff_t>(resolution.entry_index);
+    if (resolution.resolved_via_runtime_id && it->plugin_id.empty()) {
+      // The selector was a loaded plugin's runtime id matched by path;
+      // backfill the id so later id-based lookups hit directly.
+      it->plugin_id = selector;
+    }
+    return it;
+  }
+
+  if (resolution.status == PluginSelectorStatus::Ambiguous) {
+    if (error != nullptr) {
+      *error = describeAmbiguousPluginSelector(selector, resolution.candidates);
+    }
+    return entries.end();
+  }
+
+  if (error != nullptr) {
+    *error = "No plugin matching '" + selector + "' found in registry";
+  }
+  return entries.end();
 }
 
 PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
-    const std::string& plugin_id, const std::string& path,
-    const std::string& release_asset_url) {
+    const std::string& selector) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty() && path.empty() && release_asset_url.empty()) {
-    result.error_message = "No plugin identifier was provided for removal";
+  if (selector.empty()) {
+    result.error_message = "No plugin selector was provided for removal";
     return result;
   }
 
@@ -1414,24 +1497,11 @@ PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto matches_identity = [&](const orc::StagePluginRegistryEntry& e) {
-    if (!plugin_id.empty() && e.plugin_id == plugin_id) {
-      return true;
-    }
-    if (!path.empty() && e.path == path) {
-      return true;
-    }
-    if (!release_asset_url.empty() &&
-        e.release_asset_url == release_asset_url) {
-      return true;
-    }
-    return false;
-  };
-
-  auto it = std::find_if(entries.begin(), entries.end(), matches_identity);
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
 
   if (it == entries.end()) {
-    result.error_message = "No matching plugin entry found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1447,46 +1517,12 @@ PluginRegistryMutationResult ProjectPresenter::removePluginRegistryEntry(
   return result;
 }
 
-// Find a registry entry by plugin_id. If no direct match exists, fall back
-// to matching a loaded plugin's path against entries whose plugin_id is
-// still empty (happens when plugins are added via file before their ID is
-// known) and backfill the id.
-static std::vector<orc::StagePluginRegistryEntry>::iterator
-findRegistryEntryByPluginId(std::vector<orc::StagePluginRegistryEntry>& entries,
-                            const std::string& plugin_id) {
-  auto it = std::find_if(entries.begin(), entries.end(),
-                         [&plugin_id](const orc::StagePluginRegistryEntry& e) {
-                           return e.plugin_id == plugin_id;
-                         });
-
-  if (it == entries.end()) {
-    const auto& loaded_plugins =
-        orc::StageRegistry::instance().get_loaded_plugins();
-    auto loaded_it = std::find_if(
-        loaded_plugins.begin(), loaded_plugins.end(),
-        [&plugin_id](const auto& lp) { return lp.plugin_id == plugin_id; });
-
-    if (loaded_it != loaded_plugins.end()) {
-      it = std::find_if(entries.begin(), entries.end(),
-                        [&loaded_it](const orc::StagePluginRegistryEntry& e) {
-                          return !e.path.empty() && e.path == loaded_it->path;
-                        });
-
-      if (it != entries.end() && it->plugin_id.empty()) {
-        it->plugin_id = plugin_id;
-      }
-    }
-  }
-
-  return it;
-}
-
 PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryEnabled(
-    const std::string& plugin_id, bool enabled) {
+    const std::string& selector, bool enabled) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty()) {
-    result.error_message = "Plugin id cannot be empty";
+  if (selector.empty()) {
+    result.error_message = "Plugin selector cannot be empty";
     return result;
   }
 
@@ -1494,11 +1530,11 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryEnabled(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto it = findRegistryEntryByPluginId(entries, plugin_id);
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
 
   if (it == entries.end()) {
-    result.error_message =
-        "No plugin with id '" + plugin_id + "' found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1515,11 +1551,11 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryEnabled(
 }
 
 PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryTrusted(
-    const std::string& plugin_id, bool trusted) {
+    const std::string& selector, bool trusted) {
   PluginRegistryMutationResult result;
 
-  if (plugin_id.empty()) {
-    result.error_message = "Plugin id cannot be empty";
+  if (selector.empty()) {
+    result.error_message = "Plugin selector cannot be empty";
     return result;
   }
 
@@ -1527,11 +1563,11 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryTrusted(
   auto entries = persisted_registry.entries;
   const std::string registry_path = persisted_registry.registry_path;
 
-  auto it = findRegistryEntryByPluginId(entries, plugin_id);
+  auto it =
+      findRegistryEntryBySelector(entries, selector, &result.error_message);
 
   if (it == entries.end()) {
-    result.error_message =
-        "No plugin with id '" + plugin_id + "' found in registry";
+    result.failure = PluginMutationFailure::NotFound;
     return result;
   }
 
@@ -1542,7 +1578,8 @@ PluginRegistryMutationResult ProjectPresenter::setPluginRegistryEntryTrusted(
     return result;
   }
 
-  it->trust_state = trusted ? "trusted" : "untrusted";
+  it->trust_state =
+      trusted ? kPluginTrustStateTrusted : kPluginTrustStateUntrusted;
 
   std::string error;
   if (!orc::StagePluginRegistry::save(registry_path, entries, &error)) {

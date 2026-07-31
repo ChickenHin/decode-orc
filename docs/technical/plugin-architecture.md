@@ -18,9 +18,10 @@ registered through a common host runtime.
 - **Registry-based distribution:** Plugins are declared in a persistent YAML
   registry and can be fetched automatically from GitHub release assets at
   startup. Non-core registry entries must be marked trusted before they are
-  downloaded or loaded — entries added through the GUI or with
-  `orc-cli plugins add --trusted` are trusted at add time, while entries
-  that arrive from outside the application default to untrusted — and
+  downloaded or loaded — both front ends grant trust as part of the action
+  that lets a binary run (adding, installing, updating, enabling), each time
+  behind the same explicit confirmation, while entries that arrive from
+  outside the application default to untrusted — and
   downloaded artifacts are verified against a recorded SHA-256 checksum (see
   [Distribution integrity](#distribution-integrity)). Plugin binaries are
   **not** code-signed.
@@ -65,6 +66,32 @@ a plugin's code is never unmapped while one of its stages can still run.
 `orc-gui` and `orc-cli` share the same persistent registry file. The difference
 between development and packaged installs is the default plugin search path, not
 a separate per-application registry.
+
+### Front-end parity
+
+Every plugin and stage action is available from both front ends, in the same
+words, and both derive an entry's state from one presenter-computed value
+rather than re-deriving it. The capability set is recorded in
+[`orc/plugin_ux_capabilities.yaml`](../../orc/plugin_ux_capabilities.yaml),
+which names the command and the control for each capability; the
+`CLI.PluginUxCapabilityParity` CTest (label `unit;cli`) fails when a recorded
+command disappears from `orc-cli plugins --help` / `orc-cli stages --help`, or
+when a subcommand exists that the manifest does not record. Add a capability to
+either front end and the manifest is where both sides are declared.
+
+Three asymmetries are intended and recorded as such:
+
+- **`plugins untrust` has no GUI control.** The GUI has no standalone trust
+  control to withdraw from — adding, installing and ticking **Enabled** are its
+  trust-granting actions — so untrusting stays a CLI primitive.
+- **`plugins update --all` has no GUI control.** The Plugin Manager's
+  **Update** button acts on the selected row.
+- **The restart prompt is GUI-only.** Only a running GUI has a session to
+  restart; the CLI prints the same registry-change note instead.
+
+The `--json` and paste-ready (`--yaml`, `--filtergraph`) output modes are
+likewise CLI-only: they are scripting projections of the same presenter
+structures the GUI renders as widgets.
 
 ## Plugin Binary Format
 
@@ -207,7 +234,7 @@ Each entry records:
 | `target_platform` | Optional platform hint for cache selection |
 | `local_dev_path` | Optional development override used before remote download |
 | `enabled` | Whether the plugin is loaded at startup |
-| `trust_state` | Trust level, enforced before loading: entries other than `trusted` are neither downloaded nor `dlopen`ed unless `is_core_plugin` is set. Trust is always granted through an explicit warning ("plugins execute code locally on your computer") with OK/Cancel and Cancel as the default. In the GUI, adding or installing a plugin shows that warning up front — OK records the entry trusted, Cancel records nothing. Untrusted entries still occur (CLI `plugins install` records untrusted until `plugins trust <id>`, updates reset trust, and hand-edited registry files default to `untrusted`); the Plugin Manager shows them with an unticked **Enabled** box, and ticking it shows the same warning before recording trust — the GUI has no separate trust control. `orc-cli plugins trust <id>` does the same from the CLI |
+| `trust_state` | Trust level, enforced before loading: entries other than `trusted` are neither downloaded nor `dlopen`ed unless `is_core_plugin` is set. Trust is always granted through an explicit warning ("plugins execute code locally on your computer") that defaults to refusing. Both front ends grant it the same way: the action that lets a binary run — `add`, `install`, `update`, `enable` — shows that warning up front, and confirming records the entry trusted while declining records nothing. The GUI asks with a dialog (OK/Cancel, Cancel default); the CLI asks on the terminal (`[y/N]`), takes `--yes` for scripted use, and refuses rather than blocking when stdin is not a terminal, exiting `4`. Untrusted entries still occur (updates reset trust, and hand-edited registry files default to `untrusted`); the Plugin Manager shows them with an unticked **Enabled** box, and ticking it shows the same warning before recording trust — the GUI has no separate trust control, by design. `orc-cli plugins trust <selector>` / `untrust <selector>` remain as explicit scripting primitives, `trust` asking the same question; withdrawing trust grants nothing, so `untrust` never asks |
 | `license_spdx` | SPDX license identifier |
 | `is_core_plugin` | Marks entries supplied by Decode-Orc itself; implicitly trusted |
 | `required_host_abi` | Host ABI the plugin was built for. Enforced before download and load: a non-zero value that does not equal the host's `host_abi_version` means the entry is neither downloaded nor `dlopen`ed — it stays visible with a "needs a rebuild for Orc ABI N" message in `orc-cli plugins list` and the GUI Plugin Manager. `0` means unspecified (not gated); `is_core_plugin` entries are exempt |
@@ -243,18 +270,24 @@ update. The per-plugin outcome is one of:
   checked.
 
 The GUI Plugin Manager runs the check on a worker thread when it opens and
-shows the outcome in its **Update** column; `orc-cli plugins updates` prints
-the same information. One API request is made per distinct repository per
-sweep.
+shows the outcome in its **Update** column; `orc-cli plugins updates` and
+`orc-cli plugins list --check-updates` print the same information in the same
+words. One API request is made per distinct repository per sweep. No other
+listing path goes to the network: plain `plugins list` and the Plugin
+Manager's table are registry-only until the check reports.
 
 Updating (the Plugin Manager's **Update** button, or
-`orc-cli plugins update <id>`) re-resolves the release asset from the entry's
-`source_repo_url` — the same resolution as adding by URL and installing from
-the index — and rewrites the registry entry to point at the latest release.
-Any recorded `sha256` is cleared (release artifacts carry no reviewed
-digest), the cached `path` is dropped so the next launch downloads the new
-asset, and the entry reverts to **untrusted**: the user must explicitly
-re-confirm trust before the new binary is downloaded or loaded.
+`orc-cli plugins update <selector>`, or `orc-cli plugins update --all` for
+every entry reporting an update) re-resolves the release asset from the
+entry's `source_repo_url` — the same resolution as adding by URL and
+installing from the index — and rewrites the registry entry to point at the
+latest release. Any recorded `sha256` is cleared (release artifacts carry no
+reviewed digest), the cached `path` is dropped so the next launch downloads
+the new asset, and the entry's recorded trust is reset: a new binary is a new
+decision, so both front ends re-confirm trust as part of the update — the GUI
+with its post-update prompt, the CLI with the same confirmation it applies to
+`add` and `install` (once for the whole batch under `--all`). Declining leaves
+the entry untrusted, and it is neither downloaded nor loaded.
 
 ## Curated plugin index
 
@@ -269,7 +302,9 @@ release and no registry tag are required.
 The host refreshes the index on demand — when the Plugin Manager's **Browse
 Plugins…** dialog opens or a `orc-cli plugins search / info / install` command
 runs — asynchronously, falling back to the last-good cached copy
-(`<config>/plugin-index-cache.yaml`) when offline.
+(`<config>/plugin-index-cache.yaml`) when offline. `plugins info` also
+describes plugins that are only in the local registry, and skips the index
+entirely for a `path:`/`url:` selector, which the index never uses.
 
 The index curates **which plugins are offered, not their versions**: once a
 plugin is accepted, its current release and all subsequent releases are
@@ -301,7 +336,9 @@ Schema (`registry_schema: 2`):
 | `plugins[].source_repo_url` | GitHub repository the host resolves releases from (mandatory) |
 
 Installing from the index records a registry entry pointing at the resolved
-latest release asset, left **untrusted** until the user confirms trust. The
+latest release asset. Installing runs a binary, so both the browse dialog's
+**Install…** and `orc-cli plugins install <id>` ask for trust confirmation
+first and record the entry trusted; declining records nothing at all. The
 manifest's per-artifact `sha256` and `abi` are recorded into the registry
 entry, arming the existing download verify-and-quarantine path and the early
 `required_host_abi` check. After install, the host keeps checking the

@@ -36,16 +36,33 @@ class PluginManagerModel {
     return presenter_.listLoadedPlugins();
   }
 
+  // Runtime plugin load diagnostics; the CLI's 'plugins doctor' prints the
+  // same list.
+  std::vector<orc::presenters::PluginDiagnosticInfo> diagnostics() const {
+    return presenter_.listPluginDiagnostics();
+  }
+  std::vector<std::string> searchPaths() const {
+    return presenter_.listPluginSearchPaths();
+  }
+
   // Enable/disable only. Does NOT touch trust state.
   orc::presenters::PluginRegistryMutationResult setEnabled(
-      const std::string& plugin_id, bool enabled) {
-    return presenter_.setPluginEnabled(plugin_id, enabled);
+      const std::string& selector, bool enabled) {
+    return presenter_.setPluginEnabled(selector, enabled);
   }
 
   // Trust/untrust. Called only after explicit user confirmation.
   orc::presenters::PluginRegistryMutationResult setTrusted(
-      const std::string& plugin_id, bool trusted) {
-    return presenter_.setPluginTrusted(plugin_id, trusted);
+      const std::string& selector, bool trusted) {
+    return presenter_.setPluginTrusted(selector, trusted);
+  }
+
+  // Remove the entry the selector addresses. The dialog carries each row's
+  // selector, so the entry removed here is the one the CLI removes for the
+  // same string.
+  orc::presenters::PluginRegistryMutationResult removeEntry(
+      const std::string& selector) {
+    return presenter_.removePluginEntry(selector);
   }
 
   orc::presenters::PluginRegistryMutationResult addEntry(
@@ -67,8 +84,8 @@ class PluginManagerModel {
   // Rewrites the entry to the latest upstream release. The entry reverts to
   // untrusted; the dialog offers the explicit trust confirmation afterwards.
   orc::presenters::PluginRegistryMutationResult updateToLatest(
-      const std::string& plugin_id) {
-    return presenter_.updatePluginToLatestRelease(plugin_id);
+      const std::string& selector) {
+    return presenter_.updatePluginToLatestRelease(selector);
   }
 
  private:

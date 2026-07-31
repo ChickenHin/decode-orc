@@ -9,15 +9,16 @@
 
 #include "plugintrustdialog.h"
 
+#include <plugin_ux_strings.h>
+
 #include <QMessageBox>
 
 namespace orc {
 
 bool confirmPluginTrust(QWidget* parent) {
   const auto answer = QMessageBox::warning(
-      parent, "Plugin Trust",
-      "Warning! Plugins execute code locally on your computer - Are you sure "
-      "you trust the source and author of this plugin?",
+      parent, QString::fromUtf8(plugin_ux::kTrustDialogTitle),
+      QString::fromUtf8(plugin_ux::kTrustWarning),
       QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
   return answer == QMessageBox::Ok;
 }

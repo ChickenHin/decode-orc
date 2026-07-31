@@ -135,14 +135,50 @@ A toggle that hides or shows the toolbar beneath the menu bar.
 
 #### Plugin Manager…
 
-Opens the Plugin Manager, which lists the registered stage plugins (ID, path, version, source, and enabled state) and lets you add, remove, enable, and disable them.
+Opens the Plugin Manager, which lists your **installed plugins** — the registered stage plugins — and lets you add, browse for, remove, update, enable, and disable them. `orc-cli plugins` does the same things from a script, on the same registry file; each action below names its command-line equivalent.
 
-* **Add Plugin…** registers a new plugin, either from a local plugin file or from a GitHub releases URL. Remote plugins are downloaded automatically. Adding a plugin is your consent for it to run: plugin binaries execute as native code, so only add plugins from sources you trust.
-* **Remove** deletes the selected plugin from the registry (core plugins cannot be removed).
-* The **Enabled** checkbox shows whether a plugin will load at the next application start. Entries that arrived from outside Orc-GUI (a hand-edited registry file, `orc-cli plugins install`, or a newly downloaded update you have not confirmed) appear unchecked; ticking the box asks you to confirm that the plugin may run, then enables it.
-* **Show core plugins** is unticked by default, so the list shows only the plugins you installed yourself. Tick it to also see the plugins that ship with the application.
+The table has one row per plugin, with columns **ID**, **Path**, **Version**, **Update**, **Source** and **Enabled**. The registry file being edited is shown above the table.
+
+* **Add Plugin…** registers a new plugin, either from a local plugin file or from a GitHub releases URL. Remote plugins are downloaded automatically. Adding a plugin is your consent for it to run: plugin binaries execute as native code, so only add plugins from sources you trust. CLI: `orc-cli plugins add <path>` or `orc-cli plugins add --url <releases-url>`.
+* **Browse Plugins…** opens the [Browse Plugins](#browse-plugins) dialog, which lists the **available plugins** in the curated index and installs one for you. CLI: `orc-cli plugins search` and `orc-cli plugins install <id>`.
+* **Remove** deletes the selected plugin from the registry (core plugins cannot be removed). CLI: `orc-cli plugins remove <selector>`, or `orc-cli plugins remove --dry-run <selector>` to see which entry would go without writing anything.
+* **Update** re-fetches the selected plugin from its latest published release. It is enabled only for a row whose **Update** column reports one. A new binary is a new consent, so the update asks you to confirm trust again before it is downloaded. CLI: `orc-cli plugins update <selector>`, or `orc-cli plugins update --all`.
+* The **Enabled** checkbox shows whether a plugin will load at the next application start. Entries that arrived from outside Orc-GUI (a hand-edited registry file, `orc-cli plugins install`, or a newly downloaded update you have not confirmed) appear unchecked; ticking the box asks you to confirm that the plugin may run, then enables it. CLI: `orc-cli plugins enable <selector>` and `orc-cli plugins disable <selector>`.
+* **Show core plugins** is unticked by default, so the list shows only the plugins you installed yourself. Tick it to also see the plugins that ship with the application — the **core plugins**. CLI: `orc-cli plugins list`, and `orc-cli plugins list --core` to include them.
+
+The **Update** column is filled in by a check that runs in the background when the dialog opens; until it finishes, entries read **Checking...**. An entry then reads **Up to date**, **Update available (version)**, **Unreachable** when the release could not be fetched, or **—** for a plugin with no upstream repository to check. CLI: `orc-cli plugins updates`, or `orc-cli plugins list --check-updates`.
+
+##### Details
+
+The **Details** pane beside the table describes the selected plugin: its selector, its id when that differs, the installed version, the latest published version and update status once the background check has answered, license, source, path, whether the binary exists and is loaded, the ABI it needs against the ABI this build provides, and its status. A field with nothing to report is left out. The same fields, in the same order and with the same labels, are what `orc-cli plugins info <selector>` prints.
+
+A **selector** is how both front ends name one entry: the plugin's id when it has one, and otherwise a `path:` or `url:` handle. Whatever the pane shows, the command line accepts unchanged.
+
+**Status** is the single answer to "will this load?". It reads **Enabled** when the plugin will load at the next launch, and otherwise names the one reason it will not:
+
+* **Disabled** — will not load until it is enabled.
+* **Not trusted yet** — will not load until you confirm that it may run.
+* **Needs a rebuild** — the plugin was built for a different Orc ABI; its **Version** cell is marked ⚠.
+* **Binary missing** — the plugin file is not present at its recorded path.
+* **Core plugin** — ships with Decode-Orc and always loads.
+
+##### Diagnostics
+
+The collapsible **Diagnostics** section at the bottom lists what the plugin runtime recorded while loading plugins at startup, each line prefixed **Info**, **Warning** or **Error**. These are the same messages `orc-cli process` and `orc-cli filter` print for a run; CLI: `orc-cli plugins doctor`, which also reports the plugin search paths.
 
 Registry changes take effect on the next application launch; the dialog offers a restart when you close it after making changes.
+
+##### Browse Plugins
+
+Reached from the Plugin Manager's **Browse Plugins…** button. It lists the **available plugins** — the curated index of third-party plugins Decode-Orc knows about — and installs one into your registry. CLI: `orc-cli plugins search`.
+
+* The dialog opens on the full list; the search box narrows it by id, name, description or tag. CLI: `orc-cli plugins search <term>`.
+* A banner above the list reports how the listing was sourced: how many plugins are available, or **offline — showing the last cached index** when the index could not be fetched and a previous copy was used.
+* Entries are annotated **installed** when a copy is already in your registry, **incompatible** when the latest release publishes no build for this host, and **unreachable** when its release information could not be fetched.
+* Selecting an entry shows its details — id, name, description, latest version, license, maintainer, source repository, tags, whether it is compatible with this host, and whether it is installed. For a plugin you already have, the **installed** field also says which version you have and whether a newer release is published. CLI: `orc-cli plugins info <id>`.
+* **Install…** downloads the selected plugin's latest release and registers it. It is enabled only for a compatible entry you do not already have. Installing is your consent for it to run, so it asks you to confirm trust first. CLI: `orc-cli plugins install <id>`.
+
+The id the details pane shows is exactly what `orc-cli plugins info` and `orc-cli plugins install` accept, and once the plugin is installed it is also its registry selector.
 
 #### Themes
 
@@ -193,6 +229,8 @@ Orc-GUI filters the available stages to match your project’s video system (PAL
 
 The new stage is placed where you clicked.
 
+CLI: `orc-cli stages list` lists the same stages in the same categories, and `orc-cli stages list --format PAL` applies the same video-system filter. The menu shows each stage's display name; the CLI also reports the internal **stage name**, which is what `--source`, `--filters` and `--sink` accept.
+
 ### Creating Connections
 
 To connect stages:
@@ -232,6 +270,8 @@ This changes the label shown on the stage.
 
 Use this to set file paths, decoding options, thresholds, output settings, and other stage-specific behaviour.
 
+CLI: `orc-cli stages info <stage>` describes the same parameters — display name, description, type, whether it is required, default, range, allowed values and dependencies. `orc-cli stages info <stage> --yaml` emits a parameter block to paste into a project file, and `--filtergraph` emits the form `--source`/`--filters`/`--sink` take.
+
 ### Running Stage Tools
 
 Some stages offer interactive tools such as analysis, visualisation, and configuration helpers (e.g. the Disc Mapper, Dropout Editor, or FFmpeg Preset Config).
@@ -261,6 +301,8 @@ Every stage documents itself.
 * Choose **Help…**
 
 This opens the stage's built-in documentation (purpose, parameters, tools, and status-indicator meanings).
+
+CLI: `orc-cli stages help <stage>` prints the same document.
 
 ---
 

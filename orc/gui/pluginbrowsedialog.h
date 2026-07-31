@@ -29,7 +29,8 @@ namespace orc {
  * The index is fetched asynchronously on open so the UI never blocks on the
  * network; an offline/stale banner is shown when the list came from cache.
  * Installing records an untrusted registry entry and offers explicit trust
- * confirmation. Registry changes take effect on the next application launch.
+ * confirmation. Registry edits are reconciled at startup (see
+ * plugin_ux::kRegistryChangeNote), never mid-session.
  */
 class PluginBrowseDialog : public QDialog {
   Q_OBJECT

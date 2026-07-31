@@ -9,6 +9,8 @@
 
 #include "pluginbrowsedialog.h"
 
+#include <plugin_ux_strings.h>
+
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -20,6 +22,7 @@
 #include <QVBoxLayout>
 
 #include "plugintrustdialog.h"
+#include "presenters/include/plugin_details.h"
 
 namespace orc {
 
@@ -78,9 +81,9 @@ void PluginBrowseDialog::buildUI() {
   auto* close_box = new QDialogButtonBox(QDialogButtonBox::Close, this);
   root->addWidget(close_box);
 
-  auto* note = new QLabel(
-      "Note: Installed plugins take effect on the next application launch.",
-      this);
+  auto* note = new QLabel(QString::fromUtf8(plugin_ux::kNotePrefix) +
+                              QString::fromUtf8(plugin_ux::kRegistryChangeNote),
+                          this);
   note->setEnabled(false);
   note->setWordWrap(true);
   root->addWidget(note);
@@ -131,11 +134,13 @@ void PluginBrowseDialog::populateList() {
     QString label = QString::fromStdString(
         entry.display_name.empty() ? entry.id : entry.display_name);
     if (entry.release_unreachable) {
-      label += "  (unreachable)";
+      label +=
+          "  (" + QString::fromUtf8(plugin_ux::kIndexLabelUnreachable) + ")";
     } else if (!entry.has_compatible_build) {
-      label += "  (incompatible)";
+      label +=
+          "  (" + QString::fromUtf8(plugin_ux::kIndexLabelIncompatible) + ")";
     } else if (entry.already_installed) {
-      label += "  (installed)";
+      label += "  (" + QString::fromUtf8(plugin_ux::kIndexLabelInstalled) + ")";
     }
     auto* item = new QListWidgetItem(label, list_);
     item->setData(kEntryIdRole, QString::fromStdString(entry.id));
@@ -170,54 +175,15 @@ void PluginBrowseDialog::updateDetails() {
     return;
   }
 
+  // The fields, their labels and their order come from the presenter, so this
+  // pane and 'orc-cli plugins info' describe an entry identically — including
+  // how an installed copy relates to the latest published release.
   QString text;
-  text += "<b>" +
-          QString::fromStdString(
-              entry->display_name.empty() ? entry->id : entry->display_name)
-              .toHtmlEscaped() +
-          "</b><br>";
-  text += QString::fromStdString(entry->id).toHtmlEscaped() + "<br><br>";
-  if (!entry->description.empty()) {
-    text +=
-        QString::fromStdString(entry->description).toHtmlEscaped() + "<br><br>";
-  }
-  if (!entry->version.empty()) {
-    text += "Latest release: " +
-            QString::fromStdString(entry->version).toHtmlEscaped() + "<br>";
-  }
-  if (!entry->maintainer.empty()) {
-    text += "Maintainer: " +
-            QString::fromStdString(entry->maintainer).toHtmlEscaped() + "<br>";
-  }
-  if (!entry->license_spdx.empty()) {
-    text += "License: " +
-            QString::fromStdString(entry->license_spdx).toHtmlEscaped() +
+  for (const auto& field : orc::presenters::makePluginDetails(
+           model_.installedEntry(entry->id), entry, nullptr)) {
+    text += "<b>" + QString::fromStdString(field.label).toHtmlEscaped() +
+            ":</b> " + QString::fromStdString(field.value).toHtmlEscaped() +
             "<br>";
-  }
-  if (!entry->source_repo_url.empty()) {
-    text += "Source: " +
-            QString::fromStdString(entry->source_repo_url).toHtmlEscaped() +
-            "<br>";
-  }
-  text += "<br>";
-  if (entry->has_compatible_build) {
-    text += "Compatible with this host (declared by the release manifest).";
-  } else if (entry->release_unreachable) {
-    text += "Release information unreachable.";
-    if (!entry->compatibility_message.empty()) {
-      text +=
-          "<br>" +
-          QString::fromStdString(entry->compatibility_message).toHtmlEscaped();
-    }
-  } else {
-    text += QString::fromStdString(
-                entry->compatibility_message.empty()
-                    ? std::string("No compatible build for this host.")
-                    : entry->compatibility_message)
-                .toHtmlEscaped();
-  }
-  if (entry->already_installed) {
-    text += "<br>Already installed.";
   }
   details_label_->setText(text);
 

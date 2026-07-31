@@ -12,8 +12,10 @@
 #include <orc/stage/node_id.h>
 #include <orc/stage/node_type.h>
 
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace orc::presenters {
 
@@ -44,7 +46,30 @@ struct LoadedPluginInfo {
   std::vector<std::string> registered_stage_names;
 };
 
+/// Values the registry records in @ref PluginRegistryEntryInfo::trust_state.
+/// Front ends set these when they build an entry; they never compare against
+/// them to work out whether a plugin loads — that is what
+/// @ref PluginLoadState is for.
+inline constexpr const char* kPluginTrustStateTrusted = "trusted";
+inline constexpr const char* kPluginTrustStateUntrusted = "untrusted";
+
+/// Whether a registry entry will load at the next launch and, when it will
+/// not, the single reason why. Computed once by the presenter so the GUI and
+/// the CLI can never disagree about an entry's state.
+enum class PluginLoadState {
+  WillLoad,     ///< Enabled, trusted, and the artifact is usable.
+  Disabled,     ///< Enabled flag cleared by the user.
+  NotTrusted,   ///< Trust has not been granted for this binary yet.
+  AbiMismatch,  ///< Built against a different Orc ABI than this host.
+  FileMissing,  ///< A locally registered binary is not on disk.
+  Core,         ///< Bundled with the application; always loads.
+};
+
 struct PluginRegistryEntryInfo {
+  /// Canonical handle for this entry: the string every command that takes a
+  /// plugin accepts, and the only identifier a front end should print where a
+  /// selector belongs. Never empty and never a placeholder.
+  std::string selector;
   std::string plugin_id;
   std::string plugin_version;
   std::string path;
@@ -66,6 +91,14 @@ struct PluginRegistryEntryInfo {
   std::string sha256;
   bool is_loaded = false;
   bool path_exists = false;
+  /// Where the entry came from, worded once for both front ends: the release
+  /// asset URL, else the source repository, else the local path, and "Core"
+  /// for a bundled plugin.
+  std::string source_label;
+  PluginLoadState load_state = PluginLoadState::WillLoad;
+  /// Lower-case clause explaining @ref load_state for this entry (carries the
+  /// ABI numbers or the missing path); empty for states that need no detail.
+  std::string load_state_detail;
 };
 
 struct PluginRegistryInfo {
@@ -73,8 +106,38 @@ struct PluginRegistryInfo {
   std::vector<PluginRegistryEntryInfo> entries;
 };
 
+/// Outcome of turning a user-supplied plugin selector into a registry entry.
+enum class PluginSelectorStatus {
+  Resolved,   ///< Exactly one entry matched.
+  NotFound,   ///< No entry matched.
+  Ambiguous,  ///< More than one entry matched; the caller must disambiguate.
+};
+
+struct PluginSelectorResolution {
+  PluginSelectorStatus status = PluginSelectorStatus::NotFound;
+  PluginRegistryEntryInfo entry;  ///< Valid only when Resolved.
+  /// Position of @ref entry in the list that was searched. Valid only when
+  /// Resolved; lets callers map the match back onto their own storage.
+  size_t entry_index = 0;
+  /// Unambiguous selectors to choose from; populated only when Ambiguous.
+  std::vector<std::string> candidates;
+  /// The selector was a loaded plugin's runtime id resolved onto an id-less
+  /// registry row by path; mutation paths backfill the id when this is set.
+  bool resolved_via_runtime_id = false;
+};
+
+/// Why a registry mutation failed, so a front end can map the failure onto its
+/// own contract (the CLI's exit codes) without parsing the message text.
+enum class PluginMutationFailure {
+  Other,             ///< Bad arguments, write failures, unusable releases, ...
+  NotFound,          ///< The selector or id matched nothing, or was ambiguous.
+  IndexUnavailable,  ///< The curated index or a release could not be reached.
+};
+
 struct PluginRegistryMutationResult {
   bool success = false;
+  /// Meaningful only when @ref success is false.
+  PluginMutationFailure failure = PluginMutationFailure::Other;
   std::string error_message;
 };
 

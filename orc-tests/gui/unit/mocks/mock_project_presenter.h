@@ -96,12 +96,14 @@ class MockProjectPresenter : public IProjectPresenter {
   MOCK_METHOD(PluginRegistryMutationResult, addPluginFromUrl,
               (const std::string& releases_url, bool trusted),
               (const, override));
-  MOCK_METHOD(PluginRegistryMutationResult, removePlugin,
-              (const std::string& plugin_id), (const, override));
+  MOCK_METHOD(PluginSelectorResolution, resolvePluginSelector,
+              (const std::string& selector), (const, override));
+  MOCK_METHOD(PluginRegistryMutationResult, removePluginEntry,
+              (const std::string& selector), (const, override));
   MOCK_METHOD(PluginRegistryMutationResult, setPluginEnabled,
-              (const std::string& plugin_id, bool enabled), (const, override));
+              (const std::string& selector, bool enabled), (const, override));
   MOCK_METHOD(PluginRegistryMutationResult, setPluginTrusted,
-              (const std::string& plugin_id, bool trusted), (const, override));
+              (const std::string& selector, bool trusted), (const, override));
   MOCK_METHOD(PluginIndexInfo, fetchPluginIndex, (), (const, override));
   MOCK_METHOD(PluginRegistryMutationResult, installPluginFromIndex,
               (const std::string& plugin_id), (const, override));

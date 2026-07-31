@@ -10,6 +10,7 @@
 #pragma once
 
 #include <orc/stage/params/parameter_types.h>
+#include <stage_ux_strings.h>
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -37,11 +38,12 @@ class StageParameterDialog : public QDialog {
 
  public:
   // Separator used inside a string parameter's allowed_strings entry to carry a
-  // display label distinct from the stored value: "value\x1flabel". The combo
-  // box shows the label but stores the value. Entries without the separator
-  // behave as before (display == value). '\x1f' (unit separator) cannot appear
-  // in a normal parameter value, so this is collision-free.
-  static constexpr char kComboValueLabelSeparator = '\x1f';
+  // display label distinct from the stored value. The combo box shows the label
+  // but stores the value; entries without the separator behave as before
+  // (display == value). Single-sourced with the CLI's `allowed values` field so
+  // the two front ends read an entry the same way.
+  static constexpr char kComboValueLabelSeparator =
+      orc::stage_ux::kComboValueLabelSeparator;
 
   /**
    * @brief Construct parameter editor dialog
