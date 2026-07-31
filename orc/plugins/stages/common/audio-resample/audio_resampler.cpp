@@ -40,7 +40,10 @@ std::vector<int32_t> AudioResampler::resample(
   if (input_stereo.empty()) return {};
   if (in_rate == out_rate) return input_stereo;
 
-  constexpr unsigned kChannels = 2;
+  // static: the drain lambda below reads kChannels without a default capture
+  // mode, which MSVC rejects for an automatic constexpr (C3493). A static has
+  // no capture question to answer.
+  static constexpr unsigned kChannels = 2;
   const size_t in_frames = input_stereo.size() / kChannels;
   if (in_frames == 0) return {};
 
