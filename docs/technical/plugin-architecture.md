@@ -207,7 +207,7 @@ Each entry records:
 | `target_platform` | Optional platform hint for cache selection |
 | `local_dev_path` | Optional development override used before remote download |
 | `enabled` | Whether the plugin is loaded at startup |
-| `trust_state` | Trust level, enforced before loading: entries other than `trusted` are neither downloaded nor `dlopen`ed unless `is_core_plugin` is set. Trust is a distinct decision from adding or enabling: adding a plugin (local file, URL, or from the curated index) records the entry but leaves it `untrusted` unless the user confirms trust in the explicit confirmation dialog, and toggling the **Enabled** checkbox never changes trust. Trust is granted through the Plugin Manager's **Trusted** column (with a confirmation dialog) or `orc-cli plugins trust <id>` / `untrust <id>`; entries that arrive from outside the application (e.g. a hand-edited registry file) also default to `untrusted` |
+| `trust_state` | Trust level, enforced before loading: entries other than `trusted` are neither downloaded nor `dlopen`ed unless `is_core_plugin` is set. Trust is always granted through an explicit warning ("plugins execute code locally on your computer") with OK/Cancel and Cancel as the default. In the GUI, adding or installing a plugin shows that warning up front — OK records the entry trusted, Cancel records nothing. Untrusted entries still occur (CLI `plugins install` records untrusted until `plugins trust <id>`, updates reset trust, and hand-edited registry files default to `untrusted`); the Plugin Manager shows them with an unticked **Enabled** box, and ticking it shows the same warning before recording trust — the GUI has no separate trust control. `orc-cli plugins trust <id>` does the same from the CLI |
 | `license_spdx` | SPDX license identifier |
 | `is_core_plugin` | Marks entries supplied by Decode-Orc itself; implicitly trusted |
 | `required_host_abi` | Host ABI the plugin was built for. Enforced before download and load: a non-zero value that does not equal the host's `host_abi_version` means the entry is neither downloaded nor `dlopen`ed — it stays visible with a "needs a rebuild for Orc ABI N" message in `orc-cli plugins list` and the GUI Plugin Manager. `0` means unspecified (not gated); `is_core_plugin` entries are exempt |
@@ -224,6 +224,38 @@ reported as an error, and a mismatching cache hit triggers one fresh
 download attempt. When no `sha256` is recorded, the host loads the artifact
 but emits a warning that its integrity could not be verified.
 
+### Update checks and updating
+
+For every non-core registry entry with a GitHub `source_repo_url`, the host
+can query the repository's **latest published release**
+(`api.github.com/repos/<owner>/<repo>/releases/latest`) and compare its tag
+against the installed `plugin_version` (falling back to `release_tag`). This
+means a newer plugin release is reported without the curated index needing an
+update. The per-plugin outcome is one of:
+
+- **Up to date** — installed version ≥ latest release tag.
+- **Update available (x.y.z)** — a newer release is published upstream.
+- **Unreachable** — the release information could not be fetched (offline,
+  rate-limited, repository removed, or no releases published).
+- **Unknown** — the latest release is known but no installed version is
+  recorded to compare against.
+- Entries without a GitHub repository URL (e.g. local plugins) are not
+  checked.
+
+The GUI Plugin Manager runs the check on a worker thread when it opens and
+shows the outcome in its **Update** column; `orc-cli plugins updates` prints
+the same information. One API request is made per distinct repository per
+sweep.
+
+Updating (the Plugin Manager's **Update** button, or
+`orc-cli plugins update <id>`) re-resolves the release asset from the entry's
+`source_repo_url` — the same resolution as adding by URL and installing from
+the index — and rewrites the registry entry to point at the latest release.
+Any recorded `sha256` is cleared (release artifacts carry no reviewed
+digest), the cached `path` is dropped so the next launch downloads the new
+asset, and the entry reverts to **untrusted**: the user must explicitly
+re-confirm trust before the new binary is downloaded or loaded.
+
 ## Curated plugin index
 
 Alongside manual URL entry, the host offers a **curated index** of third-party
@@ -239,37 +271,42 @@ Plugins…** dialog opens or a `orc-cli plugins search / info / install` command
 runs — asynchronously, falling back to the last-good cached copy
 (`<config>/plugin-index-cache.yaml`) when offline.
 
-Schema (`registry_schema: 1`):
+The index curates **which plugins are offered, not their versions**: once a
+plugin is accepted, its current release and all subsequent releases are
+available without further index changes. The host resolves each entry's
+**latest published GitHub release** at browse and install time (the same
+resolution used when adding a plugin by URL), selecting the release asset for
+this host's platform and ABI tag. Entries whose release information cannot be
+fetched are shown as **unreachable**; entries whose latest release publishes
+no matching asset are shown as incompatible.
+
+Schema (`registry_schema: 2`):
 
 | Field | Description |
 |-------|-------------|
-| `registry_schema` | Index schema **major** version. Hosts ignore unknown fields, so additions within a major are non-breaking; a newer major is parsed best-effort so an older host still resolves compatible builds |
+| `registry_schema` | Index schema **major** version. Hosts ignore unknown fields, so additions within a major are non-breaking; a newer major is parsed best-effort with a warning. Schema 1 pinned per-release `artifacts` lists; schema 2 removed them — a pin list in an older index is ignored |
 | `plugins[].id` | Unique plugin identifier |
 | `plugins[].display_name` | Human-readable name |
 | `plugins[].description` | Short description |
 | `plugins[].tags` | Search tags |
 | `plugins[].maintainer` | Maintainer name |
 | `plugins[].license_spdx` | SPDX license identifier (mandatory) |
-| `plugins[].source_repo_url` | Plugin source repository |
-| `plugins[].artifacts[]` | One build per (platform, host ABI) |
-| `artifacts[].platform` | `linux`, `macos`, or `windows` (a more specific value such as `linux-x86_64` is matched by prefix) |
-| `artifacts[].host_abi` | Host ABI this build targets |
-| `artifacts[].url` | Direct release-asset download URL |
-| `artifacts[].sha256` | Mandatory 64-hex digest, carried into the local registry on install |
-| `artifacts[].plugin_version` | Plugin release version |
-| `artifacts[].min_host_app_version` | Minimum host application version (optional) |
+| `plugins[].source_repo_url` | GitHub repository the host resolves releases from (mandatory) |
 
-Artifacts are resolved by **(platform, host ABI)** using the same compatibility
-gating as the registry ([Compatibility Gating](#compatibility-gating)): an
-older host that finds no matching build reports "no build for this host" before
-downloading anything, instead of failing at `dlopen`. Installing from the index
-records a registry entry carrying the index's `sha256`, left **untrusted**
-until the user confirms trust.
+Installing from the index records a registry entry pointing at the resolved
+latest release asset, left **untrusted** until the user confirms trust. No
+digest is recorded (there is nothing stable to pin); integrity rests on the
+trust gate, transport security, and the load-time ABI/toolchain checks. After
+install, the host keeps checking the repository for newer releases — see
+[Update checks and updating](#update-checks-and-updating).
 
 Contribution model: plugin authors open a pull request adding their entry;
-repository CI validates every PR (schema conformance, artifact naming including
-the ABI token, URL reachability, digest match, and a present SPDX license), and
-a maintainer's merge is the curation and trust decision. See
+repository CI validates every PR (schema conformance, a present SPDX license,
+a GitHub `source_repo_url`, and — online — that the repository's latest
+release publishes an asset following the plugin naming convention), and a
+maintainer's merge is the curation decision. **The merge endorses the
+repository, not a reviewed binary**: every future release the repository
+publishes becomes installable immediately. See
 [`orc-plugin-registry/README.md`](../../orc-plugin-registry/README.md).
 
 ### Distribution integrity
@@ -292,13 +329,17 @@ What the host verifies before running plugin code, and what it does not:
 
 **What the curated index adds:**
 
-- **Mandatory digests.** Every index artifact must carry a `sha256`, enforced
-  by the registry PR validation before merge; installing from the index copies
-  that digest into the local registry so the download is always integrity-
-  checked (unlike a hand-entered URL, where a digest is optional).
-- **Curated review.** A human maintainer's merge is the trust decision for a
-  listed plugin: the PR workflow verifies the artifact URL resolves and its
-  bytes hash to the declared digest before the entry can go live.
+- **Curated acceptance.** A human maintainer's merge admits a plugin
+  repository to the list; the PR workflow verifies the repository publishes a
+  release with a conforming plugin asset before the entry can go live.
+- **No version pinning (by design).** The index does not pin release URLs or
+  digests: installs and updates always resolve the repository's latest
+  release, so a new upstream release is available with no index change. The
+  flip side is that the maintainer's merge endorses the repository and its
+  future releases, not one reviewed binary — a compromised plugin repository
+  can publish a malicious release that is immediately installable. The
+  per-user trust confirmation (required on first install and again after
+  every update) is the remaining human checkpoint.
 
 **Not verified (future work):**
 
@@ -306,9 +347,10 @@ What the host verifies before running plugin code, and what it does not:
   cryptographically signed, so its authenticity rests on transport security and
   repository access control. Signing the index (e.g. minisign/sigstore) is a
   documented follow-on.
-- **Code signing.** Plugin binaries carry no cryptographic signature; the
-  `sha256` authenticates an artifact only as strongly as the index or registry
-  entry that records it.
+- **Code signing.** Plugin binaries carry no cryptographic signature, and
+  index installs record no digest; a hand-entered `sha256` in the local
+  registry authenticates an artifact only as strongly as the registry entry
+  that records it.
 - **Unsigned local registry.** The on-disk registry
   (`stage-plugins.yaml`) and the cached index copy are plain files with no
   signature. An attacker who can write to the user's config directory could

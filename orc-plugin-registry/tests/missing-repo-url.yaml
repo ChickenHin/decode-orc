@@ -1,0 +1,7 @@
+# Fixture: entry without source_repo_url (must fail — the host installs from
+# the repository's latest release, so the URL is mandatory).
+registry_schema: 2
+plugins:
+  - id: com.example.deinterlace
+    display_name: Example Deinterlacer
+    license_spdx: GPL-3.0-or-later

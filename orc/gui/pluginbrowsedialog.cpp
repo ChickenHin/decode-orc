@@ -79,8 +79,7 @@ void PluginBrowseDialog::buildUI() {
   root->addWidget(close_box);
 
   auto* note = new QLabel(
-      "Note: Installed plugins are untrusted until you confirm trust, and take "
-      "effect on the next application launch.",
+      "Note: Installed plugins take effect on the next application launch.",
       this);
   note->setEnabled(false);
   note->setWordWrap(true);
@@ -131,7 +130,9 @@ void PluginBrowseDialog::populateList() {
   for (const auto& entry : entries) {
     QString label = QString::fromStdString(
         entry.display_name.empty() ? entry.id : entry.display_name);
-    if (!entry.has_compatible_build) {
+    if (entry.release_unreachable) {
+      label += "  (unreachable)";
+    } else if (!entry.has_compatible_build) {
       label += "  (incompatible)";
     } else if (entry.already_installed) {
       label += "  (installed)";
@@ -180,6 +181,10 @@ void PluginBrowseDialog::updateDetails() {
     text +=
         QString::fromStdString(entry->description).toHtmlEscaped() + "<br><br>";
   }
+  if (!entry->version.empty()) {
+    text += "Latest release: " +
+            QString::fromStdString(entry->version).toHtmlEscaped() + "<br>";
+  }
   if (!entry->maintainer.empty()) {
     text += "Maintainer: " +
             QString::fromStdString(entry->maintainer).toHtmlEscaped() + "<br>";
@@ -197,6 +202,13 @@ void PluginBrowseDialog::updateDetails() {
   text += "<br>";
   if (entry->has_compatible_build) {
     text += "Compatible with this host.";
+  } else if (entry->release_unreachable) {
+    text += "Release information unreachable.";
+    if (!entry->compatibility_message.empty()) {
+      text +=
+          "<br>" +
+          QString::fromStdString(entry->compatibility_message).toHtmlEscaped();
+    }
   } else {
     text += QString::fromStdString(
                 entry->compatibility_message.empty()
@@ -224,27 +236,9 @@ void PluginBrowseDialog::onInstall() {
   }
   const std::string id = entry->id;
 
-  // Determine digest status from the compatible artifact, if any.
-  QString digest_status = "no digest";
-  for (const auto& artifact : entry->artifacts) {
-    if (!artifact.sha256.empty()) {
-      digest_status = "sha256 present";
-      break;
-    }
-  }
-
-  PluginTrustDialog::Details details;
-  details.headline = QStringLiteral(
-      "Install and optionally trust this plugin. Trusted plugins are "
-      "downloaded and run as native code on the next launch.");
-  details.source = QString::fromStdString(entry->source_repo_url.empty()
-                                              ? entry->maintainer
-                                              : entry->source_repo_url);
-  details.license = QString::fromStdString(entry->license_spdx);
-  details.digest_status = digest_status;
-
-  PluginTrustDialog dialog(this, details, /*allow_untrusted=*/true);
-  if (dialog.exec() != QDialog::Accepted) {
+  // Installing means the latest release will run as native code, so trust is
+  // confirmed explicitly before anything is recorded.
+  if (!confirmPluginTrust(this)) {
     return;  // Cancelled — nothing added.
   }
 
@@ -257,21 +251,15 @@ void PluginBrowseDialog::onInstall() {
 
   changes_made_ = true;
 
-  if (dialog.choice() == PluginTrustDialog::Choice::Trust) {
-    const auto trust_result = model_.trust(id);
-    if (!trust_result.success) {
-      QMessageBox::warning(this, "Trust Failed",
-                           QString::fromStdString(trust_result.error_message));
-    }
+  const auto trust_result = model_.trust(id);
+  if (!trust_result.success) {
+    QMessageBox::warning(this, "Trust Failed",
+                         QString::fromStdString(trust_result.error_message));
   }
 
   QMessageBox::information(
       this, "Plugin Installed",
-      QString::fromStdString(id) +
-          (dialog.choice() == PluginTrustDialog::Choice::Trust
-               ? " installed and trusted."
-               : " installed (untrusted). Trust it in the Plugin Manager to "
-                 "enable loading."));
+      QString::fromStdString(id) + " installed and trusted.");
   install_button_->setEnabled(false);
 }
 

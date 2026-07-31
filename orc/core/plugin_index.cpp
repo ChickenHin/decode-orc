@@ -14,27 +14,6 @@
 namespace orc {
 namespace {
 
-PluginIndexArtifact parse_artifact(const YAML::Node& node,
-                                   std::vector<std::string>& warnings,
-                                   const std::string& plugin_id) {
-  PluginIndexArtifact artifact;
-  artifact.platform = node["platform"].as<std::string>("");
-  artifact.host_abi = node["host_abi"].as<uint32_t>(0);
-  artifact.url = node["url"].as<std::string>("");
-  artifact.sha256 = node["sha256"].as<std::string>("");
-  artifact.plugin_version = node["plugin_version"].as<std::string>("");
-  artifact.min_host_app_version =
-      node["min_host_app_version"].as<std::string>("");
-  artifact.asset_name = node["asset_name"].as<std::string>("");
-
-  if (artifact.sha256.empty()) {
-    warnings.push_back("Plugin '" + plugin_id + "' artifact for platform '" +
-                       artifact.platform +
-                       "' is missing a mandatory sha256 digest");
-  }
-  return artifact;
-}
-
 PluginIndexEntry parse_entry(const YAML::Node& node,
                              std::vector<std::string>& warnings) {
   PluginIndexEntry entry;
@@ -52,17 +31,16 @@ PluginIndexEntry parse_entry(const YAML::Node& node,
     }
   }
 
-  const YAML::Node artifacts_node = node["artifacts"];
-  if (artifacts_node && artifacts_node.IsSequence()) {
-    for (const auto& artifact_node : artifacts_node) {
-      entry.artifacts.push_back(
-          parse_artifact(artifact_node, warnings, entry.id));
-    }
-  }
+  // Schema 1 entries carried pinned `artifacts`; schema 2 resolves releases
+  // at runtime, so any pin list is ignored (tolerant of older indexes).
 
   if (entry.license_spdx.empty()) {
     warnings.push_back("Plugin '" + entry.id +
                        "' is missing an SPDX license identifier");
+  }
+  if (entry.source_repo_url.empty()) {
+    warnings.push_back("Plugin '" + entry.id +
+                       "' has no source_repo_url; it cannot be installed");
   }
   return entry;
 }

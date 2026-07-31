@@ -101,6 +101,11 @@ class IProjectPresenter {
   virtual PluginRegistryMutationResult installPluginFromIndex(
       const std::string& plugin_id) const = 0;
 
+  // === Plugin update checks ===
+  virtual std::vector<PluginUpdateStatusInfo> checkPluginUpdates() const = 0;
+  virtual PluginRegistryMutationResult updatePluginToLatestRelease(
+      const std::string& plugin_id) const = 0;
+
   // === Batch Operations ===
   virtual bool canTriggerNode(NodeID node_id, std::string* reason) const = 0;
   virtual bool triggerNode(NodeID node_id,

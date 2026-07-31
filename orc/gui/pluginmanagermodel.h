@@ -58,6 +58,19 @@ class PluginManagerModel {
     return presenter_.addPluginFromUrl(releases_url, trusted);
   }
 
+  // Network-bound: one GitHub API request per distinct source repository.
+  // Callers must run this off the UI thread.
+  std::vector<orc::presenters::PluginUpdateStatusInfo> checkUpdates() const {
+    return presenter_.checkPluginUpdates();
+  }
+
+  // Rewrites the entry to the latest upstream release. The entry reverts to
+  // untrusted; the dialog offers the explicit trust confirmation afterwards.
+  orc::presenters::PluginRegistryMutationResult updateToLatest(
+      const std::string& plugin_id) {
+    return presenter_.updatePluginToLatestRelease(plugin_id);
+  }
+
  private:
   orc::presenters::IProjectPresenter& presenter_;
 };

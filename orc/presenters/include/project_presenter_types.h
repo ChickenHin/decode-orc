@@ -78,30 +78,48 @@ struct PluginRegistryMutationResult {
   std::string error_message;
 };
 
-/// One downloadable build advertised by the curated plugin index.
-struct PluginIndexArtifactInfo {
-  std::string platform;
-  uint32_t host_abi = 0;
-  std::string url;
-  std::string sha256;
-  std::string plugin_version;
-  std::string min_host_app_version;
+/// Outcome of checking one installed plugin against its latest upstream
+/// release.
+enum class PluginUpdateStatus {
+  UpToDate,         ///< Installed version >= latest published release.
+  UpdateAvailable,  ///< A newer release is published upstream.
+  Unreachable,      ///< The release information could not be fetched.
+  Unknown,          ///< Latest release known, but no installed version to
+                    ///< compare against.
+  NotApplicable,    ///< No supported source repository URL (e.g. local
+                    ///< plugins).
 };
 
-/// One plugin advertised by the curated index, with host-compatibility
-/// resolved against the running host's platform and ABI.
+/// Per-plugin result of a latest-release update check.
+struct PluginUpdateStatusInfo {
+  std::string plugin_id;
+  std::string installed_version;
+  std::string latest_version;  ///< Normalised for display; empty when unknown.
+  std::string latest_tag;      ///< Raw upstream release tag (e.g. "v1.0.6").
+  PluginUpdateStatus status = PluginUpdateStatus::NotApplicable;
+  std::string message;  ///< Failure detail when Unreachable.
+};
+
+/// One plugin advertised by the curated index. The index curates which
+/// plugins are offered; the entry's version and compatibility are resolved
+/// at runtime from the latest release published by `source_repo_url`.
 struct PluginIndexEntryInfo {
   std::string id;
   std::string display_name;
   std::string description;
+  std::string version;     ///< Latest published release, normalised for
+                           ///< display (empty when unreachable).
+  std::string latest_tag;  ///< Raw release tag of the latest release.
   std::string maintainer;
   std::string license_spdx;
   std::string source_repo_url;
   std::vector<std::string> tags;
-  std::vector<PluginIndexArtifactInfo> artifacts;
-  bool has_compatible_build = false;  ///< A build exists for this host.
+  bool has_compatible_build = false;  ///< The latest release carries an
+                                      ///< asset for this host.
+  bool release_unreachable = false;   ///< Release info could not be fetched.
   bool already_installed = false;     ///< Present in the local registry.
-  std::string compatibility_message;  ///< Set when no compatible build exists.
+  std::string compatibility_message;  ///< Set when not installable (no
+                                      ///< matching asset, unreachable, ...).
 };
 
 /// Result of fetching the curated plugin index, including offline/cache state.

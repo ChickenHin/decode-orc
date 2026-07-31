@@ -1,4 +1,5 @@
-registry_schema: 1
+# Fixture: a fully valid schema-2 index (must pass validation).
+registry_schema: 2
 plugins:
   - id: com.example.deinterlace
     display_name: Example Deinterlacer
@@ -7,14 +8,3 @@ plugins:
     license_spdx: GPL-3.0-or-later
     source_repo_url: https://github.com/example/orc-plugin_deinterlace
     tags: [transform, video]
-    artifacts:
-      - platform: linux
-        host_abi: 8
-        url: https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi8.so
-        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        plugin_version: 1.0.0
-      - platform: windows
-        host_abi: 8
-        url: https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_windows_abi8.dll
-        sha256: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-        plugin_version: 1.0.0

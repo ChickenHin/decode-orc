@@ -271,6 +271,7 @@ PluginRemoteLoader::resolve_release_asset_from_releases_url(
   std::string response_body;
   std::string fetch_error;
   if (!fetch_text_url(api_url, &response_body, &fetch_error)) {
+    result.unreachable = true;
     result.error_message =
         "Failed to query GitHub release metadata: " + fetch_error;
     return result;

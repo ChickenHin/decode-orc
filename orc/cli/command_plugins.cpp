@@ -41,8 +41,12 @@ void print_plugins_usage(const char* program_name) {
                "index\n";
   std::cerr << "  info <id>                      Show details for an indexed "
                "plugin\n";
-  std::cerr << "  install <id>                   Install a plugin from the "
-               "curated index (untrusted until confirmed)\n";
+  std::cerr << "  install <id>                   Install an indexed plugin's "
+               "latest release (untrusted until confirmed)\n";
+  std::cerr << "  updates                        Check registered plugins for "
+               "newer upstream releases\n";
+  std::cerr << "  update <id>                    Update a registered plugin to "
+               "its latest release (untrusted until confirmed)\n";
   std::cerr << "\n";
   std::cerr << "Options for 'add':\n";
   std::cerr << "  --id ID                        Plugin identifier (e.g. "
@@ -351,6 +355,15 @@ int cmd_plugins_info(int argc, char* argv[]) {
     }
     std::cout << "\n";
   }
+  if (entry->release_unreachable) {
+    std::cout << "latest:      unreachable"
+              << (entry->compatibility_message.empty()
+                      ? ""
+                      : " — " + entry->compatibility_message)
+              << "\n";
+  } else if (!entry->version.empty()) {
+    std::cout << "latest:      " << entry->version << "\n";
+  }
   std::cout << "compatible:  "
             << (entry->has_compatible_build
                     ? "yes"
@@ -360,11 +373,6 @@ int cmd_plugins_info(int argc, char* argv[]) {
             << "\n";
   std::cout << "installed:   " << (entry->already_installed ? "yes" : "no")
             << "\n";
-  std::cout << "builds (" << entry->artifacts.size() << "):\n";
-  for (const auto& a : entry->artifacts) {
-    std::cout << "  - platform: " << a.platform << ", ABI " << a.host_abi
-              << ", version " << a.plugin_version << "\n";
-  }
   return 0;
 }
 
@@ -385,6 +393,78 @@ int cmd_plugins_install(int argc, char* argv[]) {
 
   std::cout << "Plugin '" << plugin_id
             << "' added to the registry (untrusted).\n";
+  std::cout << "Trust it before it will be downloaded and loaded:\n";
+  std::cout << "  orc-cli plugins trust " << plugin_id << "\n";
+  std::cout << "Note: Changes take effect on the next application launch.\n";
+  return 0;
+}
+
+int cmd_plugins_updates() {
+  const auto statuses =
+      orc::presenters::ProjectPresenter::checkRegisteredPluginUpdates();
+
+  if (statuses.empty()) {
+    std::cout << "No registered plugins to check for updates.\n";
+    return 0;
+  }
+
+  bool any_update = false;
+  for (const auto& s : statuses) {
+    std::cout << "  id:        " << s.plugin_id << "\n";
+    std::cout << "  installed: "
+              << (s.installed_version.empty() ? "-" : s.installed_version)
+              << "\n";
+    switch (s.status) {
+      case orc::presenters::PluginUpdateStatus::UpToDate:
+        std::cout << "  status:    up to date (latest " << s.latest_tag
+                  << ")\n";
+        break;
+      case orc::presenters::PluginUpdateStatus::UpdateAvailable:
+        any_update = true;
+        std::cout << "  status:    update available (" << s.latest_version
+                  << ")\n";
+        break;
+      case orc::presenters::PluginUpdateStatus::Unreachable:
+        std::cout << "  status:    unreachable (" << s.message << ")\n";
+        break;
+      case orc::presenters::PluginUpdateStatus::Unknown:
+        std::cout << "  status:    latest is " << s.latest_version
+                  << " (installed version unknown)\n";
+        break;
+      case orc::presenters::PluginUpdateStatus::NotApplicable:
+        std::cout << "  status:    no source repository to check\n";
+        break;
+    }
+    std::cout << "\n";
+  }
+
+  if (any_update) {
+    std::cout << "Update a plugin with: orc-cli plugins update <id>\n";
+  }
+  return 0;
+}
+
+int cmd_plugins_update(int argc, char* argv[]) {
+  if (argc < 2) {
+    std::cerr << "Error: 'update' requires a plugin id\n";
+    std::cerr << "Usage: orc-cli plugins update <id>\n";
+    return 1;
+  }
+  const std::string plugin_id = argv[1];
+  const auto result =
+      orc::presenters::ProjectPresenter::updateRegisteredPluginToLatestRelease(
+          plugin_id);
+
+  if (!result.success) {
+    std::cerr << "Error: " << result.error_message << "\n";
+    return 1;
+  }
+
+  if (!result.error_message.empty()) {
+    std::cout << "Warning: " << result.error_message << "\n";
+  }
+  std::cout << "Plugin '" << plugin_id
+            << "' updated to its latest release (untrusted).\n";
   std::cout << "Trust it before it will be downloaded and loaded:\n";
   std::cout << "  orc-cli plugins trust " << plugin_id << "\n";
   std::cout << "Note: Changes take effect on the next application launch.\n";
@@ -446,6 +526,14 @@ int plugins_command(int argc, char* argv[]) {
 
   if (subcommand == "install") {
     return cmd_plugins_install(argc - 1, argv + 1);
+  }
+
+  if (subcommand == "updates") {
+    return cmd_plugins_updates();
+  }
+
+  if (subcommand == "update") {
+    return cmd_plugins_update(argc - 1, argv + 1);
   }
 
   std::cerr << "Error: Unknown plugins subcommand: " << subcommand << "\n\n";

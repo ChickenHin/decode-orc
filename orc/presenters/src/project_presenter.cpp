@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -30,6 +31,7 @@
 #include "../core/include/curl_http_fetcher.h"
 #include "../core/include/plugin_index_client.h"
 #include "../core/include/plugin_remote_loader.h"
+#include "../core/include/plugin_update_checker.h"
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
 #include "../core/include/stage_plugin_registry.h"
@@ -984,28 +986,6 @@ std::string host_platform_token() {
 #endif
 }
 
-// Last path component of a URL, used as the release asset filename.
-std::string asset_name_from_url(const std::string& url) {
-  const auto slash = url.find_last_of('/');
-  std::string name = slash == std::string::npos ? url : url.substr(slash + 1);
-  const auto query = name.find_first_of("?#");
-  if (query != std::string::npos) {
-    name = name.substr(0, query);
-  }
-  return name;
-}
-
-PluginIndexArtifactInfo to_artifact_info(const orc::PluginIndexArtifact& a) {
-  PluginIndexArtifactInfo info;
-  info.platform = a.platform;
-  info.host_abi = a.host_abi;
-  info.url = a.url;
-  info.sha256 = a.sha256;
-  info.plugin_version = a.plugin_version;
-  info.min_host_app_version = a.min_host_app_version;
-  return info;
-}
-
 // Build a PluginIndexClient wired to the on-disk last-good cache.
 orc::PluginIndexClient::RefreshResult refresh_plugin_index(
     const orc::IHttpFetcher& fetcher) {
@@ -1066,7 +1046,11 @@ PluginIndexInfo ProjectPresenter::readPluginIndex() {
     }
   }
 
+  // The index no longer pins versions: resolve each entry's latest release
+  // from its source repository (one API call per distinct repository).
   const std::string platform = host_platform_token();
+  std::map<std::string, orc::PluginRemoteLoader::ResolveReleaseAssetResult>
+      resolved_by_repo;
   for (const auto& entry : refreshed.index.entries) {
     PluginIndexEntryInfo info;
     info.id = entry.id;
@@ -1076,15 +1060,31 @@ PluginIndexInfo ProjectPresenter::readPluginIndex() {
     info.license_spdx = entry.license_spdx;
     info.source_repo_url = entry.source_repo_url;
     info.tags = entry.tags;
-    for (const auto& artifact : entry.artifacts) {
-      info.artifacts.push_back(to_artifact_info(artifact));
+
+    if (entry.source_repo_url.empty()) {
+      info.compatibility_message =
+          "No source repository recorded for this plugin";
+    } else {
+      auto it = resolved_by_repo.find(entry.source_repo_url);
+      if (it == resolved_by_repo.end()) {
+        it = resolved_by_repo
+                 .emplace(entry.source_repo_url,
+                          orc::PluginRemoteLoader::
+                              resolve_release_asset_from_releases_url(
+                                  entry.source_repo_url, platform, nullptr))
+                 .first;
+      }
+      const auto& resolved = it->second;
+      info.latest_tag = resolved.release_tag;
+      info.version =
+          orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
+      info.has_compatible_build = resolved.success;
+      info.release_unreachable = resolved.unreachable;
+      if (!resolved.success) {
+        info.compatibility_message = resolved.error_message;
+      }
     }
-    const auto resolution = orc::PluginIndexClient::resolve_artifact(
-        entry, platform, kStagePluginHostAbiVersion);
-    info.has_compatible_build = resolution.found;
-    if (!resolution.found) {
-      info.compatibility_message = resolution.message;
-    }
+
     info.already_installed = installed_ids.count(entry.id) > 0;
     result.entries.push_back(std::move(info));
   }
@@ -1117,31 +1117,212 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
     return result;
   }
 
-  const auto resolution = orc::PluginIndexClient::resolve_artifact(
-      *entry, host_platform_token(), kStagePluginHostAbiVersion);
-  if (!resolution.found) {
-    result.error_message = resolution.message;
+  if (entry->source_repo_url.empty()) {
+    result.error_message = "Plugin '" + plugin_id +
+                           "' has no source repository recorded in the index";
+    return result;
+  }
+
+  // Install the latest published release from the plugin's repository — the
+  // same resolution as adding by URL and as the registry update path.
+  std::vector<std::string> warnings;
+  const std::string target_platform = host_platform_token();
+  const auto resolved =
+      orc::PluginRemoteLoader::resolve_release_asset_from_releases_url(
+          entry->source_repo_url, target_platform, &warnings);
+  if (!resolved.success) {
+    result.error_message = resolved.error_message;
     return result;
   }
 
   PluginRegistryEntryInfo entry_info;
   entry_info.plugin_id = entry->id;
-  entry_info.plugin_version = resolution.artifact.plugin_version;
+  entry_info.plugin_version =
+      orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
   entry_info.artifact_source = "github_release_asset";
-  entry_info.source_repo_url = entry->source_repo_url;
-  entry_info.release_asset_url = resolution.artifact.url;
-  entry_info.release_asset_name = asset_name_from_url(resolution.artifact.url);
-  entry_info.target_platform = host_platform_token();
+  entry_info.source_repo_url = resolved.source_repo_url;
+  entry_info.release_tag = resolved.release_tag;
+  entry_info.release_asset_url = resolved.release_asset_url;
+  entry_info.release_asset_name = resolved.release_asset_name;
+  entry_info.target_platform = target_platform;
   entry_info.license_spdx = entry->license_spdx;
-  entry_info.required_host_abi = resolution.artifact.host_abi;
-  entry_info.sha256 = resolution.artifact.sha256;
   entry_info.enabled = true;
   // Installing from the index records the entry but does not grant trust:
   // the user confirms trust explicitly before the binary is downloaded or
   // loaded, consistent with the URL-add and hand-edited-registry paths.
   entry_info.trust_state = "untrusted";
 
-  return addPluginRegistryEntry(entry_info);
+  auto add_result = addPluginRegistryEntry(entry_info);
+  if (add_result.success && !warnings.empty()) {
+    add_result.error_message = warnings.front();
+  }
+  return add_result;
+}
+
+// Defined later in this file; used by the update path below.
+static std::vector<orc::StagePluginRegistryEntry>::iterator
+findRegistryEntryByPluginId(std::vector<orc::StagePluginRegistryEntry>& entries,
+                            const std::string& plugin_id);
+
+namespace {
+
+// Transport wrapper that memoises responses per URL so one update sweep
+// queries each distinct repository at most once.
+class MemoisingFetcher : public orc::IHttpFetcher {
+ public:
+  explicit MemoisingFetcher(const orc::IHttpFetcher& inner) : inner_(inner) {}
+
+  orc::HttpFetchResult fetch(const std::string& url) const override {
+    auto it = cache_.find(url);
+    if (it != cache_.end()) {
+      return it->second;
+    }
+    auto result = inner_.fetch(url);
+    cache_.emplace(url, result);
+    return result;
+  }
+
+ private:
+  const orc::IHttpFetcher& inner_;
+  mutable std::map<std::string, orc::HttpFetchResult> cache_;
+};
+
+PluginUpdateStatus to_update_status(orc::PluginUpdateChecker::Status status) {
+  switch (status) {
+    case orc::PluginUpdateChecker::Status::UpToDate:
+      return PluginUpdateStatus::UpToDate;
+    case orc::PluginUpdateChecker::Status::UpdateAvailable:
+      return PluginUpdateStatus::UpdateAvailable;
+    case orc::PluginUpdateChecker::Status::Unreachable:
+      return PluginUpdateStatus::Unreachable;
+    case orc::PluginUpdateChecker::Status::Unknown:
+      return PluginUpdateStatus::Unknown;
+    case orc::PluginUpdateChecker::Status::NotApplicable:
+      break;
+  }
+  return PluginUpdateStatus::NotApplicable;
+}
+
+}  // namespace
+
+std::vector<PluginUpdateStatusInfo>
+ProjectPresenter::checkRegisteredPluginUpdates() {
+  std::vector<PluginUpdateStatusInfo> results;
+
+  const auto persisted_registry = orc::StagePluginRegistry::load_default();
+
+  const orc::CurlHttpFetcher transport;
+  const MemoisingFetcher fetcher(transport);
+  const orc::PluginUpdateChecker checker(fetcher);
+
+  for (const auto& entry : persisted_registry.entries) {
+    // Core plugins ship and update with the application itself.
+    if (entry.is_core_plugin || entry.plugin_id.empty()) {
+      continue;
+    }
+
+    PluginUpdateStatusInfo info;
+    info.plugin_id = entry.plugin_id;
+    info.installed_version =
+        !entry.plugin_version.empty()
+            ? entry.plugin_version
+            : orc::PluginUpdateChecker::normalize_version(entry.release_tag);
+
+    const auto checked =
+        checker.check(entry.source_repo_url, info.installed_version);
+    info.status = to_update_status(checked.status);
+    info.latest_tag = checked.latest_tag;
+    info.latest_version = checked.latest_version;
+    info.message = checked.message;
+    results.push_back(std::move(info));
+  }
+
+  return results;
+}
+
+PluginRegistryMutationResult
+ProjectPresenter::updateRegisteredPluginToLatestRelease(
+    const std::string& plugin_id) {
+  PluginRegistryMutationResult result;
+
+  if (plugin_id.empty()) {
+    result.error_message = "Plugin id cannot be empty";
+    return result;
+  }
+
+  const auto persisted_registry = orc::StagePluginRegistry::load_default();
+  auto entries = persisted_registry.entries;
+  const std::string registry_path = persisted_registry.registry_path;
+
+  auto it = findRegistryEntryByPluginId(entries, plugin_id);
+  if (it == entries.end()) {
+    result.error_message =
+        "No plugin with id '" + plugin_id + "' found in registry";
+    return result;
+  }
+
+  if (it->is_core_plugin) {
+    result.error_message = "Core plugins update with the application";
+    return result;
+  }
+
+  if (it->source_repo_url.empty()) {
+    result.error_message =
+        "Plugin '" + plugin_id +
+        "' has no source repository recorded, so it cannot be updated";
+    return result;
+  }
+
+  std::vector<std::string> warnings;
+  const std::string target_platform =
+      it->target_platform.empty() ? host_platform_token() : it->target_platform;
+  const auto resolved =
+      orc::PluginRemoteLoader::resolve_release_asset_from_releases_url(
+          it->source_repo_url, target_platform, &warnings);
+  if (!resolved.success) {
+    result.error_message = resolved.error_message;
+    return result;
+  }
+
+  if (!resolved.release_tag.empty() &&
+      resolved.release_tag == it->release_tag &&
+      resolved.release_asset_url == it->release_asset_url) {
+    // Already pointing at the latest release; nothing to rewrite.
+    result.success = true;
+    return result;
+  }
+
+  it->artifact_source = "github_release_asset";
+  it->source_repo_url = resolved.source_repo_url;
+  it->release_tag = resolved.release_tag;
+  it->release_asset_url = resolved.release_asset_url;
+  it->release_asset_name = resolved.release_asset_name;
+  it->target_platform = target_platform;
+  it->plugin_version =
+      orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
+  // The previous sha256 pinned the old artifact; the new one has no reviewed
+  // digest, so clear the pin rather than quarantining the fresh download.
+  it->sha256.clear();
+  // The declared ABI belonged to the old artifact; the loader re-validates
+  // the new binary's ABI at load time.
+  it->required_host_abi = 0;
+  // Drop any resolved cache path so the next startup downloads the new asset.
+  it->path.clear();
+  // A different binary means the previous trust decision no longer applies:
+  // the user must explicitly re-confirm trust before download or load.
+  it->trust_state = "untrusted";
+
+  std::string error;
+  if (!orc::StagePluginRegistry::save(registry_path, entries, &error)) {
+    result.error_message = "Failed to save registry: " + error;
+    return result;
+  }
+
+  result.success = true;
+  if (!warnings.empty()) {
+    result.error_message = warnings.front();
+  }
+  return result;
 }
 
 PluginRegistryMutationResult ProjectPresenter::removePluginFromRegistry(

@@ -1,10 +1,11 @@
 name: Validate Plugin Index
 
 # Validates the curated plugin index. On pull requests that touch the index it
-# runs the full online validation (schema, artifact naming, URL reachability,
-# and digest match); on the default branch it re-validates after merge. This is
-# the "merge is the curation/trust decision" gate for the registry — when the
-# index moves to its own repository, this workflow moves with it unchanged.
+# runs the full online validation (schema, license, GitHub repository URL, and
+# that each repository's latest release publishes a conforming plugin asset);
+# on the default branch it re-validates after merge. This is the "merge is the
+# curation decision" gate for the registry — when the index moves to its own
+# repository, this workflow moves with it unchanged.
 
 on:
   push:
@@ -35,5 +36,5 @@ jobs:
       - name: Validate fixtures (offline failure classes)
         run: bash cmake/check_plugin_index.sh .
 
-      - name: Validate live index (online — URL reachability + digests)
+      - name: Validate live index (online — latest release publishes a plugin asset)
         run: python3 orc-plugin-registry/tools/validate_index.py --online orc-plugin-registry/index.yaml

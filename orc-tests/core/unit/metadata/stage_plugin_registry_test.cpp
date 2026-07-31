@@ -182,41 +182,27 @@ TEST(StagePluginRegistryTest, Serialize_YamlRoundTripsRegistryEntries) {
   EXPECT_EQ(round_tripped.required_host_abi, entry.required_host_abi);
 }
 
-TEST(StagePluginRegistryTest,
-     Parse_YamlWarnsOnGithubRepoNameWithoutOrcPluginPrefix) {
+TEST(StagePluginRegistryTest, ParseYaml_AcceptsAnyGithubRepoName) {
+  // The repository name is not policed: curated plugins may live in a
+  // subdirectory of a repository with any name (only release *asset* names
+  // follow the orc-plugin_ convention, checked separately).
   const std::string yaml_text = R"yaml(
 version: 2
 plugins:
-  - plugin_id: invalid.repo.name
-    path: /plugins/libinvalid.so
-    source_repo_url: https://github.com/simoninns/not-prefixed-plugin
+  - plugin_id: any.repo.name
+    path: /plugins/libany.so
+    source_repo_url: https://github.com/vrunk11/hvd-cvbs-decoding
     enabled: true
-)yaml";
-
-  const auto result = orc::StagePluginRegistry::parse_yaml(yaml_text);
-
-  ASSERT_EQ(result.entries.size(), 1U);
-  ASSERT_EQ(result.warnings.size(), 1U);
-  EXPECT_EQ(result.warnings.front(),
-            "Registry entry source_repo_url should reference a repository "
-            "prefixed with 'orc-plugin_' (found 'not-prefixed-plugin')");
-}
-
-TEST(StagePluginRegistryTest,
-     ParseYaml_AcceptsGithubRepoNameWithOrcPluginPrefix) {
-  const std::string yaml_text = R"yaml(
-version: 2
-plugins:
-  - plugin_id: valid.repo.name
-    path: /plugins/libvalid.so
+  - plugin_id: prefixed.repo.name
+    path: /plugins/libprefixed.so
     source_repo_url: https://github.com/simoninns/orc-plugin_valid-stage
     enabled: true
 )yaml";
 
   const auto result = orc::StagePluginRegistry::parse_yaml(yaml_text);
 
-  ASSERT_TRUE(result.warnings.empty());
-  ASSERT_EQ(result.entries.size(), 1U);
+  EXPECT_TRUE(result.warnings.empty());
+  ASSERT_EQ(result.entries.size(), 2U);
 }
 
 TEST(StagePluginRegistryTest,

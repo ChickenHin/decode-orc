@@ -1,10 +1,6 @@
-# Plugin entry with no SPDX license.
-registry_schema: 1
+# Fixture: entry without license_spdx (must fail).
+registry_schema: 2
 plugins:
-  - id: com.example.nolicense
-    display_name: No License
-    artifacts:
-      - platform: linux
-        host_abi: 8
-        url: https://github.com/example/orc-plugin_nolicense/releases/download/v1/orc-plugin_nolicense_linux_abi8.so
-        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  - id: com.example.deinterlace
+    display_name: Example Deinterlacer
+    source_repo_url: https://github.com/example/orc-plugin_deinterlace

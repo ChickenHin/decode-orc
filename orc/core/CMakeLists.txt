@@ -104,6 +104,7 @@ add_library(orc-core SHARED
     curl_http_fetcher.cpp
     plugin_index.cpp
     plugin_index_client.cpp
+    plugin_update_checker.cpp
 
     # Project file I/O
     project.cpp

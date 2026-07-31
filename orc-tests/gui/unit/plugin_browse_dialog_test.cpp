@@ -51,6 +51,7 @@ orc::presenters::PluginIndexInfo makeIndex(bool offline) {
   entry.id = "acme.deint";
   entry.display_name = "ACME Deinterlacer";
   entry.description = "Motion-adaptive deinterlacing";
+  entry.version = "1.0.5";
   entry.license_spdx = "GPL-3.0-or-later";
   entry.source_repo_url = "https://example.invalid/acme";
   entry.tags = {"video"};

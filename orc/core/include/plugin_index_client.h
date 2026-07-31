@@ -14,7 +14,6 @@
     "plugin_index_client.h is a core-only header. Access plugin discovery through ProjectPresenter."
 #endif
 
-#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -31,7 +30,8 @@ namespace orc {
  * The client is transport- and storage-agnostic: an IHttpFetcher performs the
  * network GET, and two callbacks handle the last-good on-disk cache. This keeps
  * the fetch/parse/fallback logic unit-testable with no filesystem or network.
- * Artifact resolution and search are pure static helpers.
+ * Search and lookup are pure static helpers; release resolution happens
+ * against each entry's source repository (see PluginRemoteLoader).
  */
 class PluginIndexClient {
  public:
@@ -59,24 +59,6 @@ class PluginIndexClient {
    * network or parse failure the last-good cache is returned when present.
    */
   RefreshResult refresh(const std::string& index_url) const;
-
-  struct ArtifactResolution {
-    bool found = false;               ///< A compatible build was selected.
-    bool platform_available = false;  ///< A build for this platform exists.
-    bool abi_incompatible = false;    ///< Platform matched but no ABI build.
-    PluginIndexArtifact artifact;
-    std::string message;
-  };
-
-  /**
-   * @brief Select the artifact matching (target_platform, host_abi).
-   *
-   * Prefers an exact host-ABI match for the platform; an artifact with
-   * host_abi == 0 is treated as ABI-agnostic and accepted as a fallback.
-   */
-  static ArtifactResolution resolve_artifact(const PluginIndexEntry& entry,
-                                             const std::string& target_platform,
-                                             uint32_t host_abi);
 
   /// Case-insensitive substring search over id, name, description and tags.
   static std::vector<PluginIndexEntry> search(const PluginIndex& index,

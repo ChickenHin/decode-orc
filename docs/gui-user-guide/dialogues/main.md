@@ -139,7 +139,8 @@ Opens the Plugin Manager, which lists the registered stage plugins (ID, path, ve
 
 * **Add Plugin…** registers a new plugin, either from a local plugin file or from a GitHub releases URL. Remote plugins are downloaded automatically. Adding a plugin is your consent for it to run: plugin binaries execute as native code, so only add plugins from sources you trust.
 * **Remove** deletes the selected plugin from the registry (core plugins cannot be removed).
-* The **Enabled** checkbox shows whether a plugin will load at the next application start. For entries that were placed in the registry outside of Orc-GUI (for example, a hand-edited registry file), the checkbox appears unchecked until you enable them — ticking it marks the plugin as trusted and enables it.
+* The **Enabled** checkbox shows whether a plugin will load at the next application start. Entries that arrived from outside Orc-GUI (a hand-edited registry file, `orc-cli plugins install`, or a newly downloaded update you have not confirmed) appear unchecked; ticking the box asks you to confirm that the plugin may run, then enables it.
+* **Show core plugins** is unticked by default, so the list shows only the plugins you installed yourself. Tick it to also see the plugins that ship with the application.
 
 Registry changes take effect on the next application launch; the dialog offers a restart when you close it after making changes.
 

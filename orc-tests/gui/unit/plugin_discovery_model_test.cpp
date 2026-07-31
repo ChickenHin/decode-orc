@@ -73,6 +73,38 @@ TEST(PluginManagerModelTest, AddFromUrlForwardsTrustFlag) {
       model.addFromUrl("https://example.invalid/releases", false).success);
 }
 
+TEST(PluginManagerModelTest, CheckUpdatesDelegatesToPresenter) {
+  StrictMock<orc::presenters::test::MockProjectPresenter> mock;
+  orc::PluginManagerModel model(mock);
+
+  orc::presenters::PluginUpdateStatusInfo status;
+  status.plugin_id = "plug";
+  status.installed_version = "1.0.5";
+  status.latest_version = "1.0.6";
+  status.latest_tag = "v1.0.6";
+  status.status = orc::presenters::PluginUpdateStatus::UpdateAvailable;
+  EXPECT_CALL(mock, checkPluginUpdates())
+      .WillOnce(
+          Return(std::vector<orc::presenters::PluginUpdateStatusInfo>{status}));
+
+  const auto results = model.checkUpdates();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0].plugin_id, "plug");
+  EXPECT_EQ(results[0].status,
+            orc::presenters::PluginUpdateStatus::UpdateAvailable);
+  EXPECT_EQ(results[0].latest_version, "1.0.6");
+}
+
+TEST(PluginManagerModelTest, UpdateToLatestDoesNotGrantTrust) {
+  StrictMock<orc::presenters::test::MockProjectPresenter> mock;
+  orc::PluginManagerModel model(mock);
+
+  // Only updatePluginToLatestRelease is permitted; StrictMock fails the test
+  // if the model tried to grant trust as part of the update.
+  EXPECT_CALL(mock, updatePluginToLatestRelease("plug")).WillOnce(Return(ok()));
+  EXPECT_TRUE(model.updateToLatest("plug").success);
+}
+
 // --- PluginBrowseModel: fetch, offline, search, install ---------------------
 
 TEST(PluginBrowseModelTest, RefreshPopulatesFromPresenter) {

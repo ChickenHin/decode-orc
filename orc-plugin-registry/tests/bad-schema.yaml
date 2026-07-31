@@ -1,3 +1,7 @@
-# Unsupported schema major version.
-registry_schema: 99
-plugins: []
+# Fixture: unsupported schema major (must fail). Schema 1 (pinned artifacts)
+# is no longer accepted by this validator.
+registry_schema: 1
+plugins:
+  - id: com.example.deinterlace
+    license_spdx: GPL-3.0-or-later
+    source_repo_url: https://github.com/example/orc-plugin_deinterlace

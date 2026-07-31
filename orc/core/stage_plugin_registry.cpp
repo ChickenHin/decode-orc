@@ -15,7 +15,6 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <optional>
 
 #include "include/plugin_artifact_name.h"
 #include "include/plugin_remote_loader.h"
@@ -36,41 +35,6 @@ bool is_valid_sha256_hex(const std::string& value) {
     }
   }
   return true;
-}
-
-std::optional<std::string> extract_github_repo_name(const std::string& url) {
-  const std::string marker = "github.com/";
-  const auto marker_pos = url.find(marker);
-  if (marker_pos == std::string::npos) {
-    return std::nullopt;
-  }
-
-  std::string path = url.substr(marker_pos + marker.size());
-  const auto query_pos = path.find_first_of("?#");
-  if (query_pos != std::string::npos) {
-    path = path.substr(0, query_pos);
-  }
-
-  while (!path.empty() && path.back() == '/') {
-    path.pop_back();
-  }
-
-  const auto slash_pos = path.find('/');
-  if (slash_pos == std::string::npos || slash_pos + 1 >= path.size()) {
-    return std::nullopt;
-  }
-
-  std::string repo_name = path.substr(slash_pos + 1);
-  if (repo_name.size() > 4 &&
-      repo_name.substr(repo_name.size() - 4) == ".git") {
-    repo_name = repo_name.substr(0, repo_name.size() - 4);
-  }
-
-  if (repo_name.empty()) {
-    return std::nullopt;
-  }
-
-  return repo_name;
 }
 
 std::string env_or_empty(const char* name) {
@@ -155,17 +119,6 @@ StagePluginRegistryEntry parse_plugin_entry(
         entry.release_asset_name +
         "' (expected "
         "orc-plugin_<stage-name>_<platform>[_abi<N>].<so|dylib|dll>)");
-  }
-
-  if (const auto repo_name = extract_github_repo_name(entry.source_repo_url);
-      repo_name.has_value()) {
-    if (repo_name->rfind("orc-plugin_", 0) != 0) {
-      warnings.push_back(
-          "Registry entry source_repo_url should reference a repository "
-          "prefixed with 'orc-plugin_'"
-          " (found '" +
-          *repo_name + "')");
-    }
   }
 
   if (entry.path.empty() && !entry.local_dev_path.empty()) {

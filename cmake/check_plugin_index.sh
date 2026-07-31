@@ -65,9 +65,8 @@ expect_pass "${TESTS_DIR}/newer-minor-schema.yaml"
 # One fixture per failure class.
 expect_fail "${TESTS_DIR}/bad-schema.yaml"
 expect_fail "${TESTS_DIR}/missing-license.yaml"
-expect_fail "${TESTS_DIR}/bad-asset-name.yaml"
-expect_fail "${TESTS_DIR}/missing-sha256.yaml"
-expect_fail "${TESTS_DIR}/missing-url.yaml"
+expect_fail "${TESTS_DIR}/missing-repo-url.yaml"
+expect_fail "${TESTS_DIR}/pinned-artifacts.yaml"
 
 if [ "${status}" -ne 0 ]; then
   echo "Plugin index validation gate FAILED" >&2

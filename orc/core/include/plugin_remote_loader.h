@@ -35,6 +35,8 @@ class PluginRemoteLoader {
 
   struct ResolveReleaseAssetResult {
     bool success = false;
+    bool unreachable = false;  ///< The release metadata could not be fetched
+                               ///< (as opposed to no matching asset existing).
     std::string source_repo_url;
     std::string release_tag;
     std::string release_asset_url;

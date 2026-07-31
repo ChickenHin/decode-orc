@@ -396,6 +396,13 @@ class ProjectPresenter : public IProjectPresenter {
       const std::string& plugin_id) const override {
     return ProjectPresenter::installIndexedPlugin(plugin_id);
   }
+  std::vector<PluginUpdateStatusInfo> checkPluginUpdates() const override {
+    return ProjectPresenter::checkRegisteredPluginUpdates();
+  }
+  PluginRegistryMutationResult updatePluginToLatestRelease(
+      const std::string& plugin_id) const override {
+    return ProjectPresenter::updateRegisteredPluginToLatestRelease(plugin_id);
+  }
 
   // === Stage Registry ===
 
@@ -518,6 +525,33 @@ class ProjectPresenter : public IProjectPresenter {
    * untrusted-until-confirmed. Fails when no compatible build exists.
    */
   static PluginRegistryMutationResult installIndexedPlugin(
+      const std::string& plugin_id);
+
+  /**
+   * @brief Check registered plugins for newer upstream releases
+   *
+   * For every non-core registry entry with a GitHub source repository, the
+   * repository's latest published release is fetched and compared against the
+   * installed version. Entries without a usable repository URL are reported
+   * NotApplicable; network failures are reported Unreachable. Results for the
+   * same repository are fetched once and shared between entries.
+   *
+   * Performs one network request per distinct repository; callers should run
+   * it off the UI thread.
+   */
+  static std::vector<PluginUpdateStatusInfo> checkRegisteredPluginUpdates();
+
+  /**
+   * @brief Update a registered remote plugin to its latest upstream release
+   *
+   * Re-resolves the plugin's release asset from its recorded source
+   * repository (like the add-from-URL path) and rewrites the registry entry
+   * to point at the latest release. The recorded sha256 pin is cleared (the
+   * new artifact has no reviewed digest) and the entry reverts to untrusted,
+   * so the user must explicitly re-confirm trust before the new binary is
+   * downloaded or loaded.
+   */
+  static PluginRegistryMutationResult updateRegisteredPluginToLatestRelease(
       const std::string& plugin_id);
 
   /**

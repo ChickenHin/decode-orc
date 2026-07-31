@@ -14,7 +14,6 @@
     "plugin_index.h is a core-only header. Access plugin discovery through ProjectPresenter."
 #endif
 
-#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,26 +22,17 @@ namespace orc {
 /// Schema major version understood by this host. Additions within a major
 /// version are non-breaking (unknown fields are ignored); a higher major is
 /// parsed best-effort with a warning so older hosts tolerate newer indexes.
-inline constexpr int kPluginIndexSchemaVersion = 1;
-
-/**
- * @brief A single downloadable build of a plugin, keyed by platform and ABI.
- */
-struct PluginIndexArtifact {
-  std::string platform;   ///< Platform token: "linux", "macos", or "windows"
-                          ///< (a more specific value such as "linux-x86_64" is
-                          ///< matched by platform prefix).
-  uint32_t host_abi = 0;  ///< Host ABI this build targets; 0 means unspecified.
-  std::string url;        ///< Direct release-asset download URL.
-  std::string sha256;     ///< Mandatory 64-hex digest of the artifact.
-  std::string plugin_version;        ///< Plugin release version.
-  std::string min_host_app_version;  ///< Minimum host application version.
-  std::string asset_name;  ///< Optional explicit artifact filename; derived
-                           ///< from the URL when empty.
-};
+/// Schema 2 dropped pinned artifacts: an index entry names a plugin and its
+/// source repository, and the host resolves the latest published release at
+/// runtime.
+inline constexpr int kPluginIndexSchemaVersion = 2;
 
 /**
  * @brief One plugin as advertised by the curated index.
+ *
+ * The index curates *which* plugins are offered, not their versions: the
+ * host resolves the current release from `source_repo_url` at browse and
+ * install time.
  */
 struct PluginIndexEntry {
   std::string id;            ///< Unique plugin identifier.
@@ -51,8 +41,7 @@ struct PluginIndexEntry {
   std::vector<std::string> tags;
   std::string maintainer;
   std::string license_spdx;
-  std::string source_repo_url;
-  std::vector<PluginIndexArtifact> artifacts;
+  std::string source_repo_url;  ///< GitHub repository the host installs from.
 };
 
 /**

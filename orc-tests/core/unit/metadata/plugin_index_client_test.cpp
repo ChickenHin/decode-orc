@@ -49,7 +49,7 @@ orc::HttpFetchResult transport_error() {
 }
 
 const char* kValidIndex = R"yaml(
-registry_schema: 1
+registry_schema: 2
 plugins:
   - id: acme.deinterlace
     display_name: ACME Deinterlacer
@@ -58,57 +58,38 @@ plugins:
     license_spdx: GPL-3.0-or-later
     source_repo_url: https://github.com/acme/orc-plugin_deinterlace
     tags: [transform, video]
-    artifacts:
-      - platform: linux
-        host_abi: 8
-        url: https://example.invalid/orc-plugin_deinterlace_linux_abi8.so
-        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        plugin_version: 1.0.0
-      - platform: windows
-        host_abi: 8
-        url: https://example.invalid/orc-plugin_deinterlace_windows_abi8.dll
-        sha256: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-        plugin_version: 1.0.0
 )yaml";
 
 }  // namespace
 
-TEST(PluginIndexParseTest, ReadsStructuredEntriesAndArtifacts) {
+TEST(PluginIndexParseTest, ReadsStructuredEntries) {
   const auto parsed = orc::parse_plugin_index_yaml(kValidIndex);
   ASSERT_TRUE(parsed.success);
-  ASSERT_EQ(parsed.index.schema_version, 1);
+  ASSERT_EQ(parsed.index.schema_version, 2);
   ASSERT_EQ(parsed.index.entries.size(), 1U);
 
   const auto& entry = parsed.index.entries.front();
   EXPECT_EQ(entry.id, "acme.deinterlace");
   EXPECT_EQ(entry.display_name, "ACME Deinterlacer");
   EXPECT_EQ(entry.license_spdx, "GPL-3.0-or-later");
+  EXPECT_EQ(entry.source_repo_url,
+            "https://github.com/acme/orc-plugin_deinterlace");
   ASSERT_EQ(entry.tags.size(), 2U);
   EXPECT_EQ(entry.tags[0], "transform");
-  ASSERT_EQ(entry.artifacts.size(), 2U);
-  EXPECT_EQ(entry.artifacts[0].platform, "linux");
-  EXPECT_EQ(entry.artifacts[0].host_abi, 8U);
-  EXPECT_EQ(entry.artifacts[0].plugin_version, "1.0.0");
-  EXPECT_FALSE(entry.artifacts[0].sha256.empty());
 }
 
 TEST(PluginIndexParseTest, IgnoresUnknownFieldsWithinKnownSchemaMajor) {
   // A newer minor revision adds fields the host does not know; they must be
   // ignored, not rejected.
   const char* yaml = R"yaml(
-registry_schema: 1
-index_generated_at: 2026-07-17T00:00:00Z
+registry_schema: 2
+index_generated_at: 2026-07-30T00:00:00Z
 plugins:
   - id: acme.tool
     display_name: Tool
     license_spdx: MIT
+    source_repo_url: https://github.com/acme/orc-plugin_tool
     future_top_level_field: whatever
-    artifacts:
-      - platform: linux
-        host_abi: 8
-        url: https://example.invalid/a.so
-        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        future_artifact_field: 42
 )yaml";
   const auto parsed = orc::parse_plugin_index_yaml(yaml);
   ASSERT_TRUE(parsed.success);
@@ -116,12 +97,15 @@ plugins:
   EXPECT_EQ(parsed.index.entries.front().id, "acme.tool");
 }
 
-TEST(PluginIndexParseTest, ToleratesNewerSchemaMajorWithWarning) {
+TEST(PluginIndexParseTest, IgnoresLegacyPinnedArtifacts) {
+  // A schema-1 index pinned artifacts per platform; the entry still parses
+  // (id, license, repo) and the pin list is simply ignored.
   const char* yaml = R"yaml(
-registry_schema: 2
+registry_schema: 1
 plugins:
   - id: acme.tool
     license_spdx: MIT
+    source_repo_url: https://github.com/acme/orc-plugin_tool
     artifacts:
       - platform: linux
         host_abi: 8
@@ -130,7 +114,23 @@ plugins:
 )yaml";
   const auto parsed = orc::parse_plugin_index_yaml(yaml);
   ASSERT_TRUE(parsed.success);
-  EXPECT_EQ(parsed.index.schema_version, 2);
+  EXPECT_EQ(parsed.index.schema_version, 1);
+  ASSERT_EQ(parsed.index.entries.size(), 1U);
+  EXPECT_EQ(parsed.index.entries.front().source_repo_url,
+            "https://github.com/acme/orc-plugin_tool");
+}
+
+TEST(PluginIndexParseTest, ToleratesNewerSchemaMajorWithWarning) {
+  const char* yaml = R"yaml(
+registry_schema: 3
+plugins:
+  - id: acme.tool
+    license_spdx: MIT
+    source_repo_url: https://github.com/acme/orc-plugin_tool
+)yaml";
+  const auto parsed = orc::parse_plugin_index_yaml(yaml);
+  ASSERT_TRUE(parsed.success);
+  EXPECT_EQ(parsed.index.schema_version, 3);
   EXPECT_FALSE(parsed.warnings.empty());
 }
 
@@ -141,72 +141,21 @@ TEST(PluginIndexParseTest, MalformedYamlFails) {
 }
 
 TEST(PluginIndexParseTest, EmptyIndexIsValid) {
-  const auto parsed = orc::parse_plugin_index_yaml("registry_schema: 1\n");
+  const auto parsed = orc::parse_plugin_index_yaml("registry_schema: 2\n");
   EXPECT_TRUE(parsed.success);
   EXPECT_TRUE(parsed.index.entries.empty());
 }
 
-TEST(PluginIndexParseTest, WarnsOnMissingShaAndLicense) {
+TEST(PluginIndexParseTest, WarnsOnMissingLicenseAndRepoUrl) {
   const char* yaml = R"yaml(
-registry_schema: 1
+registry_schema: 2
 plugins:
   - id: acme.tool
-    artifacts:
-      - platform: linux
-        host_abi: 8
-        url: https://example.invalid/a.so
+    display_name: Tool
 )yaml";
   const auto parsed = orc::parse_plugin_index_yaml(yaml);
   ASSERT_TRUE(parsed.success);
-  EXPECT_GE(parsed.warnings.size(), 2U);  // missing license + missing sha256
-}
-
-TEST(PluginIndexResolveTest, ExactPlatformAndAbiMatch) {
-  const auto parsed = orc::parse_plugin_index_yaml(kValidIndex);
-  const auto resolution = orc::PluginIndexClient::resolve_artifact(
-      parsed.index.entries.front(), "linux", 8);
-  EXPECT_TRUE(resolution.found);
-  EXPECT_FALSE(resolution.abi_incompatible);
-  EXPECT_EQ(resolution.artifact.host_abi, 8U);
-  EXPECT_EQ(resolution.artifact.platform, "linux");
-}
-
-TEST(PluginIndexResolveTest, PlatformPresentButAbiMismatchIsIncompatible) {
-  const auto parsed = orc::parse_plugin_index_yaml(kValidIndex);
-  const auto resolution = orc::PluginIndexClient::resolve_artifact(
-      parsed.index.entries.front(), "linux", 9);
-  EXPECT_FALSE(resolution.found);
-  EXPECT_TRUE(resolution.platform_available);
-  EXPECT_TRUE(resolution.abi_incompatible);
-  EXPECT_NE(resolution.message.find("Orc ABI 9"), std::string::npos);
-}
-
-TEST(PluginIndexResolveTest, NoBuildForPlatform) {
-  const auto parsed = orc::parse_plugin_index_yaml(kValidIndex);
-  const auto resolution = orc::PluginIndexClient::resolve_artifact(
-      parsed.index.entries.front(), "macos", 8);
-  EXPECT_FALSE(resolution.found);
-  EXPECT_FALSE(resolution.platform_available);
-  EXPECT_FALSE(resolution.abi_incompatible);
-}
-
-TEST(PluginIndexResolveTest, AbiAgnosticArtifactIsFallback) {
-  const char* yaml = R"yaml(
-registry_schema: 1
-plugins:
-  - id: acme.tool
-    license_spdx: MIT
-    artifacts:
-      - platform: linux
-        host_abi: 0
-        url: https://example.invalid/a.so
-        sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-)yaml";
-  const auto parsed = orc::parse_plugin_index_yaml(yaml);
-  const auto resolution = orc::PluginIndexClient::resolve_artifact(
-      parsed.index.entries.front(), "linux-x86_64", 8);
-  EXPECT_TRUE(resolution.found);
-  EXPECT_EQ(resolution.artifact.host_abi, 0U);
+  EXPECT_GE(parsed.warnings.size(), 2U);  // missing license + missing repo url
 }
 
 TEST(PluginIndexSearchTest, CaseInsensitiveAcrossFields) {
