@@ -625,11 +625,15 @@ std::vector<StageInfo> ProjectPresenter::getAvailableStages(
   auto& registry = orc::StageRegistry::instance();
   auto stage_names = registry.get_registered_stages();
   const auto loaded_plugins = registry.get_loaded_plugins();
-  std::map<std::string, std::string> stage_to_plugin_id;
+  struct StagePluginOrigin {
+    std::string plugin_id;
+    bool is_core_plugin = false;
+  };
+  std::map<std::string, StagePluginOrigin> stage_to_plugin;
 
   for (const auto& plugin : loaded_plugins) {
     for (const auto& stage_name : plugin.registered_stage_names) {
-      stage_to_plugin_id[stage_name] = plugin.plugin_id;
+      stage_to_plugin[stage_name] = {plugin.plugin_id, plugin.is_core_plugin};
     }
   }
 
@@ -673,24 +677,21 @@ std::vector<StageInfo> ProjectPresenter::getAvailableStages(
       info.name = node_type_info.stage_name;
       info.display_name = node_type_info.display_name;
       info.description = node_type_info.description;
-      info.category = node_type_info.menu_category;
       if (info.display_name.empty()) {
         throw std::runtime_error("Stage '" + stage_name +
                                  "' is missing required display_name metadata");
-      }
-      if (info.category.empty()) {
-        throw std::runtime_error(
-            "Stage '" + stage_name +
-            "' is missing required menu_category metadata");
       }
       info.node_type = node_type_info.type;
       info.is_source = (node_type_info.type == orc::NodeType::SOURCE);
       info.is_sink = (node_type_info.type == orc::NodeType::SINK ||
                       node_type_info.type == orc::NodeType::ANALYSIS_SINK);
-      auto plugin_it = stage_to_plugin_id.find(stage_name);
-      if (plugin_it != stage_to_plugin_id.end()) {
-        info.is_runtime_plugin_stage = true;
-        info.owning_plugin_id = plugin_it->second;
+      auto plugin_it = stage_to_plugin.find(stage_name);
+      if (plugin_it != stage_to_plugin.end()) {
+        info.owning_plugin_id = plugin_it->second.plugin_id;
+        info.is_core_plugin = plugin_it->second.is_core_plugin;
+      } else {
+        // Stages registered directly by the host (not via a plugin) are core.
+        info.is_core_plugin = true;
       }
 
       result.push_back(info);

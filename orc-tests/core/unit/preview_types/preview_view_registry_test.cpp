@@ -39,8 +39,6 @@ class TestPreviewStage final : public orc::DAGStage,
         1,
         1,
         orc::VideoFormatCompatibility::ALL,
-        orc::SinkCategory::CORE,
-        "Transform",
     };
   }
 
@@ -89,8 +87,6 @@ class TestColourPreviewStage final : public orc::DAGStage,
         1,
         1,
         orc::VideoFormatCompatibility::ALL,
-        orc::SinkCategory::CORE,
-        "Sink (Core)",
     };
   }
 
@@ -210,8 +206,6 @@ class TestColourCapabilityOnlyStage final
         1,
         1,
         orc::VideoFormatCompatibility::ALL,
-        orc::SinkCategory::CORE,
-        "Sink (Core)",
     };
   }
 
@@ -255,8 +249,6 @@ class TestColourPreviewStageNoVectorscope final
         1,
         1,
         orc::VideoFormatCompatibility::ALL,
-        orc::SinkCategory::CORE,
-        "Sink (Core)",
     };
   }
 
@@ -313,8 +305,6 @@ class TestNonPreviewStage final : public orc::DAGStage {
         1,
         1,
         orc::VideoFormatCompatibility::ALL,
-        orc::SinkCategory::CORE,
-        "Transform",
     };
   }
 

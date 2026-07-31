@@ -124,9 +124,7 @@ class DropoutCorrectStage : public DAGStage,
                         1,
                         1,
                         UINT32_MAX,
-                        VideoFormatCompatibility::ALL,
-                        SinkCategory::CORE,
-                        "Transform"};
+                        VideoFormatCompatibility::ALL};
   }
 
   std::vector<ArtifactPtr> execute(

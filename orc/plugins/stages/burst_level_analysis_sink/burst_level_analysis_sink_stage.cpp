@@ -34,9 +34,7 @@ NodeTypeInfo BurstLevelAnalysisSinkStage::get_node_type_info() const {
                       1,
                       0,
                       0,
-                      VideoFormatCompatibility::ALL,
-                      SinkCategory::ANALYSIS,
-                      "Sink (Analysis)"};
+                      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> BurstLevelAnalysisSinkStage::execute(

@@ -35,9 +35,7 @@ class KeepaliveTestStage : public orc::DAGStage {
                              1,
                              1,
                              1,
-                             orc::VideoFormatCompatibility::ALL,
-                             orc::SinkCategory::CORE,
-                             "Test"};
+                             orc::VideoFormatCompatibility::ALL};
   }
   std::vector<orc::ArtifactPtr> execute(
       const std::vector<orc::ArtifactPtr>& inputs,

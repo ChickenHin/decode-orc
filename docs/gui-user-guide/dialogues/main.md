@@ -179,14 +179,15 @@ The graph editor is the central workspace where you build your processing pipeli
 To add a stage:
 
 * Right-click on empty space in the graph editor
-* Choose **Add Stage**
 * Pick a stage from one of the categories:
 
   * Source
   * Transform
-  * Sink (Core)
-  * Sink (Analysis)
-  * Sink (3rd party)
+  * Analysis
+  * Sink
+  * Plugins (stages from externally installed plugins, grouped into the same four categories)
+
+Only categories that contain at least one stage are shown.
 
 Orc-GUI filters the available stages to match your project’s video system (PAL/NTSC/PAL-M). For source stages it also filters by input type (Composite vs YC).
 

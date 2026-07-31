@@ -1,10 +1,10 @@
-# Sink (Core) Stages
+# Sink Stages
 
-Sink core stages are the **endpoints of a decode-orc pipeline**. They consume processed data from upstream stages and write results to disk. Unlike transform stages, sink stages do not produce outputs that can be connected further downstream.
+Sink stages are the **endpoints of a decode-orc pipeline**. They consume processed data from upstream stages and write results to disk. Unlike transform stages, sink stages do not produce outputs that can be connected further downstream.
 
 A pipeline may contain **multiple sink stages** in parallel, allowing the same processed stream to be written in different formats or to different destinations.
 
-Sink core stages are used to:
+Sink stages are used to:
 
 * Write final video outputs (TBC + metadata, CVBS files, or encoded video)
 * Export auxiliary data such as audio, EFM, AC3, or closed captions
@@ -166,6 +166,37 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 * `signal_state_preset` in the output `.meta` is always `STANDARD_TBC_LOCKED` and cannot be overridden by the user.
 * Absent upstream extensions (no audio, no EFM, etc.) produce no sidecar files — this is not an error.
+
+---
+
+## Daphne VBI Sink
+
+| | |
+|-|-|
+| **Stage id** | `daphne_vbi_sink` |
+| **Stage name** | Daphne VBI Sink |
+| **Connections** | 1 input → no outputs |
+| **Purpose** | Write per-field VBI data in the format required by the Daphne arcade LaserDisc emulator |
+
+**Use this stage when:**
+
+* Archiving a LaserDisc title for use with the Daphne arcade LaserDisc emulator
+
+**What it does**
+
+Reads VBI data from each frame in the incoming stream and writes binary VBI records field by field to a `.vbi` file according to the Daphne VBIInfo specification. The `.vbi` file carries the per-field VBI metadata that Daphne requires to emulate the disc's interactivity correctly.
+
+**Parameters**
+
+* `output_path` (string)
+    - Path to the output `.vbi` file.
+    - Required.
+
+**Notes**
+
+* This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
+* The `.vbi` format is documented at the Daphne VBIInfo wiki page.
+* Connect other sinks in parallel if you also need video output.
 
 ---
 
@@ -443,3 +474,11 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 * Sink stages terminate pipeline branches.
 * Multiple sink stages may consume the same upstream output.
 * Sink stages do not alter timing or metadata beyond their specific export role.
+
+---
+
+## Removed stages
+
+### HackDAC Sink (removed in v2.0)
+
+The `hackdac_sink` stage was removed in Decode-Orc 2.0. It is no longer available in the plugin registry. Projects that referenced this stage must be recreated without it.

@@ -9,8 +9,11 @@ A *stage* is a discrete processing unit with defined inputs and outputs. Stages 
 
 ![](assets/main-window.png)
 
-Since there are quite a large number of sink stages they are divided into 3 sub-sections:
+The Add Stage context menu groups stages by these types:
 
-* Sink (Core) - The core media/data output sinks (TBC, CVBS, encoded video, audio, EFM, AC3, closed captions)
-* Sink (Analysis) - Analysis sinks that compute statistics and display charts
-* Sink (3rd Party) - Sinks that support 3rd party applications such as Daphne
+* Source - Stages that load captured video (and any associated audio or data)
+* Transform - Stages that modify, combine, or reinterpret video
+* Analysis - Analysis sinks that compute statistics and display charts
+* Sink - The media/data output sinks (TBC, CVBS, encoded video, audio, EFM, AC3, closed captions, Daphne VBI)
+
+Stages provided by externally installed plugins appear under a separate **Plugins** entry, organised into the same four groups. Empty groups are hidden.

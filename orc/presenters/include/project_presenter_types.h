@@ -141,12 +141,11 @@ struct StageInfo {
   std::string name;          ///< Internal stage name
   std::string display_name;  ///< User-friendly display name
   std::string description;   ///< Stage description
-  std::string category;      ///< Add Stage menu category label
-  NodeType node_type;        ///< Type of node
+  NodeType node_type;        ///< Type of node (menu category derives from it)
   bool is_source;            ///< True if this is a source stage
   bool is_sink;              ///< True if this is a sink stage
-  bool is_runtime_plugin_stage =
-      false;  ///< True if discovered from runtime plugin loading
+  bool is_core_plugin =
+      false;  ///< True if the owning plugin is bundled with Decode-Orc
   std::string owning_plugin_id;  ///< Plugin id when known
 };
 

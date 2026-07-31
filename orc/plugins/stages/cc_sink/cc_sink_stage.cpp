@@ -33,9 +33,7 @@ NodeTypeInfo CCSinkStage::get_node_type_info() const {
                       1,  // One input
                       0,
                       0,  // No outputs (sink)
-                      VideoFormatCompatibility::ALL,
-                      SinkCategory::CORE,
-                      "Sink (Core)"};
+                      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> CCSinkStage::execute(

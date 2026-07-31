@@ -35,9 +35,7 @@ NodeTypeInfo LDSinkStage::get_node_type_info() const {
                       1,                     // max_inputs
                       0,                     // min_outputs
                       0,                     // max_outputs
-                      VideoFormatCompatibility::ALL,
-                      SinkCategory::CORE,
-                      "Sink (Core)"};
+                      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> LDSinkStage::execute(

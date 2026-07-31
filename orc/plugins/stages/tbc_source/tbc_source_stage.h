@@ -215,9 +215,7 @@ class TBCSourceStage : public DAGStage,
                         0,
                         1,
                         UINT32_MAX,
-                        VideoFormatCompatibility::ALL,
-                        SinkCategory::CORE,
-                        "Source"};
+                        VideoFormatCompatibility::ALL};
   }
 
   std::vector<ArtifactPtr> execute(
