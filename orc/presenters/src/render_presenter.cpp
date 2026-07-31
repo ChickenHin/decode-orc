@@ -2070,27 +2070,28 @@ bool RenderPresenter::getShowDropouts() const {
 
 RenderPresenter::ImageToFieldMapping RenderPresenter::mapImageToField(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    int image_y, int image_height) {
+    int image_y, int image_height, const std::string& option_id) {
   if (!impl_->preview_renderer_) {
     return {false, 0, 0};
   }
 
   auto result = impl_->preview_renderer_->map_image_to_field(
-      node_id, output_type, output_index, image_y, image_height);
+      node_id, output_type, output_index, image_y, image_height, option_id);
 
   return {result.is_valid, result.field_index, result.field_line};
 }
 
 RenderPresenter::FieldToImageMapping RenderPresenter::mapFieldToImage(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    uint64_t field_index, int field_line, int image_height) {
+    uint64_t field_index, int field_line, int image_height,
+    const std::string& option_id) {
   if (!impl_->preview_renderer_) {
     return {false, 0};
   }
 
   auto result = impl_->preview_renderer_->map_field_to_image(
-      node_id, output_type, output_index, field_index, field_line,
-      image_height);
+      node_id, output_type, output_index, field_index, field_line, image_height,
+      option_id);
 
   return {result.is_valid, result.image_y};
 }

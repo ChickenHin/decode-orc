@@ -205,13 +205,14 @@ class MockRenderPresenter : public IRenderPresenter {
 
   MOCK_METHOD(orc::ImageToFieldMappingResult, mapImageToField,
               (NodeID node_id, orc::PreviewOutputType output_type,
-               uint64_t output_index, int image_y, int image_height),
+               uint64_t output_index, int image_y, int image_height,
+               const std::string& option_id),
               (override));
 
   MOCK_METHOD(orc::FieldToImageMappingResult, mapFieldToImage,
               (NodeID node_id, orc::PreviewOutputType output_type,
                uint64_t output_index, uint64_t field_index, int field_line,
-               int image_height),
+               int image_height, const std::string& option_id),
               (override));
 
   MOCK_METHOD(orc::FrameFieldsResult, getFrameFields,

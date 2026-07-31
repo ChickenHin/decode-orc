@@ -868,219 +868,79 @@ FrameLineNavigationResult PreviewRenderer::navigate_frame_line(
 
 ImageToFieldMappingResult PreviewRenderer::map_image_to_field(
     const NodeID& node_id, PreviewOutputType output_type, uint64_t output_index,
-    int image_y, int image_height) const {
-  ImageToFieldMappingResult result;
-  result.is_valid = false;
-  result.field_index = 0;
-  result.field_line = 0;
-
+    int image_y, int image_height, const std::string& option_id) const {
   ORC_LOG_DEBUG(
       "map_image_to_field: node='{}' output_type={} output_index={} image_y={} "
-      "image_height={}",
+      "image_height={} option_id='{}'",
       node_id.to_string(), static_cast<int>(output_type), output_index, image_y,
-      image_height);
+      image_height, option_id);
 
-  auto repr = get_representation_at_node(node_id);
-  if (!repr) {
+  auto geometry = get_preview_field_geometry(node_id, output_index);
+  if (!geometry) {
     ORC_LOG_DEBUG(
         "map_image_to_field: no representation available for node='{}'",
         node_id.to_string());
-    return result;
+    return ImageToFieldMappingResult{false, 0, 0};
   }
 
-  // Get frame geometry from VFR
-  FrameID frame_id(output_index);
-  auto desc = repr->get_frame_descriptor(frame_id);
-  // If the frame is not found, fall back to the first frame for geometry
-  if (!desc) {
-    desc = repr->get_frame_descriptor(static_cast<FrameID>(0));
-  }
-  size_t f1_lines = desc ? field1_line_count(desc->system) : 313;
-  size_t f2_lines = desc ? (desc->height - f1_lines) : 312;
+  auto result = map_preview_row_to_field(
+      output_type, preview_frame_layout_for_option(option_id), output_index,
+      image_y, *geometry);
 
-  if (output_type == PreviewOutputType::Frame_Field1) {
-    // Flat single-field display: image_y maps directly to line within field1
-    if (image_y < 0 || static_cast<size_t>(image_y) >= f1_lines) {
-      return result;
-    }
-    result.is_valid = true;
-    result.field_index = output_index * 2;  // Sequential field1 index
-    result.field_line = image_y;
-    ORC_LOG_DEBUG(
-        "map_image_to_field: mapped to field={} line={} (Frame_Field1 mode)",
-        result.field_index, result.field_line);
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Frame_Field2) {
-    // Flat single-field display: image_y maps directly to line within field2
-    if (image_y < 0 || static_cast<size_t>(image_y) >= f2_lines) {
-      return result;
-    }
-    result.is_valid = true;
-    result.field_index = output_index * 2 + 1;  // Sequential field2 index
-    result.field_line = image_y;
-    ORC_LOG_DEBUG(
-        "map_image_to_field: mapped to field={} line={} (Frame_Field2 mode)",
-        result.field_index, result.field_line);
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Frame_Field1_First ||
-      output_type == PreviewOutputType::Frame_Reversed) {
-    // Interlaced frame: even lines come from field1 (Frame_Field1_First) or
-    // field2 (Frame_Reversed); odd lines from the other field.
-    bool is_reversed = (output_type == PreviewOutputType::Frame_Reversed);
-    bool field1_on_even = !is_reversed;
-
-    bool is_even_line = (image_y % 2) == 0;
-    bool use_field1 = (is_even_line == field1_on_even);
-
-    size_t target_field_height = use_field1 ? f1_lines : f2_lines;
-    int tentative_field_line = image_y / 2;
-
-    // Clamp to available field height
-    if (tentative_field_line < 0 ||
-        static_cast<size_t>(tentative_field_line) >= target_field_height) {
-      // Out of bounds for chosen field — try the other
-      use_field1 = !use_field1;
-      target_field_height = use_field1 ? f1_lines : f2_lines;
-      if (static_cast<size_t>(tentative_field_line) >= target_field_height) {
-        return result;
-      }
-    }
-
-    result.field_index =
-        use_field1 ? (output_index * 2) : (output_index * 2 + 1);
-    result.field_line = tentative_field_line;
-
-    // Validate the final mapping against VFR-derived field heights
-    size_t target_height = (result.field_index % 2 == 0) ? f1_lines : f2_lines;
-    if (result.field_line < 0 ||
-        static_cast<size_t>(result.field_line) >= target_height) {
-      return result;  // Line out of bounds for this field
-    }
-
-    result.is_valid = true;
-    ORC_LOG_DEBUG("map_image_to_field: mapped to field={} line={} (frame mode)",
-                  result.field_index, result.field_line);
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Split) {
-    // Split mode: top half is field1 (flat, VFR line 0..f1_lines-1),
-    // bottom half is field2 (VFR line f1_lines..height-1).
-    if (image_y < static_cast<int>(f1_lines)) {
-      result.field_index = output_index * 2;
-      result.field_line = image_y;
-      if (result.field_line < 0) return result;
-    } else {
-      result.field_index = output_index * 2 + 1;
-      result.field_line = image_y - static_cast<int>(f1_lines);
-      if (result.field_line < 0 ||
-          static_cast<size_t>(result.field_line) >= f2_lines) {
-        return result;
-      }
-    }
-
-    result.is_valid = true;
-    ORC_LOG_DEBUG("map_image_to_field: mapped to field={} line={} (split mode)",
-                  result.field_index, result.field_line);
-    return result;
-  }
-
-  // Unsupported output type
+  ORC_LOG_DEBUG("map_image_to_field: valid={} field={} line={}",
+                result.is_valid, result.field_index, result.field_line);
   return result;
 }
 
 FieldToImageMappingResult PreviewRenderer::map_field_to_image(
     const NodeID& node_id, PreviewOutputType output_type, uint64_t output_index,
-    uint64_t field_index, int field_line, int image_height) const {
-  FieldToImageMappingResult result;
-  result.is_valid = false;
-  result.image_y = 0;
-
+    uint64_t field_index, int field_line, int image_height,
+    const std::string& option_id) const {
   ORC_LOG_DEBUG(
       "map_field_to_image: node='{}' output_type={} output_index={} "
-      "field_index={} field_line={} image_height={}",
+      "field_index={} field_line={} image_height={} option_id='{}'",
       node_id.to_string(), static_cast<int>(output_type), output_index,
-      field_index, field_line, image_height);
+      field_index, field_line, image_height, option_id);
 
-  auto repr = get_representation_at_node(node_id);
-  if (!repr) {
+  auto geometry = get_preview_field_geometry(node_id, output_index);
+  if (!geometry) {
     ORC_LOG_DEBUG(
         "map_field_to_image: no representation available for node='{}'",
         node_id.to_string());
-    return result;
+    return FieldToImageMappingResult{false, 0};
   }
 
-  // Get VFR geometry for field height calculations
-  FrameID frame_id = output_index;
-  auto desc = repr->get_frame_descriptor(frame_id);
-  if (!desc) desc = repr->get_frame_descriptor(static_cast<FrameID>(0));
-  size_t f1_lines = desc ? field1_line_count(desc->system) : 313;
+  auto result = map_field_to_preview_row(
+      output_type, preview_frame_layout_for_option(option_id), output_index,
+      field_index, field_line, *geometry);
 
-  if (output_type == PreviewOutputType::Frame_Field1) {
-    // Flat field1 view: field_line is the image_y directly
-    result.is_valid = true;
-    result.image_y = field_line;
-    ORC_LOG_DEBUG(
-        "map_field_to_image: mapped to image_y={} (Frame_Field1 mode)",
-        result.image_y);
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Frame_Field2) {
-    // Flat field2 view: field_line is the image_y directly
-    result.is_valid = true;
-    result.image_y = field_line;
-    ORC_LOG_DEBUG(
-        "map_field_to_image: mapped to image_y={} (Frame_Field2 mode)",
-        result.image_y);
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Frame_Field1_First ||
-      output_type == PreviewOutputType::Frame_Reversed) {
-    // Interlaced frame: field1 on even lines (Frame_Field1_First) or odd
-    // lines (Frame_Reversed).
-    bool is_reversed = (output_type == PreviewOutputType::Frame_Reversed);
-    bool field1_on_even = !is_reversed;
-
-    // Determine which sequential half this field_index belongs to
-    uint64_t frame_field1_index = output_index * 2;
-    uint64_t frame_field2_index = output_index * 2 + 1;
-
-    if (field_index == frame_field1_index) {
-      result.image_y = field1_on_even ? (field_line * 2) : (field_line * 2 + 1);
-    } else if (field_index == frame_field2_index) {
-      result.image_y = field1_on_even ? (field_line * 2 + 1) : (field_line * 2);
-    } else {
-      return result;
-    }
-    result.is_valid = true;
-    ORC_LOG_DEBUG("map_field_to_image: mapped to image_y={} (frame mode)",
-                  result.image_y);
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Split) {
-    // Split mode: top half is field1 (f1_lines rows), bottom half is field2.
-    if (field_index == output_index * 2) {
-      result.image_y = field_line;
-    } else if (field_index == output_index * 2 + 1) {
-      result.image_y = field_line + static_cast<int>(f1_lines);
-    } else {
-      return result;
-    }
-    result.is_valid = true;
-    ORC_LOG_DEBUG("map_field_to_image: mapped to image_y={} (split mode)",
-                  result.image_y);
-    return result;
-  }
-
-  // Unsupported output type
+  ORC_LOG_DEBUG("map_field_to_image: valid={} image_y={}", result.is_valid,
+                result.image_y);
   return result;
+}
+
+std::optional<PreviewFieldGeometry> PreviewRenderer::get_preview_field_geometry(
+    const NodeID& node_id, uint64_t output_index) const {
+  auto repr = get_representation_at_node(node_id);
+  if (!repr) {
+    return std::nullopt;
+  }
+
+  // Prefer the displayed frame's descriptor; fall back to the first frame when
+  // it is not resident, since the line counts are a per-system constant.
+  FrameID frame_id(output_index);
+  auto desc = repr->get_frame_descriptor(frame_id);
+  if (!desc) {
+    desc = repr->get_frame_descriptor(static_cast<FrameID>(0));
+  }
+
+  PreviewFieldGeometry geometry;
+  geometry.field1_lines = desc ? field1_line_count(desc->system)
+                               : static_cast<size_t>(kPalField1Lines);
+  geometry.field2_lines =
+      desc ? (desc->height - geometry.field1_lines)
+           : static_cast<size_t>(kPalFrameLines - kPalField1Lines);
+  return geometry;
 }
 
 FrameFieldsResult PreviewRenderer::get_frame_fields(

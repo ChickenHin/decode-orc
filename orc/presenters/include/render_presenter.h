@@ -439,6 +439,8 @@ class RenderPresenter {
    * @param output_index Output index being displayed
    * @param image_y Y coordinate in preview image
    * @param image_height Height of preview image
+   * @param option_id Preview option being displayed; frame outputs can be
+   *        weaved or field-sequential and only the option id says which
    * @return Mapping result with field index and line number
    */
   struct ImageToFieldMapping {
@@ -450,7 +452,8 @@ class RenderPresenter {
   ImageToFieldMapping mapImageToField(NodeID node_id,
                                       orc::PreviewOutputType output_type,
                                       uint64_t output_index, int image_y,
-                                      int image_height);
+                                      int image_height,
+                                      const std::string& option_id = "");
 
   /**
    * @brief Map field coordinates to image coordinates
@@ -461,6 +464,7 @@ class RenderPresenter {
    * @param field_index Field index
    * @param field_line Line within field
    * @param image_height Height of preview image
+   * @param option_id Preview option being displayed (see mapImageToField)
    * @return Image Y coordinate (is_valid=false if out of bounds)
    */
   struct FieldToImageMapping {
@@ -472,7 +476,8 @@ class RenderPresenter {
                                       orc::PreviewOutputType output_type,
                                       uint64_t output_index,
                                       uint64_t field_index, int field_line,
-                                      int image_height);
+                                      int image_height,
+                                      const std::string& option_id = "");
 
   /**
    * @brief Get which fields comprise a frame

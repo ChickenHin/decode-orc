@@ -154,9 +154,10 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
 
   orc::ImageToFieldMappingResult mapImageToField(
       orc::NodeID node_id, orc::PreviewOutputType output_type,
-      uint64_t output_index, int image_y, int image_height) override {
+      uint64_t output_index, int image_y, int image_height,
+      const std::string& option_id) override {
     auto result = presenter_.mapImageToField(node_id, output_type, output_index,
-                                             image_y, image_height);
+                                             image_y, image_height, option_id);
     return orc::ImageToFieldMappingResult{result.is_valid, result.field_index,
                                           result.field_line};
   }
@@ -164,10 +165,10 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   orc::FieldToImageMappingResult mapFieldToImage(
       orc::NodeID node_id, orc::PreviewOutputType output_type,
       uint64_t output_index, uint64_t field_index, int field_line,
-      int image_height) override {
-    auto result =
-        presenter_.mapFieldToImage(node_id, output_type, output_index,
-                                   field_index, field_line, image_height);
+      int image_height, const std::string& option_id) override {
+    auto result = presenter_.mapFieldToImage(node_id, output_type, output_index,
+                                             field_index, field_line,
+                                             image_height, option_id);
     return orc::FieldToImageMappingResult{result.is_valid, result.image_y};
   }
 
@@ -422,7 +423,8 @@ uint64_t RenderCoordinator::requestSavePNG(const orc::NodeID& node_id,
 
 orc::ImageToFieldMappingResult RenderCoordinator::mapImageToField(
     const orc::NodeID& node_id, orc::PreviewOutputType output_type,
-    uint64_t output_index, int image_y, int image_height) {
+    uint64_t output_index, int image_y, int image_height,
+    const std::string& option_id) {
   // This is a synchronous call - safe to call render presenter directly
   // since it's just a calculation with no state changes
   std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -430,22 +432,22 @@ orc::ImageToFieldMappingResult RenderCoordinator::mapImageToField(
     return orc::ImageToFieldMappingResult{false, 0, 0};
   }
   return worker_render_presenter_->mapImageToField(
-      node_id, output_type, output_index, image_y, image_height);
+      node_id, output_type, output_index, image_y, image_height, option_id);
 }
 
 orc::FieldToImageMappingResult RenderCoordinator::mapFieldToImage(
     const orc::NodeID& node_id, orc::PreviewOutputType output_type,
     uint64_t output_index, uint64_t field_index, int field_line,
-    int image_height) {
+    int image_height, const std::string& option_id) {
   // This is a synchronous call - safe to call render presenter directly
   // since it's just a calculation with no state changes
   std::lock_guard<std::mutex> lock(queue_mutex_);
   if (!worker_render_presenter_) {
     return orc::FieldToImageMappingResult{false, 0};
   }
-  return worker_render_presenter_->mapFieldToImage(node_id, output_type,
-                                                   output_index, field_index,
-                                                   field_line, image_height);
+  return worker_render_presenter_->mapFieldToImage(
+      node_id, output_type, output_index, field_index, field_line, image_height,
+      option_id);
 }
 
 orc::FrameFieldsResult RenderCoordinator::getFrameFields(

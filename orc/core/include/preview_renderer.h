@@ -30,6 +30,7 @@
 
 #include "../analysis/vectorscope/vectorscope_data.h"
 #include "dag_frame_renderer.h"
+#include "preview_frame_layout.h"
 
 namespace orc {
 
@@ -214,13 +215,16 @@ class PreviewRenderer {
    * @param output_index The current output index (field/frame number, 0-based)
    * @param image_y The Y coordinate in the preview image
    * @param image_height Total height of the preview image (for split mode)
+   * @param option_id The preview option being displayed. Frame outputs may be
+   *        rendered weaved or field-sequential (field 1 block above field 2
+   *        block); only the option id distinguishes them, so it must be
+   *        supplied for the row mapping to match what is on screen.
    * @return Mapping result with field_index and field_line, or is_valid=false
    */
-  ImageToFieldMappingResult map_image_to_field(const NodeID& node_id,
-                                               PreviewOutputType output_type,
-                                               uint64_t output_index,
-                                               int image_y,
-                                               int image_height = 0) const;
+  ImageToFieldMappingResult map_image_to_field(
+      const NodeID& node_id, PreviewOutputType output_type,
+      uint64_t output_index, int image_y, int image_height = 0,
+      const std::string& option_id = "") const;
 
   /**
    * @brief Map field coordinates back to preview image coordinates
@@ -235,14 +239,14 @@ class PreviewRenderer {
    * @param field_index The field index to map
    * @param field_line The line within the field
    * @param image_height Total height of the image (for split mode)
+   * @param option_id The preview option being displayed (see
+   *        map_image_to_field; the frame layout depends on it)
    * @return Mapping result with image_y, or is_valid=false
    */
-  FieldToImageMappingResult map_field_to_image(const NodeID& node_id,
-                                               PreviewOutputType output_type,
-                                               uint64_t output_index,
-                                               uint64_t field_index,
-                                               int field_line,
-                                               int image_height = 0) const;
+  FieldToImageMappingResult map_field_to_image(
+      const NodeID& node_id, PreviewOutputType output_type,
+      uint64_t output_index, uint64_t field_index, int field_line,
+      int image_height = 0, const std::string& option_id = "") const;
 
   /**
    * @brief Get the field indices that make up a frame
@@ -313,6 +317,11 @@ class PreviewRenderer {
   /// Ensure node has been executed (execute on-demand if needed)
   void ensure_node_executed(const NodeID& node_id,
                             bool disable_cache = false) const;
+
+  /// Field line counts of the frame being previewed at a node, or nullopt when
+  /// the node has no representation to measure.
+  std::optional<PreviewFieldGeometry> get_preview_field_geometry(
+      const NodeID& node_id, uint64_t output_index) const;
 
   // ========================================================================
   // Internal rendering functions

@@ -170,13 +170,14 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   }
   orc::ImageToFieldMappingResult mapImageToField(orc::NodeID,
                                                  orc::PreviewOutputType,
-                                                 uint64_t, int, int) override {
+                                                 uint64_t, int, int,
+                                                 const std::string&) override {
     return {};
   }
   orc::FieldToImageMappingResult mapFieldToImage(orc::NodeID,
                                                  orc::PreviewOutputType,
-                                                 uint64_t, uint64_t, int,
-                                                 int) override {
+                                                 uint64_t, uint64_t, int, int,
+                                                 const std::string&) override {
     return {};
   }
   orc::FrameFieldsResult getFrameFields(orc::NodeID, uint64_t) override {

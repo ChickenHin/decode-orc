@@ -5,6 +5,7 @@ add_library(orc-core SHARED
     dag_executor.cpp
     frame_provenance.cpp
     dag_frame_renderer.cpp
+    preview_frame_layout.cpp
     preview_renderer.cpp
     preview_view_registry.cpp
 
