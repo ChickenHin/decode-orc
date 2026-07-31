@@ -365,6 +365,7 @@ orc_add_core_unit_tests(
         metadata/stage_registry_trust_test.cpp
         metadata/plugin_remote_loader_test.cpp
         metadata/plugin_artifact_name_test.cpp
+        metadata/plugin_release_manifest_test.cpp
         metadata/plugin_index_client_test.cpp
         metadata/plugin_update_checker_test.cpp
         metadata/sha256_hash_test.cpp

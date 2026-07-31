@@ -201,7 +201,7 @@ void PluginBrowseDialog::updateDetails() {
   }
   text += "<br>";
   if (entry->has_compatible_build) {
-    text += "Compatible with this host.";
+    text += "Compatible with this host (declared by the release manifest).";
   } else if (entry->release_unreachable) {
     text += "Release information unreachable.";
     if (!entry->compatibility_message.empty()) {

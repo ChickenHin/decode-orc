@@ -366,7 +366,7 @@ int cmd_plugins_info(int argc, char* argv[]) {
   }
   std::cout << "compatible:  "
             << (entry->has_compatible_build
-                    ? "yes"
+                    ? "yes — declared by the release manifest"
                     : (entry->compatibility_message.empty()
                            ? "no"
                            : "no — " + entry->compatibility_message))

@@ -946,6 +946,23 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
     result.error_message = resolved.error_message;
     return result;
   }
+  // A manifest-declared mismatch is authoritative: the load-time gate is
+  // guaranteed to reject the binary, so recording it would only leave a
+  // broken registry entry.
+  if (resolved.abi_mismatch || resolved.toolchain_mismatch) {
+    result.error_message =
+        resolved.abi_mismatch
+            ? ("This release is built for Orc ABI " +
+               std::to_string(resolved.asset_abi) +
+               ", but this host requires ABI " +
+               std::to_string(kStagePluginHostAbiVersion) +
+               "; it cannot load here")
+            : ("This release is built with toolchain '" +
+               resolved.asset_toolchain +
+               "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
+               "'; it cannot load here");
+    return result;
+  }
 
   PluginRegistryEntryInfo entry_info;
   entry_info.artifact_source = "github_release_asset";
@@ -954,6 +971,8 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
   entry_info.release_asset_url = resolved.release_asset_url;
   entry_info.release_asset_name = resolved.release_asset_name;
   entry_info.target_platform = target_platform;
+  entry_info.sha256 = resolved.sha256;
+  entry_info.required_host_abi = resolved.asset_abi;
   entry_info.enabled = true;
   // Adding a URL and trusting the binary it points at are distinct decisions:
   // the entry is recorded untrusted unless the caller has obtained explicit
@@ -1079,10 +1098,24 @@ PluginIndexInfo ProjectPresenter::readPluginIndex() {
       info.latest_tag = resolved.release_tag;
       info.version =
           orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
-      info.has_compatible_build = resolved.success;
+      // A declared ABI/toolchain mismatch resolves (so the version can be
+      // shown) but the load-time gate would reject it, so it is not
+      // installable from here.
+      info.has_compatible_build = resolved.success && !resolved.abi_mismatch &&
+                                  !resolved.toolchain_mismatch;
       info.release_unreachable = resolved.unreachable;
       if (!resolved.success) {
         info.compatibility_message = resolved.error_message;
+      } else if (resolved.abi_mismatch) {
+        info.compatibility_message = "Latest release is built for Orc ABI " +
+                                     std::to_string(resolved.asset_abi) +
+                                     "; this host requires ABI " +
+                                     std::to_string(kStagePluginHostAbiVersion);
+      } else if (resolved.toolchain_mismatch) {
+        info.compatibility_message =
+            "Latest release is built with toolchain '" +
+            resolved.asset_toolchain + "'; this host requires '" +
+            ORC_SDK_TOOLCHAIN_TAG "'";
       }
     }
 
@@ -1135,6 +1168,21 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
     result.error_message = resolved.error_message;
     return result;
   }
+  if (resolved.abi_mismatch) {
+    result.error_message =
+        "The latest release of '" + plugin_id + "' is built for Orc ABI " +
+        std::to_string(resolved.asset_abi) + ", but this host requires ABI " +
+        std::to_string(kStagePluginHostAbiVersion) + "; it cannot load here";
+    return result;
+  }
+  if (resolved.toolchain_mismatch) {
+    result.error_message = "The latest release of '" + plugin_id +
+                           "' is built with toolchain '" +
+                           resolved.asset_toolchain +
+                           "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
+                           "'; it cannot load here";
+    return result;
+  }
 
   PluginRegistryEntryInfo entry_info;
   entry_info.plugin_id = entry->id;
@@ -1147,6 +1195,11 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   entry_info.release_asset_name = resolved.release_asset_name;
   entry_info.target_platform = target_platform;
   entry_info.license_spdx = entry->license_spdx;
+  // The manifest digest (when declared) pins the download so the existing
+  // verify-and-quarantine path can check it; the declared ABI is recorded so
+  // the registry view can flag a mismatch after a host upgrade.
+  entry_info.sha256 = resolved.sha256;
+  entry_info.required_host_abi = resolved.asset_abi;
   entry_info.enabled = true;
   // Installing from the index records the entry but does not grant trust:
   // the user confirms trust explicitly before the binary is downloaded or
@@ -1284,6 +1337,23 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
     result.error_message = resolved.error_message;
     return result;
   }
+  // A declared mismatch means the load-time gate is guaranteed to reject the
+  // new binary; updating would only trade a working plugin for a broken,
+  // trust-reset registry entry.
+  if (resolved.abi_mismatch || resolved.toolchain_mismatch) {
+    result.error_message =
+        resolved.abi_mismatch
+            ? ("The latest release of '" + plugin_id +
+               "' is built for Orc ABI " + std::to_string(resolved.asset_abi) +
+               ", but this host requires ABI " +
+               std::to_string(kStagePluginHostAbiVersion) +
+               "; it cannot load here")
+            : ("The latest release of '" + plugin_id +
+               "' is built with toolchain '" + resolved.asset_toolchain +
+               "', but this host requires '" ORC_SDK_TOOLCHAIN_TAG
+               "'; it cannot load here");
+    return result;
+  }
 
   if (!resolved.release_tag.empty() &&
       resolved.release_tag == it->release_tag &&
@@ -1301,12 +1371,11 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
   it->target_platform = target_platform;
   it->plugin_version =
       orc::PluginUpdateChecker::normalize_version(resolved.release_tag);
-  // The previous sha256 pinned the old artifact; the new one has no reviewed
-  // digest, so clear the pin rather than quarantining the fresh download.
-  it->sha256.clear();
-  // The declared ABI belonged to the old artifact; the loader re-validates
-  // the new binary's ABI at load time.
-  it->required_host_abi = 0;
+  // The previous sha256/ABI pinned the old artifact. A release manifest
+  // supplies fresh values for the new one; without a manifest they clear so
+  // the download is not quarantined against a stale digest.
+  it->sha256 = resolved.sha256;
+  it->required_host_abi = resolved.asset_abi;
   // Drop any resolved cache path so the next startup downloads the new asset.
   it->path.clear();
   // A different binary means the previous trust decision no longer applies:

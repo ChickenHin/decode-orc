@@ -275,10 +275,17 @@ The index curates **which plugins are offered, not their versions**: once a
 plugin is accepted, its current release and all subsequent releases are
 available without further index changes. The host resolves each entry's
 **latest published GitHub release** at browse and install time (the same
-resolution used when adding a plugin by URL), selecting the release asset for
-this host's platform and ABI tag. Entries whose release information cannot be
-fetched are shown as **unreachable**; entries whose latest release publishes
-no matching asset are shown as incompatible.
+resolution used when adding a plugin by URL). Asset selection is driven
+entirely by the mandatory [release manifest](#release-manifest)
+(`orc-plugin-manifest.yaml`): the host picks the artifact the manifest
+declares for this platform and pre-checks its declared ABI and toolchain tag
+against its own. There is exactly one notion of compatible — the manifest
+declares an artifact for this platform whose ABI and toolchain match the
+host. A release without a manifest, with an invalid manifest, or whose
+manifest declares a mismatch is **incompatible** and cannot be installed;
+there is no name-based fallback and no "unknown compatibility" middle ground.
+Entries whose release information cannot be fetched are shown as
+**unreachable**.
 
 Schema (`registry_schema: 2`):
 
@@ -294,11 +301,64 @@ Schema (`registry_schema: 2`):
 | `plugins[].source_repo_url` | GitHub repository the host resolves releases from (mandatory) |
 
 Installing from the index records a registry entry pointing at the resolved
-latest release asset, left **untrusted** until the user confirms trust. No
-digest is recorded (there is nothing stable to pin); integrity rests on the
-trust gate, transport security, and the load-time ABI/toolchain checks. After
-install, the host keeps checking the repository for newer releases — see
-[Update checks and updating](#update-checks-and-updating).
+latest release asset, left **untrusted** until the user confirms trust. The
+manifest's per-artifact `sha256` and `abi` are recorded into the registry
+entry, arming the existing download verify-and-quarantine path and the early
+`required_host_abi` check. After install, the host keeps checking the
+repository for newer releases — see
+[Update checks and updating](#update-checks-and-updating); updating re-reads
+the new release's manifest the same way.
+
+### Release manifest
+
+Every plugin release **must** upload a YAML asset named
+`orc-plugin-manifest.yaml` alongside its binaries — a release without one
+(or with an invalid one) is not installable:
+
+```yaml
+manifest_schema: 1
+plugin_id: org.example.stage.demo
+plugin_version: 1.2.3
+artifacts:
+  - file: orc-plugin_demo_linux.so
+    platform: linux
+    abi: 12
+    toolchain_tag: gcc14/libstdc++
+    sha256: 91ba329876d3df13772f051878ef7071721ed8f3e547ff6bfe6e4bd36c088c68
+  - file: orc-plugin_demo_macos.dylib
+    platform: macos
+    abi: 12
+    toolchain_tag: clang17/libc++
+    sha256: 16dbdebc7ee615ac7d759972f38a8e92479f1a985dcc93ee355e7a36c32cf12c
+```
+
+Schema (`manifest_schema: 1`; unknown fields are ignored, a newer major is
+parsed best-effort with a warning):
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `manifest_schema` | yes | Manifest schema **major** version |
+| `plugin_id` | recommended | Plugin identifier; should match the index entry and the binary's descriptor |
+| `plugin_version` | no | Informational; the release tag remains the version of record |
+| `artifacts[].file` | yes | Exact release asset filename |
+| `artifacts[].platform` | yes | `linux`, `macos` or `windows` |
+| `artifacts[].abi` | yes | `kStagePluginHostAbiVersion` the binary was built against |
+| `artifacts[].toolchain_tag` | recommended | `ORC_SDK_TOOLCHAIN_TAG` of the build; without it only the ABI number can be pre-checked |
+| `artifacts[].sha256` | recommended | Hex SHA-256 of the asset; recorded into the registry so downloads are verified and quarantined on mismatch |
+
+Declared `file` entries must follow the
+[artifact naming convention](#artifact-naming-convention) and must exist in
+the release's asset list; either violation fails resolution.
+
+The manifest is a **declaration by the release's CI, not proof**: the
+load-time ABI/toolchain gate remains the enforcement point, and a manifest
+that misdeclares its binaries fails there. What the manifest provides is a
+definitive compatibility verdict *before* anything is downloaded (browse
+shows "compatible — declared by the release manifest", or the precise
+mismatch), hard refusal of installs and updates that are guaranteed to fail
+at load, and a digest for the download integrity check. Because the manifest
+travels with the release, the index stays unpinned while each release still
+pins its own artifacts.
 
 Contribution model: plugin authors open a pull request adding their entry;
 repository CI validates every PR (schema conformance, a present SPDX license,
@@ -347,10 +407,11 @@ What the host verifies before running plugin code, and what it does not:
   cryptographically signed, so its authenticity rests on transport security and
   repository access control. Signing the index (e.g. minisign/sigstore) is a
   documented follow-on.
-- **Code signing.** Plugin binaries carry no cryptographic signature, and
-  index installs record no digest; a hand-entered `sha256` in the local
-  registry authenticates an artifact only as strongly as the registry entry
-  that records it.
+- **Code signing.** Plugin binaries carry no cryptographic signature. A
+  manifest-supplied (or hand-entered) `sha256` in the local registry protects
+  download integrity, but the manifest is served from the same release as the
+  binary, so it authenticates an artifact only as strongly as the repository
+  that published both.
 - **Unsigned local registry.** The on-disk registry
   (`stage-plugins.yaml`) and the cached index copy are plain files with no
   signature. An attacker who can write to the user's config directory could
@@ -409,17 +470,18 @@ orc-plugin_<stage-name>_<platform>[_abi<N>].<ext>
 ```
 
 The optional `_abi<N>` token records the host ABI version the binary targets,
-so one release can carry builds for several host ABIs. The host prefers the
-asset tagged for its own ABI, falls back to a legacy (untagged) name — which
-the load-time gate still validates — and reports "needs a rebuild" rather than
-downloading an asset tagged for an incompatible ABI. Untagged names remain
-valid.
+so one release can carry builds for several host ABIs side by side. The name
+is purely a validity/recognisability convention: artifact **selection** and
+compatibility checking are driven entirely by the mandatory
+[release manifest](#release-manifest), whose `file` entries must conform to
+this scheme (the pattern is also enforced when a download is requested and
+when a registry entry is parsed).
 
 Examples:
-- `orc-plugin_skeleton_passthrough_linux.so` (legacy, untagged)
-- `orc-plugin_skeleton_passthrough_linux_abi8.so` (ABI-tagged)
-- `orc-plugin_skeleton_passthrough_macos_abi8.dylib`
-- `orc-plugin_skeleton_passthrough_windows_abi8.dll`
+- `orc-plugin_skeleton_passthrough_linux.so` (untagged)
+- `orc-plugin_skeleton_passthrough_linux_abi12.so` (ABI-tagged)
+- `orc-plugin_skeleton_passthrough_macos_abi12.dylib`
+- `orc-plugin_skeleton_passthrough_windows_abi12.dll`
 
 External plugin repository names follow the same prefix convention
 (`orc-plugin_<name>`), both for official decode-orc organization repositories

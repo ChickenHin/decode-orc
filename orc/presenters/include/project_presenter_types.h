@@ -114,8 +114,9 @@ struct PluginIndexEntryInfo {
   std::string license_spdx;
   std::string source_repo_url;
   std::vector<std::string> tags;
-  bool has_compatible_build = false;  ///< The latest release carries an
-                                      ///< asset for this host.
+  bool has_compatible_build = false;  ///< The latest release's manifest
+                                      ///< declares an artifact matching this
+                                      ///< host's platform, ABI and toolchain.
   bool release_unreachable = false;   ///< Release info could not be fetched.
   bool already_installed = false;     ///< Present in the local registry.
   std::string compatibility_message;  ///< Set when not installable (no
