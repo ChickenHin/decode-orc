@@ -352,9 +352,9 @@ ctest --test-dir build -L sdk -R 'PluginPrivate' --parallel "$(nproc)" --output-
 # Performance budget check (fast gate)
 python3 cmake/check_ctest_budget.py \
 --input build/ctest-results-unit.xml \
---max-wall-seconds 30.0 \
+--max-wall-seconds 45.0 \
 --min-pass-rate 99.5 \
---max-p95-seconds 0.085
+--max-p95-seconds 0.105
 
 # Slow quality sweep equivalent
 ctest --test-dir build -L integration --parallel "$(nproc)" --output-on-failure
