@@ -241,7 +241,7 @@ TEST(EFMAudioDecodeStageTest, SampleAccess_DecodesResamplesAndCachesOnce_Pal) {
   stage.set_deps_override(deps);
 
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  constexpr size_t kFrames = 2;
+  static constexpr size_t kFrames = 2;
   configure_video(*vfr, orc::VideoSystem::PAL, kFrames);
   auto output = make_output(stage, vfr, 1);
 
@@ -289,7 +289,7 @@ TEST(EFMAudioDecodeStageTest, Prime_RunsDecodeOnceAndForwardsProgress) {
   stage.set_deps_override(deps);
 
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  constexpr size_t kFrames = 2;
+  static constexpr size_t kFrames = 2;
   configure_video(*vfr, orc::VideoSystem::PAL, kFrames);
   auto output = make_output(stage, vfr, 0);
 
@@ -346,7 +346,7 @@ TEST(EFMAudioDecodeStageTest, Prime_ForwardsThroughInterveningWrapper) {
   stage.set_deps_override(deps);
 
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  constexpr size_t kFrames = 2;
+  static constexpr size_t kFrames = 2;
   configure_video(*vfr, orc::VideoSystem::PAL, kFrames);
   auto output = make_output(stage, vfr, 0);
 

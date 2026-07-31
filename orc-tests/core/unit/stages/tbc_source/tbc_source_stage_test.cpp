@@ -371,7 +371,7 @@ TEST(TBCSourceStageTest, OutputIsVFR_FrameCountIsFieldCountDividedByTwo) {
   orc::TBCSourceStage stage(deps);
   orc::ObservationContext ctx;
 
-  constexpr int32_t kNumFields = 4;
+  static constexpr int32_t kNumFields = 4;
 
   ON_CALL(*deps, validate_input_file(_, _)).WillByDefault(Return(true));
   ON_CALL(*deps, load_video_params(_, _))
@@ -522,7 +522,7 @@ TEST(TBCSourceStageTest, OutputVFR_ExposesEFM_WhenEfmFileAndMetadataCountsSet) {
   orc::TBCSourceStage stage(deps);
   orc::ObservationContext ctx;
 
-  constexpr int32_t kNumFields = 4;  // two frames
+  static constexpr int32_t kNumFields = 4;  // two frames
   // Per-field T-value counts: frame 0 = fields 0+1 = 10+5 = 15 bytes @ off 0;
   //                           frame 1 = fields 2+3 = 8+3 = 11 bytes @ off 15.
   const std::array<int32_t, 4> kCounts = {10, 5, 8, 3};
@@ -628,7 +628,7 @@ TEST(TBCSourceStageTest, OutputVFR_ExposesAC3_WhenAc3FileAndMetadataCountsSet) {
   orc::TBCSourceStage stage(deps);
   orc::ObservationContext ctx;
 
-  constexpr int32_t kNumFields = 4;  // two frames
+  static constexpr int32_t kNumFields = 4;  // two frames
   // Per-field symbol counts: frame 0 = fields 0+1 = 10+5 = 15 bytes @ off 0;
   //                          frame 1 = fields 2+3 = 8+3 = 11 bytes @ off 15.
   const std::array<int32_t, 4> kCounts = {10, 5, 8, 3};

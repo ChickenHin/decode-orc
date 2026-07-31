@@ -84,7 +84,7 @@ TEST(PluginSafeCallTest, Can_BeCalledRepeatedlyOnSameThread) {
 
 TEST(PluginSafeCallTest, Concurrent_CallsOnSeparateThreadsDoNotInterfere) {
   constexpr int kThreads = 8;
-  constexpr int kIterations = 100;
+  static constexpr int kIterations = 100;
 
   std::atomic<int> success_count{0};
   std::atomic<int> fail_count{0};

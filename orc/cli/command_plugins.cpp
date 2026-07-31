@@ -355,7 +355,9 @@ int cmd_plugins_list(int argc, char* argv[]) {
 
       // The selector leads: it is the string every other subcommand takes, so
       // a line of this output is usable as input without editing.
-      constexpr size_t kColumn = 12;
+      // static: the label lambda below reads kColumn with an empty capture
+      // list, which MSVC rejects for an automatic constexpr (C3493).
+      static constexpr size_t kColumn = 12;
       const auto label = [](const char* field) {
         return list_field_label(field, kColumn);
       };
