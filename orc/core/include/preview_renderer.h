@@ -336,11 +336,15 @@ class PreviewRenderer {
 
   /**
    * @brief Render a frame through the colour-carrier provider path.
+   *
+   * @param option_id Selects the display layout: kColourCarrierSequentialId
+   *        stacks field 1 above field 2; any other value renders the
+   *        interlaced (weaved) frame.
    */
   PreviewRenderResult render_colour_carrier_preview(
       const NodeID& stage_node_id, const class IColourPreviewProvider& provider,
       const StagePreviewCapability& capability, PreviewOutputType type,
-      uint64_t index,
+      uint64_t index, const std::string& option_id,
       PreviewNavigationHint hint = PreviewNavigationHint::Random);
 
   /**

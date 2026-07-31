@@ -54,6 +54,13 @@ bool has_signal_domain_type(const StagePreviewCapability& capability) {
       [](VideoDataType type) { return is_signal_domain_type(type); });
 }
 
+// Option IDs for the colour-carrier preview path (video sink).  The
+// interlaced id is the historical default; the sequential id stacks field 1
+// above field 2, matching the signal-domain "sequential" layouts.
+constexpr const char* kColourCarrierInterlacedId = "phase2_colour_carrier";
+constexpr const char* kColourCarrierSequentialId =
+    "phase2_colour_carrier_sequential";
+
 }  // namespace
 
 // Helper function to create a placeholder image with text
@@ -440,8 +447,9 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
             if (auto* colour_provider =
                     dynamic_cast<const IColourPreviewProvider*>(
                         node_it->stage.get())) {
-              return render_colour_carrier_preview(
-                  node_id, *colour_provider, capability, type, index, hint);
+              return render_colour_carrier_preview(node_id, *colour_provider,
+                                                   capability, type, index,
+                                                   option_id, hint);
             }
           }
 
@@ -1164,10 +1172,15 @@ std::vector<PreviewOutputInfo> PreviewRenderer::get_capability_preview_outputs(
 
   // In VFR domain field1 is always first; first_field_offset is always 0.
   outputs.push_back(
-      PreviewOutputInfo{PreviewOutputType::Frame_Field1_First, "Frame",
+      PreviewOutputInfo{PreviewOutputType::Frame_Field1_First, "Interlaced",
                         capability.navigation_extent.item_count, true,
                         capability.geometry.dar_correction_factor,
-                        "phase2_colour_carrier", false, false, 0});
+                        kColourCarrierInterlacedId, false, false, 0});
+  outputs.push_back(
+      PreviewOutputInfo{PreviewOutputType::Frame_Field1_First, "Sequential",
+                        capability.navigation_extent.item_count, true,
+                        capability.geometry.dar_correction_factor,
+                        kColourCarrierSequentialId, false, false, 0});
 
   return outputs;
 }
@@ -1175,7 +1188,7 @@ std::vector<PreviewOutputInfo> PreviewRenderer::get_capability_preview_outputs(
 PreviewRenderResult PreviewRenderer::render_colour_carrier_preview(
     const NodeID& stage_node_id, const IColourPreviewProvider& provider,
     const StagePreviewCapability& capability, PreviewOutputType type,
-    uint64_t index, PreviewNavigationHint hint) {
+    uint64_t index, const std::string& option_id, PreviewNavigationHint hint) {
   PreviewRenderResult result{};
   result.node_id = stage_node_id;
   result.output_type = type;
@@ -1209,6 +1222,12 @@ PreviewRenderResult PreviewRenderer::render_colour_carrier_preview(
   result.image = render_preview_from_colour_carrier(*carrier_opt);
   result.success = result.image.is_valid();
   result.image.vectorscope_data = carrier_opt->vectorscope_data;
+
+  // The carrier is always a weaved (interlaced) frame; re-order the rows when
+  // the sequential-fields layout was requested.
+  if (result.success && option_id == kColourCarrierSequentialId) {
+    reorder_preview_image_to_sequential_fields(result.image);
+  }
 
   if (!result.success) {
     result.error_message =

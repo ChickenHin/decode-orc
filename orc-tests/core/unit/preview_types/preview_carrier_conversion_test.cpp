@@ -223,4 +223,80 @@ TEST(ColourCarrierConversionTest, Bt1886Transfer_ProducesValidImage) {
   ASSERT_EQ(image.height, 1u);
 }
 
+namespace {
+
+// Build a width×height image where every pixel of row N has value N.
+orc::PreviewImage makeRowLabelledImage(uint32_t width, uint32_t height) {
+  orc::PreviewImage image{};
+  image.width = width;
+  image.height = height;
+  image.rgb_data.resize(static_cast<size_t>(width) * height * 3);
+  for (uint32_t row = 0; row < height; ++row) {
+    for (uint32_t i = 0; i < width * 3; ++i) {
+      image.rgb_data[static_cast<size_t>(row) * width * 3 + i] =
+          static_cast<uint8_t>(row);
+    }
+  }
+  return image;
+}
+
+uint8_t rowValue(const orc::PreviewImage& image, uint32_t row) {
+  return image.rgb_data[static_cast<size_t>(row) * image.width * 3];
+}
+
+}  // namespace
+
+TEST(SequentialFieldReorderTest, EvenHeight_StacksField1AboveField2) {
+  auto image = makeRowLabelledImage(2, 4);
+
+  orc::reorder_preview_image_to_sequential_fields(image);
+
+  ASSERT_TRUE(image.is_valid());
+  // Weaved rows 0,2 (field 1) then 1,3 (field 2).
+  EXPECT_EQ(rowValue(image, 0), 0);
+  EXPECT_EQ(rowValue(image, 1), 2);
+  EXPECT_EQ(rowValue(image, 2), 1);
+  EXPECT_EQ(rowValue(image, 3), 3);
+}
+
+TEST(SequentialFieldReorderTest, OddHeight_GivesField1TheExtraLine) {
+  auto image = makeRowLabelledImage(3, 5);
+
+  orc::reorder_preview_image_to_sequential_fields(image);
+
+  ASSERT_TRUE(image.is_valid());
+  // Field 1 = weaved rows 0,2,4; field 2 = rows 1,3.
+  EXPECT_EQ(rowValue(image, 0), 0);
+  EXPECT_EQ(rowValue(image, 1), 2);
+  EXPECT_EQ(rowValue(image, 2), 4);
+  EXPECT_EQ(rowValue(image, 3), 1);
+  EXPECT_EQ(rowValue(image, 4), 3);
+}
+
+TEST(SequentialFieldReorderTest, DropoutRegions_AreRemappedToNewRows) {
+  auto image = makeRowLabelledImage(2, 4);
+  orc::DropoutRegion even_row{};
+  even_row.line = 2;
+  orc::DropoutRegion odd_row{};
+  odd_row.line = 3;
+  image.dropout_regions = {even_row, odd_row};
+
+  orc::reorder_preview_image_to_sequential_fields(image);
+
+  // field1_rows = 2: weaved row 2 → 1; weaved row 3 → 2 + 1 = 3.
+  EXPECT_EQ(image.dropout_regions[0].line, 1u);
+  EXPECT_EQ(image.dropout_regions[1].line, 3u);
+}
+
+TEST(SequentialFieldReorderTest, InvalidOrSingleRowImage_IsUnchanged) {
+  orc::PreviewImage invalid{};
+  orc::reorder_preview_image_to_sequential_fields(invalid);
+  EXPECT_TRUE(invalid.rgb_data.empty());
+
+  auto single = makeRowLabelledImage(4, 1);
+  const auto before = single.rgb_data;
+  orc::reorder_preview_image_to_sequential_fields(single);
+  EXPECT_EQ(single.rgb_data, before);
+}
+
 }  // namespace orc_unit_test

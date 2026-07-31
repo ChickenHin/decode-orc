@@ -26,4 +26,16 @@ namespace orc {
 PreviewImage render_preview_from_colour_carrier(
     const ColourFrameCarrier& carrier);
 
+/**
+ * @brief Re-order an interlaced (weaved) preview image into sequential fields.
+ *
+ * The weaved image has field 1 on even display rows (0-based) and field 2 on
+ * odd rows.  This rearranges the rows in place so the field-1 lines form the
+ * top block and the field-2 lines the bottom block, matching the
+ * "sequential" layout offered by the signal-domain preview helpers.  Any
+ * dropout regions are remapped to their new display rows.  Image dimensions
+ * are unchanged; invalid images are left untouched.
+ */
+void reorder_preview_image_to_sequential_fields(PreviewImage& image);
+
 }  // namespace orc

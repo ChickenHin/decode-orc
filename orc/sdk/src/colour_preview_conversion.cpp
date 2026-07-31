@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <vector>
 
 namespace orc {
 namespace {
@@ -133,6 +135,38 @@ PreviewImage render_preview_from_colour_carrier(
   }
 
   return image;
+}
+
+void reorder_preview_image_to_sequential_fields(PreviewImage& image) {
+  if (!image.is_valid() || image.height < 2) {
+    return;
+  }
+
+  const size_t row_bytes = static_cast<size_t>(image.width) * 3;
+  const uint32_t field1_rows = (image.height + 1) / 2;
+
+  // Weaved row → sequential row: even rows (field 1) map to the top block,
+  // odd rows (field 2) to the bottom block.
+  auto sequential_row = [field1_rows](uint32_t weaved_row) -> uint32_t {
+    return (weaved_row % 2 == 0) ? (weaved_row / 2)
+                                 : (field1_rows + weaved_row / 2);
+  };
+
+  std::vector<uint8_t> reordered(image.rgb_data.size());
+  for (uint32_t row = 0; row < image.height; ++row) {
+    const size_t src = static_cast<size_t>(row) * row_bytes;
+    const size_t dst = static_cast<size_t>(sequential_row(row)) * row_bytes;
+    std::copy_n(image.rgb_data.begin() + static_cast<std::ptrdiff_t>(src),
+                row_bytes,
+                reordered.begin() + static_cast<std::ptrdiff_t>(dst));
+  }
+  image.rgb_data = std::move(reordered);
+
+  for (auto& region : image.dropout_regions) {
+    if (region.line < image.height) {
+      region.line = sequential_row(region.line);
+    }
+  }
 }
 
 }  // namespace orc
