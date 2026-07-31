@@ -46,10 +46,11 @@ struct ObserverInfo {
   /// True when the observer's output for a frame depends only on that frame's
   /// representation, so frames may be observed in any order and chunked freely.
   /// False when the observer models a cross-frame stream (e.g. the EIA-608
-  /// caption stream or the colour-sequence phase) and must therefore be driven
-  /// over a work item's frames in ascending order. Consumed by the background
-  /// observation scheduler to decide frame ordering; never affects an
-  /// observer's per-frame result.
+  /// caption stream or the colour-sequence phase): a consumer that wants the
+  /// stream interpretation must drive a single create_observer() handle over
+  /// ascending frames. Purely informational for the background observation
+  /// pipeline, which records per-frame results via run_observer() (a fresh
+  /// instance per frame), where ordering cannot affect any stored record.
   bool stateless = true;
 };
 

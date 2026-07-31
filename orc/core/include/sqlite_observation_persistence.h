@@ -92,6 +92,7 @@ class SqliteObservationPersistence : public IObservationPersistence {
       override;
   std::optional<ObservationRecord> load_one(
       const ObservationRecordKey& key) override;
+  bool exists(const ObservationRecordKey& key) override;
 
   // Maintenance stamps, stored in the schema_meta table under an "app:" key
   // prefix (the bare "version" key is reserved for the schema version).

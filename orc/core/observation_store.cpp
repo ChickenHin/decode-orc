@@ -108,6 +108,21 @@ bool ObservationStore::has(const ObservationRecordKey& key) {
   return ensure_resident(key);
 }
 
+bool ObservationStore::has_stored(const ObservationRecordKey& key) {
+  std::shared_ptr<IObservationPersistence> persistence;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (index_.find(key) != index_.end()) {
+      return true;
+    }
+    persistence = persistence_;
+  }
+  // Presence probe with no store lock held, so sidecar I/O never blocks other
+  // readers. Deliberately does NOT install the record in memory: callers are
+  // coverage checks, not readers.
+  return persistence && persistence->exists(key);
+}
+
 std::optional<ObservationRecord> ObservationStore::get(
     const ObservationRecordKey& key) {
   if (!ensure_resident(key)) {

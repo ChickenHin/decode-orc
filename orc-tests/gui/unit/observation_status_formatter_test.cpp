@@ -37,6 +37,21 @@ TEST(ObservationStatusFormatter, PercentageIsClampedToRange) {
             "Computing observations\xE2\x80\xA6 0%");
 }
 
+TEST(ObservationStatusFormatter, ChecksVersusComputesByComputedFlag) {
+  // A batch that has not computed anything yet is only verifying coverage of
+  // already-stored frames and must say so.
+  EXPECT_EQ(formatObservationStatus(/*active=*/true, /*percent=*/10,
+                                    /*computing=*/false),
+            "Checking observations\xE2\x80\xA6 10%");
+  EXPECT_EQ(formatObservationStatus(/*active=*/true, /*percent=*/10,
+                                    /*computing=*/true),
+            "Computing observations\xE2\x80\xA6 10%");
+  // Idle stays empty in both modes.
+  EXPECT_EQ(formatObservationStatus(/*active=*/false, /*percent=*/10,
+                                    /*computing=*/false),
+            "");
+}
+
 TEST(ObservationStatusFormatter, RoundsCompletionFraction) {
   EXPECT_EQ(roundObservationPercent(0, 0), 100);  // empty batch is complete
   EXPECT_EQ(roundObservationPercent(0, 4), 0);

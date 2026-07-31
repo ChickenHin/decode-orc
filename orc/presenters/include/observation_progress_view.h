@@ -28,6 +28,10 @@ namespace orc::presenters {
 struct ObservationProgressEvent {
   bool active = false;       ///< True while background work is running.
   int percent_complete = 0;  ///< Overall completion, 0..100.
+  /// True when the current batch has actually computed at least one frame;
+  /// false while it is only verifying coverage of already-stored frames. Lets
+  /// the status line say "Computing…" vs "Checking…" honestly.
+  bool computing = false;
   std::size_t outstanding_nodes = 0;  ///< Distinct nodes with pending work.
 };
 

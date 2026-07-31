@@ -704,7 +704,7 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
           worker_render_presenter_->subscribeObservationProgress(
               [this](const orc::presenters::ObservationProgressEvent& event) {
                 emit observationProgress(
-                    event.active, event.percent_complete,
+                    event.active, event.percent_complete, event.computing,
                     static_cast<qulonglong>(event.outstanding_nodes));
               });
     }

@@ -201,9 +201,10 @@ void MainWindow::onObservationDataReady(
 }
 
 void MainWindow::onObservationProgress(bool active, int percent_complete,
+                                       bool computing,
                                        qulonglong /*outstanding_nodes*/) {
   const std::string message =
-      orc::gui::formatObservationStatus(active, percent_complete);
+      orc::gui::formatObservationStatus(active, percent_complete, computing);
   if (message.empty()) {
     statusBar()->clearMessage();
   } else {

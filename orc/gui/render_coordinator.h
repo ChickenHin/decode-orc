@@ -955,11 +955,13 @@ class RenderCoordinator : public QObject {
    *
    * @param active            True while background observation work is running
    * @param percent_complete  Overall completion, 0..100
+   * @param computing         True when the batch has actually computed frames;
+   *                          false while it only verifies stored coverage
    * @param outstanding_nodes Distinct nodes with pending work
    *
    * Marshalled from the scheduler's worker thread via a queued connection.
    */
-  void observationProgress(bool active, int percent_complete,
+  void observationProgress(bool active, int percent_complete, bool computing,
                            qulonglong outstanding_nodes);
 
  private:

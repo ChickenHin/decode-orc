@@ -107,6 +107,12 @@ class FakePersistence : public IObservationPersistence {
     return it->second.second;
   }
 
+  bool exists(const ObservationRecordKey& k) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++exists_calls_;
+    return store_.find(flat_key(k)) != store_.end();
+  }
+
   std::size_t record_count() {
     std::lock_guard<std::mutex> lock(mutex_);
     return store_.size();
@@ -114,6 +120,10 @@ class FakePersistence : public IObservationPersistence {
   int load_one_calls() {
     std::lock_guard<std::mutex> lock(mutex_);
     return load_one_calls_;
+  }
+  int exists_calls() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return exists_calls_;
   }
   int save_calls() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -136,6 +146,7 @@ class FakePersistence : public IObservationPersistence {
   int save_calls_ = 0;
   int saved_records_ = 0;
   int load_one_calls_ = 0;
+  int exists_calls_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +191,45 @@ TEST(ObservationStorePersistence_EvictionWithoutSidecar_IsAGenuineMiss,
 
   EXPECT_FALSE(store.has(evicted));
   EXPECT_FALSE(store.get(evicted).has_value());
+}
+
+// has_stored() is a presence-only probe: it answers from the memory index or
+// the sidecar's exists() WITHOUT loading the record into memory, so coverage
+// checks over a warm sidecar cannot churn the LRU.
+TEST(ObservationStorePersistence_HasStored_ProbesWithoutLoading, ReadThrough) {
+  auto persistence = std::make_shared<FakePersistence>();
+  ObservationStore store(/*memory_budget_bytes=*/1);
+  store.set_persistence(persistence);
+
+  const auto evicted = key("A", 0, "obs", "1");
+  const auto resident = key("A", 1, "obs", "1");
+  store.put(evicted, record_with(1));
+  store.put(resident, record_with(2));
+  store.flush();  // both durable; only `resident` still in memory
+
+  // Present in the sidecar: reported via exists(), never via load_one().
+  EXPECT_TRUE(store.has_stored(evicted));
+  EXPECT_GE(persistence->exists_calls(), 1);
+  EXPECT_EQ(persistence->load_one_calls(), 0);
+
+  // The probe did NOT install the record: `resident` (the only entry the
+  // one-byte budget allows) must still be resident, which a memory-index hit
+  // answers without another sidecar round-trip.
+  const int exists_before = persistence->exists_calls();
+  EXPECT_TRUE(store.has_stored(resident));
+  EXPECT_EQ(persistence->exists_calls(), exists_before);
+
+  // Absent everywhere: false.
+  EXPECT_FALSE(store.has_stored(key("A", 2, "obs", "1")));
+}
+
+TEST(ObservationStorePersistence_HasStoredWithoutSidecar_ChecksMemoryOnly,
+     ReadThrough) {
+  ObservationStore store;  // no persistence attached
+  const auto k = key("A", 0, "obs", "1");
+  EXPECT_FALSE(store.has_stored(k));
+  store.put(k, record_with(1));
+  EXPECT_TRUE(store.has_stored(k));
 }
 
 // ---------------------------------------------------------------------------
