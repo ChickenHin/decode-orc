@@ -156,3 +156,19 @@ The observer examines line 11 of NTSC video fields for the white flag signal. Th
 
 **What it looks like:**
 A simple boolean indicator showing whether a white flag was detected on the current field.
+
+---
+
+## Teletext Observer
+
+**Purpose:** Recovers PAL World System Teletext (WST) packets from the VBI data lines of PAL video.
+
+**What it extracts:**
+- Teletext presence indicator and packet count per field
+- The recovered 42-byte T42 packets, one per VBI data line
+
+**How it works:**
+The observer slices the candidate VBI lines (broadcast lines 6-22 of each field, per ETSI EN 300 706) at the fixed teletext bit rate, locking to the clock run-in and framing code of each data line. Recovered packets are kept in transmission coding, exactly as broadcast, so downstream consumers such as the Teletext Sink stage and the Teletext Pages preview dialog apply their own error correction.
+
+**What it looks like:**
+The Teletext Pages dialog (preview window, Observers menu) renders the requested page from packets recovered in a trailing window of frames ending at the current frame; the Teletext Sink stage exports the same packets as a `.t42` stream.

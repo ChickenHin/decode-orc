@@ -94,6 +94,8 @@ orc_add_gui_unit_tests(
             node_type_helper_port_test.cpp
             observation_status_formatter_test.cpp
             quick_project_planner_test.cpp
+            teletext_observation_presenter_test.cpp
+            teletext_page_assembler_test.cpp
             vectorscope_geometry_test.cpp
 )
 
@@ -129,4 +131,5 @@ orc_add_gui_unit_tests(
         theme_controller_test.cpp
         plugin_browse_dialog_test.cpp
         plugin_manager_dialog_test.cpp
+        teletext_dialog_test.cpp
 )

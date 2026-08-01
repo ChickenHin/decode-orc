@@ -41,6 +41,7 @@
 #include "snranalysisdialog.h"
 #include "stage_help_dialog.h"
 #include "stageparameterdialog.h"
+#include "teletextdialog.h"
 #include "theme_controller.h"
 #include "theme_manager.h"
 #include "vbidialog.h"
@@ -377,6 +378,7 @@ MainWindow::MainWindow(QWidget* parent)
       preview_dialog_(nullptr),
       vbi_dialog_(nullptr),
       ntsc_observer_dialog_(nullptr),
+      teletext_dialog_(nullptr),
       dag_view_(nullptr),
       dag_model_(nullptr),
       dag_scene_(nullptr),
@@ -422,6 +424,8 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onPreviewReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::vbiDataReady, this,
           &MainWindow::onVBIDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::teletextDataReady,
+          this, &MainWindow::onTeletextDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::availableOutputsReady,
           this, &MainWindow::onAvailableOutputsReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::lineSamplesReady, this,
@@ -521,6 +525,10 @@ MainWindow::~MainWindow() {
     delete ntsc_observer_dialog_;
     ntsc_observer_dialog_ = nullptr;
   }
+  if (teletext_dialog_) {
+    delete teletext_dialog_;
+    teletext_dialog_ = nullptr;
+  }
   if (preview_dialog_) {
     delete preview_dialog_;
     preview_dialog_ = nullptr;
@@ -582,6 +590,9 @@ void MainWindow::setupUI() {
   // Create NTSC observer dialog (initially hidden)
   ntsc_observer_dialog_ = new NtscObserverDialog(this);
 
+  // Create teletext page preview dialog (initially hidden)
+  teletext_dialog_ = new TeletextDialog(this);
+
   // Note: Dropout, SNR, and Burst Level analysis dialogs are now created
   // per-stage in runAnalysisForNode() to allow each stage to have its own
   // independent dialog
@@ -625,6 +636,8 @@ void MainWindow::setupUI() {
           &MainWindow::onShowVideoParameterObserverDialog);
   connect(preview_dialog_, &PreviewDialog::showNtscObserverDialogRequested,
           this, &MainWindow::onShowNtscObserverDialog);
+  connect(preview_dialog_, &PreviewDialog::showTeletextDialogRequested, this,
+          &MainWindow::onShowTeletextDialog);
   connect(preview_dialog_, &PreviewDialog::lineScopeRequested, this,
           &MainWindow::onLineScopeRequested);
   connect(preview_dialog_, &PreviewDialog::lineNavigationRequested, this,
@@ -1215,6 +1228,9 @@ void MainWindow::closeAllDialogs() {
   }
   if (ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible()) {
     ntsc_observer_dialog_->hide();
+  }
+  if (teletext_dialog_ && teletext_dialog_->isVisible()) {
+    teletext_dialog_->hide();
   }
 
   // Close and delete all per-node analysis dialogs
@@ -4417,6 +4433,20 @@ void MainWindow::onShowNtscObserverDialog() {
   updateNtscObserverDialog();
 }
 
+void MainWindow::onShowTeletextDialog() {
+  if (!teletext_dialog_) {
+    return;
+  }
+
+  // Show the dialog first
+  teletext_dialog_->show();
+  teletext_dialog_->raise();
+  teletext_dialog_->activateWindow();
+
+  // Update teletext information after showing
+  updateTeletextDialog();
+}
+
 void MainWindow::onFrameTimingRequested() {
   if (!current_view_node_id_.is_valid()) {
     ORC_LOG_WARN("No node selected for field timing view");
@@ -4781,6 +4811,7 @@ void MainWindow::updateAllPreviewComponents() {
   updateVBIDialog();
   updateVideoParameterObserverDialog();
   updateNtscObserverDialog();
+  updateTeletextDialog();
 
   // Notify line scope dialog that preview frame has changed
   // Line scope will refresh samples at its current field/line position via
@@ -4951,6 +4982,68 @@ void MainWindow::refreshObserverDialogs() {
     pending_obs_request_id_field2_ = 0;
   }
 }
+void MainWindow::updateTeletextDialog() {
+  // Only update while the dialog is visible (observer-dialog convention).
+  if (!teletext_dialog_ || !teletext_dialog_->isVisible()) {
+    return;
+  }
+
+  if (!current_view_node_id_.is_valid()) {
+    pending_teletext_requests_.clear();
+    teletext_cache_node_id_ = orc::NodeID();
+    teletext_dialog_->clearContent();
+    return;
+  }
+
+  // The trailing-window packet cache only carries over while the view node
+  // is unchanged; a node switch means different observations.
+  if (teletext_cache_node_id_ != current_view_node_id_) {
+    teletext_cache_node_id_ = current_view_node_id_;
+    pending_teletext_requests_.clear();
+    teletext_dialog_->clearCache();
+  }
+
+  const int current_index = preview_dialog_->previewSlider()->value();
+  const bool is_frame_mode =
+      (current_output_type_ == orc::PreviewOutputType::Frame_Field1_First ||
+       current_output_type_ == orc::PreviewOutputType::Frame_Reversed ||
+       current_output_type_ == orc::PreviewOutputType::Split);
+
+  uint64_t current_frame = 0;
+  if (is_frame_mode) {
+    // Frame previews index frames directly; getFrameFields() validates the
+    // index and accounts for field ordering.
+    auto frame_fields = render_coordinator_->getFrameFields(
+        current_view_node_id_, static_cast<uint64_t>(current_index));
+    if (!frame_fields.is_valid) {
+      teletext_dialog_->clearContent();
+      return;
+    }
+    current_frame = static_cast<uint64_t>(current_index);
+  } else {
+    // Field previews index fields; one teletext request covers both fields
+    // of the parent frame.
+    current_frame = static_cast<uint64_t>(current_index) / 2;
+  }
+
+  teletext_dialog_->setCurrentFrame(current_frame);
+
+  // Request only the window frames the dialog holds no packets for. Newly
+  // issued ids supersede any in-flight ones, whose responses are dropped as
+  // stale in onTeletextDataReady().
+  pending_teletext_requests_.clear();
+  const auto needed_frames = teletext_dialog_->framesNeedingData();
+  if (needed_frames.empty()) {
+    return;
+  }
+  teletext_dialog_->showPending();
+  for (const uint64_t frame : needed_frames) {
+    const uint64_t request_id = render_coordinator_->requestTeletextData(
+        current_view_node_id_, orc::FieldID(frame * 2));
+    pending_teletext_requests_.emplace(request_id, frame);
+  }
+}
+
 void MainWindow::onLineScopeRequested(int image_x, int image_y) {
   ORC_LOG_DEBUG("Line scope requested at image position ({}, {})", image_x,
                 image_y);

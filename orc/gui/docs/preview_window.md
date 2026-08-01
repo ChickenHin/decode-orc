@@ -58,6 +58,7 @@ dialogs that update as you navigate frames.
 | VBI Decoder | Ctrl+Shift+V | Decode Vertical Blanking Interval data: closed captions, VITC timecode, teletext, and LaserDisc programme metadata. |
 | Quality Metrics | Ctrl+Shift+M | Per-frame signal quality statistics: SNR, colour burst level, and dropout sample count. |
 | NTSC Observer | Ctrl+Shift+N | NTSC-specific frame metadata: FM code status and white flag bit. |
+| Teletext Pages | Ctrl+Shift+X | Render PAL World System Teletext pages recovered from the VBI of recent frames. |
 
 ## Hints Menu
 
@@ -117,6 +118,16 @@ Per-frame signal quality data:
 ### NTSC Observer
 
 Shows NTSC-specific frame metadata including the FM code status and white flag bit.
+
+### Teletext Pages
+
+Renders the requested teletext page (PAL World System Teletext, Level 1) from
+the packets recovered in a trailing window of frames ending at the current
+frame. Enter the page number in the conventional magazine + two-hex-digit form
+(for example 100 or 888). Teletext is a carousel medium, so random access is
+approximate: the dialog reports the frame at which the page transmission was
+actually seen, and pages outside the window are reported as not seen.
+Sequential playback behaves like live reception.
 
 ### Video Parameter Hints
 

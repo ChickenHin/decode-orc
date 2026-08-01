@@ -1,0 +1,167 @@
+/*
+ * File:        teletext_observation_presenter_test.cpp
+ * Module:      orc-tests/gui/unit
+ * Purpose:     Tier 1 tests for TeletextObservationPresenter extraction and
+ *              page-view conversion
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 Simon Inns
+ */
+
+#include "teletext_observation_presenter.h"
+
+#include <gtest/gtest.h>
+#include <orc/stage/observation/observation_context.h>
+#include <orc/support/teletext_page_decoder.h>
+#include <orc/support/teletext_slicer.h>
+
+namespace gui_unit_test {
+
+using orc::FieldID;
+using orc::kTeletextPacketBytes;
+using orc::ObservationContext;
+using orc::presenters::TeletextObservationPresenter;
+
+namespace {
+
+std::array<uint8_t, kTeletextPacketBytes> patternPacket(uint8_t seed) {
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  for (size_t i = 0; i < packet.size(); ++i) {
+    packet[i] = static_cast<uint8_t>(seed ^ (i * 13));
+  }
+  return packet;
+}
+
+}  // namespace
+
+TEST(TeletextObservationPresenterTest, AbsentNamespace_ReportsUnobserved) {
+  ObservationContext context;
+
+  const auto view = TeletextObservationPresenter::extractFieldObservations(
+      FieldID(4), &context);
+
+  EXPECT_FALSE(view.observed);
+  EXPECT_FALSE(view.present);
+  EXPECT_EQ(view.line_count, 0);
+  EXPECT_TRUE(view.packets.empty());
+}
+
+TEST(TeletextObservationPresenterTest, EmptyField_ObservedButNoPackets) {
+  ObservationContext context;
+  const FieldID field(6);
+  context.set(field, "teletext", "present", false);
+  context.set(field, "teletext", "line_count", int32_t{0});
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  EXPECT_TRUE(view.observed);
+  EXPECT_FALSE(view.present);
+  EXPECT_EQ(view.line_count, 0);
+  EXPECT_TRUE(view.packets.empty());
+}
+
+TEST(TeletextObservationPresenterTest, DecodesPacketsInAscendingLineOrder) {
+  ObservationContext context;
+  const FieldID field(10);
+  const auto line16 = patternPacket(0xA5);
+  const auto line7 = patternPacket(0x3C);
+  context.set(field, "teletext", "present", true);
+  context.set(field, "teletext", "line_count", int32_t{2});
+  context.set(field, "teletext", "t42_16", orc::teletext_packet_to_hex(line16));
+  context.set(field, "teletext", "t42_7", orc::teletext_packet_to_hex(line7));
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  EXPECT_TRUE(view.observed);
+  EXPECT_TRUE(view.present);
+  EXPECT_EQ(view.line_count, 2);
+  ASSERT_EQ(view.packets.size(), 2u);
+  EXPECT_EQ(view.packets[0].field_line, 7);
+  EXPECT_EQ(view.packets[0].bytes, line7);
+  EXPECT_EQ(view.packets[1].field_line, 16);
+  EXPECT_EQ(view.packets[1].bytes, line16);
+}
+
+TEST(TeletextObservationPresenterTest, MalformedHexPacket_IsSkipped) {
+  ObservationContext context;
+  const FieldID field(2);
+  const auto good = patternPacket(0x11);
+  context.set(field, "teletext", "present", true);
+  context.set(field, "teletext", "line_count", int32_t{2});
+  context.set(field, "teletext", "t42_5", std::string("not-hex"));
+  context.set(field, "teletext", "t42_9", orc::teletext_packet_to_hex(good));
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  ASSERT_EQ(view.packets.size(), 1u);
+  EXPECT_EQ(view.packets[0].field_line, 9);
+  EXPECT_EQ(view.packets[0].bytes, good);
+}
+
+TEST(TeletextObservationPresenterTest, PageView_MapsIdentityAndAsciiCells) {
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.magazine = 1;
+  snapshot.page_number = 0x00;
+  snapshot.subcode = 0x3F7F & 0x1FFF;
+  snapshot.subtitle = true;
+  snapshot.header_field_index = 84;
+  snapshot.last_field_index = 90;
+  snapshot.cells[1][0].character = 'H';
+  snapshot.cells[1][1].character = 'i';
+  snapshot.cells[1][1].foreground = orc::TeletextColour::Yellow;
+  snapshot.cells[1][1].background = orc::TeletextColour::Blue;
+  snapshot.cells[1][2].character = 0x23;  // English national option: £
+  snapshot.cells[2][0].character = 'X';
+  snapshot.cells[2][0].parity_error = true;
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.magazine, 1);
+  EXPECT_EQ(view.page_number, 0x00);
+  EXPECT_TRUE(view.subtitle);
+  EXPECT_EQ(view.header_field_index, 84);
+  EXPECT_EQ(view.last_field_index, 90);
+  EXPECT_EQ(view.cells[1][0].character, U'H');
+  EXPECT_FALSE(view.cells[1][0].mosaic);
+  EXPECT_EQ(view.cells[1][1].character, U'i');
+  EXPECT_EQ(view.cells[1][1].foreground, 3);  // yellow
+  EXPECT_EQ(view.cells[1][1].background, 4);  // blue
+  EXPECT_EQ(view.cells[1][2].character, U'£');
+  EXPECT_TRUE(view.cells[2][0].parity_error);
+}
+
+TEST(TeletextObservationPresenterTest, PageView_MapsMosaicSixels) {
+  orc::TeletextPageSnapshot snapshot;
+  auto& all_set = snapshot.cells[3][0];
+  all_set.character = 0x7F;  // all six sixels set
+  all_set.mosaic = true;
+  auto& mixed = snapshot.cells[3][1];
+  // EN 300 706 §15.7.1 Table 47: bits 1-5 then bit 7 (0x40) select sixels.
+  mixed.character = 0x20 | 0x01 | 0x40;  // top-left + bottom-right
+  mixed.mosaic = true;
+  mixed.separated_mosaic = true;
+  auto& blast_through = snapshot.cells[3][2];
+  blast_through.character = 'A';  // codes 4/0-5/F stay alphanumeric
+  blast_through.mosaic = true;
+  auto& held = snapshot.cells[3][3];
+  held.character = 0x30;
+  held.mosaic = false;
+  held.held_mosaic = true;
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_TRUE(view.cells[3][0].mosaic);
+  EXPECT_EQ(view.cells[3][0].mosaic_pattern, 0x3F);
+  EXPECT_TRUE(view.cells[3][1].mosaic);
+  EXPECT_EQ(view.cells[3][1].mosaic_pattern, 0x01 | 0x20);
+  EXPECT_TRUE(view.cells[3][1].mosaic_separated);
+  EXPECT_FALSE(view.cells[3][2].mosaic);
+  EXPECT_EQ(view.cells[3][2].character, U'A');
+  EXPECT_TRUE(view.cells[3][3].mosaic);
+  EXPECT_EQ(view.cells[3][3].mosaic_pattern, 0x10);
+}
+
+}  // namespace gui_unit_test

@@ -23,6 +23,7 @@
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_preview_views.h>
+#include <orc_teletext.h>  // Teletext observation view types
 
 #include <QObject>
 #include <QString>
@@ -60,6 +61,7 @@ enum class RenderRequestType {
   RenderPreview,        // Render a preview image
   GetObservations,      // Fetch a frame's observations (async, non-blocking)
   GetVBIData,           // Decode VBI data for a field
+  GetTeletextData,      // Fetch teletext packets for a frame (async)
   GetDropoutData,       // Get dropout analysis data
   GetSNRData,           // Get SNR analysis data
   GetBurstLevelData,    // Get burst level analysis data
@@ -139,6 +141,19 @@ struct GetVBIDataRequest : public RenderRequest {
 
   GetVBIDataRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
       : RenderRequest(RenderRequestType::GetVBIData, id),
+        node_id(std::move(node)),
+        field_id(fid) {}
+};
+
+/**
+ * @brief Request to fetch teletext packets for the frame containing a field
+ */
+struct GetTeletextDataRequest : public RenderRequest {
+  orc::NodeID node_id;
+  orc::FieldID field_id;
+
+  GetTeletextDataRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
+      : RenderRequest(RenderRequestType::GetTeletextData, id),
         node_id(std::move(node)),
         field_id(fid) {}
 };
@@ -615,6 +630,21 @@ class RenderCoordinator : public QObject {
   uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
 
   /**
+   * @brief Request teletext packets for the frame containing a field (async)
+   *
+   * Answered from the provenance-keyed store when present, otherwise computed
+   * on the background scheduler (same delivery path as requestObservations()).
+   * One request covers both fields of the field's parent frame; the extracted
+   * per-field packet views are emitted via teletextDataReady.
+   *
+   * @param node_id  Node whose output frame is observed
+   * @param field_id Any field of the frame of interest
+   * @return Request ID for matching / discarding stale responses
+   */
+  uint64_t requestTeletextData(const orc::NodeID& node_id,
+                               orc::FieldID field_id);
+
+  /**
    * @brief Request a frame's observations without blocking the GUI (async)
    *
    * Answered from the provenance-keyed store when present, otherwise computed
@@ -835,6 +865,28 @@ class RenderCoordinator : public QObject {
                     orc::presenters::VBIFieldInfoView info);
 
   /**
+   * @brief Emitted (on the GUI thread) when a requestTeletextData() response
+   *        is ready
+   *
+   * Carries the recovered T42 packet views for both fields of the requested
+   * frame, in temporal order (field1 precedes field2).
+   *
+   * @param request_id      Id returned by requestTeletextData()
+   * @param available       True when the frame's observations were produced
+   * @param field1_id_value First field of the frame (FieldID::value())
+   * @param field1          Packet view for the first field
+   * @param field2_id_value Second field of the frame
+   * @param field2          Packet view for the second field
+   *
+   * Marshalled from the worker/scheduler thread via a queued connection.
+   */
+  void teletextDataReady(uint64_t request_id, bool available,
+                         qulonglong field1_id_value,
+                         orc::presenters::TeletextFieldPacketsView field1,
+                         qulonglong field2_id_value,
+                         orc::presenters::TeletextFieldPacketsView field2);
+
+  /**
    * @brief Emitted when dropout analysis data is ready
    */
   void dropoutDataReady(uint64_t request_id,
@@ -1003,6 +1055,11 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetVBIData request
    */
   void handleGetVBIData(const GetVBIDataRequest& req);
+
+  /**
+   * @brief Handle GetTeletextData request
+   */
+  void handleGetTeletextData(const GetTeletextDataRequest& req);
 
   /**
    * @brief Handle GetDropoutData request

@@ -40,6 +40,7 @@ class PreviewDialog;
 class VBIDialog;
 class VideoParameterObserverDialog;
 class NtscObserverDialog;
+class TeletextDialog;
 class DropoutAnalysisDialog;
 class SNRAnalysisDialog;
 class BurstLevelAnalysisDialog;
@@ -127,6 +128,8 @@ class MainWindow : public QMainWindow {
   void updateVideoParameterObserverDialog();
   void onShowNtscObserverDialog();
   void updateNtscObserverDialog();
+  void onShowTeletextDialog();
+  void updateTeletextDialog();
   /// Issue async observation requests for whichever observer dialogs are open
   /// (Phase 5). Replaces the synchronous per-dialog render-and-extract path.
   void refreshObserverDialogs();
@@ -154,6 +157,11 @@ class MainWindow : public QMainWindow {
       uint64_t request_id, bool available, qulonglong field_id_value,
       orc::presenters::VideoParameterObservationView video_params,
       orc::presenters::NtscFieldObservationsView ntsc);
+  void onTeletextDataReady(uint64_t request_id, bool available,
+                           qulonglong field1_id_value,
+                           orc::presenters::TeletextFieldPacketsView field1,
+                           qulonglong field2_id_value,
+                           orc::presenters::TeletextFieldPacketsView field2);
   void onObservationProgress(bool active, int percent_complete, bool computing,
                              qulonglong outstanding_nodes);
   void onObservationsInvalidated(QVector<int> changed_node_ids);
@@ -302,6 +310,12 @@ class MainWindow : public QMainWindow {
   orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field1_;
   orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field2_;
 
+  // Teletext dialog: one request per window frame still lacking packet data
+  // (request_id -> frame index); unknown ids in responses are stale.
+  std::unordered_map<uint64_t, uint64_t> pending_teletext_requests_;
+  // View node the teletext packet cache was filled from; a change clears it.
+  orc::NodeID teletext_cache_node_id_;
+
   uint64_t pending_outputs_request_id_{0};
   uint64_t pending_trigger_request_id_{0};
   orc::NodeID pending_trigger_node_id_;  // Track which node is being triggered
@@ -333,6 +347,7 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<orc::presenters::VbiPresenter> vbi_presenter_;
   // Note: project_presenter_ removed - use project_.presenter() instead
   NtscObserverDialog* ntsc_observer_dialog_;
+  TeletextDialog* teletext_dialog_;
   std::unordered_map<orc::NodeID, DropoutAnalysisDialog*>
       dropout_analysis_dialogs_;
   std::unordered_map<orc::NodeID, SNRAnalysisDialog*> snr_analysis_dialogs_;

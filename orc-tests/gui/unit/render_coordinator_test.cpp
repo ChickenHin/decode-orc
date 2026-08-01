@@ -12,6 +12,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <orc/support/teletext_slicer.h>
 
 #include <QCoreApplication>
 #include <QMetaType>
@@ -25,6 +26,7 @@
 Q_DECLARE_METATYPE(orc::PreviewRenderResult)
 Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
 Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
+Q_DECLARE_METATYPE(orc::presenters::TeletextFieldPacketsView)
 
 namespace gui_unit_test {
 
@@ -39,6 +41,8 @@ static bool registerRenderCoordinatorMetatypes() {
       "orc::presenters::VideoParameterObservationView");
   qRegisterMetaType<orc::presenters::NtscFieldObservationsView>(
       "orc::presenters::NtscFieldObservationsView");
+  qRegisterMetaType<orc::presenters::TeletextFieldPacketsView>(
+      "orc::presenters::TeletextFieldPacketsView");
   return true;
 }
 
@@ -394,6 +398,192 @@ TEST(RenderCoordinatorTest, ObservationRequest_DistinctIdsSupportStaleDrop) {
       coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4));
   const uint64_t second =
       coordinator.requestObservations(orc::NodeID(2), orc::FieldID(6));
+  EXPECT_NE(first, second);
+
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 2; }));
+
+  // Deliver both (oldest first). Each response carries its originating id.
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(true));
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(true));
+
+  ASSERT_TRUE(waitForCount(data_spy, 2));
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), first);
+  EXPECT_EQ(data_spy.at(1).at(0).toULongLong(), second);
+
+  coordinator.stop();
+}
+
+// --- Teletext preview: GetTeletextData request/response -------------------
+
+namespace {
+
+// Seed one recovered packet on a field of the mock's delivered context.
+std::array<uint8_t, orc::kTeletextPacketBytes> seedTeletextField(
+    orc::presenters::test::MockRenderPresenter& mock, uint64_t field_value,
+    int field_line, uint8_t byte_seed) {
+  std::array<uint8_t, orc::kTeletextPacketBytes> packet{};
+  for (size_t i = 0; i < packet.size(); ++i) {
+    packet[i] = static_cast<uint8_t>(byte_seed ^ (i * 7));
+  }
+  const orc::FieldID field(field_value);
+  mock.deliveredContext().set(field, "teletext", "present", true);
+  mock.deliveredContext().set(field, "teletext", "line_count", int32_t{1});
+  mock.deliveredContext().set(field, "teletext",
+                              "t42_" + std::to_string(field_line),
+                              orc::teletext_packet_to_hex(packet));
+  return packet;
+}
+
+}  // namespace
+
+// A store hit answers immediately with the extracted packet views for both
+// fields of the requested frame (the request may name either field).
+TEST(RenderCoordinatorTest, TeletextRequest_StoreHit_EmitsBothFieldsOfFrame) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(true);
+  const auto field8_packet = seedTeletextField(*mock_presenter, 8, 7, 0x2A);
+  const auto field9_packet = seedTeletextField(*mock_presenter, 9, 16, 0x55);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::teletextDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  // Request via the frame's SECOND field; the response still carries the
+  // frame's fields in temporal order (8 then 9).
+  const uint64_t request_id =
+      coordinator.requestTeletextData(orc::NodeID(2), orc::FieldID(9));
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  ASSERT_EQ(data_spy.count(), 1);
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_TRUE(data_spy.at(0).at(1).toBool());
+  EXPECT_EQ(data_spy.at(0).at(2).toULongLong(), 8ull);
+  EXPECT_EQ(data_spy.at(0).at(4).toULongLong(), 9ull);
+
+  const auto field1 =
+      data_spy.at(0).at(3).value<orc::presenters::TeletextFieldPacketsView>();
+  ASSERT_EQ(field1.packets.size(), 1u);
+  EXPECT_EQ(field1.packets[0].field_line, 7);
+  EXPECT_EQ(field1.packets[0].bytes, field8_packet);
+
+  const auto field2 =
+      data_spy.at(0).at(5).value<orc::presenters::TeletextFieldPacketsView>();
+  ASSERT_EQ(field2.packets.size(), 1u);
+  EXPECT_EQ(field2.packets[0].field_line, 16);
+  EXPECT_EQ(field2.packets[0].bytes, field9_packet);
+
+  coordinator.stop();
+}
+
+// A store miss defers: no signal until the awaited frame is delivered later.
+TEST(RenderCoordinatorTest, TeletextRequest_Miss_EmitsAfterDeferredDelivery) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(false);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::teletextDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestTeletextData(orc::NodeID(2), orc::FieldID(4));
+
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 1; }));
+  QCoreApplication::processEvents();
+  EXPECT_EQ(data_spy.count(), 0);  // nothing delivered yet
+
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(/*available=*/true));
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_TRUE(data_spy.at(0).at(1).toBool());
+
+  coordinator.stop();
+}
+
+// An unavailable delivery reports available=false with empty packet views.
+TEST(RenderCoordinatorTest, TeletextRequest_Unavailable_EmitsEmptyViews) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(false);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::teletextDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestTeletextData(orc::NodeID(2), orc::FieldID(4));
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 1; }));
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(/*available=*/false));
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  EXPECT_FALSE(data_spy.at(0).at(1).toBool());
+  const auto field1 =
+      data_spy.at(0).at(3).value<orc::presenters::TeletextFieldPacketsView>();
+  EXPECT_FALSE(field1.observed);
+  EXPECT_TRUE(field1.packets.empty());
+
+  coordinator.stop();
+}
+
+// Concurrent requests carry distinct ids and each response echoes its own id,
+// so a consumer can drop stale (superseded) responses.
+TEST(RenderCoordinatorTest, TeletextRequest_DistinctIdsSupportStaleDrop) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  mock_presenter->setImmediateAnswer(false);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::teletextDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t first =
+      coordinator.requestTeletextData(orc::NodeID(2), orc::FieldID(4));
+  const uint64_t second =
+      coordinator.requestTeletextData(orc::NodeID(2), orc::FieldID(6));
   EXPECT_NE(first, second);
 
   ASSERT_TRUE(waitForPredicate(

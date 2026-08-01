@@ -116,6 +116,11 @@ class MockRenderPresenter : public IRenderPresenter {
     return pending_obs_.size();
   }
 
+  // Test helper: the ObservationContext handed to delivery callbacks. Seed it
+  // with observations to exercise the coordinator's extraction paths (e.g.
+  // the "teletext" namespace behind teletextDataReady).
+  orc::ObservationContext& deliveredContext() { return delivered_context_; }
+
   // --- Workload progress (Phase 5, Task 5.4) -------------------------------
 
   uint64_t subscribeObservationProgress(

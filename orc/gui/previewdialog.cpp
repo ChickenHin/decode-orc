@@ -162,6 +162,12 @@ void PreviewDialog::setupUI() {
   connect(show_video_parameter_observer_action_, &QAction::triggered, this,
           &PreviewDialog::showVideoParameterObserverDialogRequested);
 
+  show_teletext_action_ = observersMenu->addAction("&Teletext Pages");
+  show_teletext_action_->setShortcut(
+      QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X));
+  connect(show_teletext_action_, &QAction::triggered, this,
+          &PreviewDialog::showTeletextDialogRequested);
+
   auto* viewMenu = menu_bar_->addMenu("&View");
   show_frame_timing_action_ = viewMenu->addAction("&Frame Timing");
   show_frame_timing_action_->setShortcut(
