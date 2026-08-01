@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <orc/support/teletext_page_decoder.h>
+#include <orc/support/teletext_row_squasher.h>
 
 #include <array>
 #include <cstdint>
@@ -344,6 +345,92 @@ TEST_F(TeletextPageDecoderTest, ParityError_FlagsCellWithoutCorruptingPage) {
   EXPECT_TRUE(cells[1].parity_error);
   EXPECT_EQ(cells[2].character, 'C');
   EXPECT_FALSE(cells[2].parity_error);
+}
+
+// A row that never arrived renders identically to a transmitted blank row,
+// so only row_received can tell a recovery gap from page content.
+TEST_F(TeletextPageDecoderTest, RowReceivedMarksTheRowsThatArrived) {
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "ROW ONE"), 1);
+  // No packet for row 2 — lost in recovery.
+  decoder_.process_packet(make_row(1, 3, "   "), 2);  // transmitted but blank
+  decoder_.process_packet(make_time_filling_header(1), 3);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const auto& snapshot = snapshots_[0];
+  EXPECT_TRUE(snapshot.row_received[0]);  // the X/0 header
+  EXPECT_TRUE(snapshot.row_received[1]);
+  EXPECT_FALSE(snapshot.row_received[2]);
+  // A transmitted blank row looks like row 2 in the cells but is not a gap.
+  EXPECT_TRUE(snapshot.row_received[3]);
+  EXPECT_EQ(row_text(snapshot, 2), row_text(snapshot, 3));
+  EXPECT_FALSE(snapshot.row_received[4]);
+}
+
+// With a squasher attached, rows recovered during an earlier transmission
+// stay available when a later one is clipped, and repeated copies of a row
+// correct each other (orc/support/teletext_row_squasher.h).
+TEST_F(TeletextPageDecoderTest, SquasherKeepsRowsAcrossClippedTransmissions) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "ROW ONE"), 1);
+  decoder_.process_packet(make_row(1, 2, "ROW TWO"), 2);
+  // A second transmission carrying only row 1 — the rest fell outside.
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 3);
+  decoder_.process_packet(make_row(1, 1, "ROW ONE"), 4);
+  decoder_.process_packet(make_time_filling_header(1), 5);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  const auto& clipped = snapshots_.back();
+  EXPECT_EQ(row_text(clipped, 1), "ROW ONE");
+  EXPECT_EQ(row_text(clipped, 2), "ROW TWO")
+      << "a row the clipped transmission did not carry was lost";
+  EXPECT_TRUE(clipped.row_received[2]);
+}
+
+TEST_F(TeletextPageDecoderTest, SquasherRepairsAParityDamagedByte) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  auto damaged = make_row(1, 1, "HELLO");
+  damaged[2] ^= 0x01;  // break odd parity on the leading display byte
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(damaged, 1);
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 2);
+  decoder_.process_packet(make_row(1, 1, "HELLO"), 3);
+  decoder_.process_packet(make_time_filling_header(1), 4);
+
+  ASSERT_GE(snapshots_.size(), 2u);
+  const auto& combined = snapshots_.back();
+  EXPECT_EQ(row_text(combined, 1), "HELLO");
+  EXPECT_FALSE(combined.cells[1][0].parity_error)
+      << "the damaged byte was not repaired from the clean copy";
+}
+
+// C4 replaces the page rather than updating it (EN 300 706 §9.3.1.3 Table 2),
+// so accumulated copies must not bleed into the new content.
+TEST_F(TeletextPageDecoderTest, SquasherDropsAccumulatedRowsOnErasePage) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "OLD ONE"), 1);
+  decoder_.process_packet(make_row(1, 2, "OLD TWO"), 2);
+  // Erase (C4) then a page that only uses row 1.
+  HeaderFlags erase;
+  erase.erase_page = true;
+  decoder_.process_packet(make_header(1, 0x00, 0, erase), 3);
+  decoder_.process_packet(make_row(1, 1, "NEW ONE"), 4);
+  decoder_.process_packet(make_time_filling_header(1), 5);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  const auto& fresh = snapshots_.back();
+  EXPECT_EQ(row_text(fresh, 1), "NEW ONE");
+  EXPECT_EQ(row_text(fresh, 2), "") << "erased row survived the erase";
+  EXPECT_FALSE(fresh.row_received[2]);
 }
 
 TEST_F(TeletextPageDecoderTest, RendersLevel1ColourAndMosaicAttributes) {

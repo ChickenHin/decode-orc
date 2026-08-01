@@ -13,8 +13,10 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
 #include <orc/support/teletext_page_decoder.h>
+#include <orc/support/teletext_row_squasher.h>
 #include <orc/support/teletext_slicer.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -61,6 +63,14 @@ std::string srt_timestamp(int64_t field_index) {
                 static_cast<long long>(millis));
   return buffer;
 }
+
+// One emitted packet, held so squashing can rewrite it once every copy of
+// every row has been seen. |empty| marks a keep_empty_packets placeholder.
+struct StreamEntry {
+  std::array<uint8_t, kTeletextPacketBytes> bytes;
+  int64_t field_index;
+  bool empty;
+};
 
 // Render the decoder's cues as a SubRip document.
 std::string format_srt(const std::vector<TeletextSubtitleCue>& cues) {
@@ -164,9 +174,23 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     slicer.emplace(kPalSampleRate, kTeletextBitRate, slicer_options);
   }
 
+  // Squashing needs every copy of a row before it can combine them, so the
+  // recovered stream is held and rewritten in a second pass. Without it the
+  // stream is written straight out and subtitles decode inline, as before.
+  const bool squash = options.squash_repeated_rows;
+  TeletextRowSquasher squasher;
+  std::vector<StreamEntry> stream;
+  std::optional<TeletextPageDecoder> squash_pass;
+  if (squash) {
+    squash_pass.emplace();
+    squash_pass->set_row_squasher(&squasher);
+  }
+
   // Subtitle export: every recovered packet is additionally fed, in the
   // same temporal order, into a page decoder watching the subtitle page
-  // (design §6.1). The page string was validated by the stage.
+  // (design §6.1). The page string was validated by the stage. When squashing
+  // is on this runs in the rewrite pass instead, so cues come from the
+  // corrected rows.
   std::optional<TeletextPageDecoder> page_decoder;
   if (options.export_subtitles) {
     page_decoder.emplace();
@@ -174,6 +198,9 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
       result.message = "Invalid subtitle page: " + options.subtitle_page;
       writer->close();
       return result;
+    }
+    if (squash) {
+      page_decoder->set_row_squasher(&squasher);
     }
   }
 
@@ -271,20 +298,35 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             }
           }
 
+          // Cue and squash timing is relative to the start of the export
+          // range.
+          const int64_t relative_field_index =
+              static_cast<int64_t>(frame_id - frame_rng.first) * 2 + field_idx;
+
           if (packet.has_value()) {
-            writer->write(packet->data(), packet->size());
             ++result.packets_written;
             field_has_data = true;
-            if (page_decoder.has_value()) {
-              // Cue timing is relative to the start of the export range.
-              const int64_t relative_field_index =
-                  static_cast<int64_t>(frame_id - frame_rng.first) * 2 +
-                  field_idx;
-              page_decoder->process_packet(*packet, relative_field_index);
+            if (squash) {
+              // The stream index is the copy's identity for the squasher, so
+              // the rewrite pass can re-feed it without counting it twice.
+              squash_pass->process_packet(*packet, relative_field_index,
+                                          static_cast<int64_t>(stream.size()));
+              stream.push_back(
+                  StreamEntry{*packet, relative_field_index, false});
+            } else {
+              writer->write(packet->data(), packet->size());
+              if (page_decoder.has_value()) {
+                page_decoder->process_packet(*packet, relative_field_index);
+              }
             }
           } else if (options.keep_empty_packets) {
-            writer->write(kEmptyPacket.data(), kEmptyPacket.size());
             ++result.packets_written;
+            if (squash) {
+              stream.push_back(
+                  StreamEntry{kEmptyPacket, relative_field_index, true});
+            } else {
+              writer->write(kEmptyPacket.data(), kEmptyPacket.size());
+            }
           }
         }
 
@@ -298,6 +340,67 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
         observation_context.clear_field(field0);
         observation_context.clear_field(field1);
       }
+    }
+
+    // Rewrite pass: now that every copy of every row has been seen, emit the
+    // stream with each row replaced by the combination of its copies. Packet
+    // order, count and timing are unchanged — only damaged display bytes
+    // move. Headers and enhancement packets pass through untouched (their
+    // display bytes carry a clock that differs between transmissions).
+    if (squash) {
+      // A fresh decoder re-derives which page each row belongs to. It shares
+      // the squasher, and re-feeds each copy under its original stream index,
+      // so the table it consults is the one built above, unchanged.
+      TeletextPageDecoder rewrite;
+      rewrite.set_row_squasher(&squasher);
+      TeletextPageDecoder* attributor =
+          page_decoder.has_value() ? &*page_decoder : &rewrite;
+
+      for (size_t index = 0; index < stream.size(); ++index) {
+        if (cancel_requested_ && cancel_requested_->load()) {
+          writer->close();
+          result.message =
+              "Cancelled while writing squashed output; partial "
+              "output left at " +
+              output_path;
+          ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
+          return result;
+        }
+        if (progress_callback_ &&
+            (index % (kProgressThrottleFrames * 100) == 0 ||
+             index + 1 == stream.size())) {
+          progress_callback_(index + 1, stream.size(),
+                             "Combining repeated teletext rows " +
+                                 std::to_string(index + 1) + "/" +
+                                 std::to_string(stream.size()));
+        }
+
+        const StreamEntry& entry = stream[index];
+        if (entry.empty) {
+          writer->write(kEmptyPacket.data(), kEmptyPacket.size());
+          continue;
+        }
+
+        auto out = entry.bytes;
+        attributor->process_packet(entry.bytes, entry.field_index,
+                                   static_cast<int64_t>(index));
+        const auto& attribution = attributor->last_row_attribution();
+        if (attribution.has_value()) {
+          const auto squashed = squasher.squashed_row(
+              *attribution, attributor->last_row_number());
+          if (squashed.has_value() &&
+              !std::equal(squashed->begin(), squashed->end(),
+                          out.begin() + 2)) {
+            std::copy(squashed->begin(), squashed->end(), out.begin() + 2);
+            ++result.packets_corrected;
+          }
+        }
+        writer->write(out.data(), out.size());
+      }
+      ORC_LOG_INFO(
+          "TeletextSinkDeps: squashing corrected {} of {} row packets across "
+          "{} sub-pages",
+          result.packets_corrected, stream.size(), squasher.page_count());
     }
 
     writer->close();

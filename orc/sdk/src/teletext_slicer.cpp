@@ -62,9 +62,13 @@ constexpr int kMinRunInMatches = 14;
 
 // Framing-code search range around the nominal position, in bit periods.
 // The run-in correlation is ambiguous to even-bit shifts (the alternating
-// kernel re-aligns every 2 bits), so the framing code is searched at ± 2 bit
-// positions to resolve the byte boundary.
-constexpr int kFramingSearchBits = 2;
+// kernel re-aligns every 2 bits), and on real recordings the correlation peak
+// lands up to four bits from the true run-in start — the §6.3 note allows the
+// insertion point to move for network re-timing, and the kernel also
+// correlates against the framing code and the leading payload. A ± 2 window
+// therefore misses the framing code outright on a third of otherwise perfect
+// lines, so the search spans ± 4 bit positions.
+constexpr int kFramingSearchBits = 4;
 
 // Linear interpolation between adjacent samples at fractional position |t|.
 // Caller guarantees t >= 0 and t + 1 < sample_count.
@@ -241,36 +245,74 @@ TeletextLineResult TeletextSlicer::slice(const int16_t* line,
   }
 
   // Step 3 — framing-code lock (§6.2): resolve the run-in's even-bit-shift
-  // ambiguity by searching ± 2 bit positions for the framing code.
+  // ambiguity by searching for the framing code around the correlation lock.
+  // Candidates are ranked by framing-code bit errors first, then by whether
+  // the MRAG that follows is Hamming 8/4 decodable (§7.1.2, §8.2), then by
+  // proximity to the lock. The MRAG tie-break matters because widening the
+  // search also widens the chance of the payload happening to spell the
+  // framing code; an alignment whose address bytes decode is the real one.
+  const int max_framing_errors = options_.tolerant_framing ? 1 : 0;
+  const auto bit_at = [&](double t) {
+    return sample_at(line, t) > threshold ? 1 : 0;
+  };
+  const auto payload_start = [&](int shift) {
+    return best_t0 + (kRunInBits + shift + kFramingBits) * spb;
+  };
+
   int best_shift = 0;
   int best_errors = kFramingBits + 1;
+  bool best_mrag_ok = false;
+  bool found = false;
   for (int shift = -kFramingSearchBits; shift <= kFramingSearchBits; ++shift) {
     int errors = 0;
     for (int k = 0; k < kFramingBits; ++k) {
-      const double t = best_t0 + (kRunInBits + shift + k) * spb;
-      const int bit = sample_at(line, t) > threshold ? 1 : 0;
-      errors += (bit != kFramingCodeBits[k]) ? 1 : 0;
+      errors += (bit_at(best_t0 + (kRunInBits + shift + k) * spb) !=
+                 kFramingCodeBits[k])
+                    ? 1
+                    : 0;
     }
-    if (errors < best_errors ||
-        (errors == best_errors && std::abs(shift) < std::abs(best_shift))) {
+    if (errors > max_framing_errors) {
+      continue;
+    }
+    // The whole packet must fit at this alignment (§7.1).
+    const double start = payload_start(shift);
+    if (start < 0.0 || start + (kPayloadBits - 1) * spb + 1.0 >=
+                           static_cast<double>(sample_count)) {
+      continue;
+    }
+
+    std::array<uint8_t, 2> mrag{};
+    for (int n = 0; n < 16; ++n) {
+      if (bit_at(start + n * spb) != 0) {
+        mrag[static_cast<size_t>(n) >> 3] |=
+            static_cast<uint8_t>(1u << (n & 7));
+      }
+    }
+    const bool mrag_ok = teletext_hamming84_decode(mrag[0]) >= 0 &&
+                         teletext_hamming84_decode(mrag[1]) >= 0;
+    if (options_.require_valid_mrag && !mrag_ok) {
+      continue;
+    }
+
+    const bool better = !found || errors < best_errors ||
+                        (errors == best_errors && mrag_ok && !best_mrag_ok) ||
+                        (errors == best_errors && mrag_ok == best_mrag_ok &&
+                         std::abs(shift) < std::abs(best_shift));
+    if (better) {
+      found = true;
       best_errors = errors;
       best_shift = shift;
+      best_mrag_ok = mrag_ok;
     }
   }
-  const int max_framing_errors = options_.tolerant_framing ? 1 : 0;
-  if (best_errors > max_framing_errors) {
+  if (!found) {
     return result;
   }
 
   // Step 4 — payload extraction (§7.1): 336 bits at bit-centre positions,
   // LSB first per byte. No Hamming/parity correction is applied: the T42
   // contract preserves transmission coding.
-  const double data_start =
-      best_t0 + (kRunInBits + best_shift + kFramingBits) * spb;
-  const double last_bit_centre = data_start + (kPayloadBits - 1) * spb;
-  if (last_bit_centre + 1.0 >= static_cast<double>(sample_count)) {
-    return result;
-  }
+  const double data_start = payload_start(best_shift);
   for (int n = 0; n < kPayloadBits; ++n) {
     if (sample_at(line, data_start + n * spb) > threshold) {
       result.bytes[static_cast<size_t>(n) >> 3] |=
@@ -278,14 +320,8 @@ TeletextLineResult TeletextSlicer::slice(const int16_t* line,
     }
   }
 
-  // Step 5 — optional MRAG plausibility filter (§7.1.2, §8.2): reject the
-  // line when both Hamming 8/4 coded address bytes are uncorrectable. The
-  // stored bytes stay as transmitted.
-  if (options_.require_valid_mrag &&
-      teletext_hamming84_decode(result.bytes[0]) < 0 &&
-      teletext_hamming84_decode(result.bytes[1]) < 0) {
-    return result;
-  }
+  // The MRAG plausibility filter (§7.1.2, §8.2) was applied per candidate
+  // alignment in step 3; the stored bytes stay as transmitted.
 
   result.framing_bit_errors = best_errors;
   result.data_start_sample = data_start;

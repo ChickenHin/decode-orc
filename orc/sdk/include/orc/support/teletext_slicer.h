@@ -82,10 +82,13 @@ struct TeletextSlicerOptions {
   // cost of a higher false-positive rate on noisy sources).
   bool tolerant_framing = false;
 
-  // Reject a line when both MRAG bytes (ETSI EN 300 706 §7.1.2) fail Hamming
-  // 8/4 correction (§8.2). Suppresses false framing-code locks on noise while
-  // still passing single-bit-damaged packets through. The MRAG bytes in the
-  // output remain uncorrected (transmission coding).
+  // Require both MRAG bytes (ETSI EN 300 706 §7.1.2) to survive Hamming 8/4
+  // correction (§8.2) at the chosen byte alignment. Single-bit-damaged
+  // packets still pass — Hamming 8/4 corrects those — but noise that happens
+  // to spell the framing code does not, which is what keeps the framing-code
+  // search window safe. A packet whose addressing is unrecoverable carries no
+  // usable payload anyway: TeletextPageDecoder drops it. The MRAG bytes in
+  // the output remain uncorrected (transmission coding).
   bool require_valid_mrag = true;
 };
 

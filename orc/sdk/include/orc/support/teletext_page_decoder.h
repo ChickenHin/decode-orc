@@ -22,6 +22,7 @@
 #include <string_view>
 #include <vector>
 
+#include "teletext_row_squasher.h"
 #include "teletext_slicer.h"
 
 namespace orc {
@@ -110,6 +111,13 @@ struct TeletextPageSnapshot {
   int64_t header_field_index = 0;
   int64_t last_field_index = 0;
 
+  // Whether a packet was received for each row of this page (row 0 = the
+  // X/0 header). A row with no packet displays as spaces on a black
+  // background, which is indistinguishable from a transmitted blank row —
+  // so recovery gaps can only be reported from this flag, never inferred
+  // from the cells.
+  std::array<bool, kRows> row_received{};
+
   std::array<std::array<TeletextPageCell, kColumns>, kRows> cells{};
 };
 
@@ -168,10 +176,49 @@ class TeletextPageDecoder {
   // string is malformed.
   bool set_subtitle_page(std::string_view page);
 
+  /**
+   * @brief Attach a squasher so repeated copies of a row correct each other
+   *
+   * With a squasher attached, every displayable row packet is recorded into
+   * it under the page identity the packet was attributed to, and rendered
+   * pages are built from the squashed rows rather than from the last copy
+   * received. Because the squasher outlives any one decoder, this also lets
+   * a page be assembled from several partial transmissions — a page whose
+   * transmission was clipped still renders from rows recovered earlier.
+   *
+   * The squasher is not owned and must outlive the decoder. Pass nullptr to
+   * detach. See teletext_row_squasher.h for the technique and its origin.
+   */
+  void set_row_squasher(TeletextRowSquasher* squasher) {
+    row_squasher_ = squasher;
+  }
+
   // Feed one T42 packet. |field_index| is the packet's temporal position in
   // fields; it must be monotonically non-decreasing across calls.
+  //
+  // |source| identifies this copy for a attached squasher: re-feeding the
+  // same recovered line (as a sliding-window previewer does on every window
+  // rebuild) must reuse its source so the copy is replaced rather than
+  // counted again. The default derives a unique id per call, which is what a
+  // one-pass consumer wants.
   void process_packet(const std::array<uint8_t, kTeletextPacketBytes>& packet,
-                      int64_t field_index);
+                      int64_t field_index, int64_t source = kAutoSource);
+
+  /// Sentinel for process_packet()'s |source|: allocate a fresh copy id.
+  static constexpr int64_t kAutoSource = -1;
+
+  /**
+   * @brief Page identity the last process_packet() call was attributed to
+   *
+   * Set for displayable row packets (X/1 to X/24) that belonged to an open
+   * page, cleared otherwise. Lets a consumer rewriting a packet stream ask
+   * the squasher for the corrected form of the row it just fed in.
+   */
+  const std::optional<TeletextPageKey>& last_row_attribution() const {
+    return last_row_attribution_;
+  }
+  /// Display row the last packet carried, valid when the above is set
+  int last_row_number() const { return last_row_number_; }
 
   // Flush open page assemblies and close any open subtitle cue at
   // |end_field_index|.
@@ -220,7 +267,10 @@ class TeletextPageDecoder {
   void handle_display_packet(
       int transmission_magazine, int row,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
-      int64_t field_index);
+      int64_t field_index, int64_t source);
+
+  // Identity of the page currently open in |magazine|, for squasher keying.
+  TeletextPageKey page_key(int transmission_magazine) const;
 
   // Emit the open page of |magazine| (if any) through the callback and the
   // subtitle machinery, then mark it closed (row data retained).
@@ -237,6 +287,12 @@ class TeletextPageDecoder {
       const TeletextPageSnapshot& snapshot);
 
   std::array<MagazineState, 8> magazines_{};
+
+  // Not owned; see set_row_squasher().
+  TeletextRowSquasher* row_squasher_ = nullptr;
+  int64_t next_source_ = 0;
+  std::optional<TeletextPageKey> last_row_attribution_;
+  int last_row_number_ = 0;
 
   PageCallback page_callback_;
 

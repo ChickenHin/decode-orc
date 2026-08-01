@@ -39,6 +39,10 @@ struct TeletextSinkOptions {
   // Drop packets whose MRAG fails Hamming 8/4 correction
   // (TeletextSlicerOptions).
   bool require_valid_mrag{true};
+  // Combine repeated transmissions of each page row and write the combined
+  // form ("squashing", see orc/support/teletext_row_squasher.h). Costs a
+  // second pass over the recovered packets, held in memory (~50 bytes each).
+  bool squash_repeated_rows{true};
   // Decode the subtitle page alongside the T42 export and write SubRip cues
   // next to the packet stream (design §6.1).
   bool export_subtitles{false};
@@ -54,6 +58,9 @@ struct TeletextSinkResult {
   std::string output_path;
   uint64_t packets_written{0};
   uint64_t fields_with_data{0};
+  // Row packets whose bytes were changed by squashing (0 when disabled, or
+  // when every row was only ever transmitted once).
+  uint64_t packets_corrected{0};
   // Subtitle export results (export_subtitles only).
   std::string subtitle_path;
   uint64_t subtitle_cues_written{0};

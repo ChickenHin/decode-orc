@@ -192,6 +192,27 @@ TeletextPageView TeletextObservationPresenter::makePageView(
     }
   }
 
+  view.row_received = snapshot.row_received;
+
+  // Recovery summary over the display rows. Rows consumed by a double-height
+  // character above are excluded: their transmitted content is ignored by
+  // definition (EN 300 706 §12.2 code 0/D), so their absence is not a gap.
+  for (int row = 1; row < TeletextPageView::kRows; ++row) {
+    const auto& cells = view.cells[static_cast<size_t>(row)];
+    if (cells[0].double_height_lower) {
+      continue;
+    }
+    ++view.recovery.rows_expected;
+    if (view.row_received[static_cast<size_t>(row)]) {
+      ++view.recovery.rows_received;
+    }
+    for (const auto& cell : cells) {
+      if (cell.parity_error) {
+        ++view.recovery.damaged_bytes;
+      }
+    }
+  }
+
   return view;
 }
 

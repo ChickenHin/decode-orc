@@ -110,7 +110,10 @@ bool TeletextPageDecoder::set_subtitle_page(std::string_view page) {
 
 void TeletextPageDecoder::process_packet(
     const std::array<uint8_t, kTeletextPacketBytes>& packet,
-    int64_t field_index) {
+    int64_t field_index, int64_t source) {
+  last_row_attribution_.reset();
+  last_row_number_ = 0;
+
   // MRAG: two Hamming 8/4 bytes carrying the 3-bit magazine and 5-bit packet
   // number (ETSI EN 300 706 §7.1.2). An uncorrectable MRAG byte means the
   // packet cannot be attributed; drop it.
@@ -129,8 +132,16 @@ void TeletextPageDecoder::process_packet(
     // X/1 to X/24: directly displayable rows (EN 300 706 §9.3.2). X/25
     // (key-word search labels) and X/26-X/31 (enhancement / non-display
     // packets, §9.4-§9.8) are outside the Level 1 grid and are ignored.
-    handle_display_packet(magazine, packet_number, packet, field_index);
+    handle_display_packet(magazine, packet_number, packet, field_index,
+                          source == kAutoSource ? next_source_++ : source);
   }
+}
+
+TeletextPageKey TeletextPageDecoder::page_key(int transmission_magazine) const {
+  const MagazineState& state =
+      magazines_[static_cast<size_t>(transmission_magazine)];
+  return TeletextPageKey{displayed_magazine(transmission_magazine),
+                         state.page_number, state.subcode};
 }
 
 void TeletextPageDecoder::handle_header_packet(
@@ -212,6 +223,13 @@ void TeletextPageDecoder::handle_header_packet(
   state.page_number = page_number;
   state.subcode = subcode;
   state.erase_page = erase_page;
+
+  // C4 replaces the page's content rather than updating it, so accumulated
+  // copies of its rows describe a page that no longer exists; combining them
+  // with what follows would blend the old page into the new one.
+  if (erase_page && row_squasher_ != nullptr) {
+    row_squasher_->erase_page(page_key(transmission_magazine));
+  }
   state.newsflash = newsflash;
   state.subtitle = subtitle;
   state.suppress_header = (c7_c10 & 0x1) != 0;          // C7
@@ -245,13 +263,17 @@ void TeletextPageDecoder::handle_header_packet(
 void TeletextPageDecoder::handle_display_packet(
     int transmission_magazine, int row,
     const std::array<uint8_t, kTeletextPacketBytes>& packet,
-    int64_t field_index) {
+    int64_t field_index, int64_t source) {
   MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
   // Rows belong to the page whose transmission is in progress in this
   // magazine (EN 300 706 §7.2.1); orphan rows with no open page are dropped.
   if (!state.page_open) {
     return;
   }
+
+  const TeletextPageKey key = page_key(transmission_magazine);
+  last_row_attribution_ = key;
+  last_row_number_ = row;
 
   RowData& row_data = state.rows[static_cast<size_t>(row)];
   row_data.present = true;
@@ -266,6 +288,14 @@ void TeletextPageDecoder::handle_display_packet(
       row_data.parity_error[column] = true;
     }
   }
+
+  if (row_squasher_ != nullptr) {
+    TeletextRowBytes display{};
+    std::copy(packet.begin() + 2, packet.begin() + 2 + kTeletextRowBytes,
+              display.begin());
+    row_squasher_->add_row(key, row, display, source);
+  }
+
   state.last_field_index = field_index;
 }
 
@@ -302,9 +332,36 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   snapshot.header_field_index = state.header_field_index;
   snapshot.last_field_index = state.last_field_index;
 
+  // With a squasher attached, display rows come from the combined copies
+  // rather than from the last one received: repeated transmissions correct
+  // each other, and a row recovered during an earlier transmission is still
+  // available when the current one was clipped (teletext_row_squasher.h).
+  const TeletextPageKey key{snapshot.magazine, state.page_number,
+                            state.subcode};
+
   for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
-    const RowData& row_data = state.rows[static_cast<size_t>(row)];
+    RowData local_row_data;
+    const RowData* row_source = &state.rows[static_cast<size_t>(row)];
+    if (row_squasher_ != nullptr && row >= 1) {
+      if (const auto squashed = row_squasher_->squashed_row(key, row)) {
+        local_row_data.present = true;
+        for (size_t column = 0; column < TeletextPageSnapshot::kColumns;
+             ++column) {
+          const uint8_t byte = (*squashed)[column];
+          if (teletext_odd_parity_valid(byte)) {
+            local_row_data.characters[column] = byte & 0x7F;
+            local_row_data.parity_error[column] = false;
+          } else {
+            local_row_data.characters[column] = 0x20;
+            local_row_data.parity_error[column] = true;
+          }
+        }
+        row_source = &local_row_data;
+      }
+    }
+    const RowData& row_data = *row_source;
     auto& cells = snapshot.cells[static_cast<size_t>(row)];
+    snapshot.row_received[static_cast<size_t>(row)] = row_data.present;
 
     // Start-of-row default conditions (EN 300 706 §12.2 Table 26): white
     // alphanumeric foreground, black background, steady, unboxed, normal

@@ -1,8 +1,8 @@
 /*
  * File:        teletext_page_assembler.cpp
  * Module:      orc-gui
- * Purpose:     Trailing-frame-window cache and Level 1 page assembly for the
- *              teletext preview dialog
+ * Purpose:     Trailing-frame-window cache and accumulating page catalogue for
+ *              the teletext preview dialog
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -12,13 +12,59 @@
 
 #include <orc/support/teletext_page_decoder.h>
 
+#include <utility>
+
 #include "teletext_observation_presenter.h"
 
+namespace {
+
+using Catalogue =
+    std::map<std::pair<int, int>, TeletextPageAssembler::CataloguedPage>;
+
+// Drop the entry whose page was seen longest ago (catalogue cap enforcement).
+void evictLeastRecentlySeen(Catalogue& catalogue) {
+  if (catalogue.empty()) {
+    return;
+  }
+  auto oldest = catalogue.begin();
+  for (auto it = catalogue.begin(); it != catalogue.end(); ++it) {
+    if (it->second.seen_frame < oldest->second.seen_frame) {
+      oldest = it;
+    }
+  }
+  catalogue.erase(oldest);
+}
+
+}  // namespace
+
 void TeletextPageAssembler::setCurrentFrame(uint64_t frame_index) {
+  // Merge what the current window holds into the catalogue before any of it
+  // is evicted below: catalogue contents must not depend on whether a reader
+  // happened to look between the delivery of a frame and its eviction.
+  refreshCatalogue();
+
+  // A move of at least a whole window length leaves the new window sharing no
+  // frames with the old one: the accumulated catalogue no longer describes
+  // anything near the previewer, so it is discarded and rebuilt from the
+  // frames preceding the position jumped to. Sequential stepping (and short
+  // backward steps) keep the catalogue.
+  const uint64_t distance = frame_index >= current_frame_
+                                ? frame_index - current_frame_
+                                : current_frame_ - frame_index;
+  if (distance >= kTrailingWindowFrames && !catalogue_.empty()) {
+    catalogue_.clear();
+    // The accumulated row copies describe the same superseded position, and
+    // a service can change entirely across a seek; keeping them would let a
+    // page here be built from rows recovered somewhere else.
+    squasher_.clear();
+    ++catalogue_revision_;
+  }
+
   current_frame_ = frame_index;
   const uint64_t start = windowStartFrame();
   frames_.erase(frames_.begin(), frames_.lower_bound(start));
   frames_.erase(frames_.upper_bound(current_frame_), frames_.end());
+  catalogue_dirty_ = true;
 }
 
 uint64_t TeletextPageAssembler::windowStartFrame() const {
@@ -44,24 +90,111 @@ void TeletextPageAssembler::storeFrame(
     return;  // stale delivery from a superseded window
   }
   frames_[frame_index] = FrameData{std::move(field1), std::move(field2)};
+  catalogue_dirty_ = true;
+}
+
+void TeletextPageAssembler::markFrameUnavailable(uint64_t frame_index) {
+  storeFrame(frame_index, orc::presenters::TeletextFieldPacketsView{},
+             orc::presenters::TeletextFieldPacketsView{});
 }
 
 bool TeletextPageAssembler::hasFrame(uint64_t frame_index) const {
   return frames_.find(frame_index) != frames_.end();
 }
 
-void TeletextPageAssembler::clear() { frames_.clear(); }
+void TeletextPageAssembler::clear() {
+  frames_.clear();
+  squasher_.clear();
+  if (!catalogue_.empty()) {
+    catalogue_.clear();
+    ++catalogue_revision_;
+  }
+  catalogue_dirty_ = false;
+}
 
-std::optional<orc::presenters::TeletextPageView>
-TeletextPageAssembler::assemblePage(int magazine, int page_number) const {
+std::vector<TeletextPageAssembler::PageListing>
+TeletextPageAssembler::cataloguedPages() const {
+  refreshCatalogue();
+  std::vector<PageListing> listings;
+  listings.reserve(catalogue_.size());
+  for (const auto& [address, entry] : catalogue_) {
+    listings.push_back(
+        PageListing{entry.magazine, entry.page_number, entry.seen_frame});
+  }
+  return listings;
+}
+
+const TeletextPageAssembler::CataloguedPage* TeletextPageAssembler::findPage(
+    int magazine, int page_number) const {
+  refreshCatalogue();
+  const auto it = catalogue_.find({magazine, page_number});
+  return it == catalogue_.end() ? nullptr : &it->second;
+}
+
+uint64_t TeletextPageAssembler::catalogueRevision() const {
+  refreshCatalogue();
+  return catalogue_revision_;
+}
+
+void TeletextPageAssembler::refreshCatalogue() const {
+  if (!catalogue_dirty_) {
+    return;
+  }
+  catalogue_dirty_ = false;
+
+  // Decode the whole cached window from scratch: deliveries arrive out of
+  // order, so the decoder — which requires monotonically non-decreasing field
+  // indices — is fed from the frame-ordered cache rather than incrementally.
+  // Results are merged into the catalogue, so pages whose frames have since
+  // been evicted stay listed.
   orc::TeletextPageDecoder decoder;
-  std::optional<orc::TeletextPageSnapshot> latest;
-  decoder.set_page_callback(
-      [&latest, magazine, page_number](const orc::TeletextPageSnapshot& page) {
-        if (page.magazine == magazine && page.page_number == page_number) {
-          latest = page;
-        }
-      });
+  // Rows go into the squasher, which outlives the window: a page keeps rows
+  // recovered during earlier transmissions, and repeated copies of a row
+  // correct each other. Snapshots are rendered from the squashed rows.
+  decoder.set_row_squasher(&squasher_);
+  decoder.set_page_callback([this](const orc::TeletextPageSnapshot& snapshot) {
+    const std::pair<int, int> address{snapshot.magazine, snapshot.page_number};
+    const uint64_t seen_frame =
+        static_cast<uint64_t>(snapshot.header_field_index) / 2;
+
+    auto it = catalogue_.find(address);
+    if (it == catalogue_.end()) {
+      if (catalogue_.size() >= kMaxCataloguedPages) {
+        evictLeastRecentlySeen(catalogue_);
+      }
+      it = catalogue_.emplace(address, CataloguedPage{}).first;
+      it->second.magazine = snapshot.magazine;
+      it->second.page_number = snapshot.page_number;
+      it->second.seen_frame = seen_frame;
+      it->second.page =
+          orc::presenters::TeletextObservationPresenter::makePageView(snapshot);
+      ++catalogue_revision_;
+      return;
+    }
+
+    const bool same_decode =
+        it->second.seen_frame == seen_frame &&
+        it->second.page.last_field_index == snapshot.last_field_index;
+    if (it->second.seen_frame != seen_frame) {
+      it->second.seen_frame = seen_frame;
+      ++catalogue_revision_;
+    }
+    if (same_decode) {
+      return;  // identical re-decode of an unchanged window
+    }
+
+    // The newest decode wins outright. It is not a fragment even when the
+    // trailing window clipped the transmission that produced it: the decoder
+    // renders from squasher_, which holds every row copy seen since the last
+    // discontinuity, so rows this transmission did not carry come from the
+    // ones that did.
+    it->second.page =
+        orc::presenters::TeletextObservationPresenter::makePageView(snapshot);
+  });
+
+  // Candidate VBI lines per field, for packing (field, line) into one copy
+  // identity. The observer scans field lines 5-21, well inside this bound.
+  constexpr int64_t kFieldLineStride = 64;
 
   int64_t last_field_index = 0;
   for (const auto& [frame_index, data] : frames_) {
@@ -69,15 +202,15 @@ TeletextPageAssembler::assemblePage(int magazine, int page_number) const {
       const int64_t field_index = static_cast<int64_t>(frame_index) * 2 +
                                   (field == &data.field2 ? 1 : 0);
       for (const auto& packet : field->packets) {
-        decoder.process_packet(packet.bytes, field_index);
+        // The (field, line) origin is this copy's identity, so the repeated
+        // window rebuilds below re-seat the same copy rather than letting a
+        // long-resident frame outvote the rest.
+        const int64_t source = field_index * kFieldLineStride +
+                               (packet.field_line % kFieldLineStride);
+        decoder.process_packet(packet.bytes, field_index, source);
         last_field_index = field_index;
       }
     }
   }
   decoder.finalize(last_field_index + 1);
-
-  if (!latest) {
-    return std::nullopt;
-  }
-  return orc::presenters::TeletextObservationPresenter::makePageView(*latest);
 }

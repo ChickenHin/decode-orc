@@ -77,6 +77,30 @@ struct TeletextPageCellView {
 };
 
 /**
+ * @brief How much of a page actually came back from the recovery chain
+ *
+ * A row that was never recovered renders exactly like a transmitted blank
+ * row, and a parity-damaged byte renders exactly like a transmitted SPACE,
+ * so a viewer cannot tell a recovery gap from page content by looking. These
+ * counts are the only way to make that distinction visible.
+ */
+struct TeletextPageRecoveryView {
+  /// Display rows 1-24 that could carry data (excludes the rows consumed by
+  /// double-height characters above them, whose content is ignored anyway)
+  int rows_expected = 0;
+  /// Of those, the rows a packet was actually recovered for
+  int rows_received = 0;
+  /// Display bytes that failed odd parity (EN 300 706 §8.1) and were
+  /// substituted with SPACE
+  int damaged_bytes = 0;
+
+  /// True when every expected row arrived with no damaged bytes
+  bool complete() const {
+    return rows_received == rows_expected && damaged_bytes == 0;
+  }
+};
+
+/**
  * @brief A rendered 40×25 Level 1 teletext page snapshot
  */
 struct TeletextPageView {
@@ -92,6 +116,11 @@ struct TeletextPageView {
   int64_t header_field_index = 0;
   /// Field index of the last packet that contributed to the page
   int64_t last_field_index = 0;
+
+  /// Whether a packet was recovered for each row (index 0 = the header row)
+  std::array<bool, kRows> row_received{};
+  /// Recovery summary for the display rows
+  TeletextPageRecoveryView recovery;
 
   std::array<std::array<TeletextPageCellView, kColumns>, kRows> cells{};
 };

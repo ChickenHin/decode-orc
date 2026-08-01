@@ -174,6 +174,21 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "squash_repeated_rows";
+    desc.display_name = "Combine Repeated Rows";
+    desc.description =
+        "Teletext pages are transmitted on a loop, so a recording holds "
+        "several copies of every row damaged in different places. Combine "
+        "them byte by byte, preferring values that pass their parity check, "
+        "and write the combined rows. Needs a second pass over the recovered "
+        "packets, held in memory";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "export_subtitles";
     desc.display_name = "Export Subtitles";
     desc.description =
@@ -266,6 +281,8 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
   options.require_valid_mrag =
       get_bool_or(parameters, "require_valid_mrag", true);
 
+  options.squash_repeated_rows =
+      get_bool_or(parameters, "squash_repeated_rows", true);
   options.export_subtitles = get_bool_or(parameters, "export_subtitles", false);
   if (options.export_subtitles) {
     options.subtitle_page = get_string_or(parameters, "subtitle_page", "888");

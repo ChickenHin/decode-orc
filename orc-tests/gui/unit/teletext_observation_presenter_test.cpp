@@ -164,4 +164,48 @@ TEST(TeletextObservationPresenterTest, PageView_MapsMosaicSixels) {
   EXPECT_EQ(view.cells[3][3].mosaic_pattern, 0x10);
 }
 
+TEST(TeletextObservationPresenterTest, PageView_SummarisesRecovery) {
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.row_received[0] = true;  // header row: not a display row
+  for (int row = 1; row <= 20; ++row) {
+    snapshot.row_received[static_cast<size_t>(row)] = true;
+  }
+  // Rows 21-24 never arrived.
+  snapshot.cells[5][0].parity_error = true;
+  snapshot.cells[5][1].parity_error = true;
+  snapshot.cells[6][0].parity_error = true;
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.recovery.rows_expected, 24);
+  EXPECT_EQ(view.recovery.rows_received, 20);
+  EXPECT_EQ(view.recovery.damaged_bytes, 3);
+  EXPECT_FALSE(view.recovery.complete());
+  EXPECT_TRUE(view.row_received[20]);
+  EXPECT_FALSE(view.row_received[21]);
+}
+
+// A row consumed by a double-height character above it carries no data by
+// definition (EN 300 706 §12.2 code 0/D), so its absence is not a gap.
+TEST(TeletextObservationPresenterTest,
+     PageView_ExcludesDoubleHeightLowerRowsFromRecovery) {
+  orc::TeletextPageSnapshot snapshot;
+  for (int row = 1; row < orc::TeletextPageSnapshot::kRows; ++row) {
+    snapshot.row_received[static_cast<size_t>(row)] = true;
+  }
+  snapshot.row_received[2] = false;  // lower row was never transmitted
+  for (auto& cell : snapshot.cells[1]) {
+    cell.double_height = true;
+  }
+  for (auto& cell : snapshot.cells[2]) {
+    cell.double_height_lower = true;
+  }
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.recovery.rows_expected, 23);
+  EXPECT_EQ(view.recovery.rows_received, 23);
+  EXPECT_TRUE(view.recovery.complete());
+}
+
 }  // namespace gui_unit_test

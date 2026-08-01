@@ -94,7 +94,7 @@ TEST_F(TeletextSinkStage, NodeTypeInfo_MatchesDesign) {
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 9u);
+  ASSERT_EQ(descriptors.size(), 10u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
@@ -126,29 +126,34 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   ASSERT_TRUE(descriptors[5].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[5].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[6].name, "export_subtitles");
+  EXPECT_EQ(descriptors[6].name, "squash_repeated_rows");
   EXPECT_EQ(descriptors[6].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[6].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), false);
+  EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[7].name, "subtitle_page");
-  EXPECT_EQ(descriptors[7].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[7].name, "export_subtitles");
+  EXPECT_EQ(descriptors[7].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[7].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[7].constraints.default_value),
-            "888");
-  ASSERT_TRUE(descriptors[7].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[7].constraints.depends_on->parameter_name,
-            "export_subtitles");
+  EXPECT_EQ(std::get<bool>(*descriptors[7].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[8].name, "subtitle_format");
+  EXPECT_EQ(descriptors[8].name, "subtitle_page");
   EXPECT_EQ(descriptors[8].type, orc::ParameterType::STRING);
-  ASSERT_EQ(descriptors[8].constraints.allowed_strings.size(), 1u);
-  EXPECT_EQ(descriptors[8].constraints.allowed_strings[0], "SRT");
   ASSERT_TRUE(descriptors[8].constraints.default_value.has_value());
   EXPECT_EQ(std::get<std::string>(*descriptors[8].constraints.default_value),
-            "SRT");
+            "888");
   ASSERT_TRUE(descriptors[8].constraints.depends_on.has_value());
   EXPECT_EQ(descriptors[8].constraints.depends_on->parameter_name,
+            "export_subtitles");
+
+  EXPECT_EQ(descriptors[9].name, "subtitle_format");
+  EXPECT_EQ(descriptors[9].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[9].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[9].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[9].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[9].constraints.default_value),
+            "SRT");
+  ASSERT_TRUE(descriptors[9].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[9].constraints.depends_on->parameter_name,
             "export_subtitles");
 }
 

@@ -106,6 +106,7 @@ class ObservationContext;
 #include <limits>
 #include <map>
 #include <queue>
+#include <unordered_set>
 
 // Helper functions to convert between common types and presenter types
 namespace {
@@ -5028,16 +5029,30 @@ void MainWindow::updateTeletextDialog() {
 
   teletext_dialog_->setCurrentFrame(current_frame);
 
-  // Request only the window frames the dialog holds no packets for. Newly
-  // issued ids supersede any in-flight ones, whose responses are dropped as
-  // stale in onTeletextDataReady().
-  pending_teletext_requests_.clear();
-  const auto needed_frames = teletext_dialog_->framesNeedingData();
-  if (needed_frames.empty()) {
-    return;
+  // Drop in-flight requests whose frame has left the window; keep the rest.
+  // Stepping forward slides the window by one frame, so cancelling the whole
+  // set each time would keep re-issuing reads that never get the chance to
+  // complete, and the dialog's page list would never fill.
+  const uint64_t window_start = teletext_dialog_->windowStartFrame();
+  std::unordered_set<uint64_t> frames_in_flight;
+  for (auto it = pending_teletext_requests_.begin();
+       it != pending_teletext_requests_.end();) {
+    if (it->second < window_start || it->second > current_frame) {
+      it = pending_teletext_requests_.erase(it);
+    } else {
+      frames_in_flight.insert(it->second);
+      ++it;
+    }
   }
+
+  // Request only the window frames the dialog holds no packets for and has no
+  // outstanding request for.
+  const auto needed_frames = teletext_dialog_->framesNeedingData();
   teletext_dialog_->showPending();
   for (const uint64_t frame : needed_frames) {
+    if (frames_in_flight.count(frame) != 0) {
+      continue;
+    }
     const uint64_t request_id = render_coordinator_->requestTeletextData(
         current_view_node_id_, orc::FieldID(frame * 2));
     pending_teletext_requests_.emplace(request_id, frame);

@@ -503,6 +503,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues"
+  - path: orc/support/teletext_row_squasher.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Combines repeated copies of a teletext page row into one best-estimate row"
   - path: orc/support/teletext_slicer.h
     tier: support
     domain: ""

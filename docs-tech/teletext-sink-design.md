@@ -512,16 +512,61 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   small frame-window cache: on frame change it requests observations for a
   trailing window of frames ending at the current frame (window size a
   constant, tuned to typical carousel repetition on disc), feeds packets in
-  temporal order, and renders the requested page. Random access is
-  inherently approximate for a carousel medium; the dialog surfaces
+  temporal order, and decodes every page the window contains. Random access
+  is inherently approximate for a carousel medium; the dialog surfaces
   "page seen at frame N" rather than pretending continuous reception.
-  Sequential playback in the previewer degrades gracefully to live
-  reception.
+- **Page catalogue.** A trailing window alone tells the user nothing about
+  *which* pages exist, and a single window holds only a couple of seconds of
+  a carousel that cycles over tens of seconds. Decoded pages are therefore
+  merged into a catalogue that outlives the window: a page stays listed,
+  with the frame it was last seen at, after the frames carrying it have been
+  evicted. Sequential movement through the recording accumulates the
+  service's page set; a jump large enough that the new window shares no
+  frames with the old one is a discontinuity and discards the catalogue,
+  which is then rebuilt from the frames preceding the position jumped to.
+  In-flight observation requests for frames still inside the window survive
+  a frame change, so stepping forward does not cancel and re-issue the reads
+  that fill it.
 - **Rendering.** A plain `QWidget` painting the 40×25 Level 1 grid:
   monospace font for alphanumerics, painted 2×3 block cells for mosaic
-  graphics, Level 1 attributes (colours, double height, flash ignored or
-  static). No `FrameViewportWidget` needed — teletext has its own fixed
-  geometry.
+  graphics, Level 1 attributes (colours, double height, boxing on C5/C6
+  pages, conceal as SPACE, flash static). The grid is drawn into an
+  aspect-locked rect built from the nominal 12×20 character rectangle, and
+  painting is two-pass — every background, then every foreground — because a
+  double-height character occupies the row below its origin (EN 300 706
+  §12.2 code 0/D) and a row-sequential paint would erase its lower half.
+  Double height stretches vertically only: the glyph keeps its own
+  single-width rectangle (BBC Broadcast Teletext 1976 §3.1.5). No
+  `FrameViewportWidget` needed — teletext has its own fixed geometry.
+- **Combining repeated rows ("squashing").** Teletext is a carousel, so any
+  recording longer than one cycle holds several copies of every row, damaged
+  in different places. `TeletextRowSquasher`
+  (`orc/support/teletext_row_squasher.h`) keys copies by
+  {magazine, page, sub-code} + row and combines them per byte position. The
+  technique and the name come from
+  [vhs-teletext](https://github.com/ali1234/vhs-teletext) by Alistair Buxton;
+  this is an independent implementation that additionally restricts the vote
+  to candidates passing odd parity (EN 300 706 §8.1) before falling back to
+  the plain mode, since parity detects every single-bit error. Copies are
+  identified by an opaque source id so a consumer that re-reads the same
+  recovered line replaces its copy instead of stuffing the ballot. Headers
+  (X/0) are excluded — their display bytes carry a clock (§9.3.1.4) that
+  legitimately differs between transmissions — and C4 (erase page, §9.3.1.3
+  Table 2) drops a page's accumulated copies.
+  `TeletextPageDecoder::set_row_squasher()` both feeds it and renders pages
+  from it, which is also what lets a page be assembled from several partial
+  transmissions. The sink runs it over the whole export and rewrites the
+  stream (`squash_repeated_rows`, default on); the preview dialog keeps one
+  across window rebuilds, keyed by (field, line).
+- **Recovery reporting.** A row no packet was recovered for renders exactly
+  like a transmitted blank row, and a parity-damaged byte exactly like a
+  SPACE, so a viewer cannot tell a recovery gap from page content by looking.
+  `TeletextPageSnapshot::row_received` carries which rows arrived;
+  `makePageView()` turns that plus the per-cell parity flags into a
+  `TeletextPageRecoveryView` (rows expected / rows received / damaged bytes,
+  excluding rows consumed by double height). The dialog shows it in the
+  status bar, and a **Show data errors** toggle hatches unrecovered rows and
+  outlines parity-damaged cells over the page.
 - **Lifecycle.** An *observer* dialog, not a preview-view dialog: owned
   by `MainWindow` like `VBIDialog`, `NtscObserverDialog`, and
   `VideoParameterObserverDialog` (the View-menu dialogs — frame scope,
@@ -536,9 +581,13 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   modes). The only structural difference from its VBI/NTSC siblings is
   that this dialog is stateful (page decoder + trailing-frame-window
   cache) rather than a per-field stateless display.
-- **Controls.** Page number entry, magazine/page spinner, subpage cycling,
-  "hold", and a reveal toggle (conceals are a Level 1 attribute) can all be
-  added incrementally; the initial dialog needs only page entry + render.
+- **Controls.** A page-number entry and a clickable list of the pages seen
+  (the catalogue above), kept in sync in both directions. Subpage cycling,
+  "hold", and a reveal toggle (conceals are a Level 1 attribute) can be
+  added incrementally.
+- **Status.** All status text — pending observation reads, where the shown
+  page was last seen — lives in a status bar along the bottom edge, so a
+  message appearing or clearing never reflows the page display.
 - **Testing.** Tier 1 for page-decoder-to-view-model helpers, Tier 2 for
   the coordinator request plumbing, Tier 3 offscreen smoke for the dialog
   (TESTING.md tiers; presenter-boundary only, no live core pipeline).

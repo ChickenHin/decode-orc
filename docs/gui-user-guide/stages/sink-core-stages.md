@@ -390,6 +390,9 @@ PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the s
 * `require_valid_mrag` (boolean)
     - Drop packets whose magazine/row address fails Hamming 8/4 correction (suppresses false locks on noise).
     - Default: `true`.
+* `squash_repeated_rows` (boolean)
+    - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. Needs a second pass over the recovered packets, held in memory (roughly 50 bytes each).
+    - Default: `true`.
 * `export_subtitles` (boolean)
     - Decode the subtitle page alongside the T42 export and write timed cues to a `.srt` file next to the output.
     - Default: `false`.
@@ -404,7 +407,8 @@ PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the s
 
 * PAL sources only; other video systems report an error.
 * The `.t42` format is described on the zxnet teletext wiki (T42 packet stream).
-* Subtitle export drops Level 1 colour and positioning attributes; the `.srt` carries plain text timed from the field rate.
+* Subtitle export drops Level 1 colour and positioning attributes; the `.srt` carries plain text timed from the field rate. With `squash_repeated_rows` enabled the cues are decoded from the combined rows, so they benefit from the same correction.
+* Combining repeated rows ("squashing") is an idea taken from [vhs-teletext](https://github.com/ali1234/vhs-teletext) by Alistair Buxton. A row transmitted only once cannot be corrected, so the benefit grows with how long the recording runs and how often each page recurs.
 
 ---
 

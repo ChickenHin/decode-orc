@@ -419,6 +419,7 @@ orc_add_core_unit_tests(
 
         support/teletext_slicer_test.cpp
         support/teletext_page_decoder_test.cpp
+        support/teletext_row_squasher_test.cpp
 )
 
 orc_add_core_unit_tests(
