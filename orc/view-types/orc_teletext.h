@@ -79,25 +79,37 @@ struct TeletextPageCellView {
 /**
  * @brief How much of a page actually came back from the recovery chain
  *
- * A row that was never recovered renders exactly like a transmitted blank
- * row, and a parity-damaged byte renders exactly like a transmitted SPACE,
- * so a viewer cannot tell a recovery gap from page content by looking. These
- * counts are the only way to make that distinction visible.
+ * A parity-damaged byte renders exactly like a transmitted SPACE, so a viewer
+ * cannot tell it from page content by looking; @ref damaged_bytes is the only
+ * way to make that visible.
+ *
+ * A *missing row* is a different matter, and not by itself a fault. Services
+ * routinely omit the blank rows that space a page out rather than transmitting
+ * 40 spaces: on the recording this was measured against, 134 of 140 page
+ * transmissions left out at least one row inside their own extent while not a
+ * single packet was lost. So @ref rows_received falling short of the grid is
+ * normal, and only @ref lost_packets says data actually went astray.
  */
 struct TeletextPageRecoveryView {
   /// Display rows 1-24 that could carry data (excludes the rows consumed by
   /// double-height characters above them, whose content is ignored anyway)
   int rows_expected = 0;
-  /// Of those, the rows a packet was actually recovered for
+  /// Of those, the rows a packet was actually recovered for. Rows the service
+  /// never sent are absent from this count and are not a defect.
   int rows_received = 0;
   /// Display bytes that failed odd parity (EN 300 706 §8.1) and were
   /// substituted with SPACE
   int damaged_bytes = 0;
+  /// VBI packet slots inside this transmission that yielded nothing. The
+  /// slots are the field lines the transmission itself was using, so this
+  /// self-calibrates to the recording: a service inserting teletext on two
+  /// lines per field should fill both in every field of a page it is in the
+  /// middle of sending, and a slot that came back empty is a lost packet.
+  /// Which row it would have carried is not knowable.
+  int lost_packets = 0;
 
-  /// True when every expected row arrived with no damaged bytes
-  bool complete() const {
-    return rows_received == rows_expected && damaged_bytes == 0;
-  }
+  /// True when the page arrived with nothing damaged and nothing lost
+  bool complete() const { return damaged_bytes == 0 && lost_packets == 0; }
 };
 
 /**
@@ -112,7 +124,9 @@ struct TeletextPageView {
   int subcode = 0;         ///< 13-bit page sub-code S1-S4
   bool subtitle = false;   ///< C6 subtitle control bit
   bool newsflash = false;  ///< C5 newsflash control bit
-  /// Field index of the page header packet (frame seen = index / 2)
+  /// Field index of the header packet that opened this transmission (frame
+  /// seen = index / 2). A header re-sent part-way through the page does not
+  /// restamp it, so it identifies the appearance rather than the packet.
   int64_t header_field_index = 0;
   /// Field index of the last packet that contributed to the page
   int64_t last_field_index = 0;
@@ -121,6 +135,12 @@ struct TeletextPageView {
   std::array<bool, kRows> row_received{};
   /// Recovery summary for the display rows
   TeletextPageRecoveryView recovery;
+  /// False when this is a page still arriving rather than a finished
+  /// transmission: rows below those received so far are yet to be sent, and
+  /// look exactly like transmitted blank ones. Distinct from
+  /// TeletextPageRecoveryView::complete(), which asks whether the rows that
+  /// *were* sent all came back intact.
+  bool transmission_complete = true;
 
   std::array<std::array<TeletextPageCellView, kColumns>, kRows> cells{};
 };

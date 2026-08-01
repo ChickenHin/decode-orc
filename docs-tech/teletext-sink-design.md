@@ -509,24 +509,64 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   `orc-tests/gui/unit/mocks/mock_render_presenter.h`). The `const void*`
   observation context is only touched inside the callback.
 - **Page assembly.** The dialog owns a `TeletextPageDecoder` (§6) and a
-  small frame-window cache: on frame change it requests observations for a
-  trailing window of frames ending at the current frame (window size a
-  constant, tuned to typical carousel repetition on disc), feeds packets in
-  temporal order, and decodes every page the window contains. Random access
-  is inherently approximate for a carousel medium; the dialog surfaces
-  "page seen at frame N" rather than pretending continuous reception.
+  frame cache: on frame change it requests observations for a trailing
+  window of frames ending at the current frame, feeds packets in temporal
+  order, and decodes every page they contain. Random access is inherently
+  approximate for a carousel medium; the dialog surfaces "page seen at frame
+  N" rather than pretending continuous reception.
+
+  The window length is set by what it has to span, which is a *carousel
+  cycle*, not a page. A page occupies a handful of frames; the service does
+  not bring it round again until every other page has been sent, which is
+  several hundred frames on a typical magazine (measured at ~540 frames,
+  ~22 s, on a PAL LaserDisc inserting teletext on two VBI lines per field).
+  A window shorter than a cycle holds only whichever transmissions happen to
+  fall inside it, so the page list stays nearly empty however long the user
+  waits, and repeated copies of a row — what lets damaged copies correct
+  each other — never accumulate. Reaching backwards is what the window
+  bounds, and it is bounded only because each frame of it costs an
+  observation read before anything can be shown; frames are therefore named
+  a batch at a time rather than queued in one burst ahead of the previewer's
+  own rendering.
+
+  Frames are fed to a *persistent* decoder in ascending order and never
+  decoded twice; their packets are released as soon as it has consumed them.
+  Re-decoding the whole window on every frame change — which a much shorter
+  window could afford — would repeat the same work thousands of times over
+  and make the cost of a frame step grow with the window. It also
+  manufactured phantom appearances: as the window slid past a transmission's
+  opening header, the next header in it became the opening one and the page
+  looked like it had come round again. The cost of a frame step is now
+  proportional to the frames newly arrived, not to the window.
 - **Page catalogue.** A trailing window alone tells the user nothing about
-  *which* pages exist, and a single window holds only a couple of seconds of
-  a carousel that cycles over tens of seconds. Decoded pages are therefore
-  merged into a catalogue that outlives the window: a page stays listed,
-  with the frame it was last seen at, after the frames carrying it have been
-  evicted. Sequential movement through the recording accumulates the
-  service's page set; a jump large enough that the new window shares no
-  frames with the old one is a discontinuity and discards the catalogue,
-  which is then rebuilt from the frames preceding the position jumped to.
+  *which* pages exist, and no window holds a whole recording. Decoded pages
+  are therefore merged into a catalogue that outlives the window: a page
+  stays listed, with the frame it was last seen at, after the frames
+  carrying it have been released. Sequential movement through the recording
+  accumulates the service's page set without bound — forward progress costs
+  nothing extra, so only reaching backwards is limited. A jump outside the
+  span already decoded is a discontinuity and discards the catalogue, which
+  is then rebuilt from the frames preceding the position jumped to.
   In-flight observation requests for frames still inside the window survive
   a frame change, so stepping forward does not cancel and re-issue the reads
   that fill it.
+- **Partial pages.** A page under transmission is shown as it arrives, which
+  on a sparse insertion means several frames of it filling in. Each of those
+  renders is correct for the packets received so far, but a row not yet sent
+  is indistinguishable on screen from a transmitted blank one, so snapshots
+  carry `transmission_complete` and the dialog reports it. A page still open
+  when the decoder has consumed everything available is snapshotted through
+  `open_page_snapshots()`, which renders it without terminating it —
+  `finalize()` would answer the same question but close the page, and the
+  rows arriving afterwards would then be dropped as orphans.
+
+  A service may re-send a page's header while its rows are still going out
+  (a rolling header keeps the on-screen clock live). Each repeat closes the
+  assembly like any other header, but they are all one appearance: the
+  header that *opened* the transmission stamps `header_field_index`, so
+  every snapshot of one appearance shares it and the "transmissions" count
+  reports how often the carousel brought the page round rather than how many
+  header packets it sent.
 - **Rendering.** A plain `QWidget` painting the 40×25 Level 1 grid:
   monospace font for alphanumerics, painted 2×3 block cells for mosaic
   graphics, Level 1 attributes (colours, double height, boxing on C5/C6
@@ -558,15 +598,37 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   transmissions. The sink runs it over the whole export and rewrites the
   stream (`squash_repeated_rows`, default on); the preview dialog keeps one
   across window rebuilds, keyed by (field, line).
-- **Recovery reporting.** A row no packet was recovered for renders exactly
-  like a transmitted blank row, and a parity-damaged byte exactly like a
-  SPACE, so a viewer cannot tell a recovery gap from page content by looking.
-  `TeletextPageSnapshot::row_received` carries which rows arrived;
-  `makePageView()` turns that plus the per-cell parity flags into a
-  `TeletextPageRecoveryView` (rows expected / rows received / damaged bytes,
-  excluding rows consumed by double height). The dialog shows it in the
-  status bar, and a **Show data errors** toggle hatches unrecovered rows and
-  outlines parity-damaged cells over the page.
+- **Recovery reporting.** A parity-damaged byte renders exactly like a
+  transmitted SPACE, so `TeletextPageRecoveryView::damaged_bytes` (from the
+  per-cell parity flags) is the only way to see it.
+
+  A *missing row* is a different matter and must not be reported as a fault.
+  Services habitually omit the blank rows that space a page out rather than
+  transmitting 40 spaces: on the reference recording, **134 of 140 page
+  transmissions leave out at least one row inside their own extent — 786 rows
+  in total — while not a single packet was lost** (every field carried its
+  full two lines). Treating an un-received row as a recovery gap therefore put
+  three or four error bands on pages that had arrived perfectly, which is
+  worse than no marking at all because it teaches the reader to ignore the
+  marks.
+
+  What *is* evidence is an empty packet **slot**: a service part-way through
+  sending a page fills every line it is inserting on, in every field. So
+  `TeletextPageAssembler::lostPacketsBetween()` compares, across the
+  transmission's field span, the packets each field yielded against the
+  busiest field in that same span. Calibrating from the transmission itself
+  means a recording using one line per field is not accused of losing half
+  its packets, and fields that yielded nothing at all are presumed not to
+  carry teletext (many services insert into one field of each frame only).
+  That under-reports a field where every line was lost, which is the right
+  way to be wrong here. Row-level attribution is impossible: a lost packet
+  does not say which row it would have carried.
+
+  The dialog reports rows as a plain count — not a fraction of the 24-row
+  grid, which read as a shortfall — plus lost packets and damaged bytes when
+  there are any. The **Show data errors** toggle outlines parity-damaged
+  cells, and bands the missing rows only when the transmission lost packets,
+  at which point every gap is a candidate.
 - **Lifecycle.** An *observer* dialog, not a preview-view dialog: owned
   by `MainWindow` like `VBIDialog`, `NtscObserverDialog`, and
   `VideoParameterObserverDialog` (the View-menu dialogs — frame scope,

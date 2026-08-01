@@ -5028,12 +5028,20 @@ void MainWindow::updateTeletextDialog() {
   }
 
   teletext_dialog_->setCurrentFrame(current_frame);
+  issueTeletextRequests();
+}
+
+void MainWindow::issueTeletextRequests() {
+  if (!teletext_dialog_ || !current_view_node_id_.is_valid()) {
+    return;
+  }
 
   // Drop in-flight requests whose frame has left the window; keep the rest.
   // Stepping forward slides the window by one frame, so cancelling the whole
   // set each time would keep re-issuing reads that never get the chance to
   // complete, and the dialog's page list would never fill.
   const uint64_t window_start = teletext_dialog_->windowStartFrame();
+  const uint64_t current_frame = teletext_dialog_->currentFrame();
   std::unordered_set<uint64_t> frames_in_flight;
   for (auto it = pending_teletext_requests_.begin();
        it != pending_teletext_requests_.end();) {
@@ -5046,7 +5054,10 @@ void MainWindow::updateTeletextDialog() {
   }
 
   // Request only the window frames the dialog holds no packets for and has no
-  // outstanding request for.
+  // outstanding request for. The dialog hands these out a batch at a time —
+  // the window spans minutes of video, and queuing every unread frame of it
+  // at once would put thousands of observation reads ahead of the previewer's
+  // own rendering. Each delivery calls back here for the next batch.
   const auto needed_frames = teletext_dialog_->framesNeedingData();
   teletext_dialog_->showPending();
   for (const uint64_t frame : needed_frames) {

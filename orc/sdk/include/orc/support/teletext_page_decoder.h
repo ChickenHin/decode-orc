@@ -106,8 +106,12 @@ struct TeletextPageSnapshot {
   bool magazine_serial = false;       // C11
   int national_option_subset = 0;     // C12-C14 (EN 300 706 §15.2)
 
-  // Field indices (as passed to process_packet()) of the page header packet
-  // and of the last packet that contributed to this page.
+  // Field indices (as passed to process_packet()) of the header packet that
+  // *opened* this transmission and of the last packet that contributed to
+  // the page. A header re-sent while the page's own rows are still being
+  // transmitted does not restamp the first of these, so every snapshot of
+  // one appearance of a page shares a header_field_index and a consumer can
+  // use it to tell appearances apart.
   int64_t header_field_index = 0;
   int64_t last_field_index = 0;
 
@@ -117,6 +121,16 @@ struct TeletextPageSnapshot {
   // so recovery gaps can only be reported from this flag, never inferred
   // from the cells.
   std::array<bool, kRows> row_received{};
+
+  // Whether the page's transmission had finished when this snapshot was
+  // taken. False means more rows of *this* transmission were still to come:
+  // either the header was repeated part-way through the page (a rolling
+  // header, EN 300 706 §9.3.1.4 — the service re-sends X/0 while the rows
+  // continue to arrive), or a consumer peeked at the page in progress with
+  // open_page_snapshots(). A partial snapshot is not damaged data; it is a
+  // page that has not all arrived yet, and the two look identical on screen,
+  // so only this flag distinguishes them.
+  bool transmission_complete = true;
 
   std::array<std::array<TeletextPageCell, kColumns>, kRows> cells{};
 };
@@ -224,6 +238,19 @@ class TeletextPageDecoder {
   // |end_field_index|.
   void finalize(int64_t end_field_index);
 
+  /**
+   * @brief Snapshot every page whose transmission is currently in progress
+   *
+   * Renders the pages that are open right now without terminating them, so
+   * decoding can carry on with the packets that follow. This is what lets a
+   * consumer feeding the decoder incrementally show a page as it arrives:
+   * finalize() would answer the same question, but it closes the pages, and
+   * rows arriving afterwards would then be dropped as orphans.
+   *
+   * The returned snapshots all carry transmission_complete == false.
+   */
+  std::vector<TeletextPageSnapshot> open_page_snapshots() const;
+
   // Subtitle cues emitted so far (closed cues only; an open cue is closed by
   // finalize() or by the page's clear/replace events).
   const std::vector<TeletextSubtitleCue>& subtitle_cues() const {
@@ -274,7 +301,12 @@ class TeletextPageDecoder {
 
   // Emit the open page of |magazine| (if any) through the callback and the
   // subtitle machinery, then mark it closed (row data retained).
-  void terminate_page(int transmission_magazine);
+  //
+  // |transmission_complete| is false when the page is being closed only
+  // because its own header was re-sent mid-transmission: the rows keep
+  // coming, so what is emitted is a fragment and is flagged as one.
+  void terminate_page(int transmission_magazine,
+                      bool transmission_complete = true);
 
   TeletextPageSnapshot render_snapshot(int transmission_magazine,
                                        const MagazineState& state) const;

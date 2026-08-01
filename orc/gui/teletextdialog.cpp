@@ -94,8 +94,10 @@ void TeletextDialog::setupUI() {
   show_errors_check_ = new QCheckBox(tr("Show data errors"), this);
   show_errors_check_->setObjectName("teletextShowErrorsCheck");
   show_errors_check_->setToolTip(
-      tr("Hatch rows no teletext packet was recovered for, and outline "
-         "characters whose transmitted byte failed its parity check."));
+      tr("Outline characters whose transmitted byte failed its parity check, "
+         "and hatch the missing rows of a page that lost packets. A page is "
+         "free to leave rows out — most do — so rows are only hatched when "
+         "something was actually lost."));
   connect(show_errors_check_, &QCheckBox::toggled, this,
           &TeletextDialog::onShowErrorsToggled);
   page_row->addWidget(show_errors_check_);
@@ -184,7 +186,9 @@ void TeletextDialog::setupUI() {
 void TeletextDialog::showPending() { updatePendingStatus(); }
 
 void TeletextDialog::updatePendingStatus() {
-  const std::size_t outstanding = assembler_.framesNeedingData().size();
+  // The whole outstanding count, not the capped batch, so the readout counts
+  // down towards zero instead of sitting at the batch size.
+  const std::size_t outstanding = assembler_.framesNeedingDataCount();
   if (outstanding == 0) {
     status_label_->setVisible(false);
     status_label_->clear();
@@ -269,19 +273,33 @@ void TeletextDialog::onShowErrorsToggled(bool checked) {
 }
 
 QString TeletextDialog::formatRecovery(
-    const orc::presenters::TeletextPageRecoveryView& recovery) {
-  // Rows are reported as a fraction rather than as an error count: a page is
-  // free to leave rows blank, so a row that carried no packet is a gap in
-  // what was recovered, not necessarily a fault.
-  const QString rows =
-      tr("rows %1/%2").arg(recovery.rows_received).arg(recovery.rows_expected);
-  if (recovery.damaged_bytes == 0) {
-    return recovery.rows_received == recovery.rows_expected
-               ? tr("Complete (%1)").arg(rows)
-               : rows;
+    const orc::presenters::TeletextPageView& page) {
+  const auto& recovery = page.recovery;
+  // A plain count, not a fraction of the 24-row grid. Services leave rows out
+  // as a matter of course — the blank lines that space a page out are simply
+  // not transmitted — so "rows 21/24" read as three rows missing when nothing
+  // was wrong at all.
+  const QString rows = tr("%n row(s)", nullptr, recovery.rows_received);
+
+  // A page part-way through its transmission looks exactly like a finished
+  // one with rows missing — teletext is sent a packet at a time, and on a
+  // sparse insertion a single page takes several frames to arrive. Saying so
+  // is the difference between "this recording is damaged" and "wait".
+  if (!page.transmission_complete) {
+    return tr("Partial - still arriving (%1 so far)").arg(rows);
   }
-  return tr("%1, %n damaged byte(s)", nullptr, recovery.damaged_bytes)
-      .arg(rows);
+
+  QStringList faults;
+  if (recovery.lost_packets > 0) {
+    faults << tr("%n packet(s) lost", nullptr, recovery.lost_packets);
+  }
+  if (recovery.damaged_bytes > 0) {
+    faults << tr("%n damaged byte(s)", nullptr, recovery.damaged_bytes);
+  }
+  if (faults.isEmpty()) {
+    return tr("Complete (%1)").arg(rows);
+  }
+  return tr("%1, %2").arg(rows, faults.join(tr(", ")));
 }
 
 void TeletextDialog::onPageSelected() {
@@ -345,8 +363,12 @@ void TeletextDialog::updatePageRow(
     int row, const TeletextPageAssembler::PageListing& listing) {
   // Frame numbers are 1-based in the UI (see frame_numbering.h).
   const QString seen = QString::number(listing.times_seen);
+  // A page still arriving has no settled "last seen" frame yet; an ellipsis
+  // marks it so a row that is about to change does not read as a final
+  // answer.
   const QString frame =
-      QString::number(static_cast<qulonglong>(listing.seen_frame) + 1);
+      QString::number(static_cast<qulonglong>(listing.seen_frame) + 1) +
+      (listing.transmission_complete ? QString() : QStringLiteral("…"));
   auto* seen_item = pages_table_->item(row, kColumnSeen);
   auto* frame_item = pages_table_->item(row, kColumnFrame);
   if (seen_item->text() != seen) {
@@ -354,6 +376,11 @@ void TeletextDialog::updatePageRow(
   }
   if (frame_item->text() != frame) {
     frame_item->setText(frame);
+    frame_item->setToolTip(
+        listing.transmission_complete
+            ? QString()
+            : tr("This page is still being transmitted; rows are still "
+                 "arriving."));
   }
 }
 
@@ -454,7 +481,7 @@ void TeletextDialog::renderPage() {
            static_cast<int>(entry->times_seen))
             .arg(label)
             .arg(static_cast<qulonglong>(entry->seen_frame) + 1));
-    recovery_label_->setText(formatRecovery(current_page_->recovery));
+    recovery_label_->setText(formatRecovery(*current_page_));
     recovery_label_->setVisible(true);
     page_widget_->setPage(*current_page_);
   } else {

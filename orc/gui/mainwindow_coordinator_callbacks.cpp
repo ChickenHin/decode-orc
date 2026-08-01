@@ -137,6 +137,11 @@ void MainWindow::onTeletextDataReady(
   // so that when it is shown again the window is already warm.
   teletext_dialog_->deliverFrameData(
       available, static_cast<uint64_t>(field1_id_value), field1, field2);
+
+  // The dialog hands out the frames it needs a batch at a time, so a delivery
+  // is what draws down the next of them; without this the window would only
+  // ever fill one batch per frame change.
+  issueTeletextRequests();
 }
 
 void MainWindow::onObservationDataReady(

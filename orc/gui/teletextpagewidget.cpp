@@ -220,20 +220,30 @@ void TeletextPageWidget::paintDataErrorOverlay(
   constexpr int kRows = orc::presenters::TeletextPageView::kRows;
   constexpr int kColumns = orc::presenters::TeletextPageView::kColumns;
 
-  // Rows no packet was recovered for: a hatched band across the whole row,
-  // so a recovery gap cannot be mistaken for a transmitted blank row.
-  QBrush hatch(QColor(255, 80, 80, 90), Qt::BDiagPattern);
-  for (int row = 1; row < kRows; ++row) {
-    if (page.row_received[static_cast<size_t>(row)]) {
-      continue;
+  // Rows no packet was recovered for, but only once something is known to
+  // have gone astray in this transmission.
+  //
+  // A missing row on its own says nothing. Services habitually leave out the
+  // blank rows that space a page out instead of transmitting 40 spaces, so
+  // marking every un-received row put three or four bands on a page that had
+  // arrived perfectly — which is worse than not marking at all, because it
+  // trains the reader to ignore the marks. When packets really were lost the
+  // page cannot say which row each would have carried, so every gap becomes a
+  // candidate and all of them are banded.
+  if (page.recovery.lost_packets > 0) {
+    QBrush hatch(QColor(255, 80, 80, 90), Qt::BDiagPattern);
+    for (int row = 1; row < kRows; ++row) {
+      if (page.row_received[static_cast<size_t>(row)]) {
+        continue;
+      }
+      // A row consumed by double height above it carries no data by design.
+      if (page.cells[static_cast<size_t>(row)][0].double_height_lower) {
+        continue;
+      }
+      const QRectF band(page_rect.left(), page_rect.top() + row * cell_h,
+                        page_rect.width(), cell_h);
+      painter.fillRect(band, hatch);
     }
-    // A row consumed by double height above it carries no data by design.
-    if (page.cells[static_cast<size_t>(row)][0].double_height_lower) {
-      continue;
-    }
-    const QRectF band(page_rect.left(), page_rect.top() + row * cell_h,
-                      page_rect.width(), cell_h);
-    painter.fillRect(band, hatch);
   }
 
   // Individual bytes that failed odd parity: outline the character

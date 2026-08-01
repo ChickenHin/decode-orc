@@ -180,15 +180,28 @@ void TeletextPageDecoder::handle_header_packet(
   const bool subtitle = (s4_c5_c6 & 0x8) != 0;        // C6
   const bool magazine_serial = (c11_c14 & 0x1) != 0;  // C11
 
+  // A service may re-send a page's header while the page's rows are still
+  // being transmitted (a rolling header keeps the on-screen clock live,
+  // EN 300 706 §9.3.1.4). That header closes the assembly like any other,
+  // but the transmission it closes has not finished — the same page simply
+  // reopens and its remaining rows follow. Recognising this is what stops a
+  // consumer counting one appearance of a page as several, and what lets it
+  // tell a fragment from a finished page.
+  const MagazineState& open_state =
+      magazines_[static_cast<size_t>(transmission_magazine)];
+  const bool same_page_continues =
+      open_state.page_open && open_state.have_page && !erase_page &&
+      open_state.page_number == page_number && open_state.subcode == subcode;
+
   // A page header terminates the page currently being transmitted: in serial
   // mode (C11 set) any magazine's page, in parallel mode only the page of
   // the same magazine (EN 300 706 §7.2.1).
   if (magazine_serial) {
     for (int m = 0; m < static_cast<int>(magazines_.size()); ++m) {
-      terminate_page(m);
+      terminate_page(m, m != transmission_magazine || !same_page_continues);
     }
   } else {
-    terminate_page(transmission_magazine);
+    terminate_page(transmission_magazine, !same_page_continues);
   }
 
   // Subtitle clear events act on header arrival: a header for the watched
@@ -238,7 +251,12 @@ void TeletextPageDecoder::handle_header_packet(
   state.inhibit_display = (c7_c10 & 0x8) != 0;          // C10
   state.magazine_serial = magazine_serial;              // C11
   state.national_option_subset = (c11_c14 >> 1) & 0x7;  // C12-C14
-  state.header_field_index = field_index;
+  // The header that *opened* this transmission stamps it, so a rolling header
+  // re-sent while the rows are still going out does not make the same
+  // appearance of the page look like a series of new ones.
+  if (!same_page_continues) {
+    state.header_field_index = field_index;
+  }
   state.last_field_index = field_index;
 
   // Header display bytes: transmission bytes 14-45 = packet bytes 10-41
@@ -299,19 +317,36 @@ void TeletextPageDecoder::handle_display_packet(
   state.last_field_index = field_index;
 }
 
-void TeletextPageDecoder::terminate_page(int transmission_magazine) {
+void TeletextPageDecoder::terminate_page(int transmission_magazine,
+                                         bool transmission_complete) {
   MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
   if (!state.page_open) {
     return;
   }
   state.page_open = false;
 
-  const TeletextPageSnapshot snapshot =
-      render_snapshot(transmission_magazine, state);
+  TeletextPageSnapshot snapshot = render_snapshot(transmission_magazine, state);
+  snapshot.transmission_complete = transmission_complete;
   if (page_callback_) {
     page_callback_(snapshot);
   }
   subtitle_page_completed(snapshot);
+}
+
+std::vector<TeletextPageSnapshot> TeletextPageDecoder::open_page_snapshots()
+    const {
+  std::vector<TeletextPageSnapshot> snapshots;
+  for (int magazine = 0; magazine < static_cast<int>(magazines_.size());
+       ++magazine) {
+    const MagazineState& state = magazines_[static_cast<size_t>(magazine)];
+    if (!state.page_open) {
+      continue;
+    }
+    TeletextPageSnapshot snapshot = render_snapshot(magazine, state);
+    snapshot.transmission_complete = false;
+    snapshots.push_back(std::move(snapshot));
+  }
+  return snapshots;
 }
 
 TeletextPageSnapshot TeletextPageDecoder::render_snapshot(

@@ -130,6 +130,10 @@ class MainWindow : public QMainWindow {
   void updateNtscObserverDialog();
   void onShowTeletextDialog();
   void updateTeletextDialog();
+  /// Issue the next batch of teletext observation requests for the dialog's
+  /// window. Called on every frame change and again as each delivery lands,
+  /// because the dialog paces the frames it asks for.
+  void issueTeletextRequests();
   /// Issue async observation requests for whichever observer dialogs are open
   /// (Phase 5). Replaces the synchronous per-dialog render-and-extract path.
   void refreshObserverDialogs();

@@ -126,8 +126,26 @@ the packets recovered in a trailing window of frames ending at the current
 frame. Enter the page number in the conventional magazine + two-hex-digit form
 (for example 100 or 888). Teletext is a carousel medium, so random access is
 approximate: the dialog reports the frame at which the page transmission was
-actually seen, and pages outside the window are reported as not seen.
-Sequential playback behaves like live reception.
+actually seen, and pages not yet met are reported as not seen. Sequential
+playback behaves like live reception, and everything decoded along the way is
+kept, so the page list keeps growing until you jump somewhere unrelated.
+
+A page is transmitted a packet at a time, and a source carrying only a couple
+of teletext lines per field takes several frames to send one. Stepping through
+those frames shows the page filling in, so the status bar says whether the
+transmission has finished: **Complete** once the service has moved on to the
+next page, **Partial - still arriving** while more rows are yet to come. Rows
+that have not been sent yet look exactly like transmitted blank ones, so this
+is the only way to tell "wait" from "damaged". The page list marks a page in
+that state with an ellipsis after its frame number.
+
+**Show data errors** outlines characters whose byte failed its parity check.
+It bands whole rows only when the page's transmission lost packets — a page
+leaving rows out is normal rather than a fault, because services omit the
+blank lines that space a page out instead of transmitting a row of spaces.
+Loss is detected from the VBI packet slots the transmission's own fields gave
+up, so a recording that inserts on fewer lines is not accused of losing the
+rest.
 
 ### Video Parameter Hints
 

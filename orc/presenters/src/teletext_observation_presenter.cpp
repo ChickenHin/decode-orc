@@ -162,6 +162,7 @@ TeletextPageView TeletextObservationPresenter::makePageView(
   view.newsflash = snapshot.newsflash;
   view.header_field_index = snapshot.header_field_index;
   view.last_field_index = snapshot.last_field_index;
+  view.transmission_complete = snapshot.transmission_complete;
 
   for (int row = 0; row < TeletextPageView::kRows; ++row) {
     for (int col = 0; col < TeletextPageView::kColumns; ++col) {

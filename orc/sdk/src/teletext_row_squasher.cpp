@@ -32,37 +32,39 @@ namespace {
 // Level 1 decoder would be showing.
 uint8_t vote(const std::vector<TeletextRowBytes>& copies, size_t position) {
   const auto tally = [&](bool parity_clean_only) -> std::optional<uint8_t> {
-    // 256 counters is cheaper than a map for a vote this small, and keeping
-    // the last-seen index gives a deterministic tie-break.
-    std::array<uint16_t, 256> counts{};
-    std::array<size_t, 256> last_seen{};
-    bool any = false;
+    // The candidates are the copies themselves — at most max_copies_per_row of
+    // them — so the vote is counted over those rather than over all 256 byte
+    // values. This runs for every byte of every row of every page rendered,
+    // which a previewer does on each frame it steps, so the difference is not
+    // academic.
+    uint8_t best = 0;
+    size_t best_count = 0;
+    size_t best_last = 0;
     for (size_t i = 0; i < copies.size(); ++i) {
       const uint8_t value = copies[i][position];
       if (parity_clean_only && !teletext_odd_parity_valid(value)) {
         continue;
       }
-      any = true;
-      ++counts[value];
-      last_seen[value] = i;
+      // Every copy holding this same value is one vote for it; the outer
+      // guard already established that the value passes the parity filter.
+      size_t count = 0;
+      size_t last_seen = 0;
+      for (size_t j = 0; j < copies.size(); ++j) {
+        if (copies[j][position] != value) {
+          continue;
+        }
+        ++count;
+        last_seen = j;
+      }
+      if (count > best_count ||
+          (count == best_count && last_seen > best_last)) {
+        best = value;
+        best_count = count;
+        best_last = last_seen;
+      }
     }
-    if (!any) {
+    if (best_count == 0) {
       return std::nullopt;
-    }
-    uint8_t best = 0;
-    uint16_t best_count = 0;
-    size_t best_last = 0;
-    for (int value = 0; value < 256; ++value) {
-      if (counts[value] == 0) {
-        continue;
-      }
-      const auto candidate = static_cast<uint8_t>(value);
-      if (counts[value] > best_count ||
-          (counts[value] == best_count && last_seen[value] > best_last)) {
-        best = candidate;
-        best_count = counts[value];
-        best_last = last_seen[value];
-      }
     }
     return best;
   };

@@ -532,12 +532,44 @@ TEST(TeletextPageWidgetTest, SubtitlePagesDisplayOnlyTheBoxedArea) {
 // EN 300 706 §8.1 / recovery reporting: a row that never arrived and a
 // parity-damaged byte both render as blank, so the overlay is the only way to
 // tell a recovery gap from page content.
-TEST(TeletextPageWidgetTest, DataErrorOverlayMarksRowsThatNeverArrived) {
+// A page is free to leave rows out, and nearly every real one does — the
+// blank lines that space it out are simply not transmitted. Banding those as
+// errors put several marks on a page that had arrived perfectly.
+TEST(TeletextPageWidgetTest, DataErrorOverlayIgnoresRowsThatWereNeverSent) {
   (void)ensureApplication();
 
   orc::presenters::TeletextPageView page;
   page.row_received.fill(true);
   page.row_received[5] = false;
+  page.recovery.lost_packets = 0;  // every VBI slot gave up its packet
+
+  TeletextPageWidget widget;
+  widget.setPage(page);
+  const QSize size(orc::presenters::TeletextPageView::kColumns * 12,
+                   orc::presenters::TeletextPageView::kRows * 20);
+  widget.resize(size);
+
+  const auto render = [&] {
+    QImage image(size, QImage::Format_RGB32);
+    image.fill(Qt::black);
+    widget.render(&image);
+    return image;
+  };
+
+  widget.setShowDataErrors(true);
+  EXPECT_FALSE(cellHasForeground(render(), 5, 0, qRgb(0, 0, 0)))
+      << "a row the service never sent must not be marked as an error";
+}
+
+// When packets really were lost the page cannot say which row each would have
+// carried, so every row still missing becomes a candidate and is banded.
+TEST(TeletextPageWidgetTest, DataErrorOverlayMarksMissingRowsWhenPacketsLost) {
+  (void)ensureApplication();
+
+  orc::presenters::TeletextPageView page;
+  page.row_received.fill(true);
+  page.row_received[5] = false;
+  page.recovery.lost_packets = 1;
 
   TeletextPageWidget widget;
   widget.setPage(page);
@@ -579,14 +611,67 @@ TEST(TeletextDialogTest, RecoveryReadoutReportsRowsAndDamagedBytes) {
   deliverPage100Window(dialog);
   ASSERT_TRUE(dialog.currentPage().has_value());
 
-  // The fixture transmits the header plus row 1 only.
+  // The fixture transmits the header plus row 1 only. The 23 rows it chose
+  // not to send are not a shortfall, so the readout counts what arrived
+  // rather than presenting a fraction of the grid.
   EXPECT_EQ(dialog.currentPage()->recovery.rows_received, 1);
-  EXPECT_EQ(dialog.currentPage()->recovery.rows_expected, 24);
-  EXPECT_EQ(dialog.recoveryText(), QStringLiteral("rows 1/24"));
+  EXPECT_EQ(dialog.currentPage()->recovery.lost_packets, 0);
+  EXPECT_EQ(dialog.recoveryText(), QStringLiteral("Complete (1 row(s))"));
 
   // A page that was never seen has nothing to report.
   dialog.setPageNumberText("777");
   EXPECT_TRUE(dialog.recoveryText().isEmpty());
+}
+
+// A page part-way through its transmission looks exactly like a finished one
+// with rows missing, so the readout has to say which it is. This is what a
+// user stepping through the several frames one page occupies actually sees.
+TEST(TeletextDialogTest, RecoveryReadoutDistinguishesArrivingFromComplete) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  // Two packets in every field that carries teletext, as a real insertion
+  // does: an under-filled field would read as a lost packet, which is exactly
+  // the distinction the readout is drawing.
+  //
+  // Frame 0: the header and the first row of page 100 — the transmission has
+  // started but the service has not moved on.
+  dialog.setCurrentFrame(0);
+  dialog.deliverFrameData(true, 0,
+                          makeFieldView({makeHeaderPacket(1, 0x00),
+                                         makeRowPacket(1, 1, "ROW ONE")}),
+                          makeEmptyFieldView());
+  ASSERT_TRUE(dialog.currentPage().has_value());
+  EXPECT_FALSE(dialog.currentPage()->transmission_complete);
+  EXPECT_EQ(dialog.recoveryText(),
+            QStringLiteral("Partial - still arriving (1 row(s) so far)"));
+
+  // Frame 1 adds two more rows; still arriving.
+  dialog.setCurrentFrame(1);
+  dialog.deliverFrameData(true, 2,
+                          makeFieldView({makeRowPacket(1, 2, "ROW TWO"),
+                                         makeRowPacket(1, 3, "ROW THREE")}),
+                          makeEmptyFieldView());
+  EXPECT_FALSE(dialog.currentPage()->transmission_complete);
+  EXPECT_EQ(dialog.recoveryText(),
+            QStringLiteral("Partial - still arriving (3 row(s) so far)"));
+
+  // Frame 2 carries the next page's header, which ends the transmission.
+  dialog.setCurrentFrame(2);
+  dialog.deliverFrameData(
+      true, 4,
+      makeFieldView({makeTimeFillingHeader(1), makeTimeFillingHeader(1)}),
+      makeEmptyFieldView());
+  ASSERT_TRUE(dialog.currentPage().has_value());
+  EXPECT_TRUE(dialog.currentPage()->transmission_complete);
+  EXPECT_EQ(dialog.currentPage()->recovery.lost_packets, 0);
+  EXPECT_EQ(dialog.recoveryText(), QStringLiteral("Complete (3 row(s))"));
+
+  // The whole arrival was one appearance of the page, not one per frame.
+  EXPECT_EQ(dialog.listedSeenCount("100"), 1u);
 }
 
 TEST(TeletextDialogTest, ShowDataErrorsCheckDrivesThePageWidget) {

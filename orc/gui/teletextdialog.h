@@ -71,7 +71,9 @@ class TeletextDialog : public QDialog {
   /// Advance the trailing window to end at @p frame_index and re-render
   void setCurrentFrame(uint64_t frame_index);
 
-  /// Frames in the current window still lacking packet data
+  /// Next batch of frames in the current window still lacking packet data.
+  /// Deliberately capped: call again as deliveries land (see
+  /// TeletextPageAssembler::kMaxFramesPerRequest).
   std::vector<uint64_t> framesNeedingData() const {
     return assembler_.framesNeedingData();
   }
@@ -147,9 +149,9 @@ class TeletextDialog : public QDialog {
   /// Conventional magazine + two-hex-digit page label, e.g. "100", "1F0"
   static QString formatPageLabel(int magazine, int page_number);
 
-  /// One-line summary of how much of a page came back from the recovery chain
-  static QString formatRecovery(
-      const orc::presenters::TeletextPageRecoveryView& recovery);
+  /// One-line summary of whether the page's transmission has finished and how
+  /// much of it came back from the recovery chain
+  static QString formatRecovery(const orc::presenters::TeletextPageView& page);
 
   TeletextPageAssembler assembler_;
   std::optional<orc::presenters::TeletextPageView> current_page_;

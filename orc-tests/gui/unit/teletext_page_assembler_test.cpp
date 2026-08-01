@@ -19,10 +19,24 @@ constexpr uint64_t kWindow = TeletextPageAssembler::kTrailingWindowFrames;
 
 namespace {
 
+// The assembler decodes frames in order and waits for any it has not been
+// given, because a decoder cannot be fed a field it has already passed. The
+// dialog's request loop delivers every frame of the window for that reason;
+// tests that care about only a few of them fill in the rest here.
+void fillGapsBefore(TeletextPageAssembler& assembler, uint64_t frame) {
+  for (uint64_t earlier = assembler.windowStartFrame(); earlier < frame;
+       ++earlier) {
+    if (!assembler.hasFrame(earlier)) {
+      assembler.markFrameUnavailable(earlier);
+    }
+  }
+}
+
 // Store one complete transmission of page 100 in |frame|, terminated by a
 // time-filling header in the frame's second field.
 void storePage100(TeletextPageAssembler& assembler, uint64_t frame,
                   const std::string& row_text) {
+  fillGapsBefore(assembler, frame);
   assembler.storeFrame(
       frame,
       makeFieldView({makeHeaderPacket(1, 0x00), makeRowPacket(1, 1, row_text)}),
@@ -51,19 +65,47 @@ TEST(TeletextPageAssemblerTest, WindowStartsAtZeroForEarlyFrames) {
   EXPECT_EQ(needed.back(), 3u);
 }
 
-TEST(TeletextPageAssemblerTest, AdvancingWindowEvictsOldFrames) {
+// Frames are named a batch at a time: a window is minutes of video, and one
+// observation read per frame of it, queued at once, would sit in front of
+// everything else the previewer wants to do.
+TEST(TeletextPageAssemblerTest, FramesAreRequestedInPacedBatches) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(kWindow - 1);
-  assembler.storeFrame(0, makeEmptyFieldView(), makeEmptyFieldView());
-  assembler.storeFrame(kWindow - 1, makeEmptyFieldView(), makeEmptyFieldView());
-  ASSERT_TRUE(assembler.hasFrame(0));
 
-  assembler.setCurrentFrame(kWindow);  // window is now [1, kWindow]
+  const auto first = assembler.framesNeedingData();
+  ASSERT_EQ(first.size(), TeletextPageAssembler::kMaxFramesPerRequest);
+  EXPECT_EQ(first.front(), 0u);
+  // The whole outstanding count is still reported, so the progress readout
+  // counts down rather than sitting at the batch size.
+  EXPECT_EQ(assembler.framesNeedingDataCount(),
+            static_cast<std::size_t>(kWindow));
 
-  EXPECT_FALSE(assembler.hasFrame(0));
-  EXPECT_TRUE(assembler.hasFrame(kWindow - 1));
-  const auto needed = assembler.framesNeedingData();
-  EXPECT_EQ(needed.size(), kWindow - 1);  // all but the one cached frame
+  for (const uint64_t frame : first) {
+    assembler.markFrameUnavailable(frame);
+  }
+  ASSERT_EQ(assembler.cataloguedPages().size(), 0u);  // forces a decode pass
+
+  // The delivered batch has been consumed, so the next one carries on from
+  // where it left off rather than naming the same frames again.
+  const auto second = assembler.framesNeedingData();
+  ASSERT_FALSE(second.empty());
+  EXPECT_EQ(second.front(), first.back() + 1);
+}
+
+// A decoded frame's packets are released: the assembler holds frames waiting
+// their turn, not a transcript of everything it has ever read, which is what
+// keeps an unbounded forward run flat in memory.
+TEST(TeletextPageAssemblerTest, DecodedFramesAreNotRequestedAgain) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(2);
+  assembler.markFrameUnavailable(0);
+  assembler.markFrameUnavailable(1);
+  assembler.markFrameUnavailable(2);
+  ASSERT_EQ(assembler.cataloguedPages().size(), 0u);  // forces a decode pass
+
+  EXPECT_TRUE(assembler.hasFrame(0));
+  EXPECT_TRUE(assembler.framesNeedingData().empty());
+  EXPECT_EQ(assembler.framesNeedingDataCount(), 0u);
 }
 
 TEST(TeletextPageAssemblerTest, StaleDeliveriesOutsideWindowAreIgnored) {
@@ -96,6 +138,7 @@ TEST(TeletextPageAssemblerTest, AssemblesPageFromCachedWindow) {
   assembler.setCurrentFrame(2);
 
   // Page 100 (magazine 1, page 0x00) transmitted across frame 1's fields.
+  fillGapsBefore(assembler, 1);
   assembler.storeFrame(1,
                        makeFieldView({makeHeaderPacket(1, 0x00),
                                       makeRowPacket(1, 1, "HELLO TELETEXT")}),
@@ -118,10 +161,12 @@ TEST(TeletextPageAssemblerTest, LatestTransmissionOfPageWins) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(4);
 
+  fillGapsBefore(assembler, 1);
   assembler.storeFrame(1,
                        makeFieldView({makeHeaderPacket(1, 0x00),
                                       makeRowPacket(1, 1, "FIRST PASS")}),
                        makeEmptyFieldView());
+  fillGapsBefore(assembler, 3);
   assembler.storeFrame(3,
                        makeFieldView({makeHeaderPacket(1, 0x00, /*subcode=*/0,
                                                        /*erase_page=*/true),
@@ -136,15 +181,16 @@ TEST(TeletextPageAssemblerTest, LatestTransmissionOfPageWins) {
   EXPECT_EQ(entry->seen_frame, 3u);
 }
 
-// The trailing window regularly clips a page transmission at its edge, and on
-// a source carrying only a couple of teletext lines per field a whole page
-// takes longer to transmit than the window is wide. Rows the clipped
-// retransmission did not carry must survive from the earlier one — the row
-// copies the assembler accumulates are not bounded by the window.
+// A frame's packets are released the moment the decoder has consumed them, so
+// a later retransmission carrying only part of the page has nothing left to
+// re-read. Rows it did not carry must survive from the earlier transmission —
+// the row copies the assembler accumulates outlive the frames that delivered
+// them, which is the whole point of keeping them separately.
 TEST(TeletextPageAssemblerTest, ClippedRetransmissionKeepsRowsItDidNotCarry) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(2);
 
+  fillGapsBefore(assembler, 1);
   assembler.storeFrame(1,
                        makeFieldView({makeHeaderPacket(1, 0x00),
                                       makeRowPacket(1, 1, "FULL PAGE"),
@@ -153,23 +199,16 @@ TEST(TeletextPageAssemblerTest, ClippedRetransmissionKeepsRowsItDidNotCarry) {
                                       makeTimeFillingHeader(1)}));
   ASSERT_EQ(rowText(assembler.findPage(1, 0x00)->page, 1), "FULL PAGE");
 
-  // Step forward one frame at a time until the frame carrying the full
-  // transmission has left the window (the catalogue survives stepping). A
-  // later retransmission is then clipped by the window edge: only its header
-  // and first row fall inside, so a fresh decode of the window sees a
-  // fragment of the page.
+  // Play on well past that frame, then take a retransmission carrying only
+  // the header and the first row.
   const uint64_t clipped_frame =
       TeletextPageAssembler::kTrailingWindowFrames + 5;
-  for (uint64_t frame = 3; frame <= clipped_frame; ++frame) {
-    assembler.setCurrentFrame(frame);
-    if (frame == clipped_frame) {
-      assembler.storeFrame(frame,
-                           makeFieldView({makeHeaderPacket(1, 0x00),
-                                          makeRowPacket(1, 1, "CLIP")}),
-                           makeEmptyFieldView());
-    }
-  }
-  ASSERT_FALSE(assembler.hasFrame(1));
+  stepTo(assembler, clipped_frame);
+  fillGapsBefore(assembler, clipped_frame);
+  assembler.storeFrame(
+      clipped_frame,
+      makeFieldView({makeHeaderPacket(1, 0x00), makeRowPacket(1, 1, "CLIP")}),
+      makeFieldView({makeTimeFillingHeader(1)}));
 
   const auto* entry = assembler.findPage(1, 0x00);
 
@@ -193,6 +232,7 @@ TEST(TeletextPageAssemblerTest, ErasePageDropsAccumulatedRows) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(2);
 
+  fillGapsBefore(assembler, 1);
   assembler.storeFrame(
       1,
       makeFieldView({makeHeaderPacket(1, 0x00), makeRowPacket(1, 1, "OLD PAGE"),
@@ -201,17 +241,13 @@ TEST(TeletextPageAssemblerTest, ErasePageDropsAccumulatedRows) {
   ASSERT_EQ(rowText(assembler.findPage(1, 0x00)->page, 2), "OLD SECOND ROW");
 
   const uint64_t erase_frame = TeletextPageAssembler::kTrailingWindowFrames + 5;
-  for (uint64_t frame = 3; frame <= erase_frame; ++frame) {
-    assembler.setCurrentFrame(frame);
-    if (frame == erase_frame) {
-      assembler.storeFrame(
-          frame,
-          makeFieldView({makeHeaderPacket(1, 0x00, /*subcode=*/0,
-                                          /*erase_page=*/true),
-                         makeRowPacket(1, 1, "NEW PAGE")}),
-          makeFieldView({makeTimeFillingHeader(1)}));
-    }
-  }
+  stepTo(assembler, erase_frame);
+  fillGapsBefore(assembler, erase_frame);
+  assembler.storeFrame(erase_frame,
+                       makeFieldView({makeHeaderPacket(1, 0x00, /*subcode=*/0,
+                                                       /*erase_page=*/true),
+                                      makeRowPacket(1, 1, "NEW PAGE")}),
+                       makeFieldView({makeTimeFillingHeader(1)}));
 
   const auto* entry = assembler.findPage(1, 0x00);
 
@@ -227,11 +263,13 @@ TEST(TeletextPageAssemblerTest, NewSubcodeReplacesEvenWhenLessComplete) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(4);
 
+  fillGapsBefore(assembler, 1);
   assembler.storeFrame(1,
                        makeFieldView({makeHeaderPacket(1, 0x00, /*subcode=*/1),
                                       makeRowPacket(1, 1, "SUBPAGE ONE"),
                                       makeRowPacket(1, 2, "MORE TEXT")}),
                        makeFieldView({makeTimeFillingHeader(1)}));
+  fillGapsBefore(assembler, 3);
   assembler.storeFrame(3,
                        makeFieldView({makeHeaderPacket(1, 0x00, /*subcode=*/2),
                                       makeRowPacket(1, 1, "SUBPAGE TWO")}),
@@ -248,9 +286,11 @@ TEST(TeletextPageAssemblerTest, NewSubcodeReplacesEvenWhenLessComplete) {
 TEST(TeletextPageAssemblerTest, UnseenPageReturnsNothing) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(1);
+  fillGapsBefore(assembler, 1);
   assembler.storeFrame(
       1, makeFieldView({makeHeaderPacket(1, 0x00), makeTimeFillingHeader(1)}),
       makeEmptyFieldView());
+  ASSERT_NE(assembler.findPage(1, 0x00), nullptr);
 
   EXPECT_EQ(assembler.findPage(1, 0x01), nullptr);
   EXPECT_EQ(assembler.findPage(2, 0x00), nullptr);
@@ -261,6 +301,7 @@ TEST(TeletextPageAssemblerTest, CataloguesEveryPageSeenInWindow) {
   assembler.setCurrentFrame(2);
 
   storePage100(assembler, 1, "HELLO TELETEXT");
+  fillGapsBefore(assembler, 2);
   assembler.storeFrame(
       2,
       makeFieldView({makeHeaderPacket(8, 0x88), makeRowPacket(8, 1, "SUBS")}),
@@ -278,17 +319,17 @@ TEST(TeletextPageAssemblerTest, CataloguesEveryPageSeenInWindow) {
   EXPECT_EQ(pages[1].seen_frame, 2u);
 }
 
-TEST(TeletextPageAssemblerTest, PageStaysCataloguedAfterItsFramesAreEvicted) {
+TEST(TeletextPageAssemblerTest, PageStaysCataloguedAfterItsFramesAreReleased) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(1);
   storePage100(assembler, 1, "HELLO TELETEXT");
   ASSERT_NE(assembler.findPage(1, 0x00), nullptr);
 
-  // Sequential playback well past the window length: frame 1 is evicted but
-  // the page it carried stays listed at the frame it was seen.
+  // Sequential playback well past the window length. Frame 1's packets are
+  // long gone, but the page they carried stays listed at the frame it was
+  // seen: what the catalogue remembers is not bounded by the window.
   stepTo(assembler, kWindow + 20);
 
-  EXPECT_FALSE(assembler.hasFrame(1));
   const auto* entry = assembler.findPage(1, 0x00);
   ASSERT_NE(entry, nullptr);
   EXPECT_EQ(entry->seen_frame, 1u);
@@ -321,24 +362,152 @@ TEST(TeletextPageAssemblerTest, ShortBackwardStepKeepsCatalogue) {
 
 TEST(TeletextPageAssemblerTest, RevisionOnlyChangesWhenTheCatalogueChanges) {
   TeletextPageAssembler assembler;
-  assembler.setCurrentFrame(2);
+  assembler.setCurrentFrame(3);
   storePage100(assembler, 1, "HELLO TELETEXT");
 
   const uint64_t revision = assembler.catalogueRevision();
   ASSERT_EQ(assembler.cataloguedPages().size(), 1u);
   EXPECT_EQ(assembler.catalogueRevision(), revision);
 
-  // A frame with no teletext content re-decodes the window without changing
+  // A frame with no teletext content advances the decode without changing
   // what has been seen.
-  assembler.storeFrame(0, makeEmptyFieldView(), makeEmptyFieldView());
+  assembler.storeFrame(2, makeEmptyFieldView(), makeEmptyFieldView());
   EXPECT_EQ(assembler.catalogueRevision(), revision);
 
   // A new page does change it.
   assembler.storeFrame(
-      2,
+      3,
       makeFieldView({makeHeaderPacket(8, 0x88), makeRowPacket(8, 1, "SUBS")}),
       makeFieldView({makeTimeFillingHeader(8)}));
   EXPECT_NE(assembler.catalogueRevision(), revision);
+}
+
+// On a source carrying only a couple of teletext lines per field, a page is
+// spread over several frames, and stepping through them shows it filling in.
+// Each of those renders is right for the packets received so far — but a row
+// not yet sent looks exactly like a transmitted blank one, so the page has to
+// say which it is until the transmission ends.
+TEST(TeletextPageAssemblerTest, PageArrivingIsFlaggedUntilItsTransmissionEnds) {
+  TeletextPageAssembler assembler;
+
+  assembler.setCurrentFrame(0);
+  assembler.storeFrame(0,
+                       makeFieldView({makeHeaderPacket(1, 0x00),
+                                      makeRowPacket(1, 1, "FIRST ROW")}),
+                       makeEmptyFieldView());
+  const auto* entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_FALSE(entry->page.transmission_complete);
+  EXPECT_EQ(rowText(entry->page, 1), "FIRST ROW");
+  EXPECT_EQ(rowText(entry->page, 2), "");
+
+  // A later frame of the same transmission adds a row; still arriving.
+  assembler.setCurrentFrame(1);
+  assembler.storeFrame(1, makeFieldView({makeRowPacket(1, 2, "SECOND ROW")}),
+                       makeEmptyFieldView());
+  entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_FALSE(entry->page.transmission_complete);
+  EXPECT_EQ(rowText(entry->page, 2), "SECOND ROW");
+
+  // The next page's header ends the transmission.
+  assembler.setCurrentFrame(2);
+  assembler.storeFrame(2, makeFieldView({makeTimeFillingHeader(1)}),
+                       makeEmptyFieldView());
+  entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_TRUE(entry->page.transmission_complete);
+  EXPECT_EQ(rowText(entry->page, 2), "SECOND ROW");
+
+  ASSERT_EQ(assembler.cataloguedPages().size(), 1u);
+  EXPECT_TRUE(assembler.cataloguedPages().front().transmission_complete);
+}
+
+// Services re-send a page's header while its rows are still going out, to keep
+// the clock in the header live. Every one of those closes the assembly, but
+// they are all one appearance of the page: counting them separately made the
+// list claim a page had come round several times when the carousel had brought
+// it round once.
+TEST(TeletextPageAssemblerTest, RepeatedHeaderMidTransmissionIsOneAppearance) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(0);
+
+  // Header, header again, then the rows — the pattern a real service sends.
+  assembler.storeFrame(
+      0,
+      makeFieldView({makeHeaderPacket(1, 0x00), makeHeaderPacket(1, 0x00),
+                     makeRowPacket(1, 1, "ROW ONE")}),
+      makeFieldView({makeHeaderPacket(1, 0x00), makeRowPacket(1, 2, "ROW TWO"),
+                     makeTimeFillingHeader(1)}));
+
+  const auto* entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->times_seen, 1u);
+  EXPECT_TRUE(entry->page.transmission_complete);
+  // Rows sent between the repeated headers all belong to the same page.
+  EXPECT_EQ(rowText(entry->page, 1), "ROW ONE");
+  EXPECT_EQ(rowText(entry->page, 2), "ROW TWO");
+
+  // A genuine second appearance does count.
+  assembler.setCurrentFrame(1);
+  assembler.storeFrame(1,
+                       makeFieldView({makeHeaderPacket(1, 0x00),
+                                      makeRowPacket(1, 1, "ROW ONE")}),
+                       makeFieldView({makeTimeFillingHeader(1)}));
+  entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(entry->times_seen, 2u);
+}
+
+// A missing row proves nothing — services habitually omit the blank rows that
+// space a page out. An empty VBI *slot* does prove something: a service
+// part-way through sending a page fills every line it is using, in every
+// field. The lines in use are read off the transmission itself, so a
+// recording inserting on one line per field is not accused of losing half its
+// packets.
+TEST(TeletextPageAssemblerTest, OmittedRowsAreNotCountedAsLostPackets) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(1);
+
+  // Two packets in every field throughout, but rows 2 and 4 are never sent.
+  assembler.storeFrame(0,
+                       makeFieldView({makeHeaderPacket(1, 0x00),
+                                      makeRowPacket(1, 1, "ROW ONE")}),
+                       makeFieldView({makeRowPacket(1, 3, "ROW THREE"),
+                                      makeRowPacket(1, 5, "ROW FIVE")}));
+  assembler.storeFrame(
+      1,
+      makeFieldView({makeRowPacket(1, 6, "ROW SIX"), makeTimeFillingHeader(1)}),
+      makeEmptyFieldView());
+
+  const auto* entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  ASSERT_TRUE(entry->page.transmission_complete);
+  EXPECT_FALSE(entry->page.row_received[2]);
+  EXPECT_FALSE(entry->page.row_received[4]);
+  EXPECT_EQ(entry->page.recovery.lost_packets, 0)
+      << "rows the service chose not to send are not lost packets";
+}
+
+TEST(TeletextPageAssemblerTest, EmptySlotMidTransmissionIsALostPacket) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(1);
+
+  // Field 1 of frame 0 yields only one packet where every other field yields
+  // two: a slot the service must have filled came back empty.
+  assembler.storeFrame(0,
+                       makeFieldView({makeHeaderPacket(1, 0x00),
+                                      makeRowPacket(1, 1, "ROW ONE")}),
+                       makeFieldView({makeRowPacket(1, 3, "ROW THREE")}));
+  assembler.storeFrame(
+      1,
+      makeFieldView({makeRowPacket(1, 6, "ROW SIX"), makeTimeFillingHeader(1)}),
+      makeEmptyFieldView());
+
+  const auto* entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  ASSERT_TRUE(entry->page.transmission_complete);
+  EXPECT_EQ(entry->page.recovery.lost_packets, 1);
 }
 
 TEST(TeletextPageAssemblerTest, ClearDropsAllCachedFramesAndPages) {
