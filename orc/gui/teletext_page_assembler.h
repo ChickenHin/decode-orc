@@ -66,6 +66,14 @@ class TeletextPageAssembler {
     int magazine = 8;         ///< Displayed magazine number 1-8
     int page_number = 0;      ///< Two-digit hexadecimal page number 0x00-0xFF
     uint64_t seen_frame = 0;  ///< Frame carrying the most recent header packet
+    /// Transmissions of this page counted since the last discontinuity. A
+    /// carousel repeats its pages, so this is how often the page came round —
+    /// a rough measure of how reliably it can be recovered here.
+    uint64_t times_seen = 0;
+    /// Header field index of the newest transmission already counted. The
+    /// cached window is re-decoded from scratch on every frame change, so a
+    /// transmission only counts when its header lies past this one.
+    int64_t counted_header_field = -1;
     /// Most recent assembly, built from every row copy accumulated since the
     /// last discontinuity rather than from one transmission (see
     /// refreshCatalogue() and squasher_)
@@ -120,6 +128,7 @@ class TeletextPageAssembler {
     int magazine = 8;
     int page_number = 0;
     uint64_t seen_frame = 0;
+    uint64_t times_seen = 0;
   };
 
   /// Pages seen since the last discontinuity, ascending by page address

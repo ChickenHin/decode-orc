@@ -16,9 +16,9 @@
 #include <QDialog>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QStatusBar>
 #include <QString>
+#include <QTableWidget>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -37,10 +37,13 @@ class TeletextPageWidget;
  * recording, because teletext is a carousel medium — a single frame carries
  * only a fragment of one page (see TeletextPageAssembler).
  *
- * The catalogue is presented as a clickable list of the pages seen so far,
- * each with the frame it was last seen at; selecting one renders it. Status
- * text lives in a status bar along the bottom edge so transient messages
- * never reflow the page display.
+ * The catalogue is presented as a clickable table of the pages seen so far —
+ * page number, how many times the carousel has brought it round, and the
+ * frame it was last seen at; selecting a row renders that page. Rows are
+ * merged into place rather than rebuilt, and are ordered by page address, so
+ * the table stays still enough to click while the previewer is playing.
+ * Status text lives in a status bar along the bottom edge so transient
+ * messages never reflow the page display.
  *
  * MainWindow drives it: setCurrentFrame() on frame changes, then issues one
  * requestTeletextData() per frame reported by framesNeedingData() and feeds
@@ -101,8 +104,12 @@ class TeletextDialog : public QDialog {
   QString pageNumberText() const;
   void setPageNumberText(const QString& text);
 
-  /// Pages currently listed, in list order (test seam)
+  /// Pages currently listed, in table order (test seam)
   std::vector<QString> listedPages() const;
+
+  /// Times-seen count shown for @p page_label, or 0 when it is not listed
+  /// (test seam)
+  uint64_t listedSeenCount(const QString& page_label) const;
 
   /// Recovery readout for the displayed page (test seam; empty when hidden)
   QString recoveryText() const;
@@ -113,12 +120,26 @@ class TeletextDialog : public QDialog {
   void onShowErrorsToggled(bool checked);
 
  private:
+  /// Seen-pages table columns
+  enum PageColumn {
+    kColumnPage = 0,   ///< "100"
+    kColumnSeen = 1,   ///< transmissions counted since the last discontinuity
+    kColumnFrame = 2,  ///< frame of the most recent transmission (1-based)
+    kColumnCount = 3,
+  };
+
   void setupUI();
-  /// Re-render the requested page and refresh the seen-pages list
+  /// Re-render the requested page and refresh the seen-pages table
   void renderPage();
-  /// Rebuild the seen-pages list when the catalogue has changed
+  /// Merge the catalogue into the seen-pages table when it has changed
   void refreshPageList();
-  /// Select the list row matching the page-number entry, if it is listed
+  /// Create the three items of a table row, styling non-selectable pages
+  void createPageRow(int row,
+                     const TeletextPageAssembler::PageListing& listing);
+  /// Write the volatile columns (seen count, last frame) of an existing row
+  void updatePageRow(int row,
+                     const TeletextPageAssembler::PageListing& listing);
+  /// Select the table row matching the page-number entry, if it is listed
   void syncListSelection(const QString& page_label);
   /// Update the pending-observation notice from the outstanding frame count
   void updatePendingStatus();
@@ -133,17 +154,17 @@ class TeletextDialog : public QDialog {
   TeletextPageAssembler assembler_;
   std::optional<orc::presenters::TeletextPageView> current_page_;
 
-  // Catalogue revision the page list was last built from; guards needless
-  // rebuilds (which would fight the user's selection and scroll position).
+  // Catalogue revision the page table was last built from; guards needless
+  // merges (which would fight the user's selection and scroll position).
   uint64_t listed_revision_ = 0;
   bool list_populated_ = false;
-  // Set while the list is being rebuilt or programmatically selected, so
+  // Set while the table is being merged or programmatically selected, so
   // selection changes do not feed back into the page-number entry.
   bool updating_list_ = false;
 
   QLineEdit* page_edit_ = nullptr;
   QCheckBox* show_errors_check_ = nullptr;
-  QListWidget* pages_list_ = nullptr;
+  QTableWidget* pages_table_ = nullptr;
   QStatusBar* status_bar_ = nullptr;
   // "rows 23/24, 4 damaged byte(s)" for the displayed page.
   QLabel* recovery_label_ = nullptr;

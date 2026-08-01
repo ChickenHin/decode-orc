@@ -10,10 +10,12 @@
 #include <gtest/gtest.h>
 
 #include <QApplication>
+#include <QBrush>
 #include <QCheckBox>
 #include <QImage>
 #include <QLabel>
-#include <QListWidget>
+#include <QPalette>
+#include <QTableWidget>
 
 #include "support/teletext_packet_fixtures.h"
 #include "teletextdialog.h"
@@ -130,7 +132,8 @@ TEST(TeletextDialogTest, PendingThenPopulated_RendersRequestedPage) {
 
   auto* seen = dialog.findChild<QLabel*>("teletextSeenLabel");
   ASSERT_NE(seen, nullptr);
-  EXPECT_EQ(seen->text(), QString("Page 100 last seen at frame 2"));
+  EXPECT_EQ(seen->text(),
+            QString("Page 100 last seen at frame 2 (1 transmission(s))"));
 
   auto* page_widget = dialog.findChild<TeletextPageWidget*>();
   ASSERT_NE(page_widget, nullptr);
@@ -188,7 +191,7 @@ TEST(TeletextDialogTest, InvalidPageNumber_ShowsNotice) {
   EXPECT_TRUE(seen->text().contains("Invalid"));
 }
 
-TEST(TeletextDialogTest, SeenPagesAreListedInPageOrder) {
+TEST(TeletextDialogTest, SeenPagesAreTabulatedInPageOrder) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
@@ -199,30 +202,133 @@ TEST(TeletextDialogTest, SeenPagesAreListedInPageOrder) {
   EXPECT_EQ(listed[0], QString("100"));
   EXPECT_EQ(listed[1], QString("888"));
 
-  auto* list = dialog.findChild<QListWidget*>("teletextPagesList");
-  ASSERT_NE(list, nullptr);
-  // The list carries where each page was last seen (1-based frame numbers).
-  EXPECT_TRUE(list->item(0)->text().contains("frame 2"));
-  EXPECT_TRUE(list->item(1)->text().contains("frame 3"));
-  // The rendered page is selected in the list.
-  EXPECT_EQ(list->currentRow(), 0);
+  auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
+  ASSERT_NE(table, nullptr);
+  ASSERT_EQ(table->columnCount(), 3);
+  EXPECT_EQ(table->item(0, 0)->text(), QString("100"));
+  // One transmission each, and where each was last seen (1-based frames).
+  EXPECT_EQ(table->item(0, 1)->text(), QString("1"));
+  EXPECT_EQ(table->item(0, 2)->text(), QString("2"));
+  EXPECT_EQ(table->item(1, 2)->text(), QString("3"));
+  // The rendered page is selected in the table.
+  EXPECT_EQ(table->currentRow(), 0);
 }
 
-TEST(TeletextDialogTest, SelectingAListedPageRendersIt) {
+TEST(TeletextDialogTest, SelectingATabulatedPageRendersIt) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
   deliverTwoPageWindow(dialog);
 
-  auto* list = dialog.findChild<QListWidget*>("teletextPagesList");
-  ASSERT_NE(list, nullptr);
-  list->setCurrentRow(1);
+  auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
+  ASSERT_NE(table, nullptr);
+  table->setCurrentCell(1, 0);
 
   EXPECT_EQ(dialog.pageNumberText(), QString("888"));
   ASSERT_TRUE(dialog.currentPage().has_value());
   EXPECT_EQ(dialog.currentPage()->magazine, 8);
   EXPECT_EQ(dialog.currentPage()->page_number, 0x88);
   EXPECT_EQ(rowText(*dialog.currentPage(), 1), "SUBTITLE TEXT");
+}
+
+// A carousel repeats its pages, so how often one came round is what tells the
+// user whether it can be recovered reliably here.
+TEST(TeletextDialogTest, RepeatedTransmissionsAccumulateASeenCount) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  deliverPage100Window(dialog);
+  ASSERT_EQ(dialog.listedSeenCount("100"), 1u);
+
+  // Step forward, re-transmitting page 100 every third frame.
+  for (uint64_t frame = 3; frame <= 11; ++frame) {
+    dialog.setCurrentFrame(frame);
+    if (frame % 3 == 0) {
+      dialog.deliverFrameData(
+          true, frame * 2,
+          makeFieldView({makeHeaderPacket(1, 0x00),
+                         makeRowPacket(1, 1, "HELLO TELETEXT")}),
+          makeFieldView({makeTimeFillingHeader(1)}));
+    } else {
+      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
+                              makeEmptyFieldView());
+    }
+  }
+
+  // Frames 3, 6 and 9 carried the page on top of the original transmission.
+  // The window is re-decoded on every frame change, so this also asserts that
+  // replayed transmissions are not counted again.
+  EXPECT_EQ(dialog.listedSeenCount("100"), 4u);
+  EXPECT_EQ(dialog.listedPages().size(), 1u);
+}
+
+// EN 300 706 §9.3.1.1: a page number containing A-F cannot be selected on a
+// receiver. Such pages stay listed — they are real recovered data — but sort
+// below the selectable ones and are greyed.
+TEST(TeletextDialogTest, NonSelectablePagesSortLastAndAreGreyed) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.setCurrentFrame(2);
+  for (const uint64_t frame : dialog.framesNeedingData()) {
+    if (frame == 1) {
+      dialog.deliverFrameData(true, frame * 2,
+                              makeFieldView({makeHeaderPacket(1, 0xAF)}),
+                              makeFieldView({makeTimeFillingHeader(1)}));
+    } else if (frame == 2) {
+      dialog.deliverFrameData(true, frame * 2,
+                              makeFieldView({makeHeaderPacket(8, 0x88)}),
+                              makeFieldView({makeTimeFillingHeader(8)}));
+    } else {
+      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
+                              makeEmptyFieldView());
+    }
+  }
+
+  const auto listed = dialog.listedPages();
+  ASSERT_EQ(listed.size(), 2u);
+  EXPECT_EQ(listed[0], QString("888")) << "selectable pages come first";
+  EXPECT_EQ(listed[1], QString("1AF"));
+
+  auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
+  ASSERT_NE(table, nullptr);
+  const QBrush muted =
+      table->palette().brush(QPalette::Disabled, QPalette::Text);
+  EXPECT_EQ(table->item(1, 0)->foreground(), muted);
+  EXPECT_NE(table->item(0, 0)->foreground(), muted);
+}
+
+// Playback bumps the catalogue on almost every frame; rebuilding the table
+// each time dropped the scroll position and the selection under the user.
+TEST(TeletextDialogTest, TableRowsSurviveOngoingDeliveries) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  deliverTwoPageWindow(dialog);
+
+  auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
+  ASSERT_NE(table, nullptr);
+  table->setCurrentCell(1, 0);
+  ASSERT_EQ(dialog.pageNumberText(), QString("888"));
+
+  const QTableWidgetItem* row0 = table->item(0, 0);
+  const QTableWidgetItem* row1 = table->item(1, 0);
+
+  // Keep delivering frames that re-transmit page 888 only.
+  for (uint64_t frame = 3; frame <= 12; ++frame) {
+    dialog.setCurrentFrame(frame);
+    dialog.deliverFrameData(true, frame * 2,
+                            makeFieldView({makeHeaderPacket(8, 0x88)}),
+                            makeFieldView({makeTimeFillingHeader(8)}));
+  }
+
+  // The rows were updated in place, not recreated, and the user's selection
+  // is untouched.
+  EXPECT_EQ(table->item(0, 0), row0);
+  EXPECT_EQ(table->item(1, 0), row1);
+  EXPECT_EQ(table->currentRow(), 1);
+  EXPECT_EQ(dialog.pageNumberText(), QString("888"));
+  EXPECT_GT(dialog.listedSeenCount("888"), 1u);
 }
 
 TEST(TeletextDialogTest, PageListSurvivesSequentialStepping) {

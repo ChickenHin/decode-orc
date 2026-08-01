@@ -118,8 +118,8 @@ TeletextPageAssembler::cataloguedPages() const {
   std::vector<PageListing> listings;
   listings.reserve(catalogue_.size());
   for (const auto& [address, entry] : catalogue_) {
-    listings.push_back(
-        PageListing{entry.magazine, entry.page_number, entry.seen_frame});
+    listings.push_back(PageListing{entry.magazine, entry.page_number,
+                                   entry.seen_frame, entry.times_seen});
   }
   return listings;
 }
@@ -166,20 +166,27 @@ void TeletextPageAssembler::refreshCatalogue() const {
       it->second.magazine = snapshot.magazine;
       it->second.page_number = snapshot.page_number;
       it->second.seen_frame = seen_frame;
+      it->second.times_seen = 1;
+      it->second.counted_header_field = snapshot.header_field_index;
       it->second.page =
           orc::presenters::TeletextObservationPresenter::makePageView(snapshot);
       ++catalogue_revision_;
       return;
     }
 
-    const bool same_decode =
-        it->second.seen_frame == seen_frame &&
-        it->second.page.last_field_index == snapshot.last_field_index;
-    if (it->second.seen_frame != seen_frame) {
+    // The whole cached window is re-decoded on every frame change, so most
+    // snapshots replay a transmission already counted. Only a header past the
+    // newest one counted is a fresh appearance of the page in the carousel;
+    // this also keeps "last seen" at the latest transmission when the user
+    // steps backwards.
+    const bool new_transmission =
+        snapshot.header_field_index > it->second.counted_header_field;
+    if (new_transmission) {
+      it->second.counted_header_field = snapshot.header_field_index;
       it->second.seen_frame = seen_frame;
+      ++it->second.times_seen;
       ++catalogue_revision_;
-    }
-    if (same_decode) {
+    } else if (it->second.page.last_field_index == snapshot.last_field_index) {
       return;  // identical re-decode of an unchanged window
     }
 
