@@ -65,6 +65,7 @@ add_library(orc-sdk-support STATIC
     src/dropout_util.cpp
     src/preview_helpers.cpp
     src/colour_preview_conversion.cpp
+    src/teletext_slicer.cpp
     src/vbi_utilities.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,

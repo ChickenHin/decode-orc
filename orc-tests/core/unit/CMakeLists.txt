@@ -404,6 +404,15 @@ orc_add_core_unit_tests(
 
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
+        observers/teletext_observer_test.cpp
+)
+
+# SDK support-tier algorithm helpers (synthesis-based, no I/O).
+orc_add_core_unit_tests(
+        orc-core-unit-tests-support
+        "unit"
+
+        support/teletext_slicer_test.cpp
 )
 
 orc_add_core_unit_tests(

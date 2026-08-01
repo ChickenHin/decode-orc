@@ -522,12 +522,20 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   graphics, Level 1 attributes (colours, double height, flash ignored or
   static). No `FrameViewportWidget` needed — teletext has its own fixed
   geometry.
-- **Lifecycle.** Owned by `PreviewDialog` alongside the frame scope /
-  waveform dialogs (created on demand, `closeChildDialogs()` teardown);
-  refresh connected to `previewFrameChanged` with the standard
-  `isVisible()` guard, and field IDs resolved via `getFrameFields()`
-  (frame vs field preview modes). Menu entry on the preview dialog
-  (mirrors `showVBIDialogRequested`).
+- **Lifecycle.** An *observer* dialog, not a preview-view dialog: owned
+  by `MainWindow` like `VBIDialog`, `NtscObserverDialog`, and
+  `VideoParameterObserverDialog` (the View-menu dialogs — frame scope,
+  waveform — are `PreviewDialog`-owned; the Observers-menu dialogs are
+  not). Menu entry under the preview window's **Observers** menu,
+  emitting a new `showTeletextDialogRequested` signal handled by a
+  `MainWindow::onShowTeletextDialog()` slot — the exact
+  `showVBIDialogRequested` wiring. Refresh via
+  `MainWindow::updateTeletextDialog()` called from
+  `updateAllPreviewComponents()` with the standard `isVisible()` guard;
+  field IDs resolved via `getFrameFields()` (frame vs field preview
+  modes). The only structural difference from its VBI/NTSC siblings is
+  that this dialog is stateful (page decoder + trailing-frame-window
+  cache) rather than a per-field stateless display.
 - **Controls.** Page number entry, magazine/page spinner, subpage cycling,
   "hold", and a reveal toggle (conceals are a Level 1 attribute) can all be
   added incrementally; the initial dialog needs only page entry + render.
