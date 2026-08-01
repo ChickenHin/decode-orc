@@ -497,6 +497,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Runtime loader for a stage's instructions.md (platform file I/O)"
+  - path: orc/support/teletext_page_decoder.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues"
   - path: orc/support/teletext_slicer.h
     tier: support
     domain: ""

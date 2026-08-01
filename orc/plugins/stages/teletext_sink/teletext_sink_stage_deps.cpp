@@ -12,9 +12,12 @@
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
+#include <orc/support/teletext_page_decoder.h>
 #include <orc/support/teletext_slicer.h>
 
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <memory>
 #include <optional>
 #include <string>
@@ -36,6 +39,45 @@ constexpr uint64_t kProgressThrottleFrames = 10;
 // keep_empty_packets is enabled — the vhs-decode convention giving a 1:1
 // packet-to-(frame, field, line) mapping (design §2.2).
 constexpr std::array<uint8_t, kTeletextPacketBytes> kEmptyPacket{};
+
+// ITU-R BT.1700 Annex 1 Part B Table 1 item 2: 625-line PAL scans 50 fields
+// per second; subtitle cue timing derives from the field index (the same
+// field-number/field-rate derivation as the closed-caption sink).
+constexpr double kPalFieldsPerSecond = 50.0;
+
+// Format a field index as an SRT timestamp (HH:MM:SS,mmm).
+std::string srt_timestamp(int64_t field_index) {
+  const double seconds_total =
+      static_cast<double>(field_index) / kPalFieldsPerSecond;
+  const int64_t millis_total = std::llround(seconds_total * 1000.0);
+  const int64_t hours = millis_total / 3'600'000;
+  const int64_t minutes = (millis_total / 60'000) % 60;
+  const int64_t seconds = (millis_total / 1'000) % 60;
+  const int64_t millis = millis_total % 1'000;
+  char buffer[16];
+  std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld,%03lld",
+                static_cast<long long>(hours), static_cast<long long>(minutes),
+                static_cast<long long>(seconds),
+                static_cast<long long>(millis));
+  return buffer;
+}
+
+// Render the decoder's cues as a SubRip document.
+std::string format_srt(const std::vector<TeletextSubtitleCue>& cues) {
+  std::string srt;
+  size_t index = 1;
+  for (const auto& cue : cues) {
+    srt += std::to_string(index++);
+    srt += '\n';
+    srt += srt_timestamp(cue.start_field_index);
+    srt += " --> ";
+    srt += srt_timestamp(cue.end_field_index);
+    srt += '\n';
+    srt += cue.text;
+    srt += "\n\n";
+  }
+  return srt;
+}
 
 }  // namespace
 
@@ -120,6 +162,19 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     // EBU Tech. 3280-E §1.1.1 Table 1: 4FSC PAL sample rate; bit rate fixed
     // at 444 × fH by ETSI EN 300 706 §5.3 (TeletextSlicer default).
     slicer.emplace(kPalSampleRate, kTeletextBitRate, slicer_options);
+  }
+
+  // Subtitle export: every recovered packet is additionally fed, in the
+  // same temporal order, into a page decoder watching the subtitle page
+  // (design §6.1). The page string was validated by the stage.
+  std::optional<TeletextPageDecoder> page_decoder;
+  if (options.export_subtitles) {
+    page_decoder.emplace();
+    if (!page_decoder->set_subtitle_page(options.subtitle_page)) {
+      result.message = "Invalid subtitle page: " + options.subtitle_page;
+      writer->close();
+      return result;
+    }
   }
 
   // Data levels from the source, with the spec constants as fallback (the
@@ -220,6 +275,13 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             writer->write(packet->data(), packet->size());
             ++result.packets_written;
             field_has_data = true;
+            if (page_decoder.has_value()) {
+              // Cue timing is relative to the start of the export range.
+              const int64_t relative_field_index =
+                  static_cast<int64_t>(frame_id - frame_rng.first) * 2 +
+                  field_idx;
+              page_decoder->process_packet(*packet, relative_field_index);
+            }
           } else if (options.keep_empty_packets) {
             writer->write(kEmptyPacket.data(), kEmptyPacket.size());
             ++result.packets_written;
@@ -240,11 +302,44 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
 
     writer->close();
 
+    if (page_decoder.has_value()) {
+      // Close any cue still on screen at the end of the export range.
+      page_decoder->finalize(static_cast<int64_t>(total_frames) * 2);
+      const auto& cues = page_decoder->subtitle_cues();
+
+      // The .t42 extension was applied above; the SubRip document sits next
+      // to the packet stream.
+      std::string subtitle_path =
+          output_path.substr(0, output_path.length() - t42_ext.length()) +
+          ".srt";
+      std::shared_ptr<IFileWriterUint8> subtitle_writer =
+          stage_services_->create_buffered_file_writer_uint8(
+              kWriterBufferBytes);
+      if (!subtitle_writer || !subtitle_writer->open(subtitle_path)) {
+        result.message =
+            "Exported " + std::to_string(result.packets_written) +
+            " teletext packets to " + output_path +
+            " but failed to open subtitle output: " + subtitle_path;
+        ORC_LOG_ERROR("TeletextSinkDeps: {}", result.message);
+        return result;
+      }
+      const std::string srt = format_srt(cues);
+      subtitle_writer->write(reinterpret_cast<const uint8_t*>(srt.data()),
+                             srt.size());
+      subtitle_writer->close();
+      result.subtitle_path = subtitle_path;
+      result.subtitle_cues_written = cues.size();
+    }
+
     result.success = true;
     result.message = "Exported " + std::to_string(result.packets_written) +
                      " teletext packets (" +
                      std::to_string(result.fields_with_data) +
                      " fields with data) to " + output_path;
+    if (!result.subtitle_path.empty()) {
+      result.message += "; " + std::to_string(result.subtitle_cues_written) +
+                        " subtitle cues to " + result.subtitle_path;
+    }
     ORC_LOG_INFO("TeletextSinkDeps: {}", result.message);
     return result;
 

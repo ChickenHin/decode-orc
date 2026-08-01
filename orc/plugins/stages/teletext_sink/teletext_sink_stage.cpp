@@ -12,6 +12,7 @@
 
 #include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
+#include <orc/support/teletext_page_decoder.h>
 
 #include <memory>
 #include <stdexcept>
@@ -45,6 +46,17 @@ bool get_bool_or(const std::map<std::string, ParameterValue>& parameters,
     return fallback;
   }
   return std::get<bool>(it->second);
+}
+
+std::string get_string_or(
+    const std::map<std::string, ParameterValue>& parameters,
+    const std::string& name, const std::string& fallback) {
+  const auto it = parameters.find(name);
+  if (it == parameters.end() ||
+      !std::holds_alternative<std::string>(it->second)) {
+    return fallback;
+  }
+  return std::get<std::string>(it->second);
 }
 
 }  // namespace
@@ -160,6 +172,47 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  {
+    ParameterDescriptor desc;
+    desc.name = "export_subtitles";
+    desc.display_name = "Export Subtitles";
+    desc.description =
+        "Decode the subtitle page (C6-flagged, conventionally 888) and "
+        "write timed subtitle cues next to the T42 output";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "subtitle_page";
+    desc.display_name = "Subtitle Page";
+    desc.description =
+        "Teletext page carrying the subtitles: magazine digit (1-8) "
+        "followed by two hexadecimal page digits, e.g. 888";
+    desc.type = ParameterType::STRING;
+    desc.constraints.default_value = std::string("888");
+    desc.constraints.depends_on =
+        ParameterDependency{"export_subtitles", {"true"}};
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "subtitle_format";
+    desc.display_name = "Subtitle Format";
+    desc.description =
+        "Subtitle output format (SubRip .srt; colour and positioning are "
+        "dropped at this level)";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {"SRT"};
+    desc.constraints.default_value = std::string("SRT");
+    desc.constraints.depends_on =
+        ParameterDependency{"export_subtitles", {"true"}};
+    descriptors.push_back(desc);
+  }
+
   return descriptors;
 }
 
@@ -212,6 +265,22 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
   options.tolerant_framing = get_bool_or(parameters, "tolerant_framing", false);
   options.require_valid_mrag =
       get_bool_or(parameters, "require_valid_mrag", true);
+
+  options.export_subtitles = get_bool_or(parameters, "export_subtitles", false);
+  if (options.export_subtitles) {
+    options.subtitle_page = get_string_or(parameters, "subtitle_page", "888");
+    if (!TeletextPageDecoder::parse_page_number(options.subtitle_page)
+             .has_value()) {
+      throw std::runtime_error(
+          "Invalid subtitle page \"" + options.subtitle_page +
+          "\" (expected magazine digit 1-8 plus two hex digits, e.g. 888)");
+    }
+    const std::string format =
+        get_string_or(parameters, "subtitle_format", "SRT");
+    if (format != "SRT") {
+      throw std::runtime_error("Unsupported subtitle format: " + format);
+    }
+  }
 
   return options;
 }
@@ -273,6 +342,10 @@ bool TeletextSinkStage::trigger(
                       " teletext packets (" +
                       std::to_string(result.fields_with_data) +
                       " fields with data) to " + result.output_path;
+    if (!result.subtitle_path.empty()) {
+      trigger_status_ += "; " + std::to_string(result.subtitle_cues_written) +
+                         " subtitle cues to " + result.subtitle_path;
+    }
     ORC_LOG_INFO("TeletextSink: {}", trigger_status_);
     return true;
 

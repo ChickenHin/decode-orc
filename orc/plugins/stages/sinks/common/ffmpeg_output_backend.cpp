@@ -30,6 +30,7 @@
 #include "audio_pair_selection.h"
 #include "audio_sample_feed.h"
 #include "componentframe.h"
+#include "teletext_subtitle_feed.h"
 
 namespace orc {
 
@@ -288,6 +289,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   // Store audio/subtitle/chapter configuration
   embed_audio_ = config.embed_audio;
   embed_closed_captions_ = config.embed_closed_captions;
+  embed_teletext_subtitles_ = config.embed_teletext_subtitles;
+  teletext_subtitle_page_ = config.teletext_subtitle_page;
   embed_chapter_metadata_ = config.embed_chapter_metadata;
   vfr_ = config.vfr;
   start_field_index_ = config.start_field_index;
@@ -480,6 +483,44 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
             "embedding disabled");
         embed_closed_captions_ = false;
       }
+    }
+  }
+
+  // Setup teletext subtitle embedding if requested. The cues reuse the CC
+  // mov_text stream and muxing path unchanged — cues in, tx3g samples out.
+  if (embed_teletext_subtitles_) {
+    if (container_format_ != "mp4" && container_format_ != "mov") {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Teletext subtitles only supported in MP4/MOV "
+          "containers, disabling");
+      embed_teletext_subtitles_ = false;
+    } else if (embed_closed_captions_) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Closed captions already occupy the subtitle "
+          "stream; disabling teletext subtitle embedding");
+      embed_teletext_subtitles_ = false;
+    } else if (video_system_ != VideoSystem::PAL) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Teletext subtitles are PAL WST only, "
+          "disabling");
+      embed_teletext_subtitles_ = false;
+    } else if (!config.observation_context) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: No observation context provided, teletext "
+          "subtitle embedding disabled");
+      embed_teletext_subtitles_ = false;
+    } else if (!setupSubtitleEncoder()) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to setup subtitle encoder");
+      cleanup();
+      return false;
+    } else {
+      pending_cues_ = collect_teletext_subtitle_cues(
+          *config.observation_context, config.start_field_index,
+          config.num_fields, teletext_subtitle_page_);
+      ORC_LOG_INFO(
+          "FFmpegOutputBackend: Extracted {} teletext subtitle cues from "
+          "page {}",
+          pending_cues_.size(), teletext_subtitle_page_);
     }
   }
 
@@ -1628,6 +1669,7 @@ std::string FFmpegOutputBackend::getFormatInfo() const {
   std::string info = container_format_ + " (" + codec_name_;
   if (embed_audio_) info += " + audio";
   if (embed_closed_captions_) info += " + CC";
+  if (embed_teletext_subtitles_) info += " + TTX";
   if (embed_chapter_metadata_) info += " + chapters";
   info += ")";
   return info;
@@ -2120,8 +2162,8 @@ bool FFmpegOutputBackend::setupSubtitleEncoder() {
 }
 
 bool FFmpegOutputBackend::encodeClosedCaptionsForFrame() {
-  if (!embed_closed_captions_ || !subtitle_codec_ctx_ ||
-      pending_cues_.empty()) {
+  if ((!embed_closed_captions_ && !embed_teletext_subtitles_) ||
+      !subtitle_codec_ctx_ || pending_cues_.empty()) {
     return true;  // No captions to encode
   }
 

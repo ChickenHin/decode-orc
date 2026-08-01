@@ -94,7 +94,7 @@ TEST_F(TeletextSinkStage, NodeTypeInfo_MatchesDesign) {
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 6u);
+  ASSERT_EQ(descriptors.size(), 9u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
@@ -125,6 +125,31 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   EXPECT_EQ(descriptors[5].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[5].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[5].constraints.default_value), true);
+
+  EXPECT_EQ(descriptors[6].name, "export_subtitles");
+  EXPECT_EQ(descriptors[6].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[6].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), false);
+
+  EXPECT_EQ(descriptors[7].name, "subtitle_page");
+  EXPECT_EQ(descriptors[7].type, orc::ParameterType::STRING);
+  ASSERT_TRUE(descriptors[7].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[7].constraints.default_value),
+            "888");
+  ASSERT_TRUE(descriptors[7].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[7].constraints.depends_on->parameter_name,
+            "export_subtitles");
+
+  EXPECT_EQ(descriptors[8].name, "subtitle_format");
+  EXPECT_EQ(descriptors[8].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[8].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[8].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[8].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[8].constraints.default_value),
+            "SRT");
+  ASSERT_TRUE(descriptors[8].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[8].constraints.depends_on->parameter_name,
+            "export_subtitles");
 }
 
 TEST_F(TeletextSinkStage, ConfigurationStatus_RedUntilOutputPathSet) {
@@ -274,6 +299,87 @@ TEST_F(TeletextSinkStage, Trigger_ReportsCountsFromDepsResult) {
   EXPECT_EQ(instance_->get_trigger_status(),
             "Exported 84 teletext packets (2 fields with data) to out.t42");
   EXPECT_FALSE(instance_->is_trigger_in_progress());
+}
+
+TEST_F(TeletextSinkStage, Trigger_PassesSubtitleOptionsToDeps) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")},
+      {"export_subtitles", true},
+      {"subtitle_page", std::string("150")},
+      {"subtitle_format", std::string("SRT")}};
+
+  EXPECT_TRUE(
+      instance_->trigger(make_valid_input(), params, mockObservationContext_));
+
+  EXPECT_TRUE(captured.export_subtitles);
+  EXPECT_EQ(captured.subtitle_page, "150");
+}
+
+TEST_F(TeletextSinkStage, Trigger_SubtitleExportDisabledByDefault) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_FALSE(captured.export_subtitles);
+}
+
+TEST_F(TeletextSinkStage, Trigger_RejectsMalformedSubtitlePage) {
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")},
+      {"export_subtitles", true},
+      {"subtitle_page", std::string("98X")}};
+
+  EXPECT_FALSE(
+      instance_->trigger(make_valid_input(), params, mockObservationContext_));
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Error: Invalid subtitle page \"98X\" (expected magazine digit "
+            "1-8 plus two hex digits, e.g. 888)");
+}
+
+TEST_F(TeletextSinkStage, Trigger_RejectsUnsupportedSubtitleFormat) {
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")},
+      {"export_subtitles", true},
+      {"subtitle_format", std::string("VTT")}};
+
+  EXPECT_FALSE(
+      instance_->trigger(make_valid_input(), params, mockObservationContext_));
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Error: Unsupported subtitle format: VTT");
+}
+
+TEST_F(TeletextSinkStage, Trigger_ReportsSubtitleCountsFromDepsResult) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  deps_result.packets_written = 84;
+  deps_result.fields_with_data = 2;
+  deps_result.subtitle_path = "out.srt";
+  deps_result.subtitle_cues_written = 3;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")}, {"export_subtitles", true}};
+
+  EXPECT_TRUE(
+      instance_->trigger(make_valid_input(), params, mockObservationContext_));
+
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Exported 84 teletext packets (2 fields with data) to out.t42; "
+            "3 subtitle cues to out.srt");
 }
 
 TEST_F(TeletextSinkStage, Trigger_ReportsDepsFailure) {

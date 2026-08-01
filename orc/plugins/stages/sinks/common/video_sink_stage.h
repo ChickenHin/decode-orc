@@ -216,11 +216,14 @@ class VideoSinkStage : public DAGStage,
   bool embed_audio_;  // Embed pipeline audio in output (MP4/MKV only)
   std::string audio_channel_pairs_;  // "all" or comma-separated 0-based
                                      // indices
-  double audio_gain_db_;         // Gain for embedded audio in dB (0 = unity)
-  bool embed_closed_captions_;   // Embed closed captions in MP4 output (MP4
-                                 // only, converted to mov_text)
-  bool embed_chapter_metadata_;  // Write chapter markers from VBI data
-                                 // (MKV/MP4/MOV)
+  double audio_gain_db_;           // Gain for embedded audio in dB (0 = unity)
+  bool embed_closed_captions_;     // Embed closed captions in MP4 output (MP4
+                                   // only, converted to mov_text)
+  bool embed_teletext_subtitles_;  // Embed decoded teletext subtitles as
+                                   // mov_text (PAL WST, MP4/MOV only)
+  std::string teletext_subtitle_page_;  // Teletext subtitle page, e.g. "888"
+  bool embed_chapter_metadata_;         // Write chapter markers from VBI data
+                                        // (MKV/MP4/MOV)
 
   // Encoder quality parameters (for FFmpeg output)
   std::string encoder_preset_;    // "fast", "medium", "slow", "veryslow"

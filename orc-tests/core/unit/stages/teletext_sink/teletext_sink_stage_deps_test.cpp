@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/support/teletext_page_decoder.h>
 #include <orc/support/teletext_slicer.h>
 
 #include <array>
@@ -66,6 +67,50 @@ std::array<uint8_t, orc::kTeletextPacketBytes> make_payload(uint8_t variant) {
   auto payload = orc::tests::make_test_payload();
   payload[2] = variant;
   return payload;
+}
+
+// X/0 page header for transmission magazine 0 (displayed magazine 8,
+// page 8<page_number:2x>), 32 space header characters.
+std::array<uint8_t, orc::kTeletextPacketBytes> make_header_packet(
+    int page_number, bool subtitle, bool erase) {
+  std::array<uint8_t, orc::kTeletextPacketBytes> packet{};
+  const auto mrag = orc::tests::make_mrag(0, 0);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  packet[2] =
+      orc::teletext_hamming84_encode(static_cast<uint8_t>(page_number & 0xF));
+  packet[3] = orc::teletext_hamming84_encode(
+      static_cast<uint8_t>((page_number >> 4) & 0xF));
+  packet[4] = orc::teletext_hamming84_encode(0);
+  packet[5] = orc::teletext_hamming84_encode(erase ? 0x8 : 0x0);  // C4
+  packet[6] = orc::teletext_hamming84_encode(0);
+  packet[7] = orc::teletext_hamming84_encode(subtitle ? 0x8 : 0x0);  // C6
+  packet[8] = orc::teletext_hamming84_encode(0);
+  packet[9] = orc::teletext_hamming84_encode(0);
+  for (size_t i = 0; i < 32; ++i) {
+    packet[10 + i] = orc::teletext_odd_parity_encode(' ');
+  }
+  return packet;
+}
+
+// Displayable row for transmission magazine 0 with boxed subtitle text
+// (Start Box ×2 ... End Box, the C5/C6 convention).
+std::array<uint8_t, orc::kTeletextPacketBytes> make_subtitle_row_packet(
+    int row, const std::string& text) {
+  std::array<uint8_t, orc::kTeletextPacketBytes> packet{};
+  const auto mrag = orc::tests::make_mrag(0, row);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  std::string bytes;
+  bytes.push_back(0x0B);
+  bytes.push_back(0x0B);
+  bytes += text;
+  bytes.push_back(0x0A);
+  for (size_t i = 0; i < 40; ++i) {
+    const char c = i < bytes.size() ? bytes[i] : ' ';
+    packet[2 + i] = orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+  }
+  return packet;
 }
 
 }  // namespace
@@ -379,6 +424,118 @@ TEST_F(TeletextSinkStageDeps, ExportT42_ThrottlesProgressReporting) {
   const std::vector<std::pair<uint64_t, uint64_t>> expected = {{10, 20},
                                                                {20, 20}};
   EXPECT_EQ(progress, expected);
+}
+
+TEST_F(TeletextSinkStageDeps, ExportT42_WritesSubtitleSrtWhenEnabled) {
+  // A minimal subtitle transmission on 0-based field line 7: header (C6 +
+  // C4) in field 0, one boxed row in field 1, terminating time-filling
+  // header in field 2.
+  const auto header = make_header_packet(0x88, /*subtitle=*/true,
+                                         /*erase=*/true);
+  const auto row = make_subtitle_row_packet(20, "HELLO");
+  const auto terminator =
+      make_header_packet(0xFF, /*subtitle=*/false, /*erase=*/false);
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 2}));
+  EXPECT_CALL(mockRepresentation_, has_frame(_)).WillRepeatedly(Return(true));
+
+  // Two writers: the T42 packet stream, then the SubRip document.
+  auto srt_writer = std::make_shared<StrictMock<MockFileWriterUint8>>();
+  std::vector<uint8_t> srt_written;
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(1UL * 1024 * 1024))
+      .Times(2)
+      .WillOnce(Return(pMockFileWriterUint8_))
+      .WillOnce(Return(srt_writer));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("out.t42")).WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(_, _))
+      .WillRepeatedly(Invoke([this](const uint8_t* data, size_t count) {
+        written_.insert(written_.end(), data, data + count);
+      }));
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+  EXPECT_CALL(*srt_writer, open("out.srt")).WillOnce(Return(true));
+  EXPECT_CALL(*srt_writer, write(_, _))
+      .WillRepeatedly(Invoke([&srt_written](const uint8_t* data, size_t count) {
+        srt_written.insert(srt_written.end(), data, data + count);
+      }));
+  EXPECT_CALL(*srt_writer, close()).Times(1);
+
+  MockObserverHandle* observer = expect_observer_created();
+  EXPECT_CALL(*observer, process_frame(_, _, _)).Times(3);
+
+  EXPECT_CALL(mockContext_, has(_, "teletext", "present"))
+      .WillRepeatedly(Return(false));
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(1), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(row))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(terminator))));
+  EXPECT_CALL(mockContext_, clear_field(_)).Times(6);
+
+  auto deps = make_deps();
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.export_subtitles = true;
+  options.subtitle_page = "888";
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.packets_written, 3u);
+  EXPECT_EQ(result.subtitle_path, "out.srt");
+  EXPECT_EQ(result.subtitle_cues_written, 1u);
+  EXPECT_EQ(result.message,
+            "Exported 3 teletext packets (3 fields with data) to out.t42; "
+            "1 subtitle cues to out.srt");
+
+  // Cue displayed from the row's field (1 → 20 ms at 50 fields/s) and
+  // closed by finalize at the end of the 3-frame range (field 6 → 120 ms).
+  const std::string expected_srt =
+      "1\n00:00:00,020 --> 00:00:00,120\nHELLO\n\n";
+  EXPECT_EQ(std::string(srt_written.begin(), srt_written.end()), expected_srt);
+}
+
+TEST_F(TeletextSinkStageDeps,
+       ExportT42_ReportsFailureWhenSubtitleWriterCannotOpen) {
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+
+  auto srt_writer = std::make_shared<StrictMock<MockFileWriterUint8>>();
+  EXPECT_CALL(mockStageServices_, create_buffered_file_writer_uint8(_))
+      .Times(2)
+      .WillOnce(Return(pMockFileWriterUint8_))
+      .WillOnce(Return(srt_writer));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("out.t42")).WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+  EXPECT_CALL(*srt_writer, open("out.srt")).WillOnce(Return(false));
+
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.export_subtitles = true;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_EQ(result.message,
+            "Exported 0 teletext packets to out.t42 but failed to open "
+            "subtitle output: out.srt");
 }
 
 TEST_F(TeletextSinkStageDeps, ExportT42_NonDefaultOptionsSliceDirectly) {

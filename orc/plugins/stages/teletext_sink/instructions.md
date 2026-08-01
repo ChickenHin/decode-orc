@@ -17,6 +17,8 @@ For each frame in the input range, the stage probes the candidate VBI lines of b
 
 The output is a flat, headerless sequence of 42-byte packets in **transmission coding**: Hamming 8/4 on addressing bytes and odd parity on display bytes are preserved, with no error correction applied. Consumers decode the stream exactly as they would a live transmission.
 
+Optionally, the stage can additionally decode the subtitle page (pages flagged C6 in the header control bits, conventionally page 888 in the UK) and write the recovered subtitles as a SubRip (`.srt`) file next to the packet stream. Cue timing derives from the field number at 50 fields/s; colour, positioning, and other Level 1 presentation attributes are dropped — SRT carries the plain text.
+
 ## Parameters
 
 ### output_path (file path)
@@ -36,6 +38,15 @@ Accept framing codes with one bit error. Recovers more packets from noisy source
 
 ### require_valid_mrag (boolean)
 Drop packets whose magazine/row address bytes fail Hamming 8/4 correction. This suppresses false framing-code locks on noise while still passing single-bit-damaged packets through to downstream tools. Default: `true`.
+
+### export_subtitles (boolean)
+Decode the subtitle page alongside the T42 export and write timed subtitle cues to a `.srt` file next to the output (same name, `.srt` extension). A subtitle is displayed when the page arrives, replaced when its text changes, and cleared when the page is erased or loses its subtitle flag. Default: `false`.
+
+### subtitle_page (string)
+The teletext page carrying the subtitles: a magazine digit (1–8) followed by two hexadecimal page digits, e.g. `888` (the UK convention). Only used when `export_subtitles` is enabled. Default: `888`.
+
+### subtitle_format (string)
+Subtitle output format. Currently only `SRT` (SubRip) is offered — the least lossy portable target for teletext subtitle text; colour and positioning are dropped at this level. Default: `SRT`.
 
 ## Notes
 

@@ -39,6 +39,12 @@ struct TeletextSinkOptions {
   // Drop packets whose MRAG fails Hamming 8/4 correction
   // (TeletextSlicerOptions).
   bool require_valid_mrag{true};
+  // Decode the subtitle page alongside the T42 export and write SubRip cues
+  // next to the packet stream (design §6.1).
+  bool export_subtitles{false};
+  // Watched subtitle page in the conventional magazine + two-hex-digit form
+  // (validated by the stage via TeletextPageDecoder::parse_page_number).
+  std::string subtitle_page{"888"};
 };
 
 struct TeletextSinkResult {
@@ -48,6 +54,9 @@ struct TeletextSinkResult {
   std::string output_path;
   uint64_t packets_written{0};
   uint64_t fields_with_data{0};
+  // Subtitle export results (export_subtitles only).
+  std::string subtitle_path;
+  uint64_t subtitle_cues_written{0};
 };
 
 class ITeletextSinkStageDeps {

@@ -390,11 +390,21 @@ PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the s
 * `require_valid_mrag` (boolean)
     - Drop packets whose magazine/row address fails Hamming 8/4 correction (suppresses false locks on noise).
     - Default: `true`.
+* `export_subtitles` (boolean)
+    - Decode the subtitle page alongside the T42 export and write timed cues to a `.srt` file next to the output.
+    - Default: `false`.
+* `subtitle_page` (string)
+    - Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`.
+    - Default: `888`.
+* `subtitle_format` (string)
+    - Subtitle output format; currently `SRT` (SubRip) only.
+    - Default: `SRT`.
 
 **Notes**
 
 * PAL sources only; other video systems report an error.
 * The `.t42` format is described on the zxnet teletext wiki (T42 packet stream).
+* Subtitle export drops Level 1 colour and positioning attributes; the `.srt` carries plain text timed from the field rate.
 
 ---
 
@@ -497,6 +507,12 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 
 * `embed_closed_captions` (bool)
     - FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only. Default: `false`.
+
+* `embed_teletext_subtitles` (bool)
+    - FFmpeg mode only. Decode teletext subtitles (PAL WST sources only) and embed them as mov_text subtitles. MP4/MOV output only; mutually exclusive with `embed_closed_captions`. Default: `false`.
+
+* `teletext_subtitle_page` (string)
+    - FFmpeg mode only; available only when `embed_teletext_subtitles` is enabled. Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`. Default: `888`.
 
 * `embed_chapter_metadata` (bool)
     - FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.

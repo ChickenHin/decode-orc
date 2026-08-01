@@ -464,4 +464,55 @@ TEST(VideoSinkStageTest, SetParameters_RoundTripsAudioChannelPairs) {
   params = fresh.get_parameters();
   EXPECT_EQ(string_param(params, "audio_channel_pairs"), "all");
 }
+
+TEST(VideoSinkStageTest, ParameterDescriptors_OfferTeletextSubtitleEmbedding) {
+  orc::VideoSinkStage stage;
+  auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Composite);
+
+  // embed_teletext_subtitles follows the embed_closed_captions gating: only
+  // the MP4/MOV formats that carry a mov_text stream.
+  const auto* embed = find_parameter(descriptors, "embed_teletext_subtitles");
+  ASSERT_NE(embed, nullptr);
+  EXPECT_EQ(embed->type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(embed->constraints.default_value.has_value());
+  EXPECT_FALSE(std::get<bool>(*embed->constraints.default_value));
+  ASSERT_TRUE(embed->constraints.depends_on.has_value());
+  EXPECT_EQ(embed->constraints.depends_on->parameter_name, "ffmpeg_format");
+  EXPECT_TRUE(
+      has_string(embed->constraints.depends_on->required_values, "mp4-h264"));
+  EXPECT_FALSE(
+      has_string(embed->constraints.depends_on->required_values, "mkv-ffv1"));
+
+  const auto* page = find_parameter(descriptors, "teletext_subtitle_page");
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(page->type, orc::ParameterType::STRING);
+  ASSERT_TRUE(page->constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*page->constraints.default_value), "888");
+  ASSERT_TRUE(page->constraints.depends_on.has_value());
+  EXPECT_EQ(page->constraints.depends_on->parameter_name,
+            "embed_teletext_subtitles");
+}
+
+TEST(VideoSinkStageTest, SetParameters_RoundTripsTeletextSubtitleSettings) {
+  orc::VideoSinkStage stage;
+
+  ASSERT_TRUE(
+      stage.set_parameters({{"embed_teletext_subtitles", true},
+                            {"teletext_subtitle_page", std::string("150")}}));
+  auto params = stage.get_parameters();
+  auto embed_it = params.find("embed_teletext_subtitles");
+  ASSERT_NE(embed_it, params.end());
+  ASSERT_TRUE(std::holds_alternative<bool>(embed_it->second));
+  EXPECT_TRUE(std::get<bool>(embed_it->second));
+  EXPECT_EQ(string_param(params, "teletext_subtitle_page"), "150");
+
+  // Defaults: disabled, watching page 888.
+  orc::VideoSinkStage fresh;
+  params = fresh.get_parameters();
+  embed_it = params.find("embed_teletext_subtitles");
+  ASSERT_NE(embed_it, params.end());
+  EXPECT_FALSE(std::get<bool>(embed_it->second));
+  EXPECT_EQ(string_param(params, "teletext_subtitle_page"), "888");
+}
 }  // namespace orc_unit_test

@@ -11,7 +11,7 @@ Use this sink at the end of your pipeline to export the decoded video.
 
 ## What it does
 
-Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode: encoded via FFmpeg into the chosen container and codec, or as raw decoded frames without compression. In FFmpeg mode it can optionally embed pipeline audio channel pairs (up to 8, one output stream per channel pair), closed captions (as mov_text subtitles, MP4/MOV only), and chapter markers derived from VBI data.
+Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode: encoded via FFmpeg into the chosen container and codec, or as raw decoded frames without compression. In FFmpeg mode it can optionally embed pipeline audio channel pairs (up to 8, one output stream per channel pair), closed captions or teletext subtitles (as mov_text subtitles, MP4/MOV only), and chapter markers derived from VBI data.
 
 ## Parameters
 
@@ -107,6 +107,12 @@ FFmpeg mode only; available only when `embed_audio` is enabled. Gain applied uni
 ### embed_closed_captions (bool)
 FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only; converts EIA-608 captions from VBI. Default: `false`.
 
+### embed_teletext_subtitles (bool)
+FFmpeg mode only. Decode teletext subtitles (PAL WST sources only) and embed them as mov_text subtitles. MP4/MOV output only. The subtitle page is decoded from the VBI teletext transmission; colour and positioning are dropped — the embedded track carries plain text. Mutually exclusive with `embed_closed_captions` (both share the single subtitle stream; closed captions take precedence). Default: `false`.
+
+### teletext_subtitle_page (string)
+FFmpeg mode only; available only when `embed_teletext_subtitles` is enabled. The teletext page carrying the subtitles: a magazine digit (1–8) followed by two hexadecimal page digits, e.g. `888` (the UK convention). Default: `888`.
+
 ### embed_chapter_metadata (bool)
 FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
 
@@ -129,7 +135,8 @@ Opens a preset helper dialog that lets you select common encoder configurations 
 
 ## Notes
 
-- Raw mode does not support audio, closed caption, or chapter embedding; those options apply to FFmpeg output only.
+- Raw mode does not support audio, closed caption, teletext subtitle, or chapter embedding; those options apply to FFmpeg output only.
+- Teletext subtitle embedding is PAL WST only and requires an MP4/MOV container; it is skipped (with a log warning) for other systems or containers.
 - Raw output files can be very large; ensure sufficient disk space before triggering.
 - The `y4m` raw format adds a Y4M header to the file, making it directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.
 - Closed caption embedding is only supported in MP4/MOV containers.
