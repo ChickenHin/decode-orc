@@ -350,6 +350,54 @@ This stage extracts raw EFM (Eight-to-Fourteen Modulation) t-values from the inc
 
 ---
 
+## Teletext Sink
+
+| | |
+|-|-|
+| **Stage id** | `teletext_sink` |
+| **Stage name** | Teletext Sink |
+| **Connections** | 1 input → no outputs |
+| **Purpose** | Extract World System Teletext data lines from the VBI of PAL video and write them as a T42 packet stream |
+
+**Use this stage when:**
+
+* Preserving teletext carried by a PAL LaserDisc, CVBS capture, or tape source
+* Producing a `.t42` stream for external teletext tools (vhs-teletext, wxTED)
+
+**What it does**
+
+Probes the candidate VBI lines of both fields of every frame for teletext data lines (clock run-in and framing code), recovers the 42-byte packets, and writes them as a flat, headerless `.t42` packet stream in strictly temporal order (frame → field → ascending line). Packets keep their transmission coding (Hamming 8/4 addressing, odd-parity display bytes) with no correction applied, so consumers decode the stream exactly as a receiver decodes a live broadcast.
+
+PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-quality CVBS captures are expected to decode cleanly, while consumer VHS recordings will be degraded.
+
+**Parameters**
+
+* `output_path` (string)
+    - Path to the output `.t42` file (extension appended if absent).
+    - Required.
+* `first_vbi_line` (integer)
+    - First candidate field line probed, 1-based, both fields.
+    - Default: `6`.
+* `last_vbi_line` (integer)
+    - Last candidate field line probed, 1-based, both fields.
+    - Default: `22`.
+* `keep_empty_packets` (boolean)
+    - Emit 42 zero bytes for candidate lines with no data so packet position maps 1:1 to (frame, field, line) — the vhs-decode convention.
+    - Default: `false`.
+* `tolerant_framing` (boolean)
+    - Accept framing codes with one bit error (more packets from noisy sources, higher false-positive rate).
+    - Default: `false`.
+* `require_valid_mrag` (boolean)
+    - Drop packets whose magazine/row address fails Hamming 8/4 correction (suppresses false locks on noise).
+    - Default: `true`.
+
+**Notes**
+
+* PAL sources only; other video systems report an error.
+* The `.t42` format is described on the zxnet teletext wiki (T42 packet stream).
+
+---
+
 ## Video Sink
 
 | | |
