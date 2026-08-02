@@ -15,6 +15,7 @@
 #include <QDialog>
 #include <QGroupBox>
 #include <QLabel>
+#include <QStatusBar>
 #include <memory>
 
 #include "presenters/include/ntsc_observation_view_models.h"
@@ -67,7 +68,10 @@ class NtscObserverDialog : public QDialog {
 
   /**
    * @brief Show a "computing" pending state while observations are fetched
-   *        asynchronously (Phase 5), cleared once values arrive.
+   *        asynchronously, cleared once values arrive.
+   *
+   * The notice appears in the status bar, so the field groups keep their
+   * position while it comes and goes.
    */
   void showPending();
 
@@ -77,6 +81,10 @@ class NtscObserverDialog : public QDialog {
       QGroupBox* field_group, const QString& field_label, QLabel* fm_present,
       QLabel* fm_data, QLabel* fm_flag, QLabel* white_flag,
       const orc::presenters::NtscFieldObservationsView& observations);
+
+  // Status bar along the bottom edge; always present so that showing or hiding
+  // the pending notice never changes the dialog's layout.
+  QStatusBar* status_bar_ = nullptr;
 
   // Pending-state notice shown while an async observation request is in flight.
   QLabel* status_label_;

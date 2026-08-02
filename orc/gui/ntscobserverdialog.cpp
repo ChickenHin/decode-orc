@@ -13,6 +13,7 @@
 #include <QFontDatabase>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QStatusBar>
 #include <QVBoxLayout>
 
 #include "logging.h"
@@ -35,13 +36,13 @@ NtscObserverDialog::NtscObserverDialog(QWidget* parent) : QDialog(parent) {
 NtscObserverDialog::~NtscObserverDialog() = default;
 
 void NtscObserverDialog::setupUI() {
-  auto* mainLayout = new QVBoxLayout(this);
+  auto* outerLayout = new QVBoxLayout(this);
+  outerLayout->setContentsMargins(0, 0, 0, 0);
+  outerLayout->setSpacing(0);
 
-  // Pending-state notice (hidden until an async request is in flight).
-  status_label_ = new QLabel(this);
-  status_label_->setObjectName("observationStatusLabel");
-  status_label_->setVisible(false);
-  mainLayout->addWidget(status_label_);
+  auto* mainLayout = new QVBoxLayout();
+  mainLayout->setContentsMargins(9, 9, 9, 9);
+  outerLayout->addLayout(mainLayout, /*stretch=*/1);
 
   // Field 1 group (FM Code and White Flag)
   field1_group_ = new QGroupBox("Field 1", this);
@@ -109,6 +110,19 @@ void NtscObserverDialog::setupUI() {
   field2_group_->hide();
 
   mainLayout->addStretch();
+
+  // The pending notice lives in the status bar, so showing or hiding it never
+  // reflows the field groups above it.
+  status_bar_ = new QStatusBar(this);
+  status_bar_->setObjectName("observationStatusBar");
+  status_bar_->setSizeGripEnabled(false);
+
+  status_label_ = new QLabel(this);
+  status_label_->setObjectName("observationStatusLabel");
+  status_bar_->addWidget(status_label_);
+  status_label_->setVisible(false);
+
+  outerLayout->addWidget(status_bar_);
 
   showing_frame_mode_ = false;
 }

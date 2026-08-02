@@ -11,7 +11,9 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QGroupBox>
 #include <QLabel>
+#include <QStatusBar>
 #include <algorithm>
 
 #include "burstlevelanalysisdialog.h"
@@ -173,6 +175,39 @@ TEST(AnalysisDialogSmokeTest,
   dialog.close();
 }
 
+// The pending notice belongs in the status bar: it must not push the value
+// groups around as it comes and goes.
+TEST(AnalysisDialogSmokeTest,
+     VideoParameterObserverDialog_PendingNoticeDoesNotMoveValues) {
+  (void)ensureApplication();
+
+  VideoParameterObserverDialog dialog;
+  auto* status = dialog.findChild<QLabel*>("observationStatusLabel");
+  auto* status_bar = dialog.findChild<QStatusBar*>("observationStatusBar");
+  ASSERT_NE(status, nullptr);
+  ASSERT_NE(status_bar, nullptr);
+  EXPECT_EQ(status->parentWidget(), status_bar);
+
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  auto* signal_group = dialog.findChild<QGroupBox*>();
+  ASSERT_NE(signal_group, nullptr);
+  const QRect before = signal_group->geometry();
+  ASSERT_GT(before.height(), 0);  // the layout really ran
+
+  dialog.showPending();
+  QCoreApplication::processEvents();
+  EXPECT_EQ(signal_group->geometry(), before);
+
+  dialog.updateObservations(orc::FieldID(4),
+                            orc::presenters::VideoParameterObservationView{});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(signal_group->geometry(), before);
+
+  dialog.close();
+}
+
 TEST(AnalysisDialogSmokeTest, NtscObserverDialog_PendingThenPopulated) {
   (void)ensureApplication();
 
@@ -193,6 +228,37 @@ TEST(AnalysisDialogSmokeTest, NtscObserverDialog_PendingThenPopulated) {
                             orc::presenters::NtscFieldObservationsView{});
   QCoreApplication::processEvents();
   EXPECT_FALSE(status->isVisible());
+
+  dialog.close();
+}
+
+TEST(AnalysisDialogSmokeTest,
+     NtscObserverDialog_PendingNoticeDoesNotMoveValues) {
+  (void)ensureApplication();
+
+  NtscObserverDialog dialog;
+  auto* status = dialog.findChild<QLabel*>("observationStatusLabel");
+  auto* status_bar = dialog.findChild<QStatusBar*>("observationStatusBar");
+  ASSERT_NE(status, nullptr);
+  ASSERT_NE(status_bar, nullptr);
+  EXPECT_EQ(status->parentWidget(), status_bar);
+
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  auto* field1_group = dialog.findChild<QGroupBox*>();
+  ASSERT_NE(field1_group, nullptr);
+  const QRect before = field1_group->geometry();
+  ASSERT_GT(before.height(), 0);  // the layout really ran
+
+  dialog.showPending();
+  QCoreApplication::processEvents();
+  EXPECT_EQ(field1_group->geometry(), before);
+
+  dialog.updateObservations(orc::FieldID(4),
+                            orc::presenters::NtscFieldObservationsView{});
+  QCoreApplication::processEvents();
+  EXPECT_EQ(field1_group->geometry(), before);
 
   dialog.close();
 }
