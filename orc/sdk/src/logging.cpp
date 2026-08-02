@@ -19,15 +19,20 @@ namespace orc {
 static std::shared_ptr<spdlog::logger> g_logger;
 
 void init_logging(const std::string& level, const std::string& pattern,
-                  const std::string& log_file) {
+                  const std::string& log_file, LogDestination destination) {
   std::vector<spdlog::sink_ptr> sinks;
 
-  // Always add console sink with color
-  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-  sinks.push_back(console_sink);
+  const LogSinkSelection selection =
+      resolve_log_sinks(destination, !log_file.empty());
 
-  // Add file sink if specified
-  if (!log_file.empty()) {
+  // Console sink with color
+  if (selection.console) {
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    sinks.push_back(console_sink);
+  }
+
+  // File sink
+  if (selection.file) {
     auto file_sink =
         std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
     sinks.push_back(file_sink);

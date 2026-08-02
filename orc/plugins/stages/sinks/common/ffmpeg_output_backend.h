@@ -88,6 +88,8 @@ class FFmpegOutputBackend : public OutputBackend {
   };
   std::vector<AudioPairEncoder> audio_encoders_;
   AVPacket* audio_packet_ = nullptr;  // Shared scratch packet
+  // Audio embedding is the only consumer; subtitle and chapter embedding read
+  // the observation context and must not be gated on this being non-null.
   const VideoFrameRepresentation* vfr_ = nullptr;
   uint64_t start_field_index_ = 0;
   uint64_t num_fields_ = 0;

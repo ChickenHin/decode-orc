@@ -75,6 +75,7 @@ orc/support/colour_preview_conversion.h
 orc/support/dropout_util.h
 orc/support/eia608_decoder.h
 orc/support/frame_line_util.h
+orc/support/log_destination.h
 orc/support/logging.h
 orc/support/lru_cache.h
 orc/support/preview_helpers.h

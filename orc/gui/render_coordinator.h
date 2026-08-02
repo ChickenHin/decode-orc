@@ -22,6 +22,7 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc_analysis_series.h>  // Analysis display-series view types
+#include <orc_closed_caption.h>   // Closed caption observation view types
 #include <orc_preview_views.h>
 #include <orc_teletext.h>  // Teletext observation view types
 
@@ -57,23 +58,24 @@ class GUIProject;
  * @brief Request types for the render coordinator
  */
 enum class RenderRequestType {
-  UpdateDAG,            // Update the DAG being rendered
-  RenderPreview,        // Render a preview image
-  GetObservations,      // Fetch a frame's observations (async, non-blocking)
-  GetVBIData,           // Decode VBI data for a field
-  GetTeletextData,      // Fetch teletext packets for a frame (async)
-  GetDropoutData,       // Get dropout analysis data
-  GetSNRData,           // Get SNR analysis data
-  GetBurstLevelData,    // Get burst level analysis data
-  TriggerStage,         // Trigger a stage (batch processing)
-  CancelTrigger,        // Cancel ongoing trigger
-  GetAvailableOutputs,  // Query available preview outputs
-  GetLineSamples,       // Get 16-bit samples for a line
-  GetFrameTiming,       // Get all frame samples for timing view
-  GetWaveformMonitor,   // Get all frame samples for waveform monitor
-  SavePNG,              // Save preview as PNG file
-  NavigateFrameLine,    // Navigate to next/previous line in frame mode
-  Shutdown              // Shutdown the worker thread
+  UpdateDAG,             // Update the DAG being rendered
+  RenderPreview,         // Render a preview image
+  GetObservations,       // Fetch a frame's observations (async, non-blocking)
+  GetVBIData,            // Decode VBI data for a field
+  GetTeletextData,       // Fetch teletext packets for a frame (async)
+  GetClosedCaptionData,  // Fetch closed caption bytes for a frame (async)
+  GetDropoutData,        // Get dropout analysis data
+  GetSNRData,            // Get SNR analysis data
+  GetBurstLevelData,     // Get burst level analysis data
+  TriggerStage,          // Trigger a stage (batch processing)
+  CancelTrigger,         // Cancel ongoing trigger
+  GetAvailableOutputs,   // Query available preview outputs
+  GetLineSamples,        // Get 16-bit samples for a line
+  GetFrameTiming,        // Get all frame samples for timing view
+  GetWaveformMonitor,    // Get all frame samples for waveform monitor
+  SavePNG,               // Save preview as PNG file
+  NavigateFrameLine,     // Navigate to next/previous line in frame mode
+  Shutdown               // Shutdown the worker thread
 };
 
 /**
@@ -154,6 +156,19 @@ struct GetTeletextDataRequest : public RenderRequest {
 
   GetTeletextDataRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
       : RenderRequest(RenderRequestType::GetTeletextData, id),
+        node_id(std::move(node)),
+        field_id(fid) {}
+};
+
+/**
+ * @brief Request to fetch closed caption bytes for the frame containing a field
+ */
+struct GetClosedCaptionDataRequest : public RenderRequest {
+  orc::NodeID node_id;
+  orc::FieldID field_id;
+
+  GetClosedCaptionDataRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
+      : RenderRequest(RenderRequestType::GetClosedCaptionData, id),
         node_id(std::move(node)),
         field_id(fid) {}
 };
@@ -473,8 +488,6 @@ class IRenderPresenter {
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
       const std::string& option_id) = 0;
 
-  virtual std::optional<VBIFieldInfoView> getVBIData(NodeID node_id,
-                                                     FieldID field_id) = 0;
   virtual std::optional<orc::presenters::DropoutDisplaySeries>
   getDropoutAnalysisData(NodeID node_id) = 0;
   virtual std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
@@ -621,11 +634,14 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request VBI data for a field (async)
    *
-   * Result will be emitted via vbiDataReady signal.
+   * Answered from the provenance-keyed store when present, otherwise computed
+   * on the background scheduler (same delivery path as requestObservations()).
+   * The decoded view is emitted via vbiDataReady. No DAG execution runs on the
+   * GUI thread.
    *
    * @param node_id Node to decode VBI from
    * @param field_id Field to decode
-   * @return Request ID for matching response
+   * @return Request ID for matching / discarding stale responses
    */
   uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
 
@@ -643,6 +659,22 @@ class RenderCoordinator : public QObject {
    */
   uint64_t requestTeletextData(const orc::NodeID& node_id,
                                orc::FieldID field_id);
+
+  /**
+   * @brief Request closed caption bytes for the frame containing a field
+   *        (async)
+   *
+   * Answered from the provenance-keyed store when present, otherwise computed
+   * on the background scheduler (same delivery path as requestObservations()).
+   * One request covers both fields of the field's parent frame; the extracted
+   * per-field byte pairs are emitted via closedCaptionDataReady.
+   *
+   * @param node_id  Node whose output frame is observed
+   * @param field_id Any field of the frame of interest
+   * @return Request ID for matching / discarding stale responses
+   */
+  uint64_t requestClosedCaptionData(const orc::NodeID& node_id,
+                                    orc::FieldID field_id);
 
   /**
    * @brief Request a frame's observations without blocking the GUI (async)
@@ -859,7 +891,13 @@ class RenderCoordinator : public QObject {
   void previewReady(uint64_t request_id, orc::PreviewRenderResult result);
 
   /**
-   * @brief Emitted when VBI data is ready
+   * @brief Emitted (on the GUI thread) when a requestVBIData() response is
+   *        ready
+   *
+   * Carries the decoded view for the requested field; a default-constructed
+   * view means no VBI was available. Marshalled from the worker/scheduler
+   * thread via a queued connection, so responses to concurrent requests may
+   * arrive in any order - match them by @p request_id.
    */
   void vbiDataReady(uint64_t request_id,
                     orc::presenters::VBIFieldInfoView info);
@@ -885,6 +923,28 @@ class RenderCoordinator : public QObject {
                          orc::presenters::TeletextFieldPacketsView field1,
                          qulonglong field2_id_value,
                          orc::presenters::TeletextFieldPacketsView field2);
+
+  /**
+   * @brief Emitted (on the GUI thread) when a requestClosedCaptionData()
+   *        response is ready
+   *
+   * Carries the recovered EIA-608 byte pairs for both fields of the requested
+   * frame, in temporal order (field1 precedes field2).
+   *
+   * @param request_id      Id returned by requestClosedCaptionData()
+   * @param available       True when the frame's observations were produced
+   * @param field1_id_value First field of the frame (FieldID::value())
+   * @param field1          Caption data for the first field
+   * @param field2_id_value Second field of the frame
+   * @param field2          Caption data for the second field
+   *
+   * Marshalled from the worker/scheduler thread via a queued connection.
+   */
+  void closedCaptionDataReady(
+      uint64_t request_id, bool available, qulonglong field1_id_value,
+      orc::presenters::ClosedCaptionFieldDataView field1,
+      qulonglong field2_id_value,
+      orc::presenters::ClosedCaptionFieldDataView field2);
 
   /**
    * @brief Emitted when dropout analysis data is ready
@@ -1060,6 +1120,11 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetTeletextData request
    */
   void handleGetTeletextData(const GetTeletextDataRequest& req);
+
+  /**
+   * @brief Handle GetClosedCaptionData request
+   */
+  void handleGetClosedCaptionData(const GetClosedCaptionDataRequest& req);
 
   /**
    * @brief Handle GetDropoutData request

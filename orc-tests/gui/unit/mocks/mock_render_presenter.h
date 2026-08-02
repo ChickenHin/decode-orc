@@ -162,8 +162,6 @@ class MockRenderPresenter : public IRenderPresenter {
                uint64_t output_index, const std::string& option_id),
               (override));
 
-  MOCK_METHOD((std::optional<VBIFieldInfoView>), getVBIData,
-              (NodeID node_id, FieldID field_id), (override));
   MOCK_METHOD((std::optional<orc::presenters::DropoutDisplaySeries>),
               getDropoutAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD((std::optional<orc::presenters::SNRDisplaySeries>),

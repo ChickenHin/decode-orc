@@ -138,7 +138,9 @@ For bugs that don't cause crashes, please provide:
 2. **Expected behavior** vs actual behavior
 3. **Application version** and platform
 4. **Screenshots or videos** if helpful
-5. **Log files** if available (use `--log-file` option)
+5. **Log files** if available (use the `--log-file` option; add
+   `--log-out file` to keep the console clear and capture everything in the
+   file)
 
 ## Feature Requests
 

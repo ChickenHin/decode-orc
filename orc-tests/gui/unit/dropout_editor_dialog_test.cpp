@@ -122,10 +122,6 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   }
 
   // Unused interface surface: inert stubs.
-  std::optional<orc::presenters::VBIFieldInfoView> getVBIData(
-      orc::NodeID, orc::FieldID) override {
-    return std::nullopt;
-  }
   std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
       orc::NodeID) override {
     return std::nullopt;

@@ -9,28 +9,13 @@
 
 #include "vbi_presenter.h"
 
+#include <orc/stage/observation/observation_context.h>
 #include <orc/support/vbi_types.h>
 
-#include "../core/include/dag_frame_renderer.h"
 #include "../core/include/vbi_decoder.h"
 #include "vbi_view_models.h"
 
 namespace orc::presenters {
-
-class VbiPresenter::Impl {
- public:
-  explicit Impl(std::function<std::shared_ptr<void>()> dag_provider)
-      : dag_provider_(std::move(dag_provider)) {}
-
-  std::function<std::shared_ptr<void>()> dag_provider_;
-};
-
-VbiPresenter::VbiPresenter(std::function<std::shared_ptr<void>()> dag_provider)
-    : impl_(std::make_unique<Impl>(std::move(dag_provider))) {}
-
-VbiPresenter::~VbiPresenter() = default;
-VbiPresenter::VbiPresenter(VbiPresenter&&) noexcept = default;
-VbiPresenter& VbiPresenter::operator=(VbiPresenter&&) noexcept = default;
 
 VbiSoundModeView VbiPresenter::mapSoundMode(orc::VbiSoundMode m) {
   switch (m) {
@@ -193,29 +178,6 @@ VBIFieldInfoView toView(const orc::VBIFieldInfo& src) {
   return v;
 }
 }  // namespace
-
-std::optional<VBIFieldInfoView> VbiPresenter::getVbiForField(
-    NodeID node_id, FieldID field_id) const {
-  auto dag_void = impl_->dag_provider_ ? impl_->dag_provider_() : nullptr;
-  if (!dag_void) return std::nullopt;
-  auto dag = std::static_pointer_cast<const orc::DAG>(dag_void);
-
-  try {
-    orc::FrameID frame_id = static_cast<orc::FrameID>(field_id.value() / 2);
-    DAGFrameRenderer renderer(dag);
-    auto render_result = renderer.render_frame_at_node(node_id, frame_id);
-    if (!render_result.is_valid || !render_result.representation) {
-      return std::nullopt;
-    }
-
-    const auto& obs = renderer.get_observation_context();
-    auto vbi = VBIDecoder::decode_vbi(obs, field_id);
-    if (!vbi.has_value()) return std::nullopt;
-    return toView(*vbi);
-  } catch (...) {
-    return std::nullopt;
-  }
-}
 
 std::optional<VBIFieldInfoView> VbiPresenter::decodeVbiFromObservation(
     const void* observation_context_ptr, FieldID field_id) {

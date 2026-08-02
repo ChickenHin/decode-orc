@@ -44,6 +44,7 @@ orc-cli stages <subcommand> [options]
 | `--source-type composite\|yc` | Same idea, for the source signal type | - |
 | `--log-level LEVEL` | Set logging verbosity level | `info` |
 | `--log-file FILE` | Write logs to specified file | None (console only) |
+| `--log-out console\|file\|both` | Where log output is sent | `both` |
 | `--help`, `-h` | Display help message and exit | - |
 
 ### Log Levels
@@ -57,6 +58,22 @@ Available log levels (from most to least verbose):
 - `error`: Error messages
 - `critical`: Critical errors only
 - `off`: Disable logging
+
+### Log Destinations
+
+`--log-out` selects where log records are written:
+
+- `console`: console only — any `--log-file` is ignored
+- `file`: log file only — nothing is written to the console
+- `both` (default): console, plus the log file when `--log-file` is given
+
+`file` and `both` only reach a file when `--log-file` is also given. Asking for
+`--log-out file` without a log file leaves nothing to write to, so logging
+falls back to the console and a warning is emitted rather than discarding the
+log silently.
+
+The default (`both` with no `--log-file`) is plain console logging, which is
+the behaviour of earlier releases.
 
 ## Examples
 
@@ -82,6 +99,14 @@ Save all log output to a file:
 
 ```bash
 orc-cli my-project.orcprj --process --log-file processing.log
+```
+
+### Log to File Only
+
+Keep the console clear and send every log record to the file instead:
+
+```bash
+orc-cli my-project.orcprj --process --log-file processing.log --log-out file
 ```
 
 ### Combined Options

@@ -1703,6 +1703,11 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["audio_channel_pairs"] = audio_channel_pairs_;
   backendConfig.observation_context = &observation_context;
 
+  // The backend reads audio samples straight from the representation, so hand
+  // it over whenever one is available. It is not gated on any embed option —
+  // the backend decides what to use it for.
+  backendConfig.vfr = vfr.get();
+
   // Set field-equivalent range for audio, closed caption, and/or chapter
   // metadata extraction. The ffmpeg backend uses field-based indexing
   // internally; convert frame range to field units (1 frame = 2 fields).
@@ -1712,7 +1717,6 @@ bool VideoSinkStage::run_export_trigger(
     backendConfig.num_fields = (frame_range.last - frame_range.first + 1) * 2;
 
     if (embed_audio_ && vfr && vfr->has_audio()) {
-      backendConfig.vfr = vfr.get();
       ORC_LOG_DEBUG(
           "VideoSink: Audio embedding enabled (frames {} to {} = {} frames, "
           "{} field-equiv)",

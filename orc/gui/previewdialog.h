@@ -330,10 +330,12 @@ class PreviewDialog : public QDialog {
   void
   showVideoParameterObserverDialogRequested();  // Emitted when Video Parameter
                                                 // Observer menu item selected
-  void showNtscObserverDialogRequested();  // Emitted when NTSC Observer menu
-                                           // item selected
-  void showTeletextDialogRequested();      // Emitted when Teletext Pages menu
-                                           // item selected
+  void showNtscObserverDialogRequested();   // Emitted when NTSC Observer menu
+                                            // item selected
+  void showTeletextDialogRequested();       // Emitted when Teletext Pages menu
+                                            // item selected
+  void showClosedCaptionDialogRequested();  // Emitted when Closed Captions menu
+                                            // item selected
   void showDropoutsChanged(
       bool show);  // Emitted when dropout visibility changes
   void lineScopeRequested(int image_x,
@@ -384,6 +386,7 @@ class PreviewDialog : public QDialog {
   QAction* show_video_parameter_observer_action_;
   QAction* show_ntsc_observer_action_;
   QAction* show_teletext_action_;
+  QAction* show_closed_caption_action_;
   QAction* show_frame_timing_action_;
   QAction* show_waveform_monitor_action_;
   QAction* show_component_vectorscope_action_;

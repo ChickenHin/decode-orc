@@ -87,6 +87,14 @@ The observer reads line 21 for NTSC (or line 22 for PAL) from the second field o
 **What it looks like:**
 Two bytes of caption data per field, which can be decoded into text characters and control codes by caption decoders. The data appears only on field 2 of NTSC video.
 
+The Closed Captions dialog (preview window, Observers menu) is where those bytes become readable. EIA-608 carries two bytes per frame and builds a caption out of them over a second or more, so what is on screen at any one frame is the result of a run of frames before it, not of that frame's own data; the dialog therefore decodes a trailing window of frames ending at the current frame.
+
+What it shows is a transcript of the captions decoded so far, each with the frame it appeared at, so a caption can be found again in the recording. The transcript follows the previewer: the caption that would be on screen at the preview frame is shown in bold and scrolled to as that frame moves, which is what tells you the captions are keeping step with the picture. It keeps accumulating as you step or play forward; jumping to an unrelated position starts it again from the frames preceding the new position.
+
+The status bar reports the caption mode the service is using — **Pop-on** (captions prepared off screen and shown complete), **Roll-up** (lines scrolling up as they arrive) or **Paint-on** (text appearing character by character) — and the byte pair recovered from the current frame, with the odd parity bit restored so it reads as it would in an SCC file. A byte whose parity check failed is marked with a question mark; a pair with neither byte intact is not fed to the caption decoder, which is the same rule the Closed Caption Sink stage applies when exporting. Most frames of a captioned recording carry no caption data at all — the caption data line is only written to while there is something to say — and the readout says so rather than leaving a gap.
+
+The Closed Caption Sink stage exports the same data as a Scenarist SCC or plain text file.
+
 ---
 
 ## Colour Frame Phase Observer

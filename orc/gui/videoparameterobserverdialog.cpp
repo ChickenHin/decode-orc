@@ -12,6 +12,7 @@
 #include <amplitude_conversion.h>
 
 #include <QGridLayout>
+#include <QStatusBar>
 #include <QVBoxLayout>
 
 // Burst level is an AC amplitude (peak burst excursion, not an absolute
@@ -52,13 +53,13 @@ VideoParameterObserverDialog::VideoParameterObserverDialog(QWidget* parent)
 VideoParameterObserverDialog::~VideoParameterObserverDialog() = default;
 
 void VideoParameterObserverDialog::setupUI() {
-  auto* main = new QVBoxLayout(this);
+  auto* outer = new QVBoxLayout(this);
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->setSpacing(0);
 
-  // Pending-state notice (hidden until an async request is in flight).
-  status_label_ = new QLabel(this);
-  status_label_->setObjectName("observationStatusLabel");
-  status_label_->setVisible(false);
-  main->addWidget(status_label_);
+  auto* main = new QVBoxLayout();
+  main->setContentsMargins(9, 9, 9, 9);
+  outer->addLayout(main, /*stretch=*/1);
 
   // --- Signal Parameters group (once per frame) ---
   signal_group_ = new QGroupBox("Signal Parameters", this);
@@ -172,6 +173,19 @@ void VideoParameterObserverDialog::setupUI() {
   field2_group_->setVisible(false);
   main->addWidget(field2_group_);
   main->addStretch();
+
+  // The pending notice lives in the status bar, so showing or hiding it never
+  // reflows the value groups above it.
+  status_bar_ = new QStatusBar(this);
+  status_bar_->setObjectName("observationStatusBar");
+  status_bar_->setSizeGripEnabled(false);
+
+  status_label_ = new QLabel(this);
+  status_label_->setObjectName("observationStatusLabel");
+  status_bar_->addWidget(status_label_);
+  status_label_->setVisible(false);
+
+  outer->addWidget(status_bar_);
 }
 
 // ---------------------------------------------------------------------------

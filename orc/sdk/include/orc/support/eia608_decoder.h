@@ -75,6 +75,15 @@ class CaptionBuffer {
   std::string render() const;
   void roll_up();
 
+  /**
+   * @brief The buffer's rows as written, top row first
+   *
+   * Rows are not padded, and write_char() deliberately allows a row to run
+   * past MAX_COLS; a caller presenting the 32-column EIA-608 display grid
+   * clips them.
+   */
+  const std::array<std::string, MAX_ROWS>& rows() const { return rows_; }
+
   // Getters for debugging
   size_t get_row() const { return current_row_; }
   size_t get_col() const { return current_col_; }
@@ -115,6 +124,26 @@ class EIA608Decoder {
    * @brief Get currently accumulated cues (without finalizing)
    */
   const std::vector<CaptionCue>& get_cues() const { return emitted_cues_; }
+
+  /**
+   * @brief The caption that would be on screen right now
+   *
+   * In Pop-On mode this is the buffer the last End of Caption code swapped in;
+   * in Roll-Up and Paint-On modes it is the buffer being written to. Erase
+   * Displayed Memory empties it. Unlike the cue list, which only gains a
+   * caption once that caption has been taken off screen, this is the decoder's
+   * live display state — which is what a viewer following the stream needs.
+   *
+   * Reference into the decoder; the contents change on the next
+   * process_bytes() call.
+   */
+  const CaptionBuffer& displayed() const { return displayed_; }
+
+  /// Caption mode the stream last selected (RCL, RU2-RU4 or RDC)
+  CaptionMode mode() const { return mode_; }
+
+  /// Window height the stream last selected for Roll-Up mode (2, 3 or 4)
+  int rollup_rows() const { return rollup_rows_; }
 
  private:
   // Internal state

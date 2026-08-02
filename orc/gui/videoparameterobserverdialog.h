@@ -16,6 +16,7 @@
 #include <QDialog>
 #include <QGroupBox>
 #include <QLabel>
+#include <QStatusBar>
 
 #include "presenters/include/video_parameter_observation_view_models.h"
 
@@ -64,8 +65,9 @@ class VideoParameterObserverDialog : public QDialog {
   /**
    * @brief Show a "computing" pending state while observations are fetched.
    *
-   * Displayed after an async request is issued and cleared once values arrive
-   * (Phase 5). The previously shown values remain visible beneath the notice.
+   * Displayed in the status bar after an async request is issued and cleared
+   * once values arrive. The previously shown values remain visible and keep
+   * their position while the notice comes and goes.
    */
   void showPending();
 
@@ -93,6 +95,10 @@ class VideoParameterObserverDialog : public QDialog {
   static QString systemName(orc::presenters::VideoSystem sys);
   static QString fmtOptDouble(const std::optional<double>& v,
                               const char* unit = "");
+
+  // Status bar along the bottom edge; always present so that showing or hiding
+  // the pending notice never changes the dialog's layout.
+  QStatusBar* status_bar_ = nullptr;
 
   // Pending-state notice shown while an async observation request is in flight.
   QLabel* status_label_;

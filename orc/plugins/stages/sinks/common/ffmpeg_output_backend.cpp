@@ -30,6 +30,7 @@
 #include "audio_pair_selection.h"
 #include "audio_sample_feed.h"
 #include "componentframe.h"
+#include "subtitle_embed_policy.h"
 #include "teletext_subtitle_feed.h"
 
 namespace orc {
@@ -446,82 +447,59 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     embed_audio_ = false;  // Disable audio
   }
 
-  // Setup subtitle encoder for closed captions if requested
-  // Note: Closed captions are only supported in MP4/MOV containers
-  if (embed_closed_captions_ && vfr_) {
-    if (container_format_ != "mp4" && container_format_ != "mov") {
-      ORC_LOG_WARN(
-          "FFmpegOutputBackend: Closed captions only supported in MP4/MOV "
-          "containers, disabling");
-      embed_closed_captions_ = false;
-    } else {
-      ORC_LOG_DEBUG(
-          "FFmpegOutputBackend: Setting up subtitle encoder for closed "
-          "captions");
-      if (!setupSubtitleEncoder()) {
-        ORC_LOG_ERROR("FFmpegOutputBackend: Failed to setup subtitle encoder");
-        cleanup();
-        return false;
-      }
-
-      // Extract closed caption observations from ObservationContext
-      ORC_LOG_DEBUG(
-          "FFmpegOutputBackend: Extracting closed captions from observation "
-          "context");
-      eia608_decoder_ = std::make_unique<EIA608Decoder>();
-
-      if (config.observation_context) {
-        // Process CC observations for all fields that were processed
-        // The FFmpeg sink's trigger() already populated the observation context
-        // Use the same field range as audio extraction
-        extractClosedCaptionsFromObservations(*config.observation_context,
-                                              config.start_field_index,
-                                              config.num_fields);
-      } else {
-        ORC_LOG_WARN(
-            "FFmpegOutputBackend: No observation context provided, CC "
-            "embedding disabled");
-        embed_closed_captions_ = false;
-      }
-    }
+  // Select the subtitle source for the single mov_text stream. Both sources
+  // read their data from the observation context alone, so neither depends on
+  // vfr_ (supplied only for audio embedding).
+  const SubtitleEmbedDecision subtitle_decision = select_subtitle_embed_source(
+      {embed_closed_captions_, embed_teletext_subtitles_, container_format_,
+       video_system_ == VideoSystem::PAL,
+       config.observation_context != nullptr});
+  if (!subtitle_decision.closed_caption_reason.empty()) {
+    ORC_LOG_WARN("FFmpegOutputBackend: {}, disabling closed captions",
+                 subtitle_decision.closed_caption_reason);
   }
+  if (!subtitle_decision.teletext_reason.empty()) {
+    ORC_LOG_WARN("FFmpegOutputBackend: {}, disabling teletext subtitles",
+                 subtitle_decision.teletext_reason);
+  }
+  embed_closed_captions_ =
+      (subtitle_decision.source == SubtitleEmbedSource::kClosedCaptions);
+  embed_teletext_subtitles_ =
+      (subtitle_decision.source == SubtitleEmbedSource::kTeletext);
 
-  // Setup teletext subtitle embedding if requested. The cues reuse the CC
-  // mov_text stream and muxing path unchanged — cues in, tx3g samples out.
-  if (embed_teletext_subtitles_) {
-    if (container_format_ != "mp4" && container_format_ != "mov") {
-      ORC_LOG_WARN(
-          "FFmpegOutputBackend: Teletext subtitles only supported in MP4/MOV "
-          "containers, disabling");
-      embed_teletext_subtitles_ = false;
-    } else if (embed_closed_captions_) {
-      ORC_LOG_WARN(
-          "FFmpegOutputBackend: Closed captions already occupy the subtitle "
-          "stream; disabling teletext subtitle embedding");
-      embed_teletext_subtitles_ = false;
-    } else if (video_system_ != VideoSystem::PAL) {
-      ORC_LOG_WARN(
-          "FFmpegOutputBackend: Teletext subtitles are PAL WST only, "
-          "disabling");
-      embed_teletext_subtitles_ = false;
-    } else if (!config.observation_context) {
-      ORC_LOG_WARN(
-          "FFmpegOutputBackend: No observation context provided, teletext "
-          "subtitle embedding disabled");
-      embed_teletext_subtitles_ = false;
-    } else if (!setupSubtitleEncoder()) {
+  if (embed_closed_captions_) {
+    ORC_LOG_DEBUG(
+        "FFmpegOutputBackend: Setting up subtitle encoder for closed captions");
+    if (!setupSubtitleEncoder()) {
       ORC_LOG_ERROR("FFmpegOutputBackend: Failed to setup subtitle encoder");
       cleanup();
       return false;
-    } else {
-      pending_cues_ = collect_teletext_subtitle_cues(
-          *config.observation_context, config.start_field_index,
-          config.num_fields, teletext_subtitle_page_);
-      ORC_LOG_INFO(
-          "FFmpegOutputBackend: Extracted {} teletext subtitle cues from "
-          "page {}",
-          pending_cues_.size(), teletext_subtitle_page_);
     }
+
+    // Process CC observations for all fields that were processed. The FFmpeg
+    // sink's trigger() already populated the observation context; use the same
+    // field range as audio extraction.
+    ORC_LOG_DEBUG(
+        "FFmpegOutputBackend: Extracting closed captions from observation "
+        "context");
+    eia608_decoder_ = std::make_unique<EIA608Decoder>();
+    extractClosedCaptionsFromObservations(*config.observation_context,
+                                          config.start_field_index,
+                                          config.num_fields);
+  } else if (embed_teletext_subtitles_) {
+    // Teletext cues reuse the CC mov_text stream and muxing path unchanged —
+    // cues in, tx3g samples out.
+    if (!setupSubtitleEncoder()) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to setup subtitle encoder");
+      cleanup();
+      return false;
+    }
+    pending_cues_ = collect_teletext_subtitle_cues(
+        *config.observation_context, config.start_field_index,
+        config.num_fields, teletext_subtitle_page_);
+    ORC_LOG_INFO(
+        "FFmpegOutputBackend: Extracted {} teletext subtitle cues from page {}",
+        pending_cues_.size(), teletext_subtitle_page_);
   }
 
   // Setup chapter metadata from VBI observations if requested

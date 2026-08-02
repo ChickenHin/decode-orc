@@ -25,13 +25,13 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "guiproject.h"
 #include "orcgraphicsscene.h"
 #include "orcgraphmodel.h"
 #include "presenters/include/dropout_presenter.h"
-#include "presenters/include/vbi_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "render_coordinator.h"
 
@@ -41,6 +41,7 @@ class VBIDialog;
 class VideoParameterObserverDialog;
 class NtscObserverDialog;
 class TeletextDialog;
+class ClosedCaptionDialog;
 class DropoutAnalysisDialog;
 class SNRAnalysisDialog;
 class BurstLevelAnalysisDialog;
@@ -56,7 +57,6 @@ enum class SNRAnalysisMode;
 namespace orc {
 class DAG;
 class AnalysisTool;
-class VBIDecoder;
 class DropoutAnalysisDecoder;
 }  // namespace orc
 
@@ -134,6 +134,12 @@ class MainWindow : public QMainWindow {
   /// window. Called on every frame change and again as each delivery lands,
   /// because the dialog paces the frames it asks for.
   void issueTeletextRequests();
+  void onShowClosedCaptionDialog();
+  void updateClosedCaptionDialog();
+  /// Issue the next batch of closed caption observation requests for the
+  /// dialog's window. Called on every frame change and again as each delivery
+  /// lands, because the dialog paces the frames it asks for.
+  void issueClosedCaptionRequests();
   /// Issue async observation requests for whichever observer dialogs are open
   /// (Phase 5). Replaces the synchronous per-dialog render-and-extract path.
   void refreshObserverDialogs();
@@ -166,6 +172,11 @@ class MainWindow : public QMainWindow {
                            orc::presenters::TeletextFieldPacketsView field1,
                            qulonglong field2_id_value,
                            orc::presenters::TeletextFieldPacketsView field2);
+  void onClosedCaptionDataReady(
+      uint64_t request_id, bool available, qulonglong field1_id_value,
+      orc::presenters::ClosedCaptionFieldDataView field1,
+      qulonglong field2_id_value,
+      orc::presenters::ClosedCaptionFieldDataView field2);
   void onObservationProgress(bool active, int percent_complete, bool computing,
                              qulonglong outstanding_nodes);
   void onObservationsInvalidated(QVector<int> changed_node_ids);
@@ -235,8 +246,12 @@ class MainWindow : public QMainWindow {
           false);  // Update slider, combo, preview, and info for current node
   void updateAllPreviewComponents();  // Update preview image, info label, VBI
                                       // dialog, and vectorscope(s)
-  void loadProjectDAG();              // Load DAG into embedded viewer
-  void positionViewToTopLeft();       // Position view to show top-left node
+  /// Frame the observer dialogs should follow, from the previewer's position
+  /// and output type. Nullopt when the position does not resolve to a frame
+  /// of the current view node.
+  std::optional<uint64_t> previewFrameForObservers() const;
+  void loadProjectDAG();         // Load DAG into embedded viewer
+  void positionViewToTopLeft();  // Position view to show top-left node
   void
   selectLowestSourceStage();  // Auto-select source stage with lowest node ID
   void applyStageSelection(
@@ -292,11 +307,16 @@ class MainWindow : public QMainWindow {
 
   // Pending request tracking
   uint64_t pending_preview_request_id_{0};
-  uint64_t pending_vbi_request_id_{0};
-  uint64_t pending_vbi_request_id_field2_{0};  // Second field for frame mode
+  // VBI requests go through the same async observation path as the observer
+  // dialogs, so the two frame-mode responses may arrive in either order; each
+  // field is cached until both are ready.
+  uint64_t pending_vbi_request_id_field1_{0};
+  uint64_t pending_vbi_request_id_field2_{0};
   bool pending_vbi_is_frame_mode_{false};
-  orc::presenters::VBIFieldInfoView
-      pending_vbi_field1_info_;  // Cached first field data (view model)
+  bool pending_vbi_field1_ready_{false};
+  bool pending_vbi_field2_ready_{false};
+  orc::presenters::VBIFieldInfoView pending_vbi_field1_info_;
+  orc::presenters::VBIFieldInfoView pending_vbi_field2_info_;
   // Phase 5: async observer-dialog requests. One frame yields one (field mode)
   // or two (frame mode) requests whose responses carry both observer view
   // models; field1 is cached until field2 arrives, matching the VBI flow.
@@ -319,6 +339,12 @@ class MainWindow : public QMainWindow {
   std::unordered_map<uint64_t, uint64_t> pending_teletext_requests_;
   // View node the teletext packet cache was filled from; a change clears it.
   orc::NodeID teletext_cache_node_id_;
+
+  // Closed caption dialog: one request per window frame still lacking caption
+  // data (request_id -> frame index); unknown ids in responses are stale.
+  std::unordered_map<uint64_t, uint64_t> pending_closed_caption_requests_;
+  // View node the closed caption cache was filled from; a change clears it.
+  orc::NodeID closed_caption_cache_node_id_;
 
   uint64_t pending_outputs_request_id_{0};
   uint64_t pending_trigger_request_id_{0};
@@ -348,10 +374,10 @@ class MainWindow : public QMainWindow {
   VBIDialog* vbi_dialog_;
   VideoParameterObserverDialog* video_parameter_observer_dialog_;
   std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;
-  std::unique_ptr<orc::presenters::VbiPresenter> vbi_presenter_;
   // Note: project_presenter_ removed - use project_.presenter() instead
   NtscObserverDialog* ntsc_observer_dialog_;
   TeletextDialog* teletext_dialog_;
+  ClosedCaptionDialog* closed_caption_dialog_;
   std::unordered_map<orc::NodeID, DropoutAnalysisDialog*>
       dropout_analysis_dialogs_;
   std::unordered_map<orc::NodeID, SNRAnalysisDialog*> snr_analysis_dialogs_;

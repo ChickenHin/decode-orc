@@ -10,40 +10,37 @@
 #pragma once
 
 #include <orc/stage/field_id.h>
-#include <orc/stage/node_id.h>
 
-#include <functional>
-#include <memory>
 #include <optional>
 
 #include "vbi_view_models.h"
 
 namespace orc {
-class DAG;
 enum class VbiSoundMode;
 }  // namespace orc
 
 namespace orc::presenters {
 
+/**
+ * @brief Stateless VBI view-model extraction from a delivered observation
+ *        context
+ *
+ * Mirrors the other observation presenters (NTSC, video parameters,
+ * teletext): observations are produced by the async requestObservations()
+ * path and this presenter only turns the delivered context into value-type
+ * view models. It never renders and never holds a DAG.
+ */
 class VbiPresenter {
  public:
-  explicit VbiPresenter(std::function<std::shared_ptr<void>()> dag_provider);
-  ~VbiPresenter();
-
-  VbiPresenter(const VbiPresenter&) = delete;
-  VbiPresenter& operator=(const VbiPresenter&) = delete;
-  VbiPresenter(VbiPresenter&&) noexcept;
-  VbiPresenter& operator=(VbiPresenter&&) noexcept;
-
-  // Fetch VBI for a single field; returns empty if unavailable
-  std::optional<VBIFieldInfoView> getVbiForField(NodeID node_id,
-                                                 FieldID field_id) const;
+  VbiPresenter() = delete;
 
   // Public helper for sound mode conversion (for use in callbacks)
   static VbiSoundModeView mapSoundMode(orc::VbiSoundMode mode);
 
-  // Static method for decoding VBI from observation context
-  // This allows render_coordinator to decode VBI without including core headers
+  // Decode a field's VBI from an observation context delivered by
+  // requestObservations(). The context is passed opaquely so callers (e.g.
+  // render_coordinator) need no core headers. Never forward the pointer past
+  // the delivering callback.
   static std::optional<VBIFieldInfoView> decodeVbiFromObservation(
       const void*
           observation_context_ptr,  ///< Opaque handle to observation context
@@ -52,10 +49,6 @@ class VbiPresenter {
   // Merge two field VBI views into a single frame-level interpretation
   static VBIFieldInfoView mergeFrameVbiViews(const VBIFieldInfoView& field1,
                                              const VBIFieldInfoView& field2);
-
- private:
-  class Impl;
-  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace orc::presenters

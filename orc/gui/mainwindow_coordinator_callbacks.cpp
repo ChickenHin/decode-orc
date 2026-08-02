@@ -13,6 +13,7 @@
 #include <limits>
 
 #include "burstlevelanalysisdialog.h"
+#include "closedcaptiondialog.h"
 #include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
 #include "logging.h"
@@ -20,7 +21,6 @@
 #include "ntscobserverdialog.h"
 #include "observation_status_formatter.h"
 #include "presenters/include/render_presenter.h"
-#include "presenters/include/vbi_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
 #include "snranalysisdialog.h"
@@ -80,42 +80,52 @@ void MainWindow::onPreviewReady(uint64_t request_id,
 
 void MainWindow::onVBIDataReady(uint64_t request_id,
                                 orc::presenters::VBIFieldInfoView info) {
-  if (request_id != pending_vbi_request_id_ &&
-      request_id != pending_vbi_request_id_field2_) {
-    return;
+  const bool is_field1 = (request_id == pending_vbi_request_id_field1_);
+  const bool is_field2 = (request_id == pending_vbi_request_id_field2_);
+  if (!is_field1 && !is_field2) {
+    return;  // stale / superseded response
   }
 
   ORC_LOG_DEBUG("onVBIDataReady: request_id={}", request_id);
 
-  if (!vbi_dialog_ || !vbi_presenter_) {
+  if (is_field1) {
+    pending_vbi_request_id_field1_ = 0;
+    pending_vbi_field1_info_ = std::move(info);
+    pending_vbi_field1_ready_ = true;
+  } else {
+    pending_vbi_request_id_field2_ = 0;
+    pending_vbi_field2_info_ = std::move(info);
+    pending_vbi_field2_ready_ = true;
+  }
+
+  if (!vbi_dialog_) {
     return;
   }
 
   // Process VBI data whether or not the dialog is currently visible,
   // so that when it is shown, it has the latest data
 
-  if (pending_vbi_is_frame_mode_) {
-    // Frame mode - need both fields
-    if (request_id == pending_vbi_request_id_) {
-      // First field received - cache it
-      pending_vbi_field1_info_ = info;
-      pending_vbi_request_id_ = 0;  // Mark first request as processed
-    } else if (request_id == pending_vbi_request_id_field2_) {
-      // Second field received - update dialog with both fields
-      if (vbi_dialog_->isVisible()) {
-        vbi_dialog_->updateVBIInfoFrame(pending_vbi_field1_info_, info);
-      }
-      pending_vbi_is_frame_mode_ = false;
-      pending_vbi_request_id_field2_ = 0;
-      pending_vbi_request_id_ = 0;
-    }
-  } else {
-    // Field mode - single field display
+  if (!pending_vbi_is_frame_mode_) {
+    // Field mode - the single field's response completes the update
     if (vbi_dialog_->isVisible()) {
-      vbi_dialog_->updateVBIInfo(info);
+      vbi_dialog_->updateVBIInfo(pending_vbi_field1_info_);
     }
-    pending_vbi_request_id_ = 0;
+    pending_vbi_field1_ready_ = false;
+    return;
   }
+
+  // Frame mode - wait until both fields have arrived, then combine. The two
+  // responses are delivered independently and may arrive in either order.
+  if (!pending_vbi_field1_ready_ || !pending_vbi_field2_ready_) {
+    return;
+  }
+  if (vbi_dialog_->isVisible()) {
+    vbi_dialog_->updateVBIInfoFrame(pending_vbi_field1_info_,
+                                    pending_vbi_field2_info_);
+  }
+  pending_vbi_is_frame_mode_ = false;
+  pending_vbi_field1_ready_ = false;
+  pending_vbi_field2_ready_ = false;
 }
 
 void MainWindow::onTeletextDataReady(
@@ -142,6 +152,32 @@ void MainWindow::onTeletextDataReady(
   // is what draws down the next of them; without this the window would only
   // ever fill one batch per frame change.
   issueTeletextRequests();
+}
+
+void MainWindow::onClosedCaptionDataReady(
+    uint64_t request_id, bool available, qulonglong field1_id_value,
+    orc::presenters::ClosedCaptionFieldDataView field1,
+    qulonglong /*field2_id_value*/,
+    orc::presenters::ClosedCaptionFieldDataView field2) {
+  const auto pending = pending_closed_caption_requests_.find(request_id);
+  if (pending == pending_closed_caption_requests_.end()) {
+    return;  // stale / superseded response
+  }
+  pending_closed_caption_requests_.erase(pending);
+
+  if (!closed_caption_dialog_) {
+    return;
+  }
+
+  // Feed the dialog's caption cache whether or not it is currently visible, so
+  // that when it is shown again the window is already warm.
+  closed_caption_dialog_->deliverFrameData(
+      available, static_cast<uint64_t>(field1_id_value), field1, field2);
+
+  // The dialog hands out the frames it needs a batch at a time, so a delivery
+  // is what draws down the next of them; without this the window would only
+  // ever fill one batch per frame change.
+  issueClosedCaptionRequests();
 }
 
 void MainWindow::onObservationDataReady(

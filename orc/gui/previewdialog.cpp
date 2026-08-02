@@ -168,6 +168,12 @@ void PreviewDialog::setupUI() {
   connect(show_teletext_action_, &QAction::triggered, this,
           &PreviewDialog::showTeletextDialogRequested);
 
+  show_closed_caption_action_ = observersMenu->addAction("&Closed Captions");
+  show_closed_caption_action_->setShortcut(
+      QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
+  connect(show_closed_caption_action_, &QAction::triggered, this,
+          &PreviewDialog::showClosedCaptionDialogRequested);
+
   auto* viewMenu = menu_bar_->addMenu("&View");
   show_frame_timing_action_ = viewMenu->addAction("&Frame Timing");
   show_frame_timing_action_->setShortcut(

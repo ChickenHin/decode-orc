@@ -13,6 +13,7 @@
 #include <orc/stage/node_type.h>
 
 #include "burstlevelanalysisdialog.h"
+#include "closedcaptiondialog.h"
 #include "dropout_editor_dialog.h"
 #include "dropoutanalysisdialog.h"
 #include "ffmpegpresetdialog.h"
@@ -32,7 +33,6 @@
 #include "presenters/include/ntsc_observation_presenter.h"
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/render_presenter.h"
-#include "presenters/include/vbi_presenter.h"
 #include "presenters/include/video_parameter_observation_presenter.h"
 #include "previewdialog.h"
 #include "projectpropertiesdialog.h"
@@ -380,6 +380,7 @@ MainWindow::MainWindow(QWidget* parent)
       vbi_dialog_(nullptr),
       ntsc_observer_dialog_(nullptr),
       teletext_dialog_(nullptr),
+      closed_caption_dialog_(nullptr),
       dag_view_(nullptr),
       dag_model_(nullptr),
       dag_scene_(nullptr),
@@ -411,10 +412,6 @@ MainWindow::MainWindow(QWidget* parent)
   // Create and start render coordinator
   render_coordinator_ = std::make_unique<RenderCoordinator>(this);
 
-  // Presenter for VBI observations
-  vbi_presenter_ = std::make_unique<orc::presenters::VbiPresenter>(
-      [this]() -> std::shared_ptr<void> { return project_.getDAG(); });
-
   // Presenter for dropout editing (uses ProjectPresenter for delegation)
   dropout_presenter_ = std::make_unique<orc::presenters::DropoutPresenter>(
       *project_.presenter());
@@ -427,6 +424,8 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onVBIDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::teletextDataReady,
           this, &MainWindow::onTeletextDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::closedCaptionDataReady,
+          this, &MainWindow::onClosedCaptionDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::availableOutputsReady,
           this, &MainWindow::onAvailableOutputsReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::lineSamplesReady, this,
@@ -530,6 +529,10 @@ MainWindow::~MainWindow() {
     delete teletext_dialog_;
     teletext_dialog_ = nullptr;
   }
+  if (closed_caption_dialog_) {
+    delete closed_caption_dialog_;
+    closed_caption_dialog_ = nullptr;
+  }
   if (preview_dialog_) {
     delete preview_dialog_;
     preview_dialog_ = nullptr;
@@ -594,6 +597,9 @@ void MainWindow::setupUI() {
   // Create teletext page preview dialog (initially hidden)
   teletext_dialog_ = new TeletextDialog(this);
 
+  // Create closed caption preview dialog (initially hidden)
+  closed_caption_dialog_ = new ClosedCaptionDialog(this);
+
   // Note: Dropout, SNR, and Burst Level analysis dialogs are now created
   // per-stage in runAnalysisForNode() to allow each stage to have its own
   // independent dialog
@@ -639,6 +645,8 @@ void MainWindow::setupUI() {
           this, &MainWindow::onShowNtscObserverDialog);
   connect(preview_dialog_, &PreviewDialog::showTeletextDialogRequested, this,
           &MainWindow::onShowTeletextDialog);
+  connect(preview_dialog_, &PreviewDialog::showClosedCaptionDialogRequested,
+          this, &MainWindow::onShowClosedCaptionDialog);
   connect(preview_dialog_, &PreviewDialog::lineScopeRequested, this,
           &MainWindow::onLineScopeRequested);
   connect(preview_dialog_, &PreviewDialog::lineNavigationRequested, this,
@@ -1232,6 +1240,9 @@ void MainWindow::closeAllDialogs() {
   }
   if (teletext_dialog_ && teletext_dialog_->isVisible()) {
     teletext_dialog_->hide();
+  }
+  if (closed_caption_dialog_ && closed_caption_dialog_->isVisible()) {
+    closed_caption_dialog_->hide();
   }
 
   // Close and delete all per-node analysis dialogs
@@ -4448,6 +4459,20 @@ void MainWindow::onShowTeletextDialog() {
   updateTeletextDialog();
 }
 
+void MainWindow::onShowClosedCaptionDialog() {
+  if (!closed_caption_dialog_) {
+    return;
+  }
+
+  // Show the dialog first
+  closed_caption_dialog_->show();
+  closed_caption_dialog_->raise();
+  closed_caption_dialog_->activateWindow();
+
+  // Update closed caption information after showing
+  updateClosedCaptionDialog();
+}
+
 void MainWindow::onFrameTimingRequested() {
   if (!current_view_node_id_.is_valid()) {
     ORC_LOG_WARN("No node selected for field timing view");
@@ -4813,6 +4838,7 @@ void MainWindow::updateAllPreviewComponents() {
   updateVideoParameterObserverDialog();
   updateNtscObserverDialog();
   updateTeletextDialog();
+  updateClosedCaptionDialog();
 
   // Notify line scope dialog that preview frame has changed
   // Line scope will refresh samples at its current field/line position via
@@ -4885,18 +4911,25 @@ void MainWindow::updateVBIDialog() {
     orc::FieldID field1_id(frame_fields.first_field);
     orc::FieldID field2_id(frame_fields.second_field);
     // Request both fields - VBI interpretation requires data from both fields
-    // (e.g., CLV timecode may be split across fields)
+    // (e.g., CLV timecode may be split across fields). Newly issued ids
+    // supersede any in-flight ones, whose responses are dropped as stale in
+    // onVBIDataReady().
     pending_vbi_is_frame_mode_ = true;
-    pending_vbi_request_id_ =
+    pending_vbi_field1_ready_ = false;
+    pending_vbi_field2_ready_ = false;
+    pending_vbi_request_id_field1_ =
         render_coordinator_->requestVBIData(current_view_node_id_, field1_id);
     pending_vbi_request_id_field2_ =
         render_coordinator_->requestVBIData(current_view_node_id_, field2_id);
   } else {
     // Field mode - request single field
     pending_vbi_is_frame_mode_ = false;
+    pending_vbi_field1_ready_ = false;
+    pending_vbi_field2_ready_ = false;
     orc::FieldID field_id(current_index);
-    pending_vbi_request_id_ =
+    pending_vbi_request_id_field1_ =
         render_coordinator_->requestVBIData(current_view_node_id_, field_id);
+    pending_vbi_request_id_field2_ = 0;
   }
 }
 
@@ -4983,6 +5016,30 @@ void MainWindow::refreshObserverDialogs() {
     pending_obs_request_id_field2_ = 0;
   }
 }
+
+std::optional<uint64_t> MainWindow::previewFrameForObservers() const {
+  const int current_index = preview_dialog_->previewSlider()->value();
+  const bool is_frame_mode =
+      (current_output_type_ == orc::PreviewOutputType::Frame_Field1_First ||
+       current_output_type_ == orc::PreviewOutputType::Frame_Reversed ||
+       current_output_type_ == orc::PreviewOutputType::Split);
+
+  if (!is_frame_mode) {
+    // Field previews index fields; one frame-keyed observation request covers
+    // both fields of the parent frame.
+    return static_cast<uint64_t>(current_index) / 2;
+  }
+
+  // Frame previews index frames directly; getFrameFields() validates the
+  // index and accounts for field ordering.
+  auto frame_fields = render_coordinator_->getFrameFields(
+      current_view_node_id_, static_cast<uint64_t>(current_index));
+  if (!frame_fields.is_valid) {
+    return std::nullopt;
+  }
+  return static_cast<uint64_t>(current_index);
+}
+
 void MainWindow::updateTeletextDialog() {
   // Only update while the dialog is visible (observer-dialog convention).
   if (!teletext_dialog_ || !teletext_dialog_->isVisible()) {
@@ -5004,31 +5061,84 @@ void MainWindow::updateTeletextDialog() {
     teletext_dialog_->clearCache();
   }
 
-  const int current_index = preview_dialog_->previewSlider()->value();
-  const bool is_frame_mode =
-      (current_output_type_ == orc::PreviewOutputType::Frame_Field1_First ||
-       current_output_type_ == orc::PreviewOutputType::Frame_Reversed ||
-       current_output_type_ == orc::PreviewOutputType::Split);
-
-  uint64_t current_frame = 0;
-  if (is_frame_mode) {
-    // Frame previews index frames directly; getFrameFields() validates the
-    // index and accounts for field ordering.
-    auto frame_fields = render_coordinator_->getFrameFields(
-        current_view_node_id_, static_cast<uint64_t>(current_index));
-    if (!frame_fields.is_valid) {
-      teletext_dialog_->clearContent();
-      return;
-    }
-    current_frame = static_cast<uint64_t>(current_index);
-  } else {
-    // Field previews index fields; one teletext request covers both fields
-    // of the parent frame.
-    current_frame = static_cast<uint64_t>(current_index) / 2;
+  const auto current_frame = previewFrameForObservers();
+  if (!current_frame) {
+    teletext_dialog_->clearContent();
+    return;
   }
 
-  teletext_dialog_->setCurrentFrame(current_frame);
+  teletext_dialog_->setCurrentFrame(*current_frame);
   issueTeletextRequests();
+}
+
+void MainWindow::updateClosedCaptionDialog() {
+  // Only update while the dialog is visible (observer-dialog convention).
+  if (!closed_caption_dialog_ || !closed_caption_dialog_->isVisible()) {
+    return;
+  }
+
+  if (!current_view_node_id_.is_valid()) {
+    pending_closed_caption_requests_.clear();
+    closed_caption_cache_node_id_ = orc::NodeID();
+    closed_caption_dialog_->clearContent();
+    return;
+  }
+
+  // The trailing-window caption cache only carries over while the view node is
+  // unchanged; a node switch means different observations.
+  if (closed_caption_cache_node_id_ != current_view_node_id_) {
+    closed_caption_cache_node_id_ = current_view_node_id_;
+    pending_closed_caption_requests_.clear();
+    closed_caption_dialog_->clearCache();
+  }
+
+  const auto current_frame = previewFrameForObservers();
+  if (!current_frame) {
+    closed_caption_dialog_->clearContent();
+    return;
+  }
+
+  closed_caption_dialog_->setCurrentFrame(*current_frame);
+  issueClosedCaptionRequests();
+}
+
+void MainWindow::issueClosedCaptionRequests() {
+  if (!closed_caption_dialog_ || !current_view_node_id_.is_valid()) {
+    return;
+  }
+
+  // Drop in-flight requests whose frame has left the window; keep the rest.
+  // Stepping forward slides the window by one frame, so cancelling the whole
+  // set each time would keep re-issuing reads that never get the chance to
+  // complete. The upper bound is what the dialog will still accept rather than
+  // where the previewer is: a backward step does not make a read already in
+  // flight useless.
+  const uint64_t window_start = closed_caption_dialog_->windowStartFrame();
+  const uint64_t retained_limit = closed_caption_dialog_->retainedFrameLimit();
+  std::unordered_set<uint64_t> frames_in_flight;
+  for (auto it = pending_closed_caption_requests_.begin();
+       it != pending_closed_caption_requests_.end();) {
+    if (it->second < window_start || it->second > retained_limit) {
+      it = pending_closed_caption_requests_.erase(it);
+    } else {
+      frames_in_flight.insert(it->second);
+      ++it;
+    }
+  }
+
+  // Request only the window frames the dialog holds no caption data for and
+  // has no outstanding request for. The dialog hands these out a batch at a
+  // time; each delivery calls back here for the next batch.
+  const auto needed_frames = closed_caption_dialog_->framesNeedingData();
+  closed_caption_dialog_->showPending();
+  for (const uint64_t frame : needed_frames) {
+    if (frames_in_flight.count(frame) != 0) {
+      continue;
+    }
+    const uint64_t request_id = render_coordinator_->requestClosedCaptionData(
+        current_view_node_id_, orc::FieldID(frame * 2));
+    pending_closed_caption_requests_.emplace(request_id, frame);
+  }
 }
 
 void MainWindow::issueTeletextRequests() {

@@ -9,6 +9,9 @@
 
 #pragma once
 
+// Destination vocabulary only; the ORC_LOG_* macros below deliberately shadow
+// the SDK's own (see orc/support/logging.h), so that header is not pulled in.
+#include <orc/support/log_destination.h>
 #include <spdlog/spdlog.h>
 
 #include <memory>
@@ -23,11 +26,13 @@ std::shared_ptr<spdlog::logger> get_app_logger();
 void reset_logging();
 
 /// Initialize application logging independently of core
+/// @param destination Which sinks to install (console, file, or both)
 void init_app_logging(
     const std::string& level = "info",
     const std::string& pattern = "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
     const std::string& log_file = "",
-    const std::string& logger_name = "orc-app");
+    const std::string& logger_name = "orc-app",
+    LogDestination destination = LogDestination::kBoth);
 
 }  // namespace orc
 

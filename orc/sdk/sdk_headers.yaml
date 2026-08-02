@@ -473,6 +473,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Per-line sample count and offset helpers for 4FSC CVBS flat"
+  - path: orc/support/log_destination.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Log output destination selection (console, file, both)"
   - path: orc/support/logging.h
     tier: support
     domain: ""
