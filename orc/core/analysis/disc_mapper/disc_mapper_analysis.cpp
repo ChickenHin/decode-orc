@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <iostream>
 #include <sstream>
 
 #include "../../include/dag_executor.h"
@@ -376,8 +375,8 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
       [&node_id](const ProjectDAGNode& n) { return n.node_id == node_id; });
 
   if (node_it == nodes.end()) {
-    std::cerr << "DiscMapperAnalysisTool::applyToGraph: node not found: "
-              << node_id.value() << std::endl;
+    ORC_LOG_ERROR("DiscMapperAnalysisTool::applyToGraph - node not found: {}",
+                  node_id);
     return false;
   }
 
@@ -386,7 +385,6 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   if (mapping_it == result.graphData.end()) {
     ORC_LOG_ERROR(
         "DiscMapperAnalysisTool::applyToGraph - No mapping spec in result");
-    std::cerr << "No mapping spec in result" << std::endl;
     return false;
   }
   std::string mappingSpec = mapping_it->second;
@@ -402,12 +400,9 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   }
   ORC_LOG_DEBUG("Node '{}':   New mapping spec: {}", node_id, mappingSpec);
 
-  std::cout << "Applying field mapping results to node " << node_id.value()
-            << std::endl;
-  std::cout << "  Mapping spec: " << mappingSpec << std::endl;
   auto rationale_it = result.graphData.find("rationale");
   if (rationale_it != result.graphData.end()) {
-    std::cout << "  Rationale: " << rationale_it->second << std::endl;
+    ORC_LOG_DEBUG("Node '{}':   Rationale: {}", node_id, rationale_it->second);
   }
 
   // Set the FrameMapStage's "ranges" parameter via parameterChanges
@@ -417,9 +412,6 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   ORC_LOG_DEBUG(
       "Successfully prepared mapping spec for FrameMapStage 'ranges' "
       "parameter");
-  std::cout << "Successfully prepared mapping spec for FrameMapStage 'ranges' "
-               "parameter"
-            << std::endl;
   return true;
 }
 
