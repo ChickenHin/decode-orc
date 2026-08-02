@@ -13,6 +13,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <mutex>
+#include <vector>
 
 namespace orc {
 
@@ -55,7 +56,8 @@ static spdlog::level::level_enum parse_level(const std::string& level) {
 
 void init_app_logging(const std::string& level, const std::string& pattern,
                       const std::string& log_file,
-                      const std::string& logger_name) {
+                      const std::string& logger_name,
+                      LogDestination destination) {
   std::lock_guard<std::mutex> lock(g_logger_mutex);
 
   // Drop existing logger if present
@@ -64,24 +66,41 @@ void init_app_logging(const std::string& level, const std::string& pattern,
     g_logger.reset();
   }
 
-  // Create new logger with proper name
-  auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-  g_logger = std::make_shared<spdlog::logger>(logger_name, sink);
-  spdlog::register_logger(g_logger);
-  g_logger->set_pattern(pattern);
-  g_logger->set_level(parse_level(level));
+  const LogSinkSelection selection =
+      resolve_log_sinks(destination, !log_file.empty());
 
-  if (!log_file.empty()) {
+  std::vector<spdlog::sink_ptr> sinks;
+
+  if (selection.console) {
+    auto console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+    console_sink->set_pattern(pattern);
+    sinks.push_back(console_sink);
+  }
+
+  if (selection.file) {
     try {
-      // Add file sink while keeping console output
       auto file_sink =
           std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
       file_sink->set_pattern(pattern);
-      g_logger->sinks().push_back(file_sink);
+      sinks.push_back(file_sink);
     } catch (...) {  // NOLINT(bugprone-empty-catch)
-      // If file sink creation fails, keep console logging only
+      // If file sink creation fails, fall through to the console fallback
     }
   }
+
+  if (sinks.empty()) {
+    // File-only logging was requested but the file sink could not be created;
+    // keep the console so records are not silently discarded.
+    sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
+    sinks.back()->set_pattern(pattern);
+  }
+
+  // Create new logger with proper name
+  g_logger =
+      std::make_shared<spdlog::logger>(logger_name, sinks.begin(), sinks.end());
+  spdlog::register_logger(g_logger);
+  g_logger->set_pattern(pattern);
+  g_logger->set_level(parse_level(level));
 }
 
 }  // namespace orc

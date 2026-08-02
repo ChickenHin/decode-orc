@@ -13,6 +13,7 @@
 #include <orc/stage/node_id.h>
 #include <orc/stage/orc_source_parameters.h>  // For public_api::SourceParameters
 #include <orc/stage/params/parameter_types.h>
+#include <orc/support/log_destination.h>
 
 #include <map>
 #include <memory>
@@ -37,7 +38,8 @@ namespace orc::presenters {
  * @param level Log level (trace, debug, info, warn, error, critical, off)
  * @param pattern Optional custom pattern (default: "[%Y-%m-%d %H:%M:%S.%e] [%n]
  * [%^%l%$] %v")
- * @param log_file Optional file path to write logs to (in addition to console)
+ * @param log_file Optional file path to write logs to
+ * @param destination Which sinks to install (console, file, or both)
  *
  * This function provides access to core's logging initialization through the
  * presenters layer, maintaining MVP architecture compliance.
@@ -45,7 +47,8 @@ namespace orc::presenters {
 void initCoreLogging(
     const std::string& level = "info",
     const std::string& pattern = "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
-    const std::string& log_file = "");
+    const std::string& log_file = "",
+    LogDestination destination = LogDestination::kBoth);
 
 /**
  * @brief Set the background observation worker-pool size.

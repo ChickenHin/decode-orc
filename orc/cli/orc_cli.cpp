@@ -132,6 +132,11 @@ void print_usage(const char* program_name) {
   std::cerr << "                                 Default: info\n";
   std::cerr
       << "  --log-file FILE                Write logs to specified file\n";
+  std::cerr << "  --log-out OUTPUT               Where to send log output "
+               "(console, file, both)\n";
+  std::cerr << "                                 'file' and 'both' need "
+               "--log-file\n";
+  std::cerr << "                                 Default: both\n";
   std::cerr << "  --safe-core-plugins            Clear plugin registry and "
                "ignore ORC_STAGE_PLUGIN_PATHS\n";
   std::cerr
@@ -141,6 +146,8 @@ void print_usage(const char* program_name) {
   std::cerr << "  " << program_name << " project.orcprj --process\n";
   std::cerr << "  " << program_name
             << " project.orcprj --process --log-level debug\n";
+  std::cerr << "  " << program_name
+            << " project.orcprj --process --log-file run.log --log-out file\n";
   std::cerr << "  " << program_name
             << " --source tbc_source=input_path=a.tbc \\\n";
   std::cerr << "      --filters dropout_correct --sink "
@@ -177,6 +184,8 @@ int main(int argc, char* argv[]) {
     std::string project_path;
     std::string log_level = "info";
     std::string log_file;
+    std::string log_out = "both";
+    bool log_out_provided = false;
     bool safe_core_plugins = false;
 
     // Filtergraph mode: the input/filters/output triad. Mutually exclusive
@@ -281,6 +290,9 @@ int main(int argc, char* argv[]) {
         log_level = argv[++i];
       } else if (arg == "--log-file" && i + 1 < argc) {
         log_file = argv[++i];
+      } else if (arg == "--log-out" && i + 1 < argc) {
+        log_out = argv[++i];
+        log_out_provided = true;
       } else if (arg == "--safe-core-plugins") {
         // Handled before dispatch.
       } else if (arg == "--process") {
@@ -315,6 +327,15 @@ int main(int argc, char* argv[]) {
         return 1;
       }
     }
+
+    const auto parsed_log_out = orc::parse_log_destination(log_out);
+    if (!parsed_log_out.has_value()) {
+      std::cerr << "Error: Invalid --log-out value: " << log_out
+                << " (expected console, file or both)\n\n";
+      print_usage(argv[0]);
+      return 1;
+    }
+    const orc::LogDestination log_destination = *parsed_log_out;
 
     const bool filtergraph_mode = triad_provided;
 
@@ -380,9 +401,21 @@ int main(int argc, char* argv[]) {
 
     // Initialize logging - both app logger and core logger
     orc::init_app_logging(log_level, "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
-                          log_file, "cli");
-    orc::presenters::initCoreLogging(
-        log_level, "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v", log_file);
+                          log_file, "cli", log_destination);
+    orc::presenters::initCoreLogging(log_level,
+                                     "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
+                                     log_file, log_destination);
+
+    // Only warn when the destination was asked for explicitly: the default
+    // ("both" with no log file) is plain console logging, which is not
+    // noteworthy.
+    if (log_out_provided && log_destination != orc::LogDestination::kConsole &&
+        log_file.empty()) {
+      ORC_LOG_WARN(
+          "--log-out {} was requested without --log-file; logging to the "
+          "console only",
+          log_out);
+    }
 
     if (safe_core_plugins) {
       ORC_LOG_WARN(

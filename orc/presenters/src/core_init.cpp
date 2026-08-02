@@ -17,8 +17,8 @@
 namespace orc::presenters {
 
 void initCoreLogging(const std::string& level, const std::string& pattern,
-                     const std::string& log_file) {
-  orc::init_logging(level, pattern, log_file);
+                     const std::string& log_file, LogDestination destination) {
+  orc::init_logging(level, pattern, log_file, destination);
 }
 
 namespace {

@@ -418,6 +418,7 @@ orc_add_core_unit_tests(
         orc-core-unit-tests-support
         "unit"
 
+        support/log_destination_test.cpp
         support/teletext_slicer_test.cpp
         support/teletext_page_decoder_test.cpp
         support/teletext_row_squasher_test.cpp

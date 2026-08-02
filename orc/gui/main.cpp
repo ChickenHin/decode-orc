@@ -44,21 +44,27 @@ static std::shared_ptr<spdlog::logger> g_gui_logger;
 /// @param level Log level string
 /// @param pattern Log pattern
 /// @param log_file Optional log file path
+/// @param destination Which sinks to install (console, file, or both)
 void init_gui_logging(const std::string& level, const std::string& pattern,
-                      const std::string& log_file) {
+                      const std::string& log_file, LogDestination destination) {
   // Reset existing logger
   g_gui_logger.reset();
+
+  const LogSinkSelection selection =
+      resolve_log_sinks(destination, !log_file.empty());
 
   // Create sinks
   std::vector<spdlog::sink_ptr> sinks;
 
   // Console sink (with colors)
-  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-  console_sink->set_pattern(pattern);
-  sinks.push_back(console_sink);
+  if (selection.console) {
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_pattern(pattern);
+    sinks.push_back(console_sink);
+  }
 
-  // Optional file sink
-  if (!log_file.empty()) {
+  // File sink
+  if (selection.file) {
     try {
       auto file_sink =
           std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
@@ -68,6 +74,14 @@ void init_gui_logging(const std::string& level, const std::string& pattern,
       // If file logging fails, just continue with console only
       std::cerr << "Failed to create log file: " << ex.what() << std::endl;
     }
+  }
+
+  if (sinks.empty()) {
+    // File-only logging was requested but the file sink could not be created;
+    // keep the console so records are not silently discarded.
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_pattern(pattern);
+    sinks.push_back(console_sink);
   }
 
   // Create logger
@@ -175,6 +189,13 @@ int main(int argc, char* argv[]) {
         "Write both GUI and core logs to the specified file", "file");
     parser.addOption(sharedLogFileOption);
 
+    QCommandLineOption logOutOption(
+        "log-out",
+        "Where to send log output: console, file or both. 'file' and 'both' "
+        "need --log-file. Default: both",
+        "output", "both");
+    parser.addOption(logOutOption);
+
     QCommandLineOption quickProjectOption(
         "quick", "Create a quick project from a TBC/TBCC/TBCY file",
         "filename");
@@ -216,15 +237,38 @@ int main(int argc, char* argv[]) {
     QString logLevel = parser.value(logLevelOption);
     QString sharedLogFile = parser.value(sharedLogFileOption);
 
+    const QString logOutValue = parser.value(logOutOption);
+    const auto parsedLogOut =
+        orc::parse_log_destination(logOutValue.toStdString());
+    if (!parsedLogOut.has_value()) {
+      std::cerr << "Error: Invalid --log-out value '"
+                << logOutValue.toStdString()
+                << "' (expected console, file or both)" << std::endl;
+      return 1;
+    }
+    const orc::LogDestination logDestination = *parsedLogOut;
+
     // Initialize GUI logging
     orc::init_gui_logging(logLevel.toStdString(),
                           "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
-                          sharedLogFile.toStdString());
+                          sharedLogFile.toStdString(), logDestination);
 
     // Initialize core logging (same file) through presenters layer
-    orc::presenters::initCoreLogging(logLevel.toStdString(),
-                                     "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
-                                     sharedLogFile.toStdString());
+    orc::presenters::initCoreLogging(
+        logLevel.toStdString(), "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
+        sharedLogFile.toStdString(), logDestination);
+
+    // Only warn when the destination was asked for explicitly: the default
+    // ("both" with no log file) is plain console logging, which is not
+    // noteworthy.
+    if (parser.isSet(logOutOption) &&
+        logDestination != orc::LogDestination::kConsole &&
+        sharedLogFile.isEmpty()) {
+      ORC_LOG_WARN(
+          "--log-out {} was requested without --log-file; logging to the "
+          "console only",
+          logOutValue.toStdString());
+    }
 
     // Resolve the background observation worker-pool size. "auto"/0/invalid
     // means half the cores (resolved in the presenters layer); a positive
