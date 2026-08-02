@@ -69,6 +69,7 @@ struct TBCFieldMeta {
   std::optional<int32_t> ac3rf_symbol_count;
   std::optional<int64_t> file_location;  // byte offset in .tbc (informational)
   std::vector<DropoutInfo> dropouts;     // field-local TBC dropout regions
+  bool is_pad = false;  // decoder marked this field as padding (no signal)
 };
 
 // ---------------------------------------------------------------------------

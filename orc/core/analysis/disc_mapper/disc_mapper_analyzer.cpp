@@ -1,7 +1,7 @@
 /*
  * File:        disc_mapper_analyzer.cpp
  * Module:      orc-core/analysis
- * Purpose:     Field mapping analyzer implementation
+ * Purpose:     Frame mapping analyzer implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -20,6 +20,7 @@
 #include <sstream>
 
 #include "../analysis_progress.h"
+#include "frame_quality_score.h"
 
 namespace orc {
 
@@ -43,8 +44,10 @@ struct NormalizedField {
   // Phase information (supporting evidence only)
   std::optional<int32_t> phase;  // PAL: 1-8, NTSC: 1-4
 
-  // Quality metrics for tie-breaking
-  double quality_score = 0.0;
+  // Quality metrics for tie-breaking. Both fields of a frame carry the same
+  // values: the burst/SNR observers publish one reading per frame.
+  FrameQualityMetrics quality_metrics;
+  double quality_score = kNeutralFrameQualityScore;
 
   // Flags
   bool is_lead_in_out = false;  // PN == 0
@@ -65,7 +68,8 @@ struct CandidateFrame {
   bool phase_valid = true;
   bool parity_valid = true;
 
-  double quality_score = 0.0;
+  FrameQualityMetrics quality_metrics;
+  double quality_score = kNeutralFrameQualityScore;
 
   bool is_lead_in_out = false;
   bool pn_disagreement = false;  // Fields have different PNs
@@ -278,9 +282,6 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
     ORC_LOG_DEBUG("Field {}: No VBI data in ObservationContext",
                   field_id.value());
   }
-
-  // Compute quality score (placeholder)
-  nf.quality_score = 100.0;
 
   return nf;
 }
@@ -544,7 +545,10 @@ static std::optional<CandidateFrame> pair_fields(const NormalizedField& f1,
   // Check parity: valid frame pair has one first_field and one second_field
   frame.parity_valid = (f1.is_first_field != f2.is_first_field);
 
-  // Combine quality scores
+  // Combine quality scores. Both fields carry the frame's readings, so the
+  // mean is that same value; averaging keeps the result correct if a future
+  // change ever pairs fields from different frames.
+  frame.quality_metrics = f1.quality_metrics;
   frame.quality_score = (f1.quality_score + f2.quality_score) / 2.0;
 
   // Check for lead-in/out
@@ -598,6 +602,16 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   size_t fields_with_pn = 0;
   size_t cav_fields = 0;
   size_t clv_fields = 0;
+  size_t frames_with_quality = 0;
+
+  // Reference burst amplitude used to score the measured burst level. Derived
+  // once from the source's level domain; nullopt when the source reports no
+  // video parameters, in which case burst readings are left unscored.
+  std::optional<double> nominal_burst_10bit;
+  if (auto vp = source.get_video_parameters()) {
+    nominal_burst_10bit = nominal_burst_peak_10bit(
+        vp->system, vp->blanking_level, vp->white_level);
+  }
 
   {
     size_t norm_idx = 0;
@@ -609,10 +623,23 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
       if (frame_desc) {
         format = video_format_from_system(frame_desc->system);
       }
+
+      // Burst/SNR readings are frame-scoped; both fields of the frame inherit
+      // them so that the pairing stage can rank duplicate pictures.
+      const FrameQualityMetrics quality =
+          read_frame_quality_metrics(observation_context, frame_id);
+      const double quality_score =
+          compute_frame_quality_score(quality, nominal_burst_10bit);
+      if (!quality.empty()) {
+        ++frames_with_quality;
+      }
+
       for (size_t field_idx = 0; field_idx < 2; ++field_idx) {
         FieldID fid(frame_id * 2 + field_idx);
         bool is_first = (field_idx == 0);
         auto nf = normalize_field(observation_context, fid, is_first, format);
+        nf.quality_metrics = quality;
+        nf.quality_score = quality_score;
 
         if (nf.picture_number) {
           fields_with_pn++;
@@ -756,6 +783,8 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     rationale << "  VBI disagreements (will be padded): " << pn_resolved_count
               << "\n";
   }
+  rationale << "  Frames with quality readings: " << frames_with_quality
+            << " / " << total_frames << "\n";
   rationale << "  Detected format: " << (decision.is_pal ? "PAL" : "NTSC")
             << "\n";
   rationale << "  Detected disc type: " << (decision.is_cav ? "CAV" : "CLV")
@@ -874,36 +903,111 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   // Select best frame for each PN
   std::vector<CandidateFrame> selected_frames;
   size_t removed_duplicates = 0;
+  size_t duplicate_groups = 0;
+  size_t duplicates_decided_by_quality = 0;
+
+  // The per-candidate report line: score plus the readings behind it.
+  auto describe_quality = [](const CandidateFrame& frame) {
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(1) << "score " << frame.quality_score;
+    const auto& metrics = frame.quality_metrics;
+    if (metrics.median_burst_10bit) {
+      os << ", burst " << *metrics.median_burst_10bit;
+    }
+    if (metrics.white_snr_db) {
+      os << ", white SNR " << *metrics.white_snr_db << " dB";
+    }
+    if (metrics.black_psnr_db) {
+      os << ", black PSNR " << *metrics.black_psnr_db << " dB";
+    }
+    if (metrics.empty()) {
+      os << " (no quality readings)";
+    }
+    return os.str();
+  };
+
+  // Cap on how many duplicate groups are itemised in the report; a badly
+  // tracking capture can produce thousands and the detail stops being useful.
+  constexpr size_t kMaxReportedDuplicateGroups = 20;
+  std::ostringstream duplicate_report;
 
   for (const auto& [pn, frames] : frames_by_pn) {
     if (frames.size() == 1) {
       selected_frames.push_back(frames[0]);
-    } else {
-      // Multiple frames with same PN - select best
-      removed_duplicates += frames.size() - 1;
-
-      auto best = std::max_element(
-          frames.begin(), frames.end(),
-          [](const CandidateFrame& a, const CandidateFrame& b) {
-            // Priority: confidence > phase_valid > quality
-            if (a.pn_confidence != b.pn_confidence) {
-              return a.pn_confidence < b.pn_confidence;
-            }
-            if (a.phase_valid != b.phase_valid) return !a.phase_valid;
-            return a.quality_score < b.quality_score;
-          });
-
-      selected_frames.push_back(*best);
+      continue;
     }
+
+    // Multiple frames with same PN - select best
+    removed_duplicates += frames.size() - 1;
+    ++duplicate_groups;
+
+    auto best =
+        std::max_element(frames.begin(), frames.end(),
+                         [](const CandidateFrame& a, const CandidateFrame& b) {
+                           // Priority: confidence > phase_valid > quality.
+                           // Quality is the burst/SNR score, so
+                           // equally-confident copies of the same disc picture
+                           // are separated by measured signal condition.
+                           if (a.pn_confidence != b.pn_confidence) {
+                             return a.pn_confidence < b.pn_confidence;
+                           }
+                           if (a.phase_valid != b.phase_valid) {
+                             return !a.phase_valid;
+                           }
+                           return a.quality_score < b.quality_score;
+                         });
+
+    // Quality made the decision when nothing earlier in the priority order
+    // separated the candidates and the scores were not all equal.
+    const bool confidence_and_phase_tied = std::all_of(
+        frames.begin(), frames.end(), [&frames](const CandidateFrame& f) {
+          return f.pn_confidence == frames.front().pn_confidence &&
+                 f.phase_valid == frames.front().phase_valid;
+        });
+    const bool scores_differ = std::any_of(
+        frames.begin(), frames.end(), [&frames](const CandidateFrame& f) {
+          return f.quality_score != frames.front().quality_score;
+        });
+    if (confidence_and_phase_tied && scores_differ) {
+      ++duplicates_decided_by_quality;
+    }
+
+    if (duplicate_groups <= kMaxReportedDuplicateGroups) {
+      duplicate_report << "    Picture " << pn << ": " << frames.size()
+                       << " copies\n";
+      for (const auto& frame : frames) {
+        const uint64_t src_frame_id = frame.first_field.value() / 2;
+        duplicate_report << "      "
+                         << (&frame == &*best ? "kept   " : "dropped")
+                         << " source frame " << src_frame_id << " — "
+                         << describe_quality(frame) << "\n";
+      }
+    }
+
+    selected_frames.push_back(*best);
   }
 
   decision.stats.removed_duplicates = removed_duplicates;
+  decision.stats.frames_with_quality = frames_with_quality;
+  decision.stats.duplicate_groups = duplicate_groups;
+  decision.stats.duplicates_decided_by_quality = duplicates_decided_by_quality;
 
   if (progress) progress->setProgress(100);
   rationale << "Stage 4: Deduplication\n";
   rationale << "  Unique picture numbers: " << frames_by_pn.size() << "\n";
   rationale << "  Duplicates removed: " << removed_duplicates << "\n";
+  rationale << "  Duplicate groups decided by signal quality: "
+            << duplicates_decided_by_quality << " / " << duplicate_groups
+            << "\n";
   rationale << "  Frames without PN: " << frames_without_pn.size() << "\n";
+  if (!duplicate_report.str().empty()) {
+    rationale << "  Duplicate selection:\n" << duplicate_report.str();
+    if (duplicate_groups > kMaxReportedDuplicateGroups) {
+      rationale << "    ... "
+                << (duplicate_groups - kMaxReportedDuplicateGroups)
+                << " further duplicate groups not itemised\n";
+    }
+  }
   rationale << "  Frame map: "
             << generate_frame_map(selected_frames, !decision.is_cav, fmt)
             << "\n\n";

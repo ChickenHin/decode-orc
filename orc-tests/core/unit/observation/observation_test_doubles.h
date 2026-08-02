@@ -28,12 +28,15 @@ namespace test {
 // reads samples from it, so every accessor returns a trivial value.
 class FakeVideoFrameRepresentation final : public VideoFrameRepresentation {
  public:
+  // Returned for every frame when set (e.g. to mark the content as padding).
+  std::optional<FrameDescriptor> descriptor;
+
   FrameIDRange frame_range() const override { return {0, 0}; }
   size_t frame_count() const override { return 1; }
   bool has_frame(FrameID id) const override { return id == 0; }
   std::optional<FrameDescriptor> get_frame_descriptor(
       FrameID /*id*/) const override {
-    return std::nullopt;
+    return descriptor;
   }
   const sample_type* get_frame(FrameID /*id*/) const override {
     return nullptr;

@@ -48,7 +48,10 @@ struct FrameDescriptor {
   // override (e.g., a Japanese NTSC disc mastered at 0 IRE).
   std::optional<int32_t> black_level_override;
 
-  // True for synthetic frames inserted by FrameMapStage to fill sequence gaps.
+  // True for frames with no real signal content: synthetic frames inserted to
+  // fill sequence gaps (frame_map, source_align) and source frames whose TBC
+  // metadata marks both fields as padding. The host observer pass skips such
+  // frames and records "padded, no data" observations instead (issue #77).
   bool is_padding_frame = false;
 };
 

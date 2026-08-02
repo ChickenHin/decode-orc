@@ -280,6 +280,10 @@ bool LDSinkStageDeps::write_tbc_and_metadata(
           FieldMetadata fm;
           fm.seq_no = static_cast<int32_t>(fields_exported + 1);
           fm.is_first_field = (f == 0);
+          // Preserve padding identity so it round-trips: a re-imported TBC
+          // marks these fields pad=true and the frame is skipped by the
+          // observer pass (issue #77).
+          fm.is_pad = true;
           metadata_writer_->write_field_metadata(fm);
           ++fields_exported;
         }

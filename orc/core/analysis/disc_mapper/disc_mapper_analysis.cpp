@@ -2,7 +2,7 @@
  * File:        disc_mapper_analysis.cpp
  * Module:      analysis
  * Purpose:     Disc mapper analysis tool: detects skipped, repeated, and
- * missing fields
+ * missing frames
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -11,13 +11,15 @@
 #include "disc_mapper_analysis.h"
 
 #include <biphase_observer.h>
+#include <black_psnr_observer.h>
+#include <burst_level_observer.h>
 #include <frame_numbering.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
+#include <white_snr_observer.h>
 
 #include <algorithm>
 #include <cstdint>
-#include <iostream>
 #include <sstream>
 
 #include "../../include/dag_executor.h"
@@ -35,7 +37,7 @@ std::string DiscMapperAnalysisTool::id() const { return "field_mapping"; }
 std::string DiscMapperAnalysisTool::name() const { return "Disc Mapper"; }
 
 std::string DiscMapperAnalysisTool::description() const {
-  return "Detect and correct skipped, repeated, and missing fields caused by "
+  return "Detect and correct skipped, repeated, and missing frames caused by "
          "laserdisc player tracking problems.";
 }
 
@@ -69,7 +71,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
   if (!ctx.dag || !ctx.project) {
     result.status = AnalysisResult::Failed;
     result.summary = "No DAG or project provided for analysis";
-    ORC_LOG_ERROR("Field mapping analysis requires DAG and project in context");
+    ORC_LOG_ERROR("Frame mapping analysis requires DAG and project in context");
     return result;
   }
 
@@ -91,14 +93,14 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
   // Get the input node ID
   if (node.input_node_ids.empty()) {
     result.status = AnalysisResult::Failed;
-    result.summary = "Field map node has no input connected";
-    ORC_LOG_ERROR("Field map node '{}' has no input", ctx.node_id);
+    result.summary = "Frame map node has no input connected";
+    ORC_LOG_ERROR("Frame map node '{}' has no input", ctx.node_id);
     return result;
   }
 
   NodeID input_node_id = node.input_node_ids[0];
   ORC_LOG_DEBUG(
-      "Node '{}': Field mapping analysis - getting input from node '{}'",
+      "Node '{}': Frame mapping analysis - getting input from node '{}'",
       ctx.node_id, input_node_id);
 
   // Execute DAG to get the VideoFrameRepresentation from the input node
@@ -138,18 +140,28 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
                   source->frame_count(), source->frame_count() * 2);
 
     if (progress) {
-      progress->setStatus("Extracting VBI data from fields...");
+      progress->setStatus("Extracting VBI and signal quality data...");
       progress->setProgress(0);
     }
 
-    // Run BiphaseObserver on all frames to extract VBI data into
-    // ObservationContext. Populates the "biphase" namespace with
-    // vbi_line_16, vbi_line_17, vbi_line_18 keyed by derived FieldIDs.
+    // Run the observers the mapper depends on over all frames, populating the
+    // ObservationContext:
+    //  - BiphaseObserver     "biphase" vbi_line_16/17/18 (picture numbers)
+    //  - BurstLevelObserver  "burst_level" median_burst_10bit
+    //  - WhiteSNRObserver    "white_snr" snr_db
+    //  - BlackPSNRObserver   "black_psnr" psnr_db
+    // The last three supply the signal-quality readings the deduplication
+    // stage uses to choose between duplicate copies of a disc picture. They
+    // run in the same pass so that each frame is decoded only once.
     BiphaseObserver biphase_observer;
+    BurstLevelObserver burst_level_observer;
+    WhiteSNRObserver white_snr_observer;
+    BlackPSNRObserver black_psnr_observer;
     auto& obs_context = executor.get_observation_context();
     auto frame_range = source->frame_range();
 
-    ORC_LOG_DEBUG("Running BiphaseObserver on {} frames", frame_range.count());
+    ORC_LOG_DEBUG("Running VBI and quality observers on {} frames",
+                  frame_range.count());
 
     {
       size_t total_frames = frame_range.count();
@@ -158,6 +170,9 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
           std::max(static_cast<size_t>(1), total_frames / 100);
       for (FrameID fid = frame_range.first; fid <= frame_range.last; ++fid) {
         biphase_observer.process_frame(*source, fid, obs_context);
+        burst_level_observer.process_frame(*source, fid, obs_context);
+        white_snr_observer.process_frame(*source, fid, obs_context);
+        black_psnr_observer.process_frame(*source, fid, obs_context);
         ++biphase_idx;
         if (progress && biphase_idx % update_interval == 0) {
           int pct = static_cast<int>(biphase_idx * 100 / total_frames);
@@ -176,7 +191,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
       }
     }
 
-    ORC_LOG_DEBUG("BiphaseObserver complete, ObservationContext populated");
+    ORC_LOG_DEBUG("Observers complete, ObservationContext populated");
 
     if (progress && progress->isCancelled()) {
       result.status = AnalysisResult::Cancelled;
@@ -187,7 +202,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     DiscMapperAnalyzer analyzer;
     DiscMapperAnalyzer::Options options;
 
-    // Run field mapping analysis - each stage reports its own 0-100% progress
+    // Run frame mapping analysis - each stage reports its own 0-100% progress
     FieldMappingDecision decision =
         analyzer.analyze(*source, obs_context, options, progress);
 
@@ -285,9 +300,9 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     // Frame Map parameter dialog; the applied spec stays 0-based internally.
     const std::string display_spec =
         range_spec_to_presentation(decision.mapping_spec);
-    summary << "\n\nGenerated Field Mapping:\n";
+    summary << "\n\nGenerated Frame Mapping:\n";
     if (display_spec.empty()) {
-      summary << "  (empty - no fields could be mapped)";
+      summary << "  (empty - no frames could be mapped)";
     } else if (display_spec.length() <= 200) {
       summary << "  " << display_spec;
     } else {
@@ -319,6 +334,12 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     result.statistics["paddingFrames"] =
         static_cast<int64_t>(stats.padding_frames);
     result.statistics["gapsPadded"] = static_cast<int64_t>(stats.gaps_padded);
+    result.statistics["framesWithQualityData"] =
+        static_cast<int64_t>(stats.frames_with_quality);
+    result.statistics["duplicateGroups"] =
+        static_cast<int64_t>(stats.duplicate_groups);
+    result.statistics["duplicatesDecidedByQuality"] =
+        static_cast<int64_t>(stats.duplicates_decided_by_quality);
 
     // Store mapping spec for graph application
     result.graphData["mappingSpec"] = decision.mapping_spec;
@@ -328,7 +349,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     // "Each stage shall produce a clear description of the decision making
     // process/pipeline"
 
-    ORC_LOG_DEBUG("Field mapping analysis complete - mapping spec: {} chars",
+    ORC_LOG_DEBUG("Frame mapping analysis complete - mapping spec: {} chars",
                   decision.mapping_spec.length());
 
     result.status = AnalysisResult::Success;
@@ -337,7 +358,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
   } catch (const std::exception& e) {
     result.status = AnalysisResult::Failed;
     result.summary = std::string("Analysis failed: ") + e.what();
-    ORC_LOG_ERROR("Field mapping analysis failed: {}", e.what());
+    ORC_LOG_ERROR("Frame mapping analysis failed: {}", e.what());
     return result;
   }
 }
@@ -354,8 +375,8 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
       [&node_id](const ProjectDAGNode& n) { return n.node_id == node_id; });
 
   if (node_it == nodes.end()) {
-    std::cerr << "DiscMapperAnalysisTool::applyToGraph: node not found: "
-              << node_id.value() << std::endl;
+    ORC_LOG_ERROR("DiscMapperAnalysisTool::applyToGraph - node not found: {}",
+                  node_id);
     return false;
   }
 
@@ -364,12 +385,11 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   if (mapping_it == result.graphData.end()) {
     ORC_LOG_ERROR(
         "DiscMapperAnalysisTool::applyToGraph - No mapping spec in result");
-    std::cerr << "No mapping spec in result" << std::endl;
     return false;
   }
   std::string mappingSpec = mapping_it->second;
 
-  ORC_LOG_DEBUG("Node '{}': Applying field mapping results", node_id);
+  ORC_LOG_DEBUG("Node '{}': Applying frame mapping results", node_id);
   if (node_it->parameters.count("ranges")) {
     auto& old_value = node_it->parameters.at("ranges");
     if ([[maybe_unused]] auto* str_val = std::get_if<std::string>(&old_value)) {
@@ -380,12 +400,9 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   }
   ORC_LOG_DEBUG("Node '{}':   New mapping spec: {}", node_id, mappingSpec);
 
-  std::cout << "Applying field mapping results to node " << node_id.value()
-            << std::endl;
-  std::cout << "  Mapping spec: " << mappingSpec << std::endl;
   auto rationale_it = result.graphData.find("rationale");
   if (rationale_it != result.graphData.end()) {
-    std::cout << "  Rationale: " << rationale_it->second << std::endl;
+    ORC_LOG_DEBUG("Node '{}':   Rationale: {}", node_id, rationale_it->second);
   }
 
   // Set the FrameMapStage's "ranges" parameter via parameterChanges
@@ -395,9 +412,6 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   ORC_LOG_DEBUG(
       "Successfully prepared mapping spec for FrameMapStage 'ranges' "
       "parameter");
-  std::cout << "Successfully prepared mapping spec for FrameMapStage 'ranges' "
-               "parameter"
-            << std::endl;
   return true;
 }
 

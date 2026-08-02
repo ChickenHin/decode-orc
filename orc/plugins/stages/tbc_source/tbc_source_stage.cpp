@@ -222,6 +222,14 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
     if (video_params_.ntsc_j_black_level_16b.has_value()) {
       desc.black_level_override = source_params_.black_level;
     }
+    // ld-decode marks fields it synthesised (skip/gap fill) with pad=true.
+    // A frame counts as padding only when both of its TBC fields are padded —
+    // a half-real frame still carries measurable signal.
+    const size_t tbc_f1_idx = static_cast<size_t>(id) * 2;
+    const size_t tbc_f2_idx = tbc_f1_idx + 1;
+    desc.is_padding_frame = tbc_f2_idx < field_meta_.size() &&
+                            field_meta_[tbc_f1_idx].is_pad &&
+                            field_meta_[tbc_f2_idx].is_pad;
     return desc;
   }
 
@@ -956,6 +964,7 @@ std::vector<TBCFieldMeta> build_field_meta_from_reader(
     meta.efm_t_value_count = fm.efm_t_values;
     meta.ac3rf_symbol_count = fm.ac3rf_symbols;
     meta.file_location = fm.file_location;
+    meta.is_pad = fm.is_pad.value_or(false);
     meta.dropouts = reader.read_dropouts(fid);
     result.push_back(meta);
   }

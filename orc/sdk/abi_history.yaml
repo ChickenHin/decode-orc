@@ -24,7 +24,13 @@
 #                contract-removal    (a public SDK contract header/class removed)
 #   contracts — SDK contract headers whose layout the change touches (paths as
 #               in orc/sdk/sdk_headers.yaml; [] when none).
-#   summary  — one-line prose used as the docs table "Change" cell.
+#   notes    — optional; ABI-neutral contract-header edits made while this entry
+#              is current (comment/doc changes, additive non-vtable helpers).
+#              Not rendered in the docs table, so it MUST appear before
+#              `summary` — gen_abi_history_docs.sh folds everything after
+#              `summary:` into the table cell.
+#   summary  — one-line prose used as the docs table "Change" cell; always the
+#              last field of an entry.
 schema: 1
 history:
   - abi: 1
@@ -194,6 +200,12 @@ history:
     cause: data-contract-swap
     contracts:
       - orc/stage/node_type.h
+    notes: >-
+      ABI-neutral since this entry: `orc/stage/frame_descriptor.h` — the
+      `is_padding_frame` doc comment was widened to cover source frames whose
+      TBC metadata marks both fields as padding, alongside the synthetic
+      gap-fill frames inserted by `frame_map`/`source_align` (issue #77).
+      Comment only; no layout or vtable change, no rebuild required.
     summary: >-
       `NodeTypeInfo` drops the free-text `menu_category` field and the unused
       `SinkCategory` enum/`sink_category` field. The Add Stage menu category is
