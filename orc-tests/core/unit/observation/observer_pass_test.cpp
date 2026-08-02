@@ -128,6 +128,115 @@ TEST(RunFrameObserverPass_DifferentFrame_IsSeparateEntry, PerFrame) {
 }
 
 // ---------------------------------------------------------------------------
+// Padding frames (issue #77) — observers never run over synthetic padding
+// content; every observer instead gets an explicit "padded, no data" record
+// ---------------------------------------------------------------------------
+
+// The record the pass stores for each observer/field of a padding frame.
+ObservationRecord pad_record() {
+  ObservationRecord record;
+  record[kPaddingObservationNamespace][kPaddingObservationKey] = true;
+  return record;
+}
+
+void mark_as_padding(FakeVideoFrameRepresentation& vfr) {
+  FrameDescriptor desc;
+  desc.is_padding_frame = true;
+  vfr.descriptor = desc;
+}
+
+TEST(RunFrameObserverPassPadding, RunsNoObserversAndStoresPadRecords) {
+  SpyObservationService spy;
+  spy.observers = two_observers();
+  ObservationStore store;
+  FakeVideoFrameRepresentation vfr;
+  mark_as_padding(vfr);
+  const NodeFingerprint fp{"fp"};
+  const FrameID frame = 0;
+
+  ObservationContext ctx;
+  run_frame_observer_pass(spy, spy.observers, vfr, frame, &fp, &store, ctx);
+  EXPECT_EQ(spy.total_runs, 0);
+
+  // Every observer's record for both fields is the explicit pad marker, so
+  // sweep-completeness probes hit without ever measuring the black content.
+  for (const auto& obs : spy.observers) {
+    for (FieldID::value_type f = 0; f < 2; ++f) {
+      const ObservationRecordKey key{fp, FieldID(frame * 2 + f), obs.id,
+                                     obs.version};
+      const auto rec = store.get(key);
+      ASSERT_TRUE(rec.has_value()) << obs.id << " field " << f;
+      EXPECT_EQ(*rec, pad_record()) << obs.id << " field " << f;
+    }
+  }
+
+  // The context carries the marker for both fields.
+  for (FieldID::value_type f = 0; f < 2; ++f) {
+    const auto value =
+        ctx.get(FieldID(frame * 2 + f), kPaddingObservationNamespace,
+                kPaddingObservationKey);
+    ASSERT_TRUE(value.has_value()) << "field " << f;
+    EXPECT_EQ(*value, ObservationValue{true}) << "field " << f;
+  }
+}
+
+TEST(RunFrameObserverPassPadding, OverwritesStaleMeasuredRecords) {
+  // Records stored before the padding skip existed hold measurements of the
+  // synthetic content; a padded pass replaces them with the pad marker.
+  SpyObservationService spy;
+  spy.observers = {make_observer_info("white_snr", "1.0.0")};
+  ObservationStore store;
+  const NodeFingerprint fp{"fp"};
+
+  FakeVideoFrameRepresentation real;
+  ObservationContext before;
+  run_frame_observer_pass(spy, spy.observers, real, 0, &fp, &store, before);
+  ASSERT_EQ(spy.total_runs, 1);
+
+  FakeVideoFrameRepresentation padded;
+  mark_as_padding(padded);
+  ObservationContext after;
+  run_frame_observer_pass(spy, spy.observers, padded, 0, &fp, &store, after);
+  EXPECT_EQ(spy.total_runs, 1);  // pad path never runs the observer
+
+  for (FieldID::value_type f = 0; f < 2; ++f) {
+    const ObservationRecordKey key{fp, FieldID(f), "white_snr", "1.0.0"};
+    const auto rec = store.get(key);
+    ASSERT_TRUE(rec.has_value());
+    EXPECT_EQ(*rec, pad_record());
+  }
+}
+
+TEST(RunFrameObserverPassPadding, NoStoreStillSkipsObserversAndMarksContext) {
+  SpyObservationService spy;
+  spy.observers = two_observers();
+  FakeVideoFrameRepresentation padded;
+  mark_as_padding(padded);
+
+  ObservationContext ctx;
+  run_frame_observer_pass(spy, spy.observers, padded, 0, /*fingerprint=*/
+                          nullptr, /*store=*/nullptr, ctx);
+  EXPECT_EQ(spy.total_runs, 0);
+  EXPECT_TRUE(ctx.has(FieldID(0), kPaddingObservationNamespace,
+                      kPaddingObservationKey));
+  EXPECT_TRUE(ctx.has(FieldID(1), kPaddingObservationNamespace,
+                      kPaddingObservationKey));
+}
+
+TEST(RunFrameObserverPassPadding, NonPaddingDescriptorStillRunsObservers) {
+  SpyObservationService spy;
+  spy.observers = two_observers();
+  ObservationStore store;
+  FakeVideoFrameRepresentation vfr;
+  vfr.descriptor = FrameDescriptor{};  // present but not padding
+  const NodeFingerprint fp{"fp"};
+
+  ObservationContext ctx;
+  run_frame_observer_pass(spy, spy.observers, vfr, 0, &fp, &store, ctx);
+  EXPECT_EQ(spy.total_runs, 2);
+}
+
+// ---------------------------------------------------------------------------
 // Pass-through aliasing — a frame's content known under several provenances
 // (own node first, then byte-identical upstream nodes) shares one observation
 // ---------------------------------------------------------------------------

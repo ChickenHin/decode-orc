@@ -10,6 +10,8 @@ Use this stage as the final output stage when you want to feed the processed res
 
 For every field that passes through the pipeline, LD Sink writes the raw field samples to a `.tbc` binary file and records the associated metadata (field number, parity, VBI observations, hints, and all per-field observations) to a `.tbc.db` SQLite database. The stage also supports pipeline preview — you can inspect what will be written before triggering.
 
+Padding frames (inserted upstream by Frame Map gap filling or Source Align, or marked as padding in the source TBC metadata) are written as two blanking-level fields with `pad` set in the field metadata, so the padding identity survives a round-trip back through TBC Source.
+
 ## Parameters
 
 ### output_path (string)

@@ -220,6 +220,77 @@ TEST_F(LDSinkStageDepsTest,
   EXPECT_FALSE(result);
 }
 
+TEST_F(LDSinkStageDepsTest, WriteTbc_PaddingFrameWritesPadMarkedFieldMetadata) {
+  // A padding frame is written as two blanking-level fields whose metadata
+  // carries pad=true, so the padding identity round-trips through a
+  // re-imported TBC (issue #77).
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{0, 0}));
+
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint16(16UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint16_));
+
+  EXPECT_CALL(*pMockFileWriterUint16_, open("pad_path.tbc"))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*pMockMetadataWriter_, open("pad_path.tbc.db"))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  orc::SourceParameters video_params;
+  video_params.system = orc::VideoSystem::PAL;
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .Times(1)
+      .WillOnce(Return(video_params));
+
+  EXPECT_CALL(*pMockMetadataWriter_, write_video_parameters(_))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  EXPECT_CALL(*pMockMetadataWriter_, begin_transaction())
+      .Times(1)
+      .WillOnce(Return(true));
+
+  orc::FrameDescriptor padding_desc;
+  padding_desc.is_padding_frame = true;
+  EXPECT_CALL(mockRepresentation_, get_frame_descriptor(orc::FrameID(0)))
+      .Times(1)
+      .WillOnce(Return(padding_desc));
+
+  // Two blanking-level fields are written for the padding frame.
+  EXPECT_CALL(*pMockFileWriterUint16_,
+              write(testing::A<const std::vector<uint16_t>&>()))
+      .Times(2);
+
+  std::vector<orc::FieldMetadata> written;
+  EXPECT_CALL(*pMockMetadataWriter_, write_field_metadata(_))
+      .Times(2)
+      .WillRepeatedly([&written](const orc::FieldMetadata& fm) {
+        written.push_back(fm);
+        return true;
+      });
+
+  EXPECT_CALL(*pMockMetadataWriter_, commit_transaction())
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, close()).Times(1);
+  EXPECT_CALL(*pMockFileWriterUint16_, close()).Times(1);
+
+  const bool result = instance_->write_tbc_and_metadata(
+      &mockRepresentation_, "pad_path", mockObservationContext_);
+
+  EXPECT_TRUE(result);
+  ASSERT_EQ(written.size(), 2u);
+  EXPECT_EQ(written[0].is_first_field, std::optional<bool>(true));
+  EXPECT_EQ(written[1].is_first_field, std::optional<bool>(false));
+  EXPECT_EQ(written[0].is_pad, std::optional<bool>(true));
+  EXPECT_EQ(written[1].is_pad, std::optional<bool>(true));
+}
+
 TEST_F(LDSinkStageDepsTest,
        WriteTbc_ClosesFilesAndMarksProcessingFalseWhenCancelled) {
   // Non-empty range: FrameIDRange{0, 1} = 2 frames. Cancel is checked at the

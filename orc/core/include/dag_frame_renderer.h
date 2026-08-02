@@ -30,6 +30,14 @@
 
 namespace orc {
 
+// Observation namespace/key marking a padding frame's fields (issue #77).
+// Padding frames carry no measurable signal, so the observer pass does not run
+// observers over them; instead every observer's record for both fields is an
+// explicit "padded, no data" marker holding just this key. Consumers use it to
+// distinguish padding from a field that was observed and yielded nothing.
+inline constexpr char kPaddingObservationNamespace[] = "padding";
+inline constexpr char kPaddingObservationKey[] = "is_pad";
+
 // Run the standard observer pass for one frame, with optional read-through
 // caching against an ObservationStore keyed by the node's provenance.
 //
@@ -41,6 +49,12 @@ namespace orc {
 //   - Otherwise the observer runs; when caching is enabled its output for both
 //     fields is written back to the store (an empty record is stored too, so a
 //     later probe still hits).
+//
+// Padding frames (FrameDescriptor::is_padding_frame) skip the observers
+// entirely: the context and, when caching is enabled, the store receive
+// explicit "padded, no data" records (kPaddingObservationNamespace /
+// kPaddingObservationKey = true) for every observer, replacing any stale
+// record that measured the synthetic padding content.
 //
 // When either @p fingerprint or @p store is null the observers always run and
 // nothing is stored — behaviour identical to the pre-store renderer.

@@ -397,6 +397,53 @@ TEST(TBCSourceStageTest, OutputIsVFR_FrameCountIsFieldCountDividedByTwo) {
   EXPECT_EQ(vfr->frame_count(), static_cast<size_t>(kNumFields / 2));
 }
 
+TEST(TBCSourceStageTest, FrameDescriptor_MarksPaddingOnlyWhenBothFieldsArePad) {
+  // ld-decode marks player-skip fields with pad=true. A frame is a padding
+  // frame only when both of its TBC fields are padded; a half-real frame
+  // still carries measurable signal (issue #77).
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  orc::ObservationContext ctx;
+
+  static constexpr int32_t kNumFields = 6;  // 3 frames
+
+  ON_CALL(*deps, validate_input_file(_, _)).WillByDefault(Return(true));
+  ON_CALL(*deps, load_video_params(_, _))
+      .WillByDefault([](const std::string&, std::string&) {
+        return std::optional<orc::TBCVideoParams>{
+            make_pal_video_params(kNumFields)};
+      });
+  ON_CALL(*deps, load_all_field_meta(_, _))
+      .WillByDefault([](const std::string&, std::string&) {
+        auto meta = make_pal_field_meta(kNumFields);
+        meta[2].is_pad = true;  // frame 1: both fields padded
+        meta[3].is_pad = true;
+        meta[4].is_pad = true;  // frame 2: only the first field padded
+        return meta;
+      });
+  ON_CALL(*deps, has_audio_file(_)).WillByDefault(Return(false));
+  ON_CALL(*deps, has_efm_file(_)).WillByDefault(Return(false));
+  ON_CALL(*deps, has_ac3_file(_)).WillByDefault(Return(false));
+
+  const auto outputs =
+      stage.execute({}, {{"input_path", std::string("/tmp/test.tbc")}}, ctx);
+
+  ASSERT_EQ(outputs.size(), 1u);
+  const auto* vfr =
+      dynamic_cast<orc::VideoFrameRepresentation*>(outputs.front().get());
+  ASSERT_NE(vfr, nullptr);
+
+  const auto desc0 = vfr->get_frame_descriptor(0);
+  const auto desc1 = vfr->get_frame_descriptor(1);
+  const auto desc2 = vfr->get_frame_descriptor(2);
+  ASSERT_TRUE(desc0.has_value());
+  ASSERT_TRUE(desc1.has_value());
+  ASSERT_TRUE(desc2.has_value());
+  EXPECT_FALSE(desc0->is_padding_frame);
+  EXPECT_TRUE(desc1->is_padding_frame);
+  EXPECT_FALSE(desc2->is_padding_frame);
+}
+
 TEST(TBCSourceStageTest, OutputVFR_GetFrameLazilyAssemblesFromMockedDeps) {
   // Verify that get_frame() triggers read_field_samples() via deps for frame 0.
   auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();

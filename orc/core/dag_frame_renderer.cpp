@@ -62,6 +62,40 @@ void run_frame_observer_pass(const IObservationService& service,
   const FieldID field_top(frame_id * kFieldsPerFrame);
   const FieldID field_bottom(frame_id * kFieldsPerFrame + 1);
 
+  // Padding frames (frame_map / source_align gap fill, or source fields the
+  // TBC metadata marks as pad) carry no measurable signal, so running the
+  // observers over their synthetic content would store spurious measurements
+  // (issue #77). Instead each observer gets an explicit "padded, no data"
+  // record: sweep-completeness probes still hit, and consumers can tell
+  // padding apart from a field that was observed and yielded nothing. Any
+  // stored record with different content predates the padding skip (it holds
+  // measurements of the synthetic content) and is overwritten; an up-to-date
+  // marker is left untouched so re-renders do not re-queue sidecar writes.
+  const auto descriptor = representation.get_frame_descriptor(frame_id);
+  if (descriptor && descriptor->is_padding_frame) {
+    for (const FieldID field : {field_top, field_bottom}) {
+      context.set(field, kPaddingObservationNamespace, kPaddingObservationKey,
+                  true);
+    }
+    if (caching) {
+      ObservationRecord pad_record;
+      pad_record[kPaddingObservationNamespace][kPaddingObservationKey] = true;
+      for (const auto& observer : observers) {
+        for (const auto& fingerprint : fingerprints) {
+          for (const FieldID field : {field_top, field_bottom}) {
+            const ObservationRecordKey key{fingerprint, field, observer.id,
+                                           observer.version};
+            const auto existing = store->get(key);
+            if (!existing || *existing != pad_record) {
+              store->put(key, pad_record);
+            }
+          }
+        }
+      }
+    }
+    return;
+  }
+
   for (const auto& observer : observers) {
     if (!caching) {
       // No provenance available: run directly into the target context, exactly
