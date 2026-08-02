@@ -1,7 +1,7 @@
 /*
  * File:        disc_mapper_analyzer.h
  * Module:      orc-core/analysis
- * Purpose:     Field mapping analyzer (disc mapper implementation)
+ * Purpose:     Frame mapping analyzer (disc mapper implementation)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -51,7 +51,7 @@ struct FieldMappingDecision {
 };
 
 /**
- * @brief Field mapping analyzer
+ * @brief Frame mapping analyzer
  *
  * Maps decoded fields onto a coherent frame sequence using the VBI data
  * populated in the observation context. The analysis runs a six-stage
@@ -98,7 +98,7 @@ class DiscMapperAnalyzer {
    * observers
    * @param options Analysis options
    * @param progress Optional progress callback
-   * @return Field mapping decision
+   * @return Frame mapping decision
    */
   FieldMappingDecision analyze(
       const VideoFrameRepresentation& source,

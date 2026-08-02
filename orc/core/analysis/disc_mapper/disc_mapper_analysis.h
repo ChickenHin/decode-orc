@@ -2,7 +2,7 @@
  * File:        disc_mapper_analysis.h
  * Module:      analysis
  * Purpose:     Disc mapper analysis tool: detects skipped, repeated, and
- * missing fields
+ * missing frames
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -18,7 +18,7 @@ namespace orc {
 /**
  * @brief Disc mapper analysis tool
  *
- * Analyzes source captures to detect skipped, repeated, and missing fields
+ * Analyzes source captures to detect skipped, repeated, and missing frames
  * that indicate laserdisc player tracking problems.
  */
 class DiscMapperAnalysisTool : public AnalysisTool {

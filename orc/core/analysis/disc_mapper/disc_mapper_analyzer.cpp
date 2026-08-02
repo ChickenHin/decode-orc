@@ -1,7 +1,7 @@
 /*
  * File:        disc_mapper_analyzer.cpp
  * Module:      orc-core/analysis
- * Purpose:     Field mapping analyzer implementation
+ * Purpose:     Frame mapping analyzer implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns

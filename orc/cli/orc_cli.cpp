@@ -171,7 +171,7 @@ void print_usage(const char* program_name) {
  * @brief Main entry point for orc-cli
  *
  * Parses command-line arguments and dispatches to the appropriate command
- * handler. Supports processing projects, analyzing field mappings, and
+ * handler. Supports processing projects, analyzing frame mappings, and
  * analyzing source alignments.
  *
  * @param argc Argument count

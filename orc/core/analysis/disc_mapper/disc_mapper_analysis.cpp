@@ -2,7 +2,7 @@
  * File:        disc_mapper_analysis.cpp
  * Module:      analysis
  * Purpose:     Disc mapper analysis tool: detects skipped, repeated, and
- * missing fields
+ * missing frames
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -37,7 +37,7 @@ std::string DiscMapperAnalysisTool::id() const { return "field_mapping"; }
 std::string DiscMapperAnalysisTool::name() const { return "Disc Mapper"; }
 
 std::string DiscMapperAnalysisTool::description() const {
-  return "Detect and correct skipped, repeated, and missing fields caused by "
+  return "Detect and correct skipped, repeated, and missing frames caused by "
          "laserdisc player tracking problems.";
 }
 
@@ -71,7 +71,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
   if (!ctx.dag || !ctx.project) {
     result.status = AnalysisResult::Failed;
     result.summary = "No DAG or project provided for analysis";
-    ORC_LOG_ERROR("Field mapping analysis requires DAG and project in context");
+    ORC_LOG_ERROR("Frame mapping analysis requires DAG and project in context");
     return result;
   }
 
@@ -93,14 +93,14 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
   // Get the input node ID
   if (node.input_node_ids.empty()) {
     result.status = AnalysisResult::Failed;
-    result.summary = "Field map node has no input connected";
-    ORC_LOG_ERROR("Field map node '{}' has no input", ctx.node_id);
+    result.summary = "Frame map node has no input connected";
+    ORC_LOG_ERROR("Frame map node '{}' has no input", ctx.node_id);
     return result;
   }
 
   NodeID input_node_id = node.input_node_ids[0];
   ORC_LOG_DEBUG(
-      "Node '{}': Field mapping analysis - getting input from node '{}'",
+      "Node '{}': Frame mapping analysis - getting input from node '{}'",
       ctx.node_id, input_node_id);
 
   // Execute DAG to get the VideoFrameRepresentation from the input node
@@ -202,7 +202,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     DiscMapperAnalyzer analyzer;
     DiscMapperAnalyzer::Options options;
 
-    // Run field mapping analysis - each stage reports its own 0-100% progress
+    // Run frame mapping analysis - each stage reports its own 0-100% progress
     FieldMappingDecision decision =
         analyzer.analyze(*source, obs_context, options, progress);
 
@@ -300,9 +300,9 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     // Frame Map parameter dialog; the applied spec stays 0-based internally.
     const std::string display_spec =
         range_spec_to_presentation(decision.mapping_spec);
-    summary << "\n\nGenerated Field Mapping:\n";
+    summary << "\n\nGenerated Frame Mapping:\n";
     if (display_spec.empty()) {
-      summary << "  (empty - no fields could be mapped)";
+      summary << "  (empty - no frames could be mapped)";
     } else if (display_spec.length() <= 200) {
       summary << "  " << display_spec;
     } else {
@@ -349,7 +349,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     // "Each stage shall produce a clear description of the decision making
     // process/pipeline"
 
-    ORC_LOG_DEBUG("Field mapping analysis complete - mapping spec: {} chars",
+    ORC_LOG_DEBUG("Frame mapping analysis complete - mapping spec: {} chars",
                   decision.mapping_spec.length());
 
     result.status = AnalysisResult::Success;
@@ -358,7 +358,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
   } catch (const std::exception& e) {
     result.status = AnalysisResult::Failed;
     result.summary = std::string("Analysis failed: ") + e.what();
-    ORC_LOG_ERROR("Field mapping analysis failed: {}", e.what());
+    ORC_LOG_ERROR("Frame mapping analysis failed: {}", e.what());
     return result;
   }
 }
@@ -389,7 +389,7 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
   }
   std::string mappingSpec = mapping_it->second;
 
-  ORC_LOG_DEBUG("Node '{}': Applying field mapping results", node_id);
+  ORC_LOG_DEBUG("Node '{}': Applying frame mapping results", node_id);
   if (node_it->parameters.count("ranges")) {
     auto& old_value = node_it->parameters.at("ranges");
     if ([[maybe_unused]] auto* str_val = std::get_if<std::string>(&old_value)) {
