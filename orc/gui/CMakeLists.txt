@@ -100,6 +100,12 @@ set(ORC_GUI_LIB_SOURCES
     teletextdialog.cpp
     teletextdialog.h
 
+    # Closed caption preview dialog
+    closed_caption_assembler.cpp
+    closed_caption_assembler.h
+    closedcaptiondialog.cpp
+    closedcaptiondialog.h
+
     # Frame timing dialog
     frametimingdialog.cpp
     frametimingdialog.h

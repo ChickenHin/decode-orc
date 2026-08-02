@@ -12,6 +12,7 @@
 
 #include <orc/stage/common_types.h>  // For analysis result types
 
+#include "closed_caption_observation_presenter.h"
 #include "logging.h"
 #include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
@@ -341,6 +342,15 @@ uint64_t RenderCoordinator::requestTeletextData(const orc::NodeID& node_id,
   return id;
 }
 
+uint64_t RenderCoordinator::requestClosedCaptionData(const orc::NodeID& node_id,
+                                                     orc::FieldID field_id) {
+  uint64_t id = nextRequestId();
+  auto req =
+      std::make_unique<GetClosedCaptionDataRequest>(id, node_id, field_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
 uint64_t RenderCoordinator::requestObservations(const orc::NodeID& node_id,
                                                 orc::FieldID field_id) {
   uint64_t id = nextRequestId();
@@ -588,6 +598,11 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
     case RenderRequestType::GetTeletextData:
       handleGetTeletextData(
           *static_cast<GetTeletextDataRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetClosedCaptionData:
+      handleGetClosedCaptionData(
+          *static_cast<GetClosedCaptionDataRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetDropoutData:
@@ -882,6 +897,55 @@ void RenderCoordinator::handleGetTeletextData(
                         e.what());
         } catch (...) {
           ORC_LOG_ERROR("RenderCoordinator: teletext delivery failed");
+        }
+      });
+}
+
+void RenderCoordinator::handleGetClosedCaptionData(
+    const GetClosedCaptionDataRequest& req) {
+  // One presenter request covers both fields of the field's parent frame
+  // (requestObservations() maps field -> frame), so extract both here and let
+  // the closed caption dialog fill its trailing-frame-window cache at half the
+  // request rate. Temporal order is ascending derived field id.
+  const uint64_t frame_index = req.field_id.value() / 2;
+  const orc::FieldID field1_id(frame_index * 2);
+  const orc::FieldID field2_id(frame_index * 2 + 1);
+
+  if (!worker_render_presenter_) {
+    emit closedCaptionDataReady(req.request_id, false,
+                                static_cast<qulonglong>(field1_id.value()),
+                                orc::presenters::ClosedCaptionFieldDataView{},
+                                static_cast<qulonglong>(field2_id.value()),
+                                orc::presenters::ClosedCaptionFieldDataView{});
+    return;
+  }
+
+  const uint64_t request_id = req.request_id;
+  worker_render_presenter_->requestObservations(
+      req.node_id, req.field_id,
+      [this, request_id, field1_id, field2_id](
+          uint64_t /*presenter_request_id*/, bool available,
+          const void* obs_context) noexcept {
+        // This callback may run on the scheduler's worker thread inside a
+        // completion callback that must never throw; contain everything.
+        try {
+          orc::presenters::ClosedCaptionFieldDataView field1_view;
+          orc::presenters::ClosedCaptionFieldDataView field2_view;
+          if (available && obs_context != nullptr) {
+            field1_view = orc::presenters::ClosedCaptionObservationPresenter::
+                extractFieldObservations(field1_id, obs_context);
+            field2_view = orc::presenters::ClosedCaptionObservationPresenter::
+                extractFieldObservations(field2_id, obs_context);
+          }
+          emit closedCaptionDataReady(
+              request_id, available, static_cast<qulonglong>(field1_id.value()),
+              field1_view, static_cast<qulonglong>(field2_id.value()),
+              field2_view);
+        } catch (const std::exception& e) {
+          ORC_LOG_ERROR("RenderCoordinator: closed caption delivery failed: {}",
+                        e.what());
+        } catch (...) {
+          ORC_LOG_ERROR("RenderCoordinator: closed caption delivery failed");
         }
       });
 }

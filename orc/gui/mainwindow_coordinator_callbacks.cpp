@@ -13,6 +13,7 @@
 #include <limits>
 
 #include "burstlevelanalysisdialog.h"
+#include "closedcaptiondialog.h"
 #include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
 #include "logging.h"
@@ -151,6 +152,32 @@ void MainWindow::onTeletextDataReady(
   // is what draws down the next of them; without this the window would only
   // ever fill one batch per frame change.
   issueTeletextRequests();
+}
+
+void MainWindow::onClosedCaptionDataReady(
+    uint64_t request_id, bool available, qulonglong field1_id_value,
+    orc::presenters::ClosedCaptionFieldDataView field1,
+    qulonglong /*field2_id_value*/,
+    orc::presenters::ClosedCaptionFieldDataView field2) {
+  const auto pending = pending_closed_caption_requests_.find(request_id);
+  if (pending == pending_closed_caption_requests_.end()) {
+    return;  // stale / superseded response
+  }
+  pending_closed_caption_requests_.erase(pending);
+
+  if (!closed_caption_dialog_) {
+    return;
+  }
+
+  // Feed the dialog's caption cache whether or not it is currently visible, so
+  // that when it is shown again the window is already warm.
+  closed_caption_dialog_->deliverFrameData(
+      available, static_cast<uint64_t>(field1_id_value), field1, field2);
+
+  // The dialog hands out the frames it needs a batch at a time, so a delivery
+  // is what draws down the next of them; without this the window would only
+  // ever fill one batch per frame change.
+  issueClosedCaptionRequests();
 }
 
 void MainWindow::onObservationDataReady(
