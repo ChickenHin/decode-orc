@@ -86,6 +86,18 @@ void TeletextDialog::setupUI() {
   connect(page_edit_, &QLineEdit::textChanged, this,
           &TeletextDialog::onPageNumberChanged);
   page_row->addWidget(page_edit_);
+
+  // Which page the subtitles are on is a property of the recording, not a
+  // constant: 888 is the broadcast convention, but a LaserDisc author was
+  // free to use anything (190 on the discs this was developed against). The
+  // service says so itself through C6, so the answer is put where the reader
+  // is already typing a page number rather than left to be found by scanning
+  // the table.
+  subtitle_hint_ = new QLabel(this);
+  subtitle_hint_->setObjectName("teletextSubtitleHint");
+  subtitle_hint_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  subtitle_hint_->setVisible(false);
+  page_row->addWidget(subtitle_hint_);
   page_row->addStretch();
 
   // A row that was never recovered renders exactly like a transmitted blank
@@ -266,6 +278,10 @@ QString TeletextDialog::recoveryText() const {
   return recovery_label_->isVisible() ? recovery_label_->text() : QString();
 }
 
+QString TeletextDialog::subtitleHintText() const {
+  return subtitle_hint_->isVisible() ? subtitle_hint_->text() : QString();
+}
+
 void TeletextDialog::onPageNumberChanged() { renderPage(); }
 
 void TeletextDialog::onShowErrorsToggled(bool checked) {
@@ -295,6 +311,12 @@ QString TeletextDialog::formatRecovery(
   }
   if (recovery.damaged_bytes > 0) {
     faults << tr("%n damaged byte(s)", nullptr, recovery.damaged_bytes);
+  }
+  // Not damage, but not settled either: the carousel has corrected most of
+  // this page against a repeat and these rows have not been checked by one.
+  if (recovery.unconfirmed_rows > 0) {
+    faults << tr("%n row(s) seen only once", nullptr,
+                 recovery.unconfirmed_rows);
   }
   if (faults.isEmpty()) {
     return tr("Complete (%1)").arg(rows);
@@ -361,6 +383,25 @@ void TeletextDialog::createPageRow(
 
 void TeletextDialog::updatePageRow(
     int row, const TeletextPageAssembler::PageListing& listing) {
+  auto* page_item = pages_table_->item(row, kColumnPage);
+
+  // The subtitle flag is not known when the row is created — a page can be
+  // listed from a transmission before the one that declares C6 — so the marker
+  // is written here with the volatile columns. It is spelled out rather than
+  // shown as a symbol because there is nowhere in this table to put a legend.
+  const QString label = page_item->data(Qt::UserRole).toString();
+  const QString page_text = listing.subtitle ? tr("%1 subs").arg(label) : label;
+  if (page_item->text() != page_text) {
+    page_item->setText(page_text);
+    if (listing.subtitle) {
+      page_item->setToolTip(
+          tr("Page %1 is transmitted with the C6 subtitle control bit set: it "
+             "is the page this service carries its subtitles on. Use it as the "
+             "subtitle page when exporting subtitles.")
+              .arg(label));
+    }
+  }
+
   // Frame numbers are 1-based in the UI (see frame_numbering.h).
   const QString seen = QString::number(listing.times_seen);
   // A page still arriving has no settled "last seen" frame yet; an ellipsis
@@ -407,8 +448,12 @@ void TeletextDialog::refreshPageList() {
   // time would drop the scroll position and the selection out from under a
   // user trying to click a row.
   updating_list_ = true;
+  QStringList subtitle_pages;
   int row = 0;
   for (const auto& listing : listings) {
+    if (listing.subtitle) {
+      subtitle_pages << formatPageLabel(listing.magazine, listing.page_number);
+    }
     const int key = pageSortKey(listing.magazine, listing.page_number);
     while (row < pages_table_->rowCount() &&
            pages_table_->item(row, kColumnPage)->data(kSortKeyRole).toInt() <
@@ -428,6 +473,23 @@ void TeletextDialog::refreshPageList() {
     pages_table_->removeRow(row);
   }
   updating_list_ = false;
+
+  // Plural in the general case: a multi-service recording, or a service
+  // running subtitles in more than one language, declares C6 on each page it
+  // uses for them.
+  if (subtitle_pages.isEmpty()) {
+    subtitle_hint_->setVisible(false);
+    subtitle_hint_->clear();
+  } else {
+    subtitle_hint_->setText(
+        tr("Subtitles on %1").arg(subtitle_pages.join(QStringLiteral(", "))));
+    subtitle_hint_->setToolTip(
+        tr("These pages were transmitted with the C6 subtitle control bit set "
+           "(ETSI EN 300 706 §9.3.1.3). The broadcast convention is page 888, "
+           "but a recording may carry its subtitles anywhere — use what is "
+           "listed here as the subtitle page when exporting subtitles."));
+    subtitle_hint_->setVisible(true);
+  }
 }
 
 void TeletextDialog::syncListSelection(const QString& page_label) {

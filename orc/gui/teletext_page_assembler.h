@@ -36,9 +36,11 @@
  * carrying it have been evicted, so stepping forward through a recording
  * builds up the set of pages the service transmits instead of showing only
  * the last few seconds. Continuity is what makes that meaningful, so the
- * catalogue is discarded when the previewer moves outside the span already
- * decoded; it is then rebuilt from the frames preceding the position jumped
- * to.
+ * catalogue is discarded when the previewer *seeks* — lands somewhere no part
+ * of the run describes — and is then rebuilt from the frames preceding the
+ * position jumped to. Moving back within a window's travel of the run is not
+ * a seek: the run is laid out again from further back, but everything it has
+ * learned is kept (see setCurrentFrame()).
  *
  * Frames are fed to a *persistent* decoder in ascending order and never
  * decoded twice. That matters at this window length: re-decoding the whole
@@ -106,6 +108,15 @@ class TeletextPageAssembler {
     /// Header field index of the newest appearance already counted. Guards
     /// against counting a transmission twice when it is re-emitted.
     int64_t counted_header_field = -1;
+    /// The page has been transmitted with C6 (subtitle) set at least once
+    /// since the last discontinuity — this is the service telling the receiver
+    /// which page carries the subtitles, and 888 is only a convention (the
+    /// LaserDisc samples this was built against use 190). Sticky, because a
+    /// service may drop C6 between captions (the decoder treats that as the
+    /// clear event); the page is still the subtitle page in between, and a
+    /// marker that blinked out whenever nothing was on screen would be worse
+    /// than useless for finding it.
+    bool subtitle = false;
     /// Most recent assembly, built from every row copy accumulated since the
     /// last discontinuity rather than from one transmission (see
     /// refreshCatalogue() and squasher_)
@@ -118,10 +129,16 @@ class TeletextPageAssembler {
   /**
    * @brief Advance the window so it ends at @p frame_index
    *
-   * Cached frames that fall outside the new window are evicted. A move to a
-   * position the decoder cannot reach by carrying on forwards — before the
-   * span already decoded, or more than a window beyond it — is treated as a
-   * discontinuity (skip or seek) and clears the accumulated page catalogue.
+   * A move backwards past the start of the decode run lays the run out again
+   * from a window before the new position — the decoder only goes forwards —
+   * but keeps the page catalogue and the accumulated row copies: the frames in
+   * between are the same recording, so what has been decoded is still true of
+   * it, and the page on screen stays up while the re-read happens.
+   *
+   * Only a *seek* discards: a move more than a whole window forward of the
+   * previewer, or so far back that a fresh window here would not reach where
+   * the run began. There nothing decoded so far describes anywhere near the
+   * new position, and a service can change entirely across a seek.
    */
   void setCurrentFrame(uint64_t frame_index);
 
@@ -129,6 +146,20 @@ class TeletextPageAssembler {
 
   /// First frame of the current window (0 when the window reaches the start)
   uint64_t windowStartFrame() const;
+
+  /**
+   * @brief Highest frame whose packets are still worth holding or delivering
+   *
+   * Frames ahead of the previewer are kept after a backward step, as far as a
+   * continuous move could come back to them; each one held is an observation
+   * read saved when it does. Beyond this only a seek could reach them, and a
+   * seek discards the cache anyway. Callers tracking in-flight reads should
+   * use this rather than currentFrame() as the upper bound on what is still
+   * worth waiting for.
+   */
+  uint64_t retainedFrameLimit() const {
+    return current_frame_ + kTrailingWindowFrames;
+  }
 
   /**
    * @brief Frames inside the current window with no cached data yet
@@ -145,11 +176,12 @@ class TeletextPageAssembler {
   /**
    * @brief Store the delivered per-field packet views for a frame
    *
-   * Frames outside the current window are ignored (stale deliveries), as are
-   * frames the decoder has already passed: it is fed strictly forwards, so a
-   * late delivery for an earlier frame can no longer contribute. Requests are
-   * issued in ascending order and the decoder only advances over frames that
-   * have arrived, so this is the rare case of a response overtaken by a seek.
+   * Frames outside the run's reach are ignored (stale deliveries; see
+   * retainedFrameLimit()), as are frames the decoder has already passed: it is
+   * fed strictly forwards, so a late delivery for an earlier frame can no
+   * longer contribute. Requests are issued in ascending order and the decoder
+   * only advances over frames that have arrived, so this is the rare case of a
+   * response overtaken by a seek.
    */
   void storeFrame(uint64_t frame_index,
                   orc::presenters::TeletextFieldPacketsView field1,
@@ -181,6 +213,9 @@ class TeletextPageAssembler {
     /// False while the page is still arriving (see
     /// orc::presenters::TeletextPageView::transmission_complete)
     bool transmission_complete = true;
+    /// Seen with the C6 subtitle control bit set (see
+    /// CataloguedPage::subtitle)
+    bool subtitle = false;
   };
 
   /// Pages seen since the last discontinuity, ascending by page address
@@ -232,9 +267,15 @@ class TeletextPageAssembler {
    */
   int lostPacketsBetween(int64_t first_field, int64_t last_field) const;
 
-  /// Start decoding afresh from @p anchor_frame, discarding the catalogue,
-  /// the accumulated row copies, and the decoder's assembly state.
+  /// Lay the decode run out again from @p anchor_frame, discarding only the
+  /// decoder's own assembly state. The catalogue and the row copies survive;
+  /// discardAccumulated() is what throws those away.
   void restartDecodeAt(uint64_t anchor_frame);
+
+  /// Throw away everything learned by this decode run — cached frames, row
+  /// copies, per-field packet counts and the catalogue — for a seek to a
+  /// position none of it describes.
+  void discardAccumulated();
 
   /// Frame a decode run arriving at @p frame_index should start from — one
   /// whole window back, clamped to the start of the recording.

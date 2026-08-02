@@ -122,6 +122,19 @@ struct TeletextPageSnapshot {
   // from the cells.
   std::array<bool, kRows> row_received{};
 
+  // Copies of each display row that were combined to produce it: 0 where no
+  // packet was received, 1 where the row rests on a single copy, more where
+  // repeated transmissions corrected each other (see teletext_row_squasher.h).
+  // Index 0 is always 0 — header rows carry a live clock and are not squashed.
+  //
+  // This is the page's confidence in its own rows. One copy is not a fault,
+  // but it is unchecked: the row is shown exactly as it was received, and a
+  // burst long enough to carry a row's address onto another codeword (Hamming
+  // 8/4 corrects one bit and detects two, EN 300 706 §8.2 — a longer burst can
+  // still land on a valid address) puts that row in the wrong place with
+  // nothing to contradict it. A second copy is what turns that into a vote.
+  std::array<int, kRows> row_copies{};
+
   // Whether the page's transmission had finished when this snapshot was
   // taken. False means more rows of *this* transmission were still to come:
   // either the header was repeated part-way through the page (a rolling

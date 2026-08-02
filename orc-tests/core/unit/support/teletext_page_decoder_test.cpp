@@ -390,6 +390,40 @@ TEST_F(TeletextPageDecoderTest, SquasherKeepsRowsAcrossClippedTransmissions) {
   EXPECT_TRUE(clipped.row_received[2]);
 }
 
+// How many copies a row rests on is the page's confidence in it. Hamming 8/4
+// corrects one bit and detects two (EN 300 706 §8.2), but a longer burst can
+// carry a row's address onto another valid one, and a row that arrived once
+// has nothing to contradict it if that happens.
+TEST_F(TeletextPageDecoderTest, RowCopiesCountWhatEachRowRestsOn) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "ROW ONE"), 1);
+  decoder_.process_packet(make_row(1, 2, "ROW TWO"), 2);
+  // A second pass of the carousel confirms row 1 but not row 2.
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 3);
+  decoder_.process_packet(make_row(1, 1, "ROW ONE"), 4);
+  decoder_.process_packet(make_time_filling_header(1), 5);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  const auto& snapshot = snapshots_.back();
+  EXPECT_EQ(snapshot.row_copies[0], 0) << "header rows are never squashed";
+  EXPECT_EQ(snapshot.row_copies[1], 2);
+  EXPECT_EQ(snapshot.row_copies[2], 1);
+  EXPECT_EQ(snapshot.row_copies[3], 0) << "no packet was received for row 3";
+}
+
+TEST_F(TeletextPageDecoderTest, RowCopiesIsOneWithoutASquasher) {
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "ROW ONE"), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(snapshots_[0].row_copies[1], 1);
+  EXPECT_EQ(snapshots_[0].row_copies[2], 0);
+}
+
 TEST_F(TeletextPageDecoderTest, SquasherRepairsAParityDamagedByte) {
   orc::TeletextRowSquasher squasher;
   decoder_.set_row_squasher(&squasher);

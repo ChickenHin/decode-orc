@@ -185,6 +185,39 @@ TEST(TeletextObservationPresenterTest, PageView_SummarisesRecovery) {
   EXPECT_FALSE(view.row_received[21]);
 }
 
+// A row that arrived once is only worth flagging where the page has rows the
+// carousel has corrected against a repeat: that is what makes the odd one out
+// odd. It is where a row carried onto the wrong address by a burst survives.
+TEST(TeletextObservationPresenterTest, PageView_FlagsRowsSeenOnlyOnce) {
+  orc::TeletextPageSnapshot snapshot;
+  for (int row = 1; row <= 5; ++row) {
+    snapshot.row_received[static_cast<size_t>(row)] = true;
+    snapshot.row_copies[static_cast<size_t>(row)] = 3;
+  }
+  snapshot.row_copies[3] = 1;  // never confirmed by a repeat
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.recovery.unconfirmed_rows, 1);
+  EXPECT_TRUE(view.row_unconfirmed[3]);
+  EXPECT_FALSE(view.row_unconfirmed[2]);
+  EXPECT_FALSE(view.row_unconfirmed[6]) << "a row never received is not this";
+}
+
+// On a page seen once nothing has been confirmed, so saying so of every row
+// says nothing at all.
+TEST(TeletextObservationPresenterTest, PageView_FirstSightingFlagsNothing) {
+  orc::TeletextPageSnapshot snapshot;
+  for (int row = 1; row <= 5; ++row) {
+    snapshot.row_received[static_cast<size_t>(row)] = true;
+    snapshot.row_copies[static_cast<size_t>(row)] = 1;
+  }
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.recovery.unconfirmed_rows, 0);
+}
+
 // A row consumed by a double-height character above it carries no data by
 // definition (EN 300 706 §12.2 code 0/D), so its absence is not a gap.
 TEST(TeletextObservationPresenterTest,

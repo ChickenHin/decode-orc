@@ -41,7 +41,11 @@ class TeletextPageWidget;
  * page number, how many times the carousel has brought it round, and the
  * frame it was last seen at; selecting a row renders that page. Rows are
  * merged into place rather than rebuilt, and are ordered by page address, so
- * the table stays still enough to click while the previewer is playing.
+ * the table stays still enough to click while the previewer is playing. Pages
+ * transmitted with the C6 subtitle control bit are marked in the table and
+ * named beside the page-number entry: which page carries the subtitles is a
+ * property of the recording (888 is only the broadcast convention), and it is
+ * what the sink stages need to be told to export them.
  * Status text lives in a status bar along the bottom edge so transient
  * messages never reflow the page display.
  *
@@ -84,6 +88,12 @@ class TeletextDialog : public QDialog {
   /// Last frame of the current trailing window (the previewer's frame)
   uint64_t currentFrame() const { return assembler_.currentFrame(); }
 
+  /// Highest frame a delivery is still worth making for
+  /// (see TeletextPageAssembler::retainedFrameLimit())
+  uint64_t retainedFrameLimit() const {
+    return assembler_.retainedFrameLimit();
+  }
+
   /**
    * @brief Deliver a teletextDataReady response for one frame
    *
@@ -115,6 +125,10 @@ class TeletextDialog : public QDialog {
 
   /// Recovery readout for the displayed page (test seam; empty when hidden)
   QString recoveryText() const;
+
+  /// Subtitle-page notice text (test seam; empty when no subtitle page has
+  /// been seen and the notice is hidden)
+  QString subtitleHintText() const;
 
  private slots:
   void onPageNumberChanged();
@@ -174,6 +188,8 @@ class TeletextDialog : public QDialog {
   QLabel* status_label_ = nullptr;
   // "Page last seen at frame N" / "not seen yet" notice.
   QLabel* seen_label_ = nullptr;
+  // "Subtitles: 190" — the pages seen carrying the C6 subtitle control bit.
+  QLabel* subtitle_hint_ = nullptr;
   TeletextPageWidget* page_widget_ = nullptr;
 };
 

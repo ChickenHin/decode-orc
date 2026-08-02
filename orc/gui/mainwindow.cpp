@@ -5039,13 +5039,16 @@ void MainWindow::issueTeletextRequests() {
   // Drop in-flight requests whose frame has left the window; keep the rest.
   // Stepping forward slides the window by one frame, so cancelling the whole
   // set each time would keep re-issuing reads that never get the chance to
-  // complete, and the dialog's page list would never fill.
+  // complete, and the dialog's page list would never fill. The upper bound is
+  // what the dialog will still accept rather than where the previewer is: a
+  // backward step does not make a read already in flight useless, and
+  // abandoning it only means issuing it again when the previewer comes back.
   const uint64_t window_start = teletext_dialog_->windowStartFrame();
-  const uint64_t current_frame = teletext_dialog_->currentFrame();
+  const uint64_t retained_limit = teletext_dialog_->retainedFrameLimit();
   std::unordered_set<uint64_t> frames_in_flight;
   for (auto it = pending_teletext_requests_.begin();
        it != pending_teletext_requests_.end();) {
-    if (it->second < window_start || it->second > current_frame) {
+    if (it->second < window_start || it->second > retained_limit) {
       it = pending_teletext_requests_.erase(it);
     } else {
       frames_in_flight.insert(it->second);

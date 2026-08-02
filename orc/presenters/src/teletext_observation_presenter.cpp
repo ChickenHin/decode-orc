@@ -195,6 +195,14 @@ TeletextPageView TeletextObservationPresenter::makePageView(
 
   view.row_received = snapshot.row_received;
 
+  // A row is only worth calling unconfirmed where the page has something to
+  // compare it against: on a page whose rows have all been seen once, every
+  // row rests on one copy and the label would be noise. Where other rows *have*
+  // been corrected by a repeat, a row that stands alone is the one the reader
+  // should distrust.
+  const int most_copies =
+      *std::max_element(snapshot.row_copies.begin(), snapshot.row_copies.end());
+
   // Recovery summary over the display rows. Rows consumed by a double-height
   // character above are excluded: their transmitted content is ignored by
   // definition (EN 300 706 §12.2 code 0/D), so their absence is not a gap.
@@ -206,6 +214,10 @@ TeletextPageView TeletextObservationPresenter::makePageView(
     ++view.recovery.rows_expected;
     if (view.row_received[static_cast<size_t>(row)]) {
       ++view.recovery.rows_received;
+    }
+    if (most_copies > 1 && snapshot.row_copies[static_cast<size_t>(row)] == 1) {
+      view.row_unconfirmed[static_cast<size_t>(row)] = true;
+      ++view.recovery.unconfirmed_rows;
     }
     for (const auto& cell : cells) {
       if (cell.parity_error) {

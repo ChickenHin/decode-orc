@@ -262,6 +262,58 @@ TEST(TeletextDialogTest, RepeatedTransmissionsAccumulateASeenCount) {
   EXPECT_EQ(dialog.listedPages().size(), 1u);
 }
 
+// Which page carries the subtitles is a property of the recording: 888 is the
+// broadcast convention, but the LaserDisc samples this was developed against
+// use 190. The service declares it with C6, so the dialog says so outright
+// rather than leaving the reader to guess a page number.
+TEST(TeletextDialogTest, SubtitlePageIsAnnouncedAndMarkedInTheList) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  // Shown, because the notice reports itself through its visibility and a
+  // child of a hidden window is never visible.
+  dialog.show();
+  EXPECT_TRUE(dialog.subtitleHintText().isEmpty());
+
+  dialog.setCurrentFrame(2);
+  for (const uint64_t frame : dialog.framesNeedingData()) {
+    if (frame == 1) {
+      dialog.deliverFrameData(
+          true, frame * 2,
+          makeFieldView({makeHeaderPacket(1, 0x00),
+                         makeRowPacket(1, 1, "HELLO TELETEXT")}),
+          makeFieldView({makeTimeFillingHeader(1)}));
+    } else if (frame == 2) {
+      dialog.deliverFrameData(
+          true, frame * 2,
+          makeFieldView(
+              {makeHeaderPacket(1, 0x90, /*subcode=*/0, /*erase_page=*/false,
+                                /*subtitle=*/true),
+               makeRowPacket(1, 20, "SUBTITLE TEXT")}),
+          makeFieldView({makeTimeFillingHeader(1)}));
+    } else {
+      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
+                              makeEmptyFieldView());
+    }
+  }
+
+  EXPECT_TRUE(dialog.subtitleHintText().contains("190"));
+  EXPECT_FALSE(dialog.subtitleHintText().contains("100"));
+
+  // The row keeps its plain page label for selection, and says what it is.
+  const auto listed = dialog.listedPages();
+  ASSERT_EQ(listed.size(), 2u);
+  EXPECT_EQ(listed[1], QString("190"));
+  auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
+  ASSERT_NE(table, nullptr);
+  EXPECT_TRUE(table->item(1, 0)->text().contains("subs"));
+  EXPECT_FALSE(table->item(0, 0)->text().contains("subs"));
+
+  // A page-list rebuild with no subtitle page left takes the notice away.
+  dialog.clearContent();
+  EXPECT_TRUE(dialog.subtitleHintText().isEmpty());
+}
+
 // EN 300 706 §9.3.1.1: a page number containing A-F cannot be selected on a
 // receiver. Such pages stay listed — they are real recovered data — but sort
 // below the selectable ones and are greyed.
@@ -594,6 +646,40 @@ TEST(TeletextPageWidgetTest, DataErrorOverlayMarksMissingRowsWhenPacketsLost) {
       << "row that carried no packet was not marked";
   EXPECT_FALSE(cellHasForeground(marked, 4, 0, qRgb(0, 0, 0)))
       << "a row that did arrive must not be marked";
+}
+
+// A row the carousel never got to check is not damage, so it is marked apart
+// from the lost-packet banding and only when the reader has asked to see how
+// the page was recovered.
+TEST(TeletextPageWidgetTest, DataErrorOverlayMarksRowsSeenOnlyOnce) {
+  (void)ensureApplication();
+
+  orc::presenters::TeletextPageView page;
+  page.row_received.fill(true);
+  page.row_unconfirmed[7] = true;
+  page.recovery.unconfirmed_rows = 1;
+
+  TeletextPageWidget widget;
+  widget.setPage(page);
+  const QSize size(orc::presenters::TeletextPageView::kColumns * 12,
+                   orc::presenters::TeletextPageView::kRows * 20);
+  widget.resize(size);
+
+  const auto render = [&] {
+    QImage image(size, QImage::Format_RGB32);
+    image.fill(Qt::black);
+    widget.render(&image);
+    return image;
+  };
+
+  EXPECT_FALSE(cellHasForeground(render(), 7, 0, qRgb(0, 0, 0)));
+
+  widget.setShowDataErrors(true);
+  const QImage marked = render();
+  EXPECT_TRUE(cellHasForeground(marked, 7, 0, qRgb(0, 0, 0)))
+      << "row resting on a single copy was not marked";
+  EXPECT_FALSE(cellHasForeground(marked, 6, 0, qRgb(0, 0, 0)))
+      << "a row confirmed by a repeat must not be marked";
 }
 
 TEST(TeletextDialogTest, RecoveryReadoutReportsRowsAndDamagedBytes) {

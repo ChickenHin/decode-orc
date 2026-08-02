@@ -376,9 +376,11 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
 
   for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
     RowData local_row_data;
+    int row_copies = 0;
     const RowData* row_source = &state.rows[static_cast<size_t>(row)];
     if (row_squasher_ != nullptr && row >= 1) {
       if (const auto squashed = row_squasher_->squashed_row(key, row)) {
+        row_copies = static_cast<int>(row_squasher_->copy_count(key, row));
         local_row_data.present = true;
         for (size_t column = 0; column < TeletextPageSnapshot::kColumns;
              ++column) {
@@ -397,6 +399,12 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     const RowData& row_data = *row_source;
     auto& cells = snapshot.cells[static_cast<size_t>(row)];
     snapshot.row_received[static_cast<size_t>(row)] = row_data.present;
+    // Without a squasher — or for a row it has no copies of, which is this
+    // magazine's own store answering — the row rests on the one copy received.
+    if (row_copies == 0 && row_data.present && row >= 1) {
+      row_copies = 1;
+    }
+    snapshot.row_copies[static_cast<size_t>(row)] = row_copies;
 
     // Start-of-row default conditions (EN 300 706 §12.2 Table 26): white
     // alphanumeric foreground, black background, steady, unboxed, normal

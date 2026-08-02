@@ -113,11 +113,27 @@ TEST(TeletextPageAssemblerTest, StaleDeliveriesOutsideWindowAreIgnored) {
   assembler.setCurrentFrame(kWindow * 2);
 
   assembler.storeFrame(0, makeEmptyFieldView(), makeEmptyFieldView());
-  assembler.storeFrame(kWindow * 2 + 1, makeEmptyFieldView(),
+  assembler.storeFrame(assembler.retainedFrameLimit() + 1, makeEmptyFieldView(),
                        makeEmptyFieldView());
 
   EXPECT_FALSE(assembler.hasFrame(0));
-  EXPECT_FALSE(assembler.hasFrame(kWindow * 2 + 1));
+  EXPECT_FALSE(assembler.hasFrame(assembler.retainedFrameLimit() + 1));
+}
+
+// A read already in flight when the previewer steps back is not wasted: the
+// frame is still one a continuous move could return to, and re-reading it
+// would cost another observation read for data already in hand.
+TEST(TeletextPageAssemblerTest, DeliveriesAheadOfThePreviewerAreKept) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(100);
+  assembler.setCurrentFrame(90);
+
+  assembler.storeFrame(95, makeEmptyFieldView(), makeEmptyFieldView());
+  EXPECT_TRUE(assembler.hasFrame(95));
+
+  // ...and stepping back again does not throw them away either.
+  assembler.setCurrentFrame(80);
+  EXPECT_TRUE(assembler.hasFrame(95));
 }
 
 TEST(TeletextPageAssemblerTest, UnavailableFrameIsNotRequestedAgain) {
@@ -283,6 +299,29 @@ TEST(TeletextPageAssemblerTest, NewSubcodeReplacesEvenWhenLessComplete) {
   EXPECT_EQ(rowText(entry->page, 2), "");
 }
 
+// The header arrives a frame or two ahead of the first row. Listing the page
+// on the strength of the header alone puts an empty grid on screen under the
+// page's own number, which reads as "this page is blank" rather than "its rows
+// have not arrived" — and on a seek, where the whole catalogue is rebuilt,
+// that is what the reader sees happen to the page they were looking at.
+TEST(TeletextPageAssemblerTest, HeaderWithoutRowsIsNotCataloguedYet) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(2);
+
+  assembler.storeFrame(0, makeFieldView({makeHeaderPacket(1, 0x00)}),
+                       makeEmptyFieldView());
+  EXPECT_EQ(assembler.findPage(1, 0x00), nullptr);
+  EXPECT_TRUE(assembler.cataloguedPages().empty());
+
+  assembler.storeFrame(1, makeFieldView({makeRowPacket(1, 1, "FIRST ROW")}),
+                       makeEmptyFieldView());
+
+  const auto* entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(rowText(entry->page, 1), "FIRST ROW");
+  EXPECT_FALSE(entry->page.transmission_complete);
+}
+
 TEST(TeletextPageAssemblerTest, UnseenPageReturnsNothing) {
   TeletextPageAssembler assembler;
   assembler.setCurrentFrame(1);
@@ -317,6 +356,68 @@ TEST(TeletextPageAssemblerTest, CataloguesEveryPageSeenInWindow) {
   EXPECT_EQ(pages[1].magazine, 8);
   EXPECT_EQ(pages[1].page_number, 0x88);
   EXPECT_EQ(pages[1].seen_frame, 2u);
+}
+
+// The service names its own subtitle page through C6 (EN 300 706 §9.3.1.3).
+// 888 is only the broadcast convention — the LaserDisc samples this was built
+// against use 190 — so the flag is the only reliable way to find it, and it
+// has to survive the page coming round with C6 clear between captions.
+TEST(TeletextPageAssemblerTest, SubtitlePageIsFlaggedFromC6AndStaysFlagged) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(3);
+
+  fillGapsBefore(assembler, 1);
+  assembler.storeFrame(
+      1,
+      makeFieldView({makeHeaderPacket(1, 0x90, /*subcode=*/0,
+                                      /*erase_page=*/false, /*subtitle=*/true),
+                     makeRowPacket(1, 20, "SUBTITLE TEXT")}),
+      makeFieldView({makeTimeFillingHeader(1)}));
+  storePage100(assembler, 2, "HELLO TELETEXT");
+  // The caption ends: page 190 comes round again with C6 clear, which is the
+  // decoder's clear event, not the page ceasing to be the subtitle page.
+  fillGapsBefore(assembler, 3);
+  assembler.storeFrame(3, makeFieldView({makeHeaderPacket(1, 0x90)}),
+                       makeFieldView({makeTimeFillingHeader(1)}));
+
+  const auto* subtitle_page = assembler.findPage(1, 0x90);
+  ASSERT_NE(subtitle_page, nullptr);
+  EXPECT_TRUE(subtitle_page->subtitle);
+  const auto* plain_page = assembler.findPage(1, 0x00);
+  ASSERT_NE(plain_page, nullptr);
+  EXPECT_FALSE(plain_page->subtitle);
+
+  const auto pages = assembler.cataloguedPages();
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_FALSE(pages[0].subtitle) << "page 100 carries no subtitles";
+  EXPECT_TRUE(pages[1].subtitle) << "page 190 does";
+}
+
+// A page can be listed from a transmission before the one that declares C6,
+// so the flag arriving has to be a catalogue change in its own right —
+// otherwise the marker only appears when something else about the page does.
+TEST(TeletextPageAssemblerTest, SubtitleFlagArrivingBumpsTheCatalogueRevision) {
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(2);
+
+  fillGapsBefore(assembler, 1);
+  assembler.storeFrame(
+      1,
+      makeFieldView({makeHeaderPacket(1, 0x90), makeRowPacket(1, 20, "TEXT")}),
+      makeFieldView({makeTimeFillingHeader(1)}));
+  const uint64_t before = assembler.catalogueRevision();
+  ASSERT_FALSE(assembler.findPage(1, 0x90)->subtitle);
+
+  fillGapsBefore(assembler, 2);
+  assembler.storeFrame(
+      2,
+      makeFieldView({makeHeaderPacket(1, 0x90, /*subcode=*/0,
+                                      /*erase_page=*/false, /*subtitle=*/true),
+                     makeRowPacket(1, 20, "TEXT")}),
+      makeFieldView({makeTimeFillingHeader(1)}));
+
+  EXPECT_TRUE(assembler.findPage(1, 0x90)->subtitle);
+  EXPECT_GT(assembler.catalogueRevision(), before);
 }
 
 TEST(TeletextPageAssemblerTest, PageStaysCataloguedAfterItsFramesAreReleased) {
@@ -358,6 +459,46 @@ TEST(TeletextPageAssemblerTest, ShortBackwardStepKeepsCatalogue) {
 
   ASSERT_EQ(assembler.cataloguedPages().size(), 1u);
   EXPECT_EQ(assembler.cataloguedPages().front().seen_frame, 10u);
+}
+
+// Dragging the slider backwards leaves the span the run has decoded, so the
+// run has to be laid out again from further back. The frames in between are
+// the same recording, though, so nothing it learned is thrown away: the page
+// the reader is looking at stays on screen and stays whole while the frames
+// behind the new position are read.
+TEST(TeletextPageAssemblerTest, RewindPastTheAnchorKeepsWhatWasDecoded) {
+  TeletextPageAssembler assembler;
+  const uint64_t start = kWindow * 3;
+  assembler.setCurrentFrame(start);
+  storePage100(assembler, start, "HELLO TELETEXT");
+  ASSERT_NE(assembler.findPage(1, 0x00), nullptr);
+  const uint64_t anchor = assembler.windowStartFrame();
+
+  // Half a window back — past the anchor, but well within a window of it.
+  assembler.setCurrentFrame(anchor - kWindow / 2);
+
+  ASSERT_EQ(assembler.cataloguedPages().size(), 1u);
+  const auto* entry = assembler.findPage(1, 0x00);
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(rowText(entry->page, 1), "HELLO TELETEXT");
+  // The run itself has moved back and will re-read from there.
+  EXPECT_LT(assembler.windowStartFrame(), anchor);
+  EXPECT_FALSE(assembler.framesNeedingData().empty());
+}
+
+// A seek is different: land more than a window before where the run began and
+// nothing it decoded describes anywhere near here, so it all goes.
+TEST(TeletextPageAssemblerTest, LongBackwardSeekClearsCatalogue) {
+  TeletextPageAssembler assembler;
+  const uint64_t start = kWindow * 4;
+  assembler.setCurrentFrame(start);
+  storePage100(assembler, start, "HELLO TELETEXT");
+  ASSERT_NE(assembler.findPage(1, 0x00), nullptr);
+
+  assembler.setCurrentFrame(assembler.windowStartFrame() - kWindow - 1);
+
+  EXPECT_TRUE(assembler.cataloguedPages().empty());
+  EXPECT_EQ(assembler.findPage(1, 0x00), nullptr);
 }
 
 TEST(TeletextPageAssemblerTest, RevisionOnlyChangesWhenTheCatalogueChanges) {

@@ -246,6 +246,24 @@ void TeletextPageWidget::paintDataErrorOverlay(
     }
   }
 
+  // Rows this page rests on a single unchecked copy of while its other rows
+  // have been corrected against a repeat (TeletextPageView::row_unconfirmed).
+  // Amber rather than red, and drawn under the parity outlines: nothing is
+  // known to be wrong with these rows, they have simply never been checked —
+  // which is where a row carried onto the wrong address by a burst survives
+  // to the screen looking like page content.
+  {
+    QBrush unchecked(QColor(255, 190, 60, 55), Qt::FDiagPattern);
+    for (int row = 1; row < kRows; ++row) {
+      if (!page.row_unconfirmed[static_cast<size_t>(row)]) {
+        continue;
+      }
+      const QRectF band(page_rect.left(), page_rect.top() + row * cell_h,
+                        page_rect.width(), cell_h);
+      painter.fillRect(band, unchecked);
+    }
+  }
+
   // Individual bytes that failed odd parity: outline the character
   // rectangle that was substituted with SPACE.
   painter.setPen(QPen(QColor(255, 80, 80, 200), 0));

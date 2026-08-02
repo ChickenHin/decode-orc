@@ -57,10 +57,20 @@ uint64_t TeletextPageAssembler::anchorFor(uint64_t frame_index) {
              : 0;
 }
 
+void TeletextPageAssembler::discardAccumulated() {
+  frames_.clear();
+  squasher_.clear();
+  field_packet_counts_.clear();
+  const bool had_catalogue = !catalogue_.empty();
+  catalogue_.clear();
+  if (had_catalogue) {
+    ++catalogue_revision_;
+  }
+}
+
 void TeletextPageAssembler::restartDecodeAt(uint64_t anchor_frame) {
   decode_anchor_ = anchor_frame;
   decode_frontier_ = anchor_frame;
-  field_packet_counts_.clear();
   decoder_ = std::make_unique<orc::TeletextPageDecoder>();
   // Rows go into the squasher, which outlives any single transmission: a page
   // keeps rows recovered during earlier ones, and repeated copies of a row
@@ -78,36 +88,46 @@ void TeletextPageAssembler::setCurrentFrame(uint64_t frame_index) {
   // happened to look between the delivery of a frame and its eviction.
   refreshCatalogue();
 
-  // The decoder only moves forwards. A position it can still reach that way —
-  // at or after the frames already consumed, and near enough that the window
-  // covers the gap — is continuous, and the accumulated catalogue and row
-  // copies keep describing the recording around the previewer. Anything else
-  // is a seek: the catalogue would no longer describe anything near the new
-  // position, and a service can change entirely across one, so keeping the
-  // row copies would let a page here be built from rows recovered elsewhere.
-  // Measured from where the previewer was, not from how far decoding has
-  // got: reads can lag a long way behind a user holding down a step key, and
-  // a backlog is no reason to throw away the history.
-  const bool continuous = frame_index >= decode_anchor_ &&
-                          frame_index < current_frame_ + kTrailingWindowFrames;
-  if (!continuous) {
-    const bool had_catalogue = !catalogue_.empty();
-    frames_.clear();
-    squasher_.clear();
-    catalogue_.clear();
+  // A seek is a move to somewhere no part of this decode run describes: more
+  // than a whole window forward of the previewer, or so far back that a fresh
+  // window here would not reach where the run began. There the catalogue would
+  // be describing another part of the recording entirely, and a service can
+  // change across a seek, so keeping the row copies would let a page here be
+  // built from rows recovered elsewhere. The forward measure is taken from
+  // where the previewer was, not from how far decoding has got: reads can lag
+  // a long way behind a user holding down a step key, and a backlog is no
+  // reason to throw away the history.
+  const bool seek = frame_index >= current_frame_ + kTrailingWindowFrames ||
+                    (frame_index < decode_anchor_ &&
+                     decode_anchor_ - frame_index > kTrailingWindowFrames);
+
+  // Anything else that lands before the anchor is a rewind: the decoder only
+  // moves forwards, so reaching frames before the anchor means laying the run
+  // out again from further back. What it has already decoded does not stop
+  // being true — the frames between here and there are the same recording, a
+  // window's travel apart at most — so the catalogue and the accumulated row
+  // copies are kept and the page on screen survives the re-read. Discarding
+  // them is what used to blank the page and rebuild it from a single
+  // transmission every time a backward drag passed the anchor, which on a
+  // long drag is every window's worth of travel.
+  const bool rewind = !seek && frame_index < decode_anchor_;
+
+  if (seek) {
+    discardAccumulated();
+  }
+  if (seek || rewind) {
     restartDecodeAt(anchorFor(frame_index));
-    if (had_catalogue) {
-      ++catalogue_revision_;
-    }
   }
 
   current_frame_ = frame_index;
-  // Frames past the previewer are dropped after a backward step: they are not
-  // wanted now and would be re-requested if it moves forward again. Frames
-  // *behind* it are kept whatever the trailing length, because the decoder
-  // still has to consume them in order — dropping one it has not reached
-  // would stall the frontier on a frame that could never arrive.
-  frames_.erase(frames_.upper_bound(current_frame_), frames_.end());
+  // Frames behind the previewer are kept whatever the trailing length, because
+  // the decoder still has to consume them in order — dropping one it has not
+  // reached would stall the frontier on a frame that could never arrive.
+  // Frames ahead of it are kept as far as a continuous move could come back
+  // to them: a backward step does not make them wrong, and each one thrown
+  // away is another observation read when the previewer returns. Past that
+  // reach only a seek could revisit them, and a seek discards everything.
+  frames_.erase(frames_.upper_bound(retainedFrameLimit()), frames_.end());
   catalogue_dirty_ = true;
 }
 
@@ -152,7 +172,7 @@ std::size_t TeletextPageAssembler::framesNeedingDataCount() const {
 void TeletextPageAssembler::storeFrame(
     uint64_t frame_index, orc::presenters::TeletextFieldPacketsView field1,
     orc::presenters::TeletextFieldPacketsView field2) {
-  if (frame_index < windowStartFrame() || frame_index > current_frame_) {
+  if (frame_index < windowStartFrame() || frame_index > retainedFrameLimit()) {
     return;  // stale delivery from a superseded window
   }
   if (frame_index < decode_frontier_) {
@@ -178,14 +198,8 @@ bool TeletextPageAssembler::hasFrame(uint64_t frame_index) const {
 }
 
 void TeletextPageAssembler::clear() {
-  frames_.clear();
-  squasher_.clear();
-  const bool had_catalogue = !catalogue_.empty();
-  catalogue_.clear();
+  discardAccumulated();
   restartDecodeAt(anchorFor(current_frame_));
-  if (had_catalogue) {
-    ++catalogue_revision_;
-  }
   catalogue_dirty_ = false;
 }
 
@@ -195,9 +209,9 @@ TeletextPageAssembler::cataloguedPages() const {
   std::vector<PageListing> listings;
   listings.reserve(catalogue_.size());
   for (const auto& [address, entry] : catalogue_) {
-    listings.push_back(PageListing{entry.magazine, entry.page_number,
-                                   entry.seen_frame, entry.times_seen,
-                                   entry.page.transmission_complete});
+    listings.push_back(PageListing{
+        entry.magazine, entry.page_number, entry.seen_frame, entry.times_seen,
+        entry.page.transmission_complete, entry.subtitle});
   }
   return listings;
 }
@@ -273,6 +287,16 @@ void TeletextPageAssembler::mergeSnapshot(
 
   auto it = catalogue_.find(address);
   if (it == catalogue_.end()) {
+    auto page = make_page(snapshot);
+    // A transmission that has only just opened carries its header and nothing
+    // else. Listing the page now would put an empty grid on screen under the
+    // page's own number, which reads as "this page is blank" when what is true
+    // is "its rows have not arrived". The first row is a frame or two behind
+    // the header, so waiting for it costs nothing and says the same thing
+    // without showing something untrue.
+    if (!snapshot.transmission_complete && page.recovery.rows_received == 0) {
+      return;
+    }
     if (catalogue_.size() >= kMaxCataloguedPages) {
       evictLeastRecentlySeen(catalogue_);
     }
@@ -280,14 +304,25 @@ void TeletextPageAssembler::mergeSnapshot(
     it->second.magazine = snapshot.magazine;
     it->second.page_number = snapshot.page_number;
     it->second.seen_frame = seen_frame;
-    it->second.page = make_page(snapshot);
+    it->second.page = std::move(page);
     // A page first met part-way through its transmission has still appeared
     // once; counting it only when it finishes would leave the list showing
     // zero for a page plainly on screen.
     it->second.times_seen = 1;
     it->second.counted_header_field = snapshot.header_field_index;
+    it->second.subtitle = snapshot.subtitle;
     ++catalogue_revision_;
     return;
+  }
+
+  // Which page carries the subtitles is a discovery in its own right, and one
+  // the reader is looking for before the page's rows mean anything to them.
+  // It is recorded ahead of everything below because the returns further down
+  // are about the page's *content* being unchanged, which says nothing about
+  // whether this transmission was the first to declare itself a subtitle page.
+  if (snapshot.subtitle && !it->second.subtitle) {
+    it->second.subtitle = true;
+    ++catalogue_revision_;
   }
 
   // One appearance of a page yields several snapshots: fragments as its own
@@ -312,11 +347,35 @@ void TeletextPageAssembler::mergeSnapshot(
     ++catalogue_revision_;
   }
 
-  // The newest decode wins outright. It is not a fragment even when this
-  // transmission was clipped: the decoder renders from squasher_, which holds
-  // every row copy seen since the last discontinuity, so rows this
-  // transmission did not carry come from the ones that did.
-  it->second.page = make_page(snapshot);
+  // Rendering the page is the expensive part of this function and everything
+  // above can answer without it, so it happens here rather than at the top.
+  auto page = make_page(snapshot);
+
+  // The newest decode wins, except where it would take rows away. It is not a
+  // fragment even when this transmission was clipped: the decoder renders from
+  // squasher_, which holds every row copy seen since the last discontinuity,
+  // so rows this transmission did not carry come from the ones that did. When
+  // the squasher has nothing to answer with — its page bound dropped the page,
+  // or the run was just laid out again — a re-opened transmission renders as
+  // its header and 24 empty rows, and letting that replace a full assembly
+  // blanks a page the reader is looking at and then fills it back in a row at
+  // a time. The exceptions are the two ways the content genuinely stops being
+  // the same page: C4 (erase page, EN 300 706 §9.3.1.3 Table 2), where the
+  // service has said so outright, and a change of sub-code (§9.3.1.2), which
+  // is a different sub-page under the same number. In both, the rows on screen
+  // describe a page that no longer exists and must go however many there are.
+  const bool replaces_content =
+      snapshot.erase_page || snapshot.subcode != it->second.page.subcode;
+  if (replaces_content ||
+      page.recovery.rows_received >= it->second.page.recovery.rows_received) {
+    it->second.page = std::move(page);
+    return;
+  }
+  // Keep the fuller assembly, but let the reader know a transmission is in
+  // progress rather than reporting a page as settled while rows are arriving.
+  it->second.page.transmission_complete = snapshot.transmission_complete;
+  it->second.page.header_field_index = snapshot.header_field_index;
+  it->second.page.last_field_index = snapshot.last_field_index;
 }
 
 void TeletextPageAssembler::refreshCatalogue() const {

@@ -544,12 +544,27 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   stays listed, with the frame it was last seen at, after the frames
   carrying it have been released. Sequential movement through the recording
   accumulates the service's page set without bound — forward progress costs
-  nothing extra, so only reaching backwards is limited. A jump outside the
-  span already decoded is a discontinuity and discards the catalogue, which
-  is then rebuilt from the frames preceding the position jumped to.
+  nothing extra, so only reaching backwards is limited.
+
+  Only a *seek* discards it: a move more than a window forward of the
+  previewer, or so far back that a fresh window at the new position would not
+  reach where the decode run began. Landing before the run's start by less
+  than that is a **rewind**, not a seek — the decoder only goes forwards, so
+  the run is laid out again from a window before the new position, but the
+  catalogue and the accumulated row copies are kept. The frames in between
+  are the same recording, and copies are keyed by (field, line), so
+  re-decoding re-seats them rather than counting them twice. Discarding on
+  any backward move past the anchor was measurably wrong: a drag re-anchors
+  the run at `position − window`, so a continued drag left the span again
+  every window's worth of travel, and each time the page on screen went blank
+  and rebuilt from a single transmission. Reconstructed against a 53 451-frame
+  PAL recording, a 400-step scrub reset 135 times under that rule.
+
   In-flight observation requests for frames still inside the window survive
   a frame change, so stepping forward does not cancel and re-issue the reads
-  that fill it.
+  that fill it. Delivered frames *ahead* of the previewer are kept for the
+  same reason after a backward step, as far as a continuous move could return
+  to them; beyond that only a seek could, and a seek discards the cache.
 - **Partial pages.** A page under transmission is shown as it arrives, which
   on a sparse insertion means several frames of it filling in. Each of those
   renders is correct for the packets received so far, but a row not yet sent
@@ -560,6 +575,15 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   `finalize()` would answer the same question but close the page, and the
   rows arriving afterwards would then be dropped as orphans.
 
+  A transmission that has only just opened is a page header and nothing else,
+  and that is not worth showing. It is not catalogued until a row arrives —
+  listing it puts an empty grid on screen under the page's own number, which
+  reads as "this page is blank" rather than "its rows have not arrived" — and
+  it never replaces an assembly that already has more rows, which would blank
+  a page the reader is looking at once per carousel cycle. The exceptions are
+  the two ways the content genuinely stops being the same page: C4 (erase
+  page) and a change of sub-code.
+
   A service may re-send a page's header while its rows are still going out
   (a rolling header keeps the on-screen clock live). Each repeat closes the
   assembly like any other header, but they are all one appearance: the
@@ -567,6 +591,23 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   every snapshot of one appearance shares it and the "transmissions" count
   reports how often the carousel brought the page round rather than how many
   header packets it sent.
+- **Finding the subtitle page.** Both subtitle consumers of §6 need to be
+  told which page to watch, and their `"888"` default is a UK broadcast
+  convention rather than a fact about a recording — the PAL LaserDisc
+  samples this was developed against carry their subtitles on **190**. The
+  service states it itself in the C6 control bit, so the dialog reports it
+  instead of leaving the user to hunt through the carousel: a page seen with
+  C6 set is marked in the page list, and the pages carrying subtitles are
+  named next to the page-number entry.
+
+  The flag is sticky for the life of the catalogue. C6 is per-transmission,
+  and a service that drops it between captions (which is the decoder's cue
+  to clear the display, §6) has not stopped using that page for subtitles; a
+  marker that blinked out whenever no caption was on screen would be worse
+  than useless for finding it. The flag arriving therefore counts as a
+  catalogue change in its own right — a page is often listed from a
+  transmission before the one that declares C6, and the marker must not have
+  to wait for something else about the page to change.
 - **Rendering.** A plain `QWidget` painting the 40×25 Level 1 grid:
   monospace font for alphanumerics, painted 2×3 block cells for mosaic
   graphics, Level 1 attributes (colours, double height, boxing on C5/C6
@@ -624,11 +665,24 @@ seams (the VBI dialog / NTSC observer dialog pattern):
   way to be wrong here. Row-level attribution is impossible: a lost packet
   does not say which row it would have carried.
 
+  A third thing is worth reporting, and it is neither damage nor a gap: how
+  many copies a row rests on (`TeletextPageSnapshot::row_copies`, from the
+  squasher). Hamming 8/4 corrects one bit and detects two (§8.2), but a burst
+  long enough can carry a row's address onto another valid one, and then the
+  row is filed under the wrong number with nothing to contradict it. On the
+  reference recording this happens in 5 of 28 743 transmissions — rare, but
+  visible, because a row the carousel has only delivered once wins its vote
+  unopposed. The presenter flags such rows (`row_unconfirmed`) *only* where
+  the page has other rows a repeat has confirmed; on a first sighting nothing
+  has been checked and saying so of every row says nothing.
+
   The dialog reports rows as a plain count — not a fraction of the 24-row
-  grid, which read as a shortfall — plus lost packets and damaged bytes when
-  there are any. The **Show data errors** toggle outlines parity-damaged
-  cells, and bands the missing rows only when the transmission lost packets,
-  at which point every gap is a candidate.
+  grid, which read as a shortfall — plus lost packets, damaged bytes, and
+  rows seen only once, when there are any. The **Show data errors** toggle
+  outlines parity-damaged cells, bands the missing rows only when the
+  transmission lost packets (at which point every gap is a candidate), and
+  bands the unconfirmed rows in amber rather than red — nothing is known to
+  be wrong with them, they have simply never been checked.
 - **Lifecycle.** An *observer* dialog, not a preview-view dialog: owned
   by `MainWindow` like `VBIDialog`, `NtscObserverDialog`, and
   `VideoParameterObserverDialog` (the View-menu dialogs — frame scope,

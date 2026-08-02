@@ -100,6 +100,14 @@ struct TeletextPageRecoveryView {
   /// Display bytes that failed odd parity (EN 300 706 §8.1) and were
   /// substituted with SPACE
   int damaged_bytes = 0;
+  /// Rows this page rests on a single unchecked copy of, while other rows of
+  /// the same page have been confirmed by a repeat. Teletext is a carousel, so
+  /// a page seen more than once has had its rows corrected against each other;
+  /// a row that stands alone in such a page was recovered once and never
+  /// checked, and is where a misplaced or damaged row survives to the screen.
+  /// Zero on a page seen only once — there, nothing has been confirmed yet and
+  /// saying so of every row would say nothing.
+  int unconfirmed_rows = 0;
   /// VBI packet slots inside this transmission that yielded nothing. The
   /// slots are the field lines the transmission itself was using, so this
   /// self-calibrates to the recording: a service inserting teletext on two
@@ -133,6 +141,11 @@ struct TeletextPageView {
 
   /// Whether a packet was recovered for each row (index 0 = the header row)
   std::array<bool, kRows> row_received{};
+  /// Rows resting on a single unchecked copy while the page has confirmed
+  /// rows elsewhere (see TeletextPageRecoveryView::unconfirmed_rows, which
+  /// counts these). The judgement is the presenter's, so a renderer and the
+  /// recovery readout cannot disagree about which rows they mean.
+  std::array<bool, kRows> row_unconfirmed{};
   /// Recovery summary for the display rows
   TeletextPageRecoveryView recovery;
   /// False when this is a page still arriving rather than a finished
