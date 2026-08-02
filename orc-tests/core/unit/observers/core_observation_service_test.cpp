@@ -43,7 +43,8 @@ using ::testing::Return;
 const std::set<std::string> kExpectedObserverIds{
     "white_snr",      "black_psnr", "burst_level",
     "closed_caption", "biphase",    "colour_frame_phase",
-    "disc_quality",   "fm_code",    "white_flag"};
+    "disc_quality",   "fm_code",    "white_flag",
+    "teletext"};
 
 TEST(CoreObservationService, AvailableObservers_ExposesEveryStandardObserver) {
   CoreObservationService service;
@@ -71,7 +72,7 @@ const std::map<std::string, bool> kExpectedStateless{
     {"burst_level", true},  {"closed_caption", false},
     {"biphase", true},      {"colour_frame_phase", false},
     {"disc_quality", true}, {"fm_code", true},
-    {"white_flag", true}};
+    {"white_flag", true},   {"teletext", true}};
 
 TEST(CoreObservationService, AvailableObservers_ClassifiesStatefulness) {
   CoreObservationService service;

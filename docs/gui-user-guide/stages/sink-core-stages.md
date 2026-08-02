@@ -350,6 +350,68 @@ This stage extracts raw EFM (Eight-to-Fourteen Modulation) t-values from the inc
 
 ---
 
+## Teletext Sink
+
+| | |
+|-|-|
+| **Stage id** | `teletext_sink` |
+| **Stage name** | Teletext Sink |
+| **Connections** | 1 input → no outputs |
+| **Purpose** | Extract World System Teletext data lines from the VBI of PAL video and write them as a T42 packet stream |
+
+**Use this stage when:**
+
+* Preserving teletext carried by a PAL LaserDisc, CVBS capture, or tape source
+* Producing a `.t42` stream for external teletext tools (vhs-teletext, wxTED)
+
+**What it does**
+
+Probes the candidate VBI lines of both fields of every frame for teletext data lines (clock run-in and framing code), recovers the 42-byte packets, and writes them as a flat, headerless `.t42` packet stream in strictly temporal order (frame → field → ascending line). Packets keep their transmission coding (Hamming 8/4 addressing, odd-parity display bytes) with no correction applied, so consumers decode the stream exactly as a receiver decodes a live broadcast.
+
+PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-quality CVBS captures are expected to decode cleanly, while consumer VHS recordings will be degraded.
+
+**Parameters**
+
+* `output_path` (string)
+    - Path to the output `.t42` file (extension appended if absent).
+    - Required.
+* `first_vbi_line` (integer)
+    - First candidate field line probed, 1-based, both fields.
+    - Default: `6`.
+* `last_vbi_line` (integer)
+    - Last candidate field line probed, 1-based, both fields.
+    - Default: `22`.
+* `keep_empty_packets` (boolean)
+    - Emit 42 zero bytes for candidate lines with no data so packet position maps 1:1 to (frame, field, line) — the vhs-decode convention.
+    - Default: `false`.
+* `tolerant_framing` (boolean)
+    - Accept framing codes with one bit error (more packets from noisy sources, higher false-positive rate).
+    - Default: `false`.
+* `require_valid_mrag` (boolean)
+    - Drop packets whose magazine/row address fails Hamming 8/4 correction (suppresses false locks on noise).
+    - Default: `true`.
+* `squash_repeated_rows` (boolean)
+    - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. Needs a second pass over the recovered packets, held in memory (roughly 50 bytes each).
+    - Default: `true`.
+* `export_subtitles` (boolean)
+    - Decode the subtitle page alongside the T42 export and write timed cues to a `.srt` file next to the output.
+    - Default: `false`.
+* `subtitle_page` (string)
+    - Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`.
+    - Default: `888`.
+* `subtitle_format` (string)
+    - Subtitle output format; currently `SRT` (SubRip) only.
+    - Default: `SRT`.
+
+**Notes**
+
+* PAL sources only; other video systems report an error.
+* The `.t42` format is described on the zxnet teletext wiki (T42 packet stream).
+* Subtitle export drops Level 1 colour and positioning attributes; the `.srt` carries plain text timed from the field rate. With `squash_repeated_rows` enabled the cues are decoded from the combined rows, so they benefit from the same correction.
+* Combining repeated rows ("squashing") is an idea taken from [vhs-teletext](https://github.com/ali1234/vhs-teletext) by Alistair Buxton. A row transmitted only once cannot be corrected, so the benefit grows with how long the recording runs and how often each page recurs.
+
+---
+
 ## Video Sink
 
 | | |
@@ -449,6 +511,12 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 
 * `embed_closed_captions` (bool)
     - FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only. Default: `false`.
+
+* `embed_teletext_subtitles` (bool)
+    - FFmpeg mode only. Decode teletext subtitles (PAL WST sources only) and embed them as mov_text subtitles. MP4/MOV output only; mutually exclusive with `embed_closed_captions`. Default: `false`.
+
+* `teletext_subtitle_page` (string)
+    - FFmpeg mode only; available only when `embed_teletext_subtitles` is enabled. Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`. Default: `888`.
 
 * `embed_chapter_metadata` (bool)
     - FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.

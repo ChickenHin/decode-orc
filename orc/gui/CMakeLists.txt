@@ -91,7 +91,15 @@ set(ORC_GUI_LIB_SOURCES
     # NTSC observer dialog
     ntscobserverdialog.cpp
     ntscobserverdialog.h
-    
+
+    # Teletext page preview dialog
+    teletext_page_assembler.cpp
+    teletext_page_assembler.h
+    teletextpagewidget.cpp
+    teletextpagewidget.h
+    teletextdialog.cpp
+    teletextdialog.h
+
     # Frame timing dialog
     frametimingdialog.cpp
     frametimingdialog.h

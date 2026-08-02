@@ -25,6 +25,7 @@ add_library(orc-presenters STATIC
     src/metrics_presenter.cpp
     src/vbi_presenter.cpp
     src/ntsc_observation_presenter.cpp
+    src/teletext_observation_presenter.cpp
     src/video_parameter_observation_presenter.cpp
     src/core_init.cpp
 )

@@ -191,6 +191,14 @@ ParameterDescriptor make_param(const std::string& name, bool required) {
   return p;
 }
 
+ParameterDescriptor make_typed_param(const std::string& name,
+                                     orc::ParameterType type) {
+  ParameterDescriptor p;
+  p.name = name;
+  p.type = type;
+  return p;
+}
+
 // Wires up the common expectations shared by most tests: a source stage and
 // a sink stage, both compatible with every video format (so no accidental
 // video-format inference kicks in unless a test wants it to), with no
@@ -215,6 +223,16 @@ void set_up_generic_source_and_sink(NiceMock<MockProjectPresenter>& presenter,
   // (BuildsSimpleLinearGraph) override this locally with their own
   // EXPECT_CALL, which GMock matches in preference to this ON_CALL default.
   ON_CALL(presenter, addNode(_, _, _)).WillByDefault(Return(NodeID(0)));
+
+  // The typed overload is the one the importer uses, and a false return there
+  // means the parameters were rejected; accept them by default.
+  ON_CALL(
+      presenter,
+      setNodeParameters(
+          _,
+          ::testing::Matcher<const std::map<std::string, orc::ParameterValue>&>(
+              _)))
+      .WillByDefault(Return(true));
 }
 
 TEST(FiltergraphImportTest, BuildsSimpleLinearGraph) {
@@ -227,11 +245,16 @@ TEST(FiltergraphImportTest, BuildsSimpleLinearGraph) {
   EXPECT_CALL(presenter, addNode("video_sink", _, _))
       .Times(1)
       .WillOnce(Return(NodeID(1)));
+  // Parameters go in typed, not as the raw filtergraph text: the stage reads
+  // them by their declared alternative. Only tbc_source has a non-empty map.
   EXPECT_CALL(
       presenter,
       setNodeParameters(
-          _, ::testing::Matcher<const std::map<std::string, std::string>&>(_)))
-      .Times(1);  // only tbc_source has a non-empty params map
+          _,
+          ::testing::Matcher<const std::map<std::string, orc::ParameterValue>&>(
+              _)))
+      .Times(1)
+      .WillOnce(Return(true));
   EXPECT_CALL(presenter, addEdge(NodeID(0), NodeID(1))).Times(1);
 
   const auto result = import_filtergraph_into_project(
@@ -337,6 +360,13 @@ TEST(FiltergraphImportTest, FormatIsSetBeforeParameterDescriptorsAreFetched) {
   ON_CALL(presenter, getStageParameters(_))
       .WillByDefault(Return(std::vector<ParameterDescriptor>{}));
   ON_CALL(presenter, addNode(_, _, _)).WillByDefault(Return(NodeID(0)));
+  ON_CALL(
+      presenter,
+      setNodeParameters(
+          _,
+          ::testing::Matcher<const std::map<std::string, orc::ParameterValue>&>(
+              _)))
+      .WillByDefault(Return(true));
 
   {
     InSequence seq;
@@ -348,6 +378,63 @@ TEST(FiltergraphImportTest, FormatIsSetBeforeParameterDescriptorsAreFetched) {
       presenter, "NTSC_CVBS_Source=input_path=a.composite, video_sink");
 
   EXPECT_TRUE(result.ok);
+}
+
+// Regression test: a filtergraph is text, so every value arrives as a string.
+// Handing them to the stage that way left every non-string parameter invisible
+// to the std::holds_alternative check stages read them with, and the stage
+// silently used its default instead — with no error and nothing in the log.
+TEST(FiltergraphImportTest, NonStringParametersReachTheStageTyped) {
+  NiceMock<MockProjectPresenter> presenter;
+  set_up_generic_source_and_sink(presenter, "test_source", "test_sink");
+  ON_CALL(presenter, getStageParameters("test_sink"))
+      .WillByDefault(Return(std::vector<ParameterDescriptor>{
+          make_typed_param("flag", orc::ParameterType::BOOL),
+          make_typed_param("count", orc::ParameterType::INT32),
+          make_typed_param("gain", orc::ParameterType::DOUBLE),
+          make_typed_param("name", orc::ParameterType::STRING)}));
+
+  std::map<std::string, orc::ParameterValue> applied;
+  EXPECT_CALL(
+      presenter,
+      setNodeParameters(
+          _,
+          ::testing::Matcher<const std::map<std::string, orc::ParameterValue>&>(
+              _)))
+      .WillRepeatedly(
+          [&applied](NodeID,
+                     const std::map<std::string, orc::ParameterValue>& params) {
+            applied.insert(params.begin(), params.end());
+            return true;
+          });
+
+  const auto result = import_filtergraph_into_project(
+      presenter,
+      "test_source, test_sink=flag=true:count=7:gain=1.5:name=hello");
+
+  ASSERT_TRUE(result.ok) << (result.errors.empty() ? ""
+                                                   : result.errors.front());
+  EXPECT_EQ(std::get<bool>(applied.at("flag")), true);
+  EXPECT_EQ(std::get<int32_t>(applied.at("count")), 7);
+  EXPECT_EQ(std::get<double>(applied.at("gain")), 1.5);
+  EXPECT_EQ(std::get<std::string>(applied.at("name")), "hello");
+}
+
+// A value that does not fit its declared type is an error, not a silent
+// fallback to the default — the whole failure mode this replaced.
+TEST(FiltergraphImportTest, MalformedTypedParameterIsRejected) {
+  NiceMock<MockProjectPresenter> presenter;
+  set_up_generic_source_and_sink(presenter, "test_source", "test_sink");
+  ON_CALL(presenter, getStageParameters("test_sink"))
+      .WillByDefault(Return(std::vector<ParameterDescriptor>{
+          make_typed_param("flag", orc::ParameterType::BOOL)}));
+
+  const auto result = import_filtergraph_into_project(
+      presenter, "test_source, test_sink=flag=maybe");
+
+  EXPECT_FALSE(result.ok);
+  ASSERT_FALSE(result.errors.empty());
+  EXPECT_NE(result.errors.front().find("flag"), std::string::npos);
 }
 
 // Regression test: if parameter validation fails *after* the format was

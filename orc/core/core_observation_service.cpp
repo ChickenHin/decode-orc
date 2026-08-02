@@ -18,6 +18,7 @@
 #include <fm_code_observer.h>
 #include <observer.h>
 #include <orc/stage/video_frame_representation.h>
+#include <teletext_observer.h>
 #include <white_flag_observer.h>
 #include <white_snr_observer.h>
 
@@ -60,7 +61,7 @@ std::unique_ptr<Observer> make_observer() {
 //     codes and pop-on/paint-on modes span successive frames.
 //   - colour_frame_phase: the 4-/8-field colour-sequence phase is only
 //     meaningful as an ordered progression across frames.
-constexpr std::array<ObserverRegistryEntry, 9> kObserverRegistry{{
+constexpr std::array<ObserverRegistryEntry, 10> kObserverRegistry{{
     {"white_snr", &make_observer<WhiteSNRObserver>, /*stateless=*/true},
     {"black_psnr", &make_observer<BlackPSNRObserver>, /*stateless=*/true},
     {"burst_level", &make_observer<BurstLevelObserver>, /*stateless=*/true},
@@ -72,6 +73,9 @@ constexpr std::array<ObserverRegistryEntry, 9> kObserverRegistry{{
     {"disc_quality", &make_observer<FieldQualityObserver>, /*stateless=*/true},
     {"fm_code", &make_observer<FmCodeObserver>, /*stateless=*/true},
     {"white_flag", &make_observer<WhiteFlagObserver>, /*stateless=*/true},
+    // Stateless by design: each field is sliced independently; teletext page
+    // assembly (the stateful part) lives in downstream consumers.
+    {"teletext", &make_observer<TeletextObserver>, /*stateless=*/true},
 }};
 
 // Look up a factory by id. Returns nullptr for an unknown id (no throw).

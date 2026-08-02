@@ -24,6 +24,7 @@
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
 #include "snranalysisdialog.h"
+#include "teletextdialog.h"
 #include "vbidialog.h"
 #include "videoparameterobserverdialog.h"
 
@@ -115,6 +116,32 @@ void MainWindow::onVBIDataReady(uint64_t request_id,
     }
     pending_vbi_request_id_ = 0;
   }
+}
+
+void MainWindow::onTeletextDataReady(
+    uint64_t request_id, bool available, qulonglong field1_id_value,
+    orc::presenters::TeletextFieldPacketsView field1,
+    qulonglong /*field2_id_value*/,
+    orc::presenters::TeletextFieldPacketsView field2) {
+  const auto pending = pending_teletext_requests_.find(request_id);
+  if (pending == pending_teletext_requests_.end()) {
+    return;  // stale / superseded response
+  }
+  pending_teletext_requests_.erase(pending);
+
+  if (!teletext_dialog_) {
+    return;
+  }
+
+  // Feed the dialog's packet cache whether or not it is currently visible,
+  // so that when it is shown again the window is already warm.
+  teletext_dialog_->deliverFrameData(
+      available, static_cast<uint64_t>(field1_id_value), field1, field2);
+
+  // The dialog hands out the frames it needs a batch at a time, so a delivery
+  // is what draws down the next of them; without this the window would only
+  // ever fill one batch per frame change.
+  issueTeletextRequests();
 }
 
 void MainWindow::onObservationDataReady(

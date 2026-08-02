@@ -22,6 +22,7 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ld_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/raw_efm_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
                 ${CMAKE_SOURCE_DIR}/orc/sdk/include
         )
     target_link_libraries(
@@ -73,7 +74,8 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-dropout-analysis-sink
                         orc-stage-plugin-snr-analysis-sink
                         orc-stage-plugin-burst-level-analysis-sink
-                        orc-stage-plugin-cvbs-sink)
+                        orc-stage-plugin-cvbs-sink
+                        orc-stage-plugin-teletext-sink)
                 if(TARGET ${_orc_stage_plugin_target})
                         target_link_libraries(${target} ${_orc_stage_plugin_target})
                 endif()
@@ -132,6 +134,7 @@ orc_add_core_unit_tests(
         stages/video_sink/video_sink_stage_test.cpp
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
+        stages/video_sink/teletext_subtitle_feed_test.cpp
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
@@ -157,6 +160,8 @@ orc_add_core_unit_tests(
         stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
+        stages/teletext_sink/teletext_sink_stage_test.cpp
+        stages/teletext_sink/teletext_sink_stage_deps_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -404,6 +409,17 @@ orc_add_core_unit_tests(
 
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
+        observers/teletext_observer_test.cpp
+)
+
+# SDK support-tier algorithm helpers (synthesis-based, no I/O).
+orc_add_core_unit_tests(
+        orc-core-unit-tests-support
+        "unit"
+
+        support/teletext_slicer_test.cpp
+        support/teletext_page_decoder_test.cpp
+        support/teletext_row_squasher_test.cpp
 )
 
 orc_add_core_unit_tests(

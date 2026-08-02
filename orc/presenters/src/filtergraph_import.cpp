@@ -10,8 +10,13 @@
 #include "filtergraph_import.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -103,6 +108,119 @@ struct SourceFormatInference {
 bool has_nonempty_param(const FilterStage& stage, const std::string& key) {
   const auto it = stage.params.find(key);
   return it != stage.params.end() && !it->second.empty();
+}
+
+/**
+ * Convert one `key=value` text from a filtergraph into the ParameterValue
+ * alternative the stage actually reads.
+ *
+ * A filtergraph is text, so every value arrives as a string; stages read
+ * their parameters with std::holds_alternative against the type they
+ * declared. Storing everything as a string therefore made every non-string
+ * parameter invisible to its stage, which silently fell back to the default.
+ * The declared type is the authority for the conversion, and a value that
+ * does not fit it is an error rather than a default.
+ *
+ * @param descriptor Declared parameter, whose `type` selects the alternative
+ * @param text       Value exactly as typed in the filtergraph
+ * @param error      Set to a user-facing explanation when conversion fails
+ * @return The typed value, or nullopt when @p text does not fit the type
+ */
+std::optional<orc::ParameterValue> coerce_parameter(
+    const ParameterDescriptor& descriptor, const std::string& text,
+    std::string* error) {
+  // Leading/trailing spaces survive shell quoting more often than they are
+  // meant, and no numeric or boolean literal needs them.
+  const auto first = text.find_first_not_of(" \t");
+  const auto last = text.find_last_not_of(" \t");
+  const std::string trimmed = first == std::string::npos
+                                  ? std::string()
+                                  : text.substr(first, last - first + 1);
+
+  const auto whole_number = [&](int64_t min_value,
+                                int64_t max_value) -> std::optional<int64_t> {
+    if (trimmed.empty()) {
+      *error = "expected a whole number";
+      return std::nullopt;
+    }
+    std::size_t consumed = 0;
+    int64_t value = 0;
+    try {
+      value = static_cast<int64_t>(std::stoll(trimmed, &consumed));
+    } catch (const std::exception&) {
+      *error = "'" + text + "' is not a whole number";
+      return std::nullopt;
+    }
+    if (consumed != trimmed.size()) {
+      *error = "'" + text + "' is not a whole number";
+      return std::nullopt;
+    }
+    if (value < min_value || value > max_value) {
+      *error = "'" + text + "' is out of range for this parameter";
+      return std::nullopt;
+    }
+    return value;
+  };
+
+  switch (descriptor.type) {
+    case ParameterType::BOOL: {
+      // The spellings a person actually types on a command line; the project
+      // writer emits "true"/"false", which round-trips through the first two.
+      std::string lowered = trimmed;
+      std::transform(
+          lowered.begin(), lowered.end(), lowered.begin(),
+          [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (lowered == "true" || lowered == "1" || lowered == "yes" ||
+          lowered == "on") {
+        return orc::ParameterValue{true};
+      }
+      if (lowered == "false" || lowered == "0" || lowered == "no" ||
+          lowered == "off") {
+        return orc::ParameterValue{false};
+      }
+      *error = "'" + text + "' is not true or false";
+      return std::nullopt;
+    }
+    case ParameterType::INT32: {
+      const auto value = whole_number(INT32_MIN, INT32_MAX);
+      if (!value) {
+        return std::nullopt;
+      }
+      return orc::ParameterValue{static_cast<int32_t>(*value)};
+    }
+    case ParameterType::UINT32: {
+      const auto value = whole_number(0, UINT32_MAX);
+      if (!value) {
+        return std::nullopt;
+      }
+      return orc::ParameterValue{static_cast<uint32_t>(*value)};
+    }
+    case ParameterType::DOUBLE: {
+      if (trimmed.empty()) {
+        *error = "expected a number";
+        return std::nullopt;
+      }
+      std::size_t consumed = 0;
+      double value = 0.0;
+      try {
+        value = std::stod(trimmed, &consumed);
+      } catch (const std::exception&) {
+        *error = "'" + text + "' is not a number";
+        return std::nullopt;
+      }
+      if (consumed != trimmed.size()) {
+        *error = "'" + text + "' is not a number";
+        return std::nullopt;
+      }
+      return orc::ParameterValue{value};
+    }
+    case ParameterType::STRING:
+    case ParameterType::FILE_PATH:
+      break;
+  }
+  // Strings and paths are stored exactly as typed: trimming a path would
+  // change what it means.
+  return orc::ParameterValue{text};
 }
 
 SourceFormatInference infer_source_format(
@@ -214,9 +332,22 @@ FiltergraphImportResult import_filtergraph_into_project(
   // are reported as errors (instead of an opaque failure later inside the
   // stage's trigger()), and unrecognised parameter names are reported as
   // warnings (likely typos) without blocking the build.
-  for (const auto& stage : parsed.graph.stages) {
+  //
+  // The same pass converts each value to the alternative its descriptor
+  // declares. Filtergraph text is untyped, so this is the only point at which
+  // a bool or a number can be recognised as one; without it every non-string
+  // parameter reached the stage as a string and was silently ignored.
+  std::vector<std::map<std::string, orc::ParameterValue>> typed_params(
+      parsed.graph.stages.size());
+  for (std::size_t index = 0; index < parsed.graph.stages.size(); ++index) {
+    const auto& stage = parsed.graph.stages[index];
     const auto descriptors = presenter.getStageParameters(stage.stage_name);
     if (descriptors.empty()) {
+      // Nothing declares these, so there is no type to convert to; pass them
+      // through unchanged and let the stage decide.
+      for (const auto& [key, value] : stage.params) {
+        typed_params[index][key] = value;
+      }
       continue;
     }
 
@@ -231,15 +362,26 @@ FiltergraphImportResult import_filtergraph_into_project(
     }
 
     for (const auto& [key, value] : stage.params) {
-      (void)value;
-      const bool known =
-          std::any_of(descriptors.begin(), descriptors.end(),
-                      [&key](const auto& d) { return d.name == key; });
-      if (!known) {
+      const auto descriptor =
+          std::find_if(descriptors.begin(), descriptors.end(),
+                       [&key](const auto& d) { return d.name == key; });
+      if (descriptor == descriptors.end()) {
         result.warnings.push_back(
             "Stage '" + stage.stage_name + "': parameter '" + key +
             "' is not recognised by this stage (check for typos).");
+        typed_params[index][key] = value;
+        continue;
       }
+      std::string conversion_error;
+      const auto coerced =
+          coerce_parameter(*descriptor, value, &conversion_error);
+      if (!coerced.has_value()) {
+        result.errors.push_back("Stage '" + stage.stage_name +
+                                "': parameter '" + key +
+                                "': " + conversion_error + ".");
+        continue;
+      }
+      typed_params[index][key] = *coerced;
     }
   }
   if (!result.errors.empty()) {
@@ -264,11 +406,16 @@ FiltergraphImportResult import_filtergraph_into_project(
     std::vector<orc::NodeID> node_ids;
     node_ids.reserve(parsed.graph.stages.size());
     double x = 0.0;
-    for (const auto& stage : parsed.graph.stages) {
+    for (std::size_t index = 0; index < parsed.graph.stages.size(); ++index) {
+      const auto& stage = parsed.graph.stages[index];
       orc::NodeID id = presenter.addNode(stage.stage_name, x, 0.0);
       node_ids.push_back(id);
-      if (!stage.params.empty()) {
-        presenter.setNodeParameters(id, stage.params);
+      if (!typed_params[index].empty() &&
+          !presenter.setNodeParameters(id, typed_params[index])) {
+        // Same failure path as any other core-side rejection below, so the
+        // rollback in the catch block covers it too.
+        throw std::runtime_error("stage '" + stage.stage_name +
+                                 "': parameters were rejected");
       }
       x += 200.0;
     }
