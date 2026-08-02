@@ -48,6 +48,7 @@ add_library(orc-core SHARED
     # Field/frame mapping analysis
     analysis/disc_mapper/disc_mapper_analysis.cpp
     analysis/disc_mapper/disc_mapper_analyzer.cpp
+    analysis/disc_mapper/frame_quality_score.cpp
     analysis/frame_map_range/frame_map_range_analysis.cpp
     analysis/frame_map_range/frame_map_range_search.cpp
     

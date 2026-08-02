@@ -41,6 +41,12 @@ struct FieldMappingDecision {
     size_t pulldown_frames = 0;
     size_t padding_frames = 0;
     size_t gaps_padded = 0;
+    /// Frames carrying at least one burst/SNR quality reading
+    size_t frames_with_quality = 0;
+    /// Picture numbers that had more than one candidate frame
+    size_t duplicate_groups = 0;
+    /// Duplicate groups whose winner was chosen on signal quality alone
+    size_t duplicates_decided_by_quality = 0;
   } stats;
 };
 
@@ -54,7 +60,9 @@ struct FieldMappingDecision {
  *      VBI line disagreements).
  *   2. Field pairing into candidate frames.
  *   3. Frame validation and filtering (lead-in/out, phase, unmappable).
- *   4. Deduplication by picture number.
+ *   4. Deduplication by picture number, picking the best copy of each disc
+ *      picture from the colour-burst level and white/black SNR readings
+ *      published by the quality observers.
  *   5. Sort by picture number and gap detection.
  *   6. Mapping-specification generation with range notation.
  * Returns a FieldMappingDecision describing the resulting mapping, the

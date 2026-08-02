@@ -170,6 +170,7 @@ orc_add_core_unit_tests(
         "unit"
 
         analysis/analysis_series_decimator_test.cpp
+        analysis/frame_quality_score_test.cpp
 )
 
 orc_add_core_unit_tests(

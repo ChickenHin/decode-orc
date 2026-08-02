@@ -11,9 +11,12 @@
 #include "disc_mapper_analysis.h"
 
 #include <biphase_observer.h>
+#include <black_psnr_observer.h>
+#include <burst_level_observer.h>
 #include <frame_numbering.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
+#include <white_snr_observer.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -138,18 +141,28 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
                   source->frame_count(), source->frame_count() * 2);
 
     if (progress) {
-      progress->setStatus("Extracting VBI data from fields...");
+      progress->setStatus("Extracting VBI and signal quality data...");
       progress->setProgress(0);
     }
 
-    // Run BiphaseObserver on all frames to extract VBI data into
-    // ObservationContext. Populates the "biphase" namespace with
-    // vbi_line_16, vbi_line_17, vbi_line_18 keyed by derived FieldIDs.
+    // Run the observers the mapper depends on over all frames, populating the
+    // ObservationContext:
+    //  - BiphaseObserver     "biphase" vbi_line_16/17/18 (picture numbers)
+    //  - BurstLevelObserver  "burst_level" median_burst_10bit
+    //  - WhiteSNRObserver    "white_snr" snr_db
+    //  - BlackPSNRObserver   "black_psnr" psnr_db
+    // The last three supply the signal-quality readings the deduplication
+    // stage uses to choose between duplicate copies of a disc picture. They
+    // run in the same pass so that each frame is decoded only once.
     BiphaseObserver biphase_observer;
+    BurstLevelObserver burst_level_observer;
+    WhiteSNRObserver white_snr_observer;
+    BlackPSNRObserver black_psnr_observer;
     auto& obs_context = executor.get_observation_context();
     auto frame_range = source->frame_range();
 
-    ORC_LOG_DEBUG("Running BiphaseObserver on {} frames", frame_range.count());
+    ORC_LOG_DEBUG("Running VBI and quality observers on {} frames",
+                  frame_range.count());
 
     {
       size_t total_frames = frame_range.count();
@@ -158,6 +171,9 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
           std::max(static_cast<size_t>(1), total_frames / 100);
       for (FrameID fid = frame_range.first; fid <= frame_range.last; ++fid) {
         biphase_observer.process_frame(*source, fid, obs_context);
+        burst_level_observer.process_frame(*source, fid, obs_context);
+        white_snr_observer.process_frame(*source, fid, obs_context);
+        black_psnr_observer.process_frame(*source, fid, obs_context);
         ++biphase_idx;
         if (progress && biphase_idx % update_interval == 0) {
           int pct = static_cast<int>(biphase_idx * 100 / total_frames);
@@ -176,7 +192,7 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
       }
     }
 
-    ORC_LOG_DEBUG("BiphaseObserver complete, ObservationContext populated");
+    ORC_LOG_DEBUG("Observers complete, ObservationContext populated");
 
     if (progress && progress->isCancelled()) {
       result.status = AnalysisResult::Cancelled;
@@ -319,6 +335,12 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     result.statistics["paddingFrames"] =
         static_cast<int64_t>(stats.padding_frames);
     result.statistics["gapsPadded"] = static_cast<int64_t>(stats.gaps_padded);
+    result.statistics["framesWithQualityData"] =
+        static_cast<int64_t>(stats.frames_with_quality);
+    result.statistics["duplicateGroups"] =
+        static_cast<int64_t>(stats.duplicate_groups);
+    result.statistics["duplicatesDecidedByQuality"] =
+        static_cast<int64_t>(stats.duplicates_decided_by_quality);
 
     // Store mapping spec for graph application
     result.graphData["mappingSpec"] = decision.mapping_spec;
