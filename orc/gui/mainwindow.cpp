@@ -32,7 +32,6 @@
 #include "presenters/include/ntsc_observation_presenter.h"
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/render_presenter.h"
-#include "presenters/include/vbi_presenter.h"
 #include "presenters/include/video_parameter_observation_presenter.h"
 #include "previewdialog.h"
 #include "projectpropertiesdialog.h"
@@ -410,10 +409,6 @@ MainWindow::MainWindow(QWidget* parent)
       last_line_scope_image_y_(-1) {
   // Create and start render coordinator
   render_coordinator_ = std::make_unique<RenderCoordinator>(this);
-
-  // Presenter for VBI observations
-  vbi_presenter_ = std::make_unique<orc::presenters::VbiPresenter>(
-      [this]() -> std::shared_ptr<void> { return project_.getDAG(); });
 
   // Presenter for dropout editing (uses ProjectPresenter for delegation)
   dropout_presenter_ = std::make_unique<orc::presenters::DropoutPresenter>(
@@ -4885,18 +4880,25 @@ void MainWindow::updateVBIDialog() {
     orc::FieldID field1_id(frame_fields.first_field);
     orc::FieldID field2_id(frame_fields.second_field);
     // Request both fields - VBI interpretation requires data from both fields
-    // (e.g., CLV timecode may be split across fields)
+    // (e.g., CLV timecode may be split across fields). Newly issued ids
+    // supersede any in-flight ones, whose responses are dropped as stale in
+    // onVBIDataReady().
     pending_vbi_is_frame_mode_ = true;
-    pending_vbi_request_id_ =
+    pending_vbi_field1_ready_ = false;
+    pending_vbi_field2_ready_ = false;
+    pending_vbi_request_id_field1_ =
         render_coordinator_->requestVBIData(current_view_node_id_, field1_id);
     pending_vbi_request_id_field2_ =
         render_coordinator_->requestVBIData(current_view_node_id_, field2_id);
   } else {
     // Field mode - request single field
     pending_vbi_is_frame_mode_ = false;
+    pending_vbi_field1_ready_ = false;
+    pending_vbi_field2_ready_ = false;
     orc::FieldID field_id(current_index);
-    pending_vbi_request_id_ =
+    pending_vbi_request_id_field1_ =
         render_coordinator_->requestVBIData(current_view_node_id_, field_id);
+    pending_vbi_request_id_field2_ = 0;
   }
 }
 

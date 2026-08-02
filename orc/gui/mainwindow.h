@@ -31,7 +31,6 @@
 #include "orcgraphicsscene.h"
 #include "orcgraphmodel.h"
 #include "presenters/include/dropout_presenter.h"
-#include "presenters/include/vbi_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "render_coordinator.h"
 
@@ -56,7 +55,6 @@ enum class SNRAnalysisMode;
 namespace orc {
 class DAG;
 class AnalysisTool;
-class VBIDecoder;
 class DropoutAnalysisDecoder;
 }  // namespace orc
 
@@ -292,11 +290,16 @@ class MainWindow : public QMainWindow {
 
   // Pending request tracking
   uint64_t pending_preview_request_id_{0};
-  uint64_t pending_vbi_request_id_{0};
-  uint64_t pending_vbi_request_id_field2_{0};  // Second field for frame mode
+  // VBI requests go through the same async observation path as the observer
+  // dialogs, so the two frame-mode responses may arrive in either order; each
+  // field is cached until both are ready.
+  uint64_t pending_vbi_request_id_field1_{0};
+  uint64_t pending_vbi_request_id_field2_{0};
   bool pending_vbi_is_frame_mode_{false};
-  orc::presenters::VBIFieldInfoView
-      pending_vbi_field1_info_;  // Cached first field data (view model)
+  bool pending_vbi_field1_ready_{false};
+  bool pending_vbi_field2_ready_{false};
+  orc::presenters::VBIFieldInfoView pending_vbi_field1_info_;
+  orc::presenters::VBIFieldInfoView pending_vbi_field2_info_;
   // Phase 5: async observer-dialog requests. One frame yields one (field mode)
   // or two (frame mode) requests whose responses carry both observer view
   // models; field1 is cached until field2 arrives, matching the VBI flow.
@@ -348,7 +351,6 @@ class MainWindow : public QMainWindow {
   VBIDialog* vbi_dialog_;
   VideoParameterObserverDialog* video_parameter_observer_dialog_;
   std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;
-  std::unique_ptr<orc::presenters::VbiPresenter> vbi_presenter_;
   // Note: project_presenter_ removed - use project_.presenter() instead
   NtscObserverDialog* ntsc_observer_dialog_;
   TeletextDialog* teletext_dialog_;

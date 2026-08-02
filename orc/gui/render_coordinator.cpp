@@ -16,6 +16,7 @@
 #include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
 #include "teletext_observation_presenter.h"
+#include "vbi_presenter.h"
 #include "video_parameter_observation_presenter.h"
 
 namespace {
@@ -61,11 +62,6 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
       uint64_t output_index, const std::string& option_id) override {
     return presenter_.renderPreview(node_id, output_type, output_index,
                                     option_id);
-  }
-
-  std::optional<orc::presenters::VBIFieldInfoView> getVBIData(
-      orc::NodeID node_id, orc::FieldID field_id) override {
-    return presenter_.getVBIData(node_id, field_id);
   }
 
   std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
@@ -901,22 +897,33 @@ void RenderCoordinator::handleGetVBIData(const GetVBIDataRequest& req) {
     return;
   }
 
-  try {
-    auto vbi_info_opt =
-        worker_render_presenter_->getVBIData(req.node_id, req.field_id);
+  const uint64_t request_id = req.request_id;
+  const orc::FieldID field_id = req.field_id;
 
-    if (vbi_info_opt.has_value()) {
-      // Return the fully decoded VBI info directly
-      emit vbiDataReady(req.request_id, vbi_info_opt.value());
-    } else {
-      // No VBI data available
-      emit vbiDataReady(req.request_id, orc::presenters::VBIFieldInfoView{});
-    }
-
-  } catch (const std::exception& e) {
-    ORC_LOG_ERROR("RenderCoordinator: VBI decode failed: {}", e.what());
-    emit vbiDataReady(req.request_id, orc::presenters::VBIFieldInfoView{});
-  }
+  worker_render_presenter_->requestObservations(
+      req.node_id, field_id,
+      [this, request_id, field_id](uint64_t /*presenter_request_id*/,
+                                   bool available,
+                                   const void* obs_context) noexcept {
+        // This callback may run on the scheduler's worker thread inside a
+        // completion callback that must never throw; contain everything.
+        try {
+          orc::presenters::VBIFieldInfoView vbi_view;
+          if (available && obs_context != nullptr) {
+            auto decoded =
+                orc::presenters::VbiPresenter::decodeVbiFromObservation(
+                    obs_context, field_id);
+            if (decoded.has_value()) {
+              vbi_view = std::move(*decoded);
+            }
+          }
+          emit vbiDataReady(request_id, std::move(vbi_view));
+        } catch (const std::exception& e) {
+          ORC_LOG_ERROR("RenderCoordinator: VBI delivery failed: {}", e.what());
+        } catch (...) {
+          ORC_LOG_ERROR("RenderCoordinator: VBI delivery failed");
+        }
+      });
 }
 
 void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {

@@ -48,11 +48,9 @@
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
 #include "../core/include/sqlite_observation_persistence.h"
-#include "../core/include/vbi_decoder.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
 #include "project_presenter.h"
-#include "vbi_presenter.h"
 
 namespace orc::presenters {
 
@@ -352,7 +350,6 @@ class RenderPresenter::Impl {
   std::unique_ptr<orc::PreviewRenderer> preview_renderer_;
   orc::PreviewViewRegistry preview_view_registry_;
   std::unique_ptr<orc::DAGFrameRenderer> field_renderer_;
-  std::unique_ptr<orc::VBIDecoder> vbi_decoder_;
   std::shared_ptr<orc::ObservationCache> obs_cache_;
 
   // Provenance-keyed observation store, owned here so it survives DAG rebuilds
@@ -801,7 +798,6 @@ class RenderPresenter::Impl {
       fingerprints_shared_.reset();
       preview_renderer_.reset();
       field_renderer_.reset();
-      vbi_decoder_.reset();
       obs_cache_.reset();
       preview_view_registry_ = orc::PreviewViewRegistry{};
       return;
@@ -967,7 +963,6 @@ class RenderPresenter::Impl {
     preview_renderer_ = std::make_unique<orc::PreviewRenderer>(dag);
     field_renderer_ = std::make_unique<orc::DAGFrameRenderer>(dag);
     field_renderer_->set_observation_store(obs_store_, fingerprints);
-    vbi_decoder_ = std::make_unique<orc::VBIDecoder>();
 
     preview_view_registry_ = orc::PreviewViewRegistry{};
     orc::PreviewViewRegistry::register_default_views(
@@ -1644,36 +1639,6 @@ orc::PreviewViewDataResult RenderPresenter::requestPreviewViewData(
 
   return impl_->preview_view_registry_.request_data(*dag, node_id, view_id,
                                                     data_type, coordinate);
-}
-
-std::optional<VBIFieldInfoView> RenderPresenter::getVBIData(NodeID node_id,
-                                                            FieldID field_id) {
-  if (!impl_->obs_cache_) {
-    return std::nullopt;
-  }
-
-  try {
-    // Render the frame to populate observations
-    bool obs_ok = impl_->obs_cache_->get_field(node_id, field_id);
-    if (!obs_ok) {
-      return std::nullopt;
-    }
-
-    // Get observations and decode VBI
-    const auto& obs_context = impl_->obs_cache_->get_observation_context();
-    auto vbi_info_opt =
-        VbiPresenter::decodeVbiFromObservation(&obs_context, field_id);
-
-    if (!vbi_info_opt.has_value()) {
-      return std::nullopt;
-    }
-
-    // Return the fully decoded VBI information
-    return vbi_info_opt;
-
-  } catch (const std::exception&) {
-    return std::nullopt;
-  }
 }
 
 bool RenderPresenter::requestDropoutData(

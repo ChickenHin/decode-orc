@@ -20,7 +20,6 @@
 #include "ntscobserverdialog.h"
 #include "observation_status_formatter.h"
 #include "presenters/include/render_presenter.h"
-#include "presenters/include/vbi_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
 #include "snranalysisdialog.h"
@@ -80,42 +79,52 @@ void MainWindow::onPreviewReady(uint64_t request_id,
 
 void MainWindow::onVBIDataReady(uint64_t request_id,
                                 orc::presenters::VBIFieldInfoView info) {
-  if (request_id != pending_vbi_request_id_ &&
-      request_id != pending_vbi_request_id_field2_) {
-    return;
+  const bool is_field1 = (request_id == pending_vbi_request_id_field1_);
+  const bool is_field2 = (request_id == pending_vbi_request_id_field2_);
+  if (!is_field1 && !is_field2) {
+    return;  // stale / superseded response
   }
 
   ORC_LOG_DEBUG("onVBIDataReady: request_id={}", request_id);
 
-  if (!vbi_dialog_ || !vbi_presenter_) {
+  if (is_field1) {
+    pending_vbi_request_id_field1_ = 0;
+    pending_vbi_field1_info_ = std::move(info);
+    pending_vbi_field1_ready_ = true;
+  } else {
+    pending_vbi_request_id_field2_ = 0;
+    pending_vbi_field2_info_ = std::move(info);
+    pending_vbi_field2_ready_ = true;
+  }
+
+  if (!vbi_dialog_) {
     return;
   }
 
   // Process VBI data whether or not the dialog is currently visible,
   // so that when it is shown, it has the latest data
 
-  if (pending_vbi_is_frame_mode_) {
-    // Frame mode - need both fields
-    if (request_id == pending_vbi_request_id_) {
-      // First field received - cache it
-      pending_vbi_field1_info_ = info;
-      pending_vbi_request_id_ = 0;  // Mark first request as processed
-    } else if (request_id == pending_vbi_request_id_field2_) {
-      // Second field received - update dialog with both fields
-      if (vbi_dialog_->isVisible()) {
-        vbi_dialog_->updateVBIInfoFrame(pending_vbi_field1_info_, info);
-      }
-      pending_vbi_is_frame_mode_ = false;
-      pending_vbi_request_id_field2_ = 0;
-      pending_vbi_request_id_ = 0;
-    }
-  } else {
-    // Field mode - single field display
+  if (!pending_vbi_is_frame_mode_) {
+    // Field mode - the single field's response completes the update
     if (vbi_dialog_->isVisible()) {
-      vbi_dialog_->updateVBIInfo(info);
+      vbi_dialog_->updateVBIInfo(pending_vbi_field1_info_);
     }
-    pending_vbi_request_id_ = 0;
+    pending_vbi_field1_ready_ = false;
+    return;
   }
+
+  // Frame mode - wait until both fields have arrived, then combine. The two
+  // responses are delivered independently and may arrive in either order.
+  if (!pending_vbi_field1_ready_ || !pending_vbi_field2_ready_) {
+    return;
+  }
+  if (vbi_dialog_->isVisible()) {
+    vbi_dialog_->updateVBIInfoFrame(pending_vbi_field1_info_,
+                                    pending_vbi_field2_info_);
+  }
+  pending_vbi_is_frame_mode_ = false;
+  pending_vbi_field1_ready_ = false;
+  pending_vbi_field2_ready_ = false;
 }
 
 void MainWindow::onTeletextDataReady(

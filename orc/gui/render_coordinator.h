@@ -473,8 +473,6 @@ class IRenderPresenter {
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
       const std::string& option_id) = 0;
 
-  virtual std::optional<VBIFieldInfoView> getVBIData(NodeID node_id,
-                                                     FieldID field_id) = 0;
   virtual std::optional<orc::presenters::DropoutDisplaySeries>
   getDropoutAnalysisData(NodeID node_id) = 0;
   virtual std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
@@ -621,11 +619,14 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request VBI data for a field (async)
    *
-   * Result will be emitted via vbiDataReady signal.
+   * Answered from the provenance-keyed store when present, otherwise computed
+   * on the background scheduler (same delivery path as requestObservations()).
+   * The decoded view is emitted via vbiDataReady. No DAG execution runs on the
+   * GUI thread.
    *
    * @param node_id Node to decode VBI from
    * @param field_id Field to decode
-   * @return Request ID for matching response
+   * @return Request ID for matching / discarding stale responses
    */
   uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
 
@@ -859,7 +860,13 @@ class RenderCoordinator : public QObject {
   void previewReady(uint64_t request_id, orc::PreviewRenderResult result);
 
   /**
-   * @brief Emitted when VBI data is ready
+   * @brief Emitted (on the GUI thread) when a requestVBIData() response is
+   *        ready
+   *
+   * Carries the decoded view for the requested field; a default-constructed
+   * view means no VBI was available. Marshalled from the worker/scheduler
+   * thread via a queued connection, so responses to concurrent requests may
+   * arrive in any order - match them by @p request_id.
    */
   void vbiDataReady(uint64_t request_id,
                     orc::presenters::VBIFieldInfoView info);

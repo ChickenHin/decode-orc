@@ -28,7 +28,6 @@
 
 #include "observation_invalidation_view.h"  // ObservationInvalidationEvent
 #include "observation_progress_view.h"  // ObservationProgressEvent, ObservationDataReadyCallback
-#include "vbi_view_models.h"  // VBIFieldInfoView
 
 // Forward declare core types
 namespace orc {
@@ -42,20 +41,6 @@ namespace orc::presenters {
 struct QualityMetrics;  // From metrics_presenter.h
 using ProgressCallback = std::function<void(
     size_t, size_t, const std::string&)>;  // From project_presenter.h
-
-/**
- * @brief VBI data for a single field
- */
-struct VBIData {
-  bool has_vbi;
-  bool is_clv;
-  std::string chapter_number;
-  std::string frame_number;
-  std::string picture_number;
-  std::string picture_stop_code;
-  std::string user_code;
-  std::vector<std::string> raw_vbi_lines;
-};
 
 /**
  * @brief Export format options
@@ -84,7 +69,6 @@ using RenderProgress = orc::RenderProgress;
  * It provides a clean interface for:
  * - Rendering preview images for specific nodes/fields
  * - Batch rendering with progress callbacks
- * - VBI data extraction
  * - Analysis data requests (dropout, SNR, burst level)
  * - Managing render cache
  *
@@ -265,18 +249,6 @@ class RenderPresenter {
   orc::PreviewViewDataResult requestPreviewViewData(
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate);
-
-  // === VBI Data Extraction ===
-
-  /**
-   * @brief Get VBI data for a specific field (fully decoded)
-   *
-   * @param node_id Node to extract from
-   * @param field_id Field to decode
-   * @return Full VBI field info view with all decoded data, or empty optional
-   * if no VBI found
-   */
-  std::optional<VBIFieldInfoView> getVBIData(NodeID node_id, FieldID field_id);
 
   // === Analysis Data Access ===
 
