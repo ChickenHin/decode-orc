@@ -1,8 +1,27 @@
-/* Keep documentation compact and readable across themes. */
+/* Keep documentation compact and readable across themes.
+ *
+ * IMPORTANT: Material only uses the three-column (nav | content | toc)
+ * layout on wide viewports.  Below 76.25em the primary nav becomes an
+ * off-canvas drawer that is parked at "left: -12.1rem" and revealed by a
+ * transform, and below 60em the table of contents is folded into that
+ * drawer.  Any override of the sidebar geometry, of the drawer titles or
+ * of the content gutters therefore has to be scoped to the viewport width
+ * where that layout actually applies, otherwise the drawer pokes out of
+ * the left edge of the screen and the body text runs under it.
+ */
+
 html,
 body {
-    font-size: 18px;
     line-height: 1.6;
+}
+
+/* Denser typography for desktop reading; phones and small tablets keep
+ * Material's stock 125% root size so body text stays legible. */
+@media screen and (min-width: 60em) {
+    html,
+    body {
+        font-size: 18px;
+    }
 }
 
 [data-md-color-scheme="default"] {
@@ -54,67 +73,90 @@ body {
     max-width: 96rem;
 }
 
-.md-sidebar {
-    width: 13rem;
-}
+/* Primary navigation ---------------------------------------------------- */
 
-.md-sidebar__scrollwrap {
-    padding-top: 0.6rem;
-}
+/* Only touch the primary sidebar once it is a real sidebar.  Widening it
+ * while it is still the off-canvas drawer leaves the difference between
+ * the override and Material's "left: -12.1rem" parking position visible
+ * as a stripe down the left-hand side of every page. */
+@media screen and (min-width: 76.25em) {
+    .md-sidebar--primary {
+        width: 13rem;
+    }
 
-.md-nav--primary .md-nav__title {
-    display: none;
-}
+    .md-sidebar__scrollwrap {
+        padding-top: 0.6rem;
+    }
 
-.md-nav--primary .md-nav__item {
-    margin: 0;
-}
+    /* Redundant on desktop, but on narrow screens these labels are the
+     * drawer header and the "back" buttons of every nested nav level. */
+    .md-nav--primary .md-nav__title {
+        display: none;
+    }
 
-.md-nav--primary .md-nav__link {
-    font-size: 0.88rem;
-    margin-top: 0;
-    padding-top: 0.24rem;
-    padding-bottom: 0.24rem;
-}
+    .md-nav--primary .md-nav__item {
+        margin: 0;
+    }
 
-.md-nav__item--section > .md-nav__link {
-    font-size: 0.84rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    color: #57606a;
-    margin-top: 0.85rem;
+    /* Tight rows are fine for a mouse; the drawer keeps Material's larger
+     * tap targets. */
+    .md-nav--primary .md-nav__link {
+        font-size: 0.88rem;
+        margin-top: 0;
+        padding-top: 0.24rem;
+        padding-bottom: 0.24rem;
+    }
+
+    .md-nav__item--section > .md-nav__link {
+        font-size: 0.84rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--md-default-fg-color--light);
+        margin-top: 0.85rem;
+    }
 }
 
 .md-nav__link--active,
 .md-nav__link:hover {
-    color: #0969da;
+    color: var(--md-typeset-a-color);
 }
 
-.md-sidebar--secondary {
-    width: 11rem;
+/* Table of contents ----------------------------------------------------- */
+
+/* Below 60em the secondary nav is rendered inside the drawer, so it must
+ * keep Material's own geometry there. */
+@media screen and (min-width: 60em) {
+    .md-sidebar--secondary {
+        width: 11rem;
+    }
+
+    .md-nav--secondary .md-nav__title {
+        font-size: 0.84rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+        color: var(--md-default-fg-color--light);
+    }
+
+    .md-nav--secondary .md-nav__link {
+        font-size: 0.88rem;
+        padding-top: 0.18rem;
+        padding-bottom: 0.18rem;
+    }
 }
 
-.md-nav--secondary .md-nav__title {
-    font-size: 0.84rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-    color: #57606a;
-}
-
-.md-nav--secondary .md-nav__link {
-    font-size: 0.88rem;
-    padding-top: 0.18rem;
-    padding-bottom: 0.18rem;
-}
+/* Content --------------------------------------------------------------- */
 
 .md-content {
     max-width: 68rem;
 }
 
+/* No margin override here: Material already gutters the content column
+ * (and widens the gutters once the sidebars appear).  Auto margins would
+ * collapse to zero on every viewport narrower than the max-width above,
+ * putting the text hard against the edge of the screen. */
 .md-content__inner {
-    margin: 0 auto;
     padding-top: 1.2rem;
 }
 
@@ -136,6 +178,15 @@ h3 {
 h4 {
     font-size: 1.16rem;
     margin: 0.85rem 0 0.45rem;
+}
+
+/* Headings are sized in viewport-independent rem, so long words in a
+ * page title can overflow a phone screen; let them wrap instead. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+    overflow-wrap: break-word;
 }
 
 p,
@@ -162,6 +213,13 @@ kbd {
     font-size: 0.96rem;
 }
 
+/* Long paths, flags and URLs in inline code are common here and would
+ * otherwise force the whole page to scroll sideways on a phone. */
+.md-typeset code {
+    overflow-wrap: break-word;
+}
+
 img {
+    max-width: 100%;
     height: auto;
 }
