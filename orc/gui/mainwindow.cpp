@@ -2413,6 +2413,13 @@ bool MainWindow::checkUnsavedChanges() {
 }
 
 void MainWindow::updatePreviewInfo() {
+  // Update standard-specific observer menu availability: the NTSC observers
+  // (FM code, white flag) and closed captions are NTSC-only, teletext is
+  // PAL-only. Done before the early returns so the menu never keeps the
+  // previous project's availability while no stage is selected.
+  auto video_format_presenter = project_.presenter()->getVideoFormat();
+  preview_dialog_->setObserverAvailabilityForFormat(video_format_presenter);
+
   if (current_view_node_id_.is_valid() == false) {
     preview_dialog_->previewInfoLabel()->setText("No stage selected");
     preview_dialog_->sliderMinLabel()->setText("");
@@ -2428,11 +2435,7 @@ void MainWindow::updatePreviewInfo() {
     return;
   }
 
-  // Update NTSC observer menu item availability (only for NTSC)
-  // NTSC observers (FM code, white flag) are NTSC-specific
-  auto video_format_presenter = project_.presenter()->getVideoFormat();
   bool is_ntsc = (video_format_presenter == orc::presenters::VideoFormat::NTSC);
-  preview_dialog_->ntscObserverAction()->setEnabled(is_ntsc);
 
   // ITU-R BT.470-6 §5.1 (PAL 25 fps) / SMPTE 170M-2004 §2 (NTSC ~29.97 fps).
   // ITU-R BT.1700-1 Annex 1 Part B (PAL-M 29.97 fps, same rate as NTSC).

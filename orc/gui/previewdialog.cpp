@@ -91,6 +91,20 @@ void PreviewDialog::setSignalControlsVisible(bool visible) {
   signal_combo_->setVisible(visible);
 }
 
+void PreviewDialog::setObserverAvailabilityForFormat(
+    orc::presenters::VideoFormat format) {
+  // SMPTE 170M-2004 §8.4 / CEA-608-E §4: the NTSC-specific observers (FM code,
+  // white flag) and line 21 closed captions exist only on 525-line NTSC.
+  const bool is_ntsc = (format == orc::presenters::VideoFormat::NTSC);
+  // ETSI EN 300 706 §1: System B teletext is carried on 625-line PAL only, so
+  // PAL-M (525-line) is deliberately excluded here.
+  const bool is_pal = (format == orc::presenters::VideoFormat::PAL);
+
+  show_ntsc_observer_action_->setEnabled(is_ntsc);
+  show_closed_caption_action_->setEnabled(is_ntsc);
+  show_teletext_action_->setEnabled(is_pal);
+}
+
 PreviewDialog::~PreviewDialog() = default;
 
 const std::string& PreviewDialog::kComponentVectorscopeViewIdRef() {
