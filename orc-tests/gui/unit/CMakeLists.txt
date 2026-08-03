@@ -93,6 +93,7 @@ orc_add_gui_unit_tests(
             theme_manager_test.cpp
             node_type_helper_port_test.cpp
             observation_status_formatter_test.cpp
+            project_load_status_formatter_test.cpp
             quick_project_planner_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp

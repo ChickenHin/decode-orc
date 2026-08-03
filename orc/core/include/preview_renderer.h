@@ -160,6 +160,23 @@ class PreviewRenderer {
   bool get_show_dropouts() const;
 
   /**
+   * @brief Observe on-demand DAG execution driven by preview queries
+   *
+   * Preview queries (available outputs, renders) execute the DAG up to the
+   * queried node on the calling thread. Opening a large source can take many
+   * seconds inside a single node, so callers that need to report "still
+   * working" install a callback here; it is invoked once per node, immediately
+   * before that node executes, with the node's 1-based position in the
+   * execution order and the order's length.
+   *
+   * Thread-safety: the callback is invoked synchronously on whichever thread
+   * calls into the renderer, so it must not assume any particular thread.
+   *
+   * @param callback Progress sink, or an empty function to stop observing
+   */
+  void set_execution_progress_callback(DAGExecutor::ProgressCallback callback);
+
+  /**
    * @brief Get the frame representation at a node
    *
    * This allows direct access to the underlying CVBS_U10_4FSC frame data

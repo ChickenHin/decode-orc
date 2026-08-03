@@ -682,4 +682,48 @@ TEST(RenderCoordinatorTest, ObservationProgress_UnsubscribeStopsDelivery) {
   coordinator.stop();
 }
 
+// --- On-demand execution progress (project-load feedback) ----------------
+
+// The coordinator installs an execution observer on the presenter it creates,
+// and each node event reaches the GUI thread as an executionProgress signal.
+TEST(RenderCoordinatorTest, ExecutionProgress_ForwardedToSignal) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy execution_spy(&coordinator, &RenderCoordinator::executionProgress);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  // The observer is installed when the presenter is created on the worker.
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->hasExecutionProgressCallback(); }));
+
+  mock_presenter->fireExecutionProgress(/*node_id=*/4, /*current=*/1,
+                                        /*total=*/3);
+
+  ASSERT_TRUE(waitForCount(execution_spy, 1));
+  EXPECT_EQ(execution_spy.at(0).at(0).toInt(), 4);
+  EXPECT_EQ(execution_spy.at(0).at(1).toULongLong(), 1ull);
+  EXPECT_EQ(execution_spy.at(0).at(2).toULongLong(), 3ull);
+
+  // Every node of the execution order is reported, not just the first.
+  mock_presenter->fireExecutionProgress(/*node_id=*/7, /*current=*/2,
+                                        /*total=*/3);
+  ASSERT_TRUE(waitForCount(execution_spy, 2));
+  EXPECT_EQ(execution_spy.at(1).at(0).toInt(), 7);
+  EXPECT_EQ(execution_spy.at(1).at(1).toULongLong(), 2ull);
+
+  coordinator.stop();
+}
+
 }  // namespace gui_unit_test

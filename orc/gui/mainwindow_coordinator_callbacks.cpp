@@ -275,6 +275,40 @@ void MainWindow::onObservationProgress(bool active, int percent_complete,
   }
 }
 
+void MainWindow::onExecutionProgress(int node_id_value, qulonglong current,
+                                     qulonglong total) {
+  // Only the project-load modal consumes these; ordinary stage selection has
+  // its own "Rendering..." feedback on the preview window.
+  if (!project_load_in_progress_) {
+    return;
+  }
+
+  // Name the node the way the rest of the UI does: user label first, stage name
+  // otherwise, node id as a last resort.
+  const orc::NodeID node_id(node_id_value);
+  QString label = QString::fromStdString(node_id.to_string());
+  const auto nodes = project_.presenter()->getNodes();
+  for (const auto& node : nodes) {
+    if (node.node_id != node_id) {
+      continue;
+    }
+    if (!node.label.empty()) {
+      label = QString::fromStdString(node.label);
+    } else if (!node.stage_name.empty()) {
+      label = QString::fromStdString(node.stage_name);
+    }
+    break;
+  }
+
+  ORC_LOG_DEBUG("Project load: executing '{}' ({} of {})", label.toStdString(),
+                current, total);
+
+  project_load_stage_label_ = label;
+  project_load_current_ = current;
+  project_load_total_ = total;
+  updateProjectLoadProgressLabel();
+}
+
 void MainWindow::onObservationsInvalidated(QVector<int> changed_node_ids) {
   // If the node currently being viewed had its observations invalidated,
   // re-issue the async request so the open dialogs refresh with new data.
@@ -297,6 +331,11 @@ void MainWindow::onAvailableOutputsReady(
 
   ORC_LOG_DEBUG("onAvailableOutputsReady: request_id={}, count={}", request_id,
                 outputs.size());
+
+  // The worker has finished everything a project load waits on (renderer
+  // rebuild plus the DAG execution behind this query), so retire the modal
+  // before the preview dialog is shown below.
+  endProjectLoadProgress();
 
   available_outputs_ = std::move(outputs);
 
@@ -606,6 +645,11 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // endPreviewRenderInFlight() was previously only reachable from
   // onPreviewReady.
   endPreviewRenderInFlight();
+
+  // Same reasoning for the project-load modal: a failed available-outputs
+  // request resolves through this signal, and the modal has no cancel button,
+  // so leaving it up would wedge the application.
+  endProjectLoadProgress();
 
   // Show error in status bar for other errors
   statusBar()->showMessage(QString("Error: %1").arg(message), 5000);

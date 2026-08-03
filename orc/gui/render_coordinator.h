@@ -40,6 +40,7 @@
 #include <string>
 #include <thread>
 
+#include "dag_execution_progress_view.h"
 #include "ntsc_observation_view_models.h"
 #include "observation_invalidation_view.h"
 #include "observation_progress_view.h"
@@ -469,6 +470,13 @@ class IRenderPresenter {
   // that only render frames — construction then stays cheap enough for the
   // GUI thread and no duplicate background pipeline is spawned.
   virtual void setBackgroundObservationEnabled(bool enabled) = 0;
+
+  // Observe the on-demand DAG execution that getAvailableOutputs()/
+  // renderPreview() drive. Fires once per node, immediately before it runs, on
+  // the calling (worker) thread; an empty callback stops delivery. Lets the
+  // view report progress while a large source is being opened.
+  virtual void setExecutionProgressCallback(
+      orc::presenters::DagExecutionProgressCallback callback) = 0;
 
   // Phase 3: observation-invalidation notifications. subscribeInvalidation()
   // returns an id passed to unsubscribeInvalidation() to cancel delivery.
@@ -1080,6 +1088,24 @@ class RenderCoordinator : public QObject {
    */
   void observationProgress(bool active, int percent_complete, bool computing,
                            qulonglong outstanding_nodes);
+
+  /**
+   * @brief Emitted (on the GUI thread) as each node of an on-demand preview
+   *        execution starts
+   *
+   * A preview query (available outputs, render) executes the DAG up to the
+   * queried node. Opening a large source takes many seconds inside a single
+   * node, so the view uses these events to report what the worker is doing
+   * instead of leaving the window silent.
+   *
+   * @param node_id_value NodeID::value() of the node about to run
+   * @param current       1-based position in the execution order
+   * @param total         Number of nodes in the execution order
+   *
+   * Marshalled from the worker thread via a queued connection.
+   */
+  void executionProgress(int node_id_value, qulonglong current,
+                         qulonglong total);
 
  private:
   // ========================================================================
