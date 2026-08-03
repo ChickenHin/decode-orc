@@ -4789,10 +4789,12 @@ void MainWindow::onFrameTimingDataReady(
       c_samples_2, video_params, marker_sample, first_field_height,
       second_field_height);
 
-  // Only show/raise/activate if not already visible, and only if the parent
-  // preview dialog is still open. Guards against pending async callbacks
-  // re-opening the dialog after the user has closed the preview window.
-  if (!frame_timing_dialog->isVisible() && preview_dialog_->isVisible()) {
+  // Only show/raise/activate if not already visible, the parent preview
+  // dialog is still open, and the user still wants this dialog open. Guards
+  // against pending async callbacks re-opening the dialog after the user has
+  // closed either it or the preview window.
+  if (!frame_timing_dialog->isVisible() && preview_dialog_->isVisible() &&
+      preview_dialog_->isFrameTimingOpenRequested()) {
     frame_timing_dialog->show();
     frame_timing_dialog->raise();
     frame_timing_dialog->activateWindow();
@@ -4858,6 +4860,17 @@ void MainWindow::onWaveformMonitorDataReady(
   wm_dialog->setData(std::move(composite_samples), std::move(y_samples),
                      std::move(c_samples), first_field_height,
                      second_field_height, video_params);
+
+  // Only show/raise/activate if not already visible, the parent preview
+  // dialog is still open, and the user still wants this dialog open. Guards
+  // against pending async callbacks re-opening the dialog after the user has
+  // closed either it or the preview window.
+  if (!wm_dialog->isVisible() && preview_dialog_->isVisible() &&
+      preview_dialog_->isWaveformMonitorOpenRequested()) {
+    wm_dialog->show();
+    wm_dialog->raise();
+    wm_dialog->activateWindow();
+  }
 }
 
 // Vectorscope is preview-owned and refreshed through the registry request

@@ -132,6 +132,7 @@ orc_add_gui_unit_tests(
         field_preview_crosshair_test.cpp
         preview_dialog_playback_test.cpp
         preview_dialog_observer_availability_test.cpp
+        preview_dialog_subwindow_lifecycle_test.cpp
         theme_controller_test.cpp
         plugin_browse_dialog_test.cpp
         plugin_manager_dialog_test.cpp
