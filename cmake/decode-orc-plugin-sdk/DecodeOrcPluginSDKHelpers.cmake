@@ -103,6 +103,17 @@ function(orc_add_stage_plugin target)
             ORC_STAGE_PLUGIN_VERSION="${ORCSP_PLUGIN_VERSION}")
     endif()
 
+    # Compile-time log level, matching the host (orc/core, orc/gui, orc/sdk).
+    # spdlog defaults SPDLOG_ACTIVE_LEVEL to info, which strips every
+    # ORC_LOG_DEBUG and ORC_LOG_TRACE from the plugin at compile time — the
+    # statement is gone, so no runtime level can bring it back. Plugins carry
+    # the diagnostics a difficult source is judged on, so they need the same
+    # level the host is built with.
+    target_compile_definitions(${target} PRIVATE
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG>
+        $<$<NOT:$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE>
+    )
+
     # Output directory during builds (so the host can discover plugins at runtime)
     if(NOT DEFINED ORC_STAGE_PLUGIN_BUILD_DIR)
         set(ORC_STAGE_PLUGIN_BUILD_DIR "${CMAKE_BINARY_DIR}/lib/orc-stage-plugins")

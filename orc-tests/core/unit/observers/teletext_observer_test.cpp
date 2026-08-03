@@ -311,6 +311,130 @@ TEST(TeletextObserver, YcSource_IgnoresCompositeChannel) {
   EXPECT_FALSE(context.has(FieldID(0), "teletext", "t42_12"));
 }
 
+TEST(TeletextObserver, BandLimitedYcSource_RecoversViaMlseFallback) {
+  // The tape case that motivated the automatic detector: a Y/C VHS source
+  // whose luma cannot pass the clock run-in. The observer takes no
+  // configuration, so this only works if its slicer is set to fall back.
+  const auto payload = make_parity_coded_payload();
+  TeletextLineSynthOptions synth;
+  synth.low_pass_cutoff_hz = 2.8e6;  // consumer VHS luma bandwidth
+
+  auto luma = make_black_pal_frame();
+  inject_line(luma, 12, synthesize_teletext_line(payload, synth));
+
+  FlatBufferVFR vfr(make_black_pal_frame(), make_pal_params());
+  vfr.set_luma(std::move(luma));
+
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  const auto hex = get_string(context, FieldID(0), "t42_12");
+  ASSERT_TRUE(hex.has_value());
+  const auto bytes = teletext_hex_to_packet(*hex);
+  ASSERT_TRUE(bytes.has_value());
+  EXPECT_EQ(*bytes, payload);
+}
+
+TEST(TeletextObserver, MlseRecoveredPacket_CarriesPerByteConfidence) {
+  // The stored observation carries how sure the detector was of each byte, so
+  // a consumer combining repeated copies of a row can weight this one
+  // (orc/support/teletext_row_squasher.h).
+  const auto payload = make_parity_coded_payload();
+  TeletextLineSynthOptions synth;
+  synth.low_pass_cutoff_hz = 2.8e6;
+
+  auto luma = make_black_pal_frame();
+  inject_line(luma, 12, synthesize_teletext_line(payload, synth));
+
+  FlatBufferVFR vfr(make_black_pal_frame(), make_pal_params());
+  vfr.set_luma(std::move(luma));
+
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  const auto hex = get_string(context, FieldID(0), "t42_12");
+  ASSERT_TRUE(hex.has_value());
+  const auto observed = teletext_hex_to_observed_packet(*hex);
+  ASSERT_TRUE(observed.has_value());
+  EXPECT_EQ(observed->bytes, payload);
+  ASSERT_TRUE(observed->has_confidence);
+  for (const float value : observed->confidence) {
+    EXPECT_GT(value, 0.0F);
+    EXPECT_LE(value, 1.0F);
+  }
+}
+
+TEST(TeletextObserver, DamagedDisplayBytesAreRepairedFromConfidence) {
+  // The observer's slicer repairs parity failures by flipping the bit it was
+  // least sure of. The fixture is pinned to a noise seed whose unrepaired
+  // decode carries four damaged bytes — asserted below, so the test says so
+  // rather than passing vacuously if the fixture ever stops being damaged.
+  const auto payload = make_parity_coded_payload();
+  TeletextLineSynthOptions synth;
+  synth.low_pass_cutoff_hz = 2.8e6;
+  synth.noise_amplitude = 90;
+  synth.noise_seed = 16;
+  const auto line = synthesize_teletext_line(payload, synth);
+
+  TeletextSlicerOptions unrepaired;
+  unrepaired.detector = TeletextDetector::kAuto;
+  const auto as_read =
+      TeletextSlicer(kPalSampleRate, kTeletextBitRate, unrepaired)
+          .slice(line.data(), line.size(), static_cast<int16_t>(kPalBlack),
+                 static_cast<int16_t>(kPalWhite));
+  ASSERT_TRUE(as_read.valid);
+  int damaged = 0;
+  for (size_t i = 2; i < kTeletextPacketBytes; ++i) {
+    damaged += teletext_odd_parity_valid(as_read.bytes[i]) ? 0 : 1;
+  }
+  ASSERT_GT(damaged, 0) << "fixture is no longer damaged";
+
+  auto luma = make_black_pal_frame();
+  inject_line(luma, 12, line);
+  FlatBufferVFR vfr(make_black_pal_frame(), make_pal_params());
+  vfr.set_luma(std::move(luma));
+
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  const auto hex = get_string(context, FieldID(0), "t42_12");
+  ASSERT_TRUE(hex.has_value());
+  const auto bytes = teletext_hex_to_packet(*hex);
+  ASSERT_TRUE(bytes.has_value());
+  // Every repaired byte satisfies parity again, and on this line the repairs
+  // restore what was transmitted.
+  for (size_t i = 2; i < kTeletextPacketBytes; ++i) {
+    EXPECT_TRUE(teletext_odd_parity_valid((*bytes)[i])) << "byte " << i;
+  }
+  EXPECT_EQ(*bytes, payload);
+}
+
+TEST(TeletextObserver, ThresholdRecoveredPacket_CarriesNoConfidenceSuffix) {
+  // A source the threshold detector handles is decided one sample per bit,
+  // with no path metric to measure: the observation says nothing about
+  // confidence rather than inventing it, and stays the 84 characters every
+  // build has written.
+  const auto payload = make_test_payload();
+  auto frame = make_black_pal_frame();
+  inject_line(frame, 8, synthesize_teletext_line(payload));
+
+  FlatBufferVFR vfr(std::move(frame), make_pal_params());
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  const auto hex = get_string(context, FieldID(0), "t42_8");
+  ASSERT_TRUE(hex.has_value());
+  EXPECT_EQ(hex->size(), kTeletextPacketBytes * 2);
+  const auto observed = teletext_hex_to_observed_packet(*hex);
+  ASSERT_TRUE(observed.has_value());
+  EXPECT_EQ(observed->bytes, payload);
+  EXPECT_FALSE(observed->has_confidence);
+}
+
 // ---------------------------------------------------------------------------
 // Statelessness
 // ---------------------------------------------------------------------------

@@ -13,13 +13,14 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
 #include <orc/support/teletext_page_decoder.h>
+#include <orc/support/teletext_recovery_stats.h>
 #include <orc/support/teletext_row_squasher.h>
 #include <orc/support/teletext_slicer.h>
+#include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,11 +28,20 @@
 #include <variant>
 #include <vector>
 
+#include "teletext_squash_stats.h"
+
 namespace orc {
 
 namespace {
 
 constexpr size_t kWriterBufferBytes = 1UL * 1024UL * 1024UL;
+
+// Page runs the squasher retains for the rewrite pass (see where it is used).
+// A run costs its received rows: at most 24 × 16 copies × ~210 bytes, but a
+// run created by an erase-on-every-transmission service holds one copy per row
+// and costs around 5 kB. The bound is the point past which a recording's older
+// runs start going uncorrected rather than a memory ceiling being enforced.
+constexpr size_t kSquashPageRunBound = 4096;
 
 // Progress callbacks are throttled to once every N frames (plus the final
 // frame) so tight loops do not flood the UI.
@@ -56,12 +66,8 @@ std::string srt_timestamp(int64_t field_index) {
   const int64_t minutes = (millis_total / 60'000) % 60;
   const int64_t seconds = (millis_total / 1'000) % 60;
   const int64_t millis = millis_total % 1'000;
-  char buffer[16];
-  std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld,%03lld",
-                static_cast<long long>(hours), static_cast<long long>(minutes),
-                static_cast<long long>(seconds),
-                static_cast<long long>(millis));
-  return buffer;
+  return fmt::format("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds,
+                     millis);
 }
 
 // One emitted packet, held so squashing can rewrite it once every copy of
@@ -70,7 +76,50 @@ struct StreamEntry {
   std::array<uint8_t, kTeletextPacketBytes> bytes;
   int64_t field_index;
   bool empty;
+  // How sure the recovery chain was of each byte, and whether it could say.
+  // Held with the packet because the rewrite pass re-feeds every copy under
+  // its original identity: a re-feed that dropped the confidence would replace
+  // a weighted copy with an unweighted one.
+  bool has_confidence;
+  TeletextPacketConfidence confidence;
 };
+
+// Display row a packet is addressed to (X/1 to X/24, ETSI EN 300 706 §9.3.2),
+// or 0 when the MRAG does not decode or the packet is not a displayable row.
+// The character figures are counted over these: they are the packets whose 40
+// bytes carry byte-wise odd parity and are shown on screen.
+int display_row_of(const std::array<uint8_t, kTeletextPacketBytes>& packet) {
+  const int mrag_low = teletext_hamming84_decode(packet[0]);
+  const int mrag_high = teletext_hamming84_decode(packet[1]);
+  if (mrag_low < 0 || mrag_high < 0) {
+    return 0;
+  }
+  const int row = ((mrag_low >> 3) & 0x01) | ((mrag_high << 1) & 0x1E);
+  return (row >= 1 && row < TeletextPageSnapshot::kRows) ? row : 0;
+}
+
+// The 40 display bytes of a packet (§9.3.2: the payload after the 2 MRAG
+// bytes).
+TeletextRowBytes display_bytes_of(
+    const std::array<uint8_t, kTeletextPacketBytes>& packet) {
+  TeletextRowBytes row{};
+  std::copy(packet.begin() + 2, packet.begin() + 2 + kTeletextRowBytes,
+            row.begin());
+  return row;
+}
+
+// Name a detector for the report, in the wording the parameter uses.
+const char* detector_name(TeletextDetector detector) {
+  switch (detector) {
+    case TeletextDetector::kThreshold:
+      return "Threshold";
+    case TeletextDetector::kMlse:
+      return "MLSE";
+    case TeletextDetector::kAuto:
+      return "Automatic";
+  }
+  return "Automatic";
+}
 
 // Render the decoder's cues as a SubRip document.
 std::string format_srt(const std::vector<TeletextSubtitleCue>& cues) {
@@ -90,6 +139,72 @@ std::string format_srt(const std::vector<TeletextSubtitleCue>& cues) {
 }
 
 }  // namespace
+
+std::string TeletextSinkStageDeps::build_report(
+    const TeletextSinkOptions& options, const TeletextSinkResult& result,
+    uint64_t total_frames, const TeletextRecoveryStats& stats,
+    const TeletextSquashStats& squash_stats) {
+  // The headline first: the one figure a reader wants before deciding whether
+  // any of the detail below is worth their time.
+  std::string report = "Teletext export report\n";
+  const std::string loss = squash_stats.character_loss_summary();
+  if (!loss.empty()) {
+    report += "  " + loss + "\n\n";
+  }
+  report += fmt::format(
+      "  Output:        {}\n"
+      "  Frames:        {}\n"
+      "  VBI lines:     {}-{} of each field (1-based)\n"
+      "  Detector:      {}\n"
+      "  Packets:       {} written, {} fields carried data",
+      result.output_path, total_frames, options.first_field_line + 1,
+      options.last_field_line + 1, detector_name(options.detector),
+      result.packets_written, result.fields_with_data);
+  if (options.keep_empty_packets) {
+    report += " (empty candidate lines padded)";
+  }
+  if (result.bytes_repaired > 0) {
+    report += fmt::format("\n  Parity repair: {} damaged display bytes mended",
+                          result.bytes_repaired);
+  }
+  if (!result.subtitle_path.empty()) {
+    report += fmt::format("\n  Subtitles:     {} cues from page {} to {}",
+                          result.subtitle_cues_written, options.subtitle_page,
+                          result.subtitle_path);
+  }
+
+  if (stats.lines_seen() > 0) {
+    report += "\n\n" + stats.summary();
+  }
+
+  report += "\n\n";
+  report += options.squash_repeated_rows
+                ? squash_stats.summary()
+                : "Teletext squashing: disabled; packets written as recovered";
+  return report;
+}
+
+void TeletextSinkStageDeps::write_report(const TeletextSinkOptions& options,
+                                         TeletextSinkResult& result) const {
+  if (!options.write_report || stage_services_ == nullptr) {
+    return;
+  }
+  // Sits beside the packet stream under its full name — mydata.t42.txt — so
+  // it cannot collide with the .srt, or with a second export writing a
+  // differently-named stream into the same directory.
+  const std::string path = result.output_path + ".txt";
+  std::shared_ptr<IFileWriterUint8> report_writer =
+      stage_services_->create_buffered_file_writer_uint8(kWriterBufferBytes);
+  if (!report_writer || !report_writer->open(path)) {
+    ORC_LOG_WARN("TeletextSinkDeps: could not open report file: {}", path);
+    return;
+  }
+  const std::string text = result.report + "\n";
+  report_writer->write(reinterpret_cast<const uint8_t*>(text.data()),
+                       text.size());
+  report_writer->close();
+  result.report_path = path;
+}
 
 void TeletextSinkStageDeps::init(TriggerProgressCallback progress_callback,
                                  std::atomic<bool>* cancel_requested) {
@@ -152,7 +267,8 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
   // so its (cacheable) observations can be consumed directly. Non-default
   // options require slicing here with a locally configured TeletextSlicer.
   const bool use_observer_path =
-      !options.tolerant_framing && options.require_valid_mrag;
+      !options.tolerant_framing && options.require_valid_mrag &&
+      options.parity_repair && options.detector == TeletextDetector::kAuto;
 
   std::unique_ptr<IObserverHandle> observer;
   if (use_observer_path && observation_service_) {
@@ -169,16 +285,37 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     TeletextSlicerOptions slicer_options;
     slicer_options.tolerant_framing = options.tolerant_framing;
     slicer_options.require_valid_mrag = options.require_valid_mrag;
+    slicer_options.parity_repair = options.parity_repair;
+    slicer_options.detector = options.detector;
     // EBU Tech. 3280-E §1.1.1 Table 1: 4FSC PAL sample rate; bit rate fixed
     // at 444 × fH by ETSI EN 300 706 §5.3 (TeletextSlicer default).
     slicer.emplace(kPalSampleRate, kTeletextBitRate, slicer_options);
   }
 
+  // Recovery diagnostics. Accumulated on both paths: where this stage slices,
+  // from the full line results; where it reads the observer's stored
+  // observations, from the packets those carry (the observer's own per-field
+  // profile says how each field went, and this says how the run went).
+  TeletextRecoveryStats stats;
+  // What combining repeated rows changed, accumulated in the rewrite pass.
+  TeletextSquashStats squash_stats;
+
   // Squashing needs every copy of a row before it can combine them, so the
   // recovered stream is held and rewritten in a second pass. Without it the
   // stream is written straight out and subtitles decode inline, as before.
   const bool squash = options.squash_repeated_rows;
-  TeletextRowSquasher squasher;
+  // The rewrite pass asks about runs of a page that were transmitted long
+  // before the packet it is rewriting, so the squasher's page bound has to
+  // hold every run of the recording rather than the recently-used working set
+  // a live previewer needs. Erases multiply runs (see TeletextPageKey), so a
+  // carousel that erases as it re-sends can reach several thousand. A run
+  // evicted before the rewrite reaches it simply goes uncorrected — the vote
+  // falls back to the single copy re-fed for it — so the cost of the bound is
+  // lost correction, never wrong output. Proportionate to the packet stream
+  // this pass already holds in memory.
+  TeletextRowSquasher::Options squasher_options;
+  squasher_options.max_pages = kSquashPageRunBound;
+  TeletextRowSquasher squasher(squasher_options);
   std::vector<StreamEntry> stream;
   std::optional<TeletextPageDecoder> squash_pass;
   if (squash) {
@@ -214,6 +351,15 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
   const size_t line_width = static_cast<size_t>(vp.frame_width_nominal);
   const size_t frame_height = static_cast<size_t>(vp.frame_height);
 
+  // A cancelled run still recovered whatever it got to, and that is exactly
+  // when a reader wants to know how it was going. The report file is not
+  // written for one: it describes a run that did not finish, and the option
+  // asks for a record of the export beside the export.
+  const auto report_partial_run = [&](TeletextSinkResult& partial) {
+    partial.report =
+        build_report(options, partial, total_frames, stats, squash_stats);
+  };
+
   try {
     uint64_t frames_processed = 0;
     for (FrameID frame_id = frame_rng.first; frame_id <= frame_rng.last;
@@ -224,6 +370,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
                          " of " + std::to_string(total_frames) +
                          " frames; partial output left at " + output_path;
         ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
+        report_partial_run(result);
         return result;
       }
 
@@ -262,6 +409,10 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
         for (int32_t field_line = options.first_field_line;
              field_line <= options.last_field_line; ++field_line) {
           std::optional<std::array<uint8_t, kTeletextPacketBytes>> packet;
+          // Per-byte confidence, where whichever path produced the packet
+          // could measure it (see orc/support/teletext_slicer.h).
+          bool has_confidence = false;
+          TeletextPacketConfidence confidence{};
 
           if (slicer) {
             // Direct slicing (non-default slicer options). Same line fetch
@@ -285,8 +436,13 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
               if (line_data != nullptr && sample_count > 0) {
                 const TeletextLineResult sliced = slicer->slice(
                     line_data, sample_count, black_level, white_level);
+                stats.add_line(field_line, sliced);
                 if (sliced.valid) {
                   packet = sliced.bytes;
+                  has_confidence = sliced.has_byte_confidence;
+                  confidence = sliced.byte_confidence;
+                  result.bytes_repaired +=
+                      static_cast<uint64_t>(sliced.repaired_bytes);
                 }
               }
             }
@@ -294,8 +450,17 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             const auto obs = observation_context.get(
                 field_id, "teletext", "t42_" + std::to_string(field_line));
             if (obs && std::holds_alternative<std::string>(*obs)) {
-              packet = teletext_hex_to_packet(std::get<std::string>(*obs));
+              const auto observed =
+                  teletext_hex_to_observed_packet(std::get<std::string>(*obs));
+              if (observed.has_value()) {
+                packet = observed->bytes;
+                has_confidence = observed->has_confidence;
+                confidence = observed->confidence;
+              }
             }
+            stats.add_observed_line(field_line,
+                                    packet.has_value() ? &*packet : nullptr,
+                                    has_confidence ? &confidence : nullptr);
           }
 
           // Cue and squash timing is relative to the start of the export
@@ -306,24 +471,33 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
           if (packet.has_value()) {
             ++result.packets_written;
             field_has_data = true;
+            const TeletextPacketConfidence* weights =
+                has_confidence ? &confidence : nullptr;
             if (squash) {
               // The stream index is the copy's identity for the squasher, so
               // the rewrite pass can re-feed it without counting it twice.
               squash_pass->process_packet(*packet, relative_field_index,
-                                          static_cast<int64_t>(stream.size()));
-              stream.push_back(
-                  StreamEntry{*packet, relative_field_index, false});
+                                          static_cast<int64_t>(stream.size()),
+                                          weights);
+              stream.push_back(StreamEntry{*packet, relative_field_index, false,
+                                           has_confidence, confidence});
             } else {
               writer->write(packet->data(), packet->size());
+              if (display_row_of(*packet) != 0) {
+                squash_stats.add_written_row(display_bytes_of(*packet));
+              }
               if (page_decoder.has_value()) {
-                page_decoder->process_packet(*packet, relative_field_index);
+                page_decoder->process_packet(*packet, relative_field_index,
+                                             TeletextPageDecoder::kAutoSource,
+                                             weights);
               }
             }
           } else if (options.keep_empty_packets) {
             ++result.packets_written;
             if (squash) {
-              stream.push_back(
-                  StreamEntry{kEmptyPacket, relative_field_index, true});
+              stream.push_back(StreamEntry{kEmptyPacket, relative_field_index,
+                                           true, false,
+                                           TeletextPacketConfidence{}});
             } else {
               writer->write(kEmptyPacket.data(), kEmptyPacket.size());
             }
@@ -364,6 +538,8 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
               "output left at " +
               output_path;
           ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
+          squash_stats.set_page_runs(squasher.page_count());
+          report_partial_run(result);
           return result;
         }
         if (progress_callback_ &&
@@ -382,25 +558,31 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
         }
 
         auto out = entry.bytes;
-        attributor->process_packet(entry.bytes, entry.field_index,
-                                   static_cast<int64_t>(index));
+        attributor->process_packet(
+            entry.bytes, entry.field_index, static_cast<int64_t>(index),
+            entry.has_confidence ? &entry.confidence : nullptr);
         const auto& attribution = attributor->last_row_attribution();
         if (attribution.has_value()) {
-          const auto squashed = squasher.squashed_row(
-              *attribution, attributor->last_row_number());
-          if (squashed.has_value() &&
-              !std::equal(squashed->begin(), squashed->end(),
-                          out.begin() + 2)) {
-            std::copy(squashed->begin(), squashed->end(), out.begin() + 2);
-            ++result.packets_corrected;
+          const int row = attributor->last_row_number();
+          const auto squashed = squasher.squashed_row(*attribution, row);
+          if (squashed.has_value()) {
+            squash_stats.add_row(display_bytes_of(entry.bytes), *squashed,
+                                 squasher.copy_count(*attribution, row));
+            if (!std::equal(squashed->begin(), squashed->end(),
+                            out.begin() + 2)) {
+              std::copy(squashed->begin(), squashed->end(), out.begin() + 2);
+              ++result.packets_corrected;
+            }
           }
+        } else if (display_row_of(entry.bytes) != 0) {
+          // A display row that belonged to no open page is written as it was
+          // recovered. It carries characters the reader will see, so its
+          // damage belongs in the loss figure even though no vote reached it.
+          squash_stats.add_written_row(display_bytes_of(entry.bytes));
         }
         writer->write(out.data(), out.size());
       }
-      ORC_LOG_INFO(
-          "TeletextSinkDeps: squashing corrected {} of {} row packets across "
-          "{} sub-pages",
-          result.packets_corrected, stream.size(), squasher.page_count());
+      squash_stats.set_page_runs(squasher.page_count());
     }
 
     writer->close();
@@ -434,6 +616,9 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
       result.subtitle_cues_written = cues.size();
     }
 
+    result.characters_written = squash_stats.bytes_total();
+    result.characters_damaged = squash_stats.parity_failures_after();
+
     result.success = true;
     result.message = "Exported " + std::to_string(result.packets_written) +
                      " teletext packets (" +
@@ -444,6 +629,10 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
                         " subtitle cues to " + result.subtitle_path;
     }
     ORC_LOG_INFO("TeletextSinkDeps: {}", result.message);
+
+    result.report =
+        build_report(options, result, total_frames, stats, squash_stats);
+    write_report(options, result);
     return result;
 
   } catch (const std::exception& e) {

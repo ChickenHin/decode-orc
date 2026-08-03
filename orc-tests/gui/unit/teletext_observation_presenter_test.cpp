@@ -84,6 +84,51 @@ TEST(TeletextObservationPresenterTest, DecodesPacketsInAscendingLineOrder) {
   EXPECT_EQ(view.packets[1].bytes, line16);
 }
 
+TEST(TeletextObservationPresenterTest, DecodesPerByteConfidenceWhenPresent) {
+  ObservationContext context;
+  const FieldID field(11);
+  const auto packet = patternPacket(0x5A);
+  orc::TeletextPacketConfidence confidence{};
+  for (size_t i = 0; i < confidence.size(); ++i) {
+    confidence[i] = i % 2 == 0 ? 1.0F : 0.2F;
+  }
+  context.set(field, "teletext", "present", true);
+  context.set(field, "teletext", "line_count", int32_t{1});
+  context.set(field, "teletext", "t42_7",
+              orc::teletext_packet_to_hex(packet, confidence));
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  ASSERT_EQ(view.packets.size(), 1u);
+  EXPECT_EQ(view.packets[0].bytes, packet);
+  ASSERT_TRUE(view.packets[0].has_confidence);
+  for (size_t i = 0; i < confidence.size(); ++i) {
+    EXPECT_NEAR(view.packets[0].confidence[i], confidence[i], 0.05F)
+        << "byte " << i;
+  }
+}
+
+TEST(TeletextObservationPresenterTest, LegacyPacketReportsFullConfidence) {
+  // An observation stored before confidences existed must not be discounted
+  // against one that measured itself.
+  ObservationContext context;
+  const FieldID field(12);
+  const auto packet = patternPacket(0x11);
+  context.set(field, "teletext", "present", true);
+  context.set(field, "teletext", "line_count", int32_t{1});
+  context.set(field, "teletext", "t42_7", orc::teletext_packet_to_hex(packet));
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  ASSERT_EQ(view.packets.size(), 1u);
+  EXPECT_FALSE(view.packets[0].has_confidence);
+  for (const float value : view.packets[0].confidence) {
+    EXPECT_EQ(value, 1.0F);
+  }
+}
+
 TEST(TeletextObservationPresenterTest, MalformedHexPacket_IsSkipped) {
   ObservationContext context;
   const FieldID field(2);

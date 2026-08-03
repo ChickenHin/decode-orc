@@ -12,6 +12,7 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
+#include <orc/support/teletext_recovery_stats.h>
 #include <orc/support/teletext_slicer.h>
 #include <teletext_observer.h>
 
@@ -34,12 +35,35 @@ std::string t42_key(size_t field_line) {
   return "t42_" + std::to_string(field_line);
 }
 
+// Observers take no configuration, so the one slicer setup here has to serve
+// every source the host may be pointed at. kAuto does: the threshold detector
+// runs first and a band-limited source (consumer VHS, where the clock run-in
+// is attenuated below the detection threshold) falls back to MLSE. A line the
+// threshold detector recovers never reaches the fallback, so disc and direct
+// CVBS captures are unchanged in both results and cost.
+//
+// Parity repair is on for the same reason. It acts only on MLSE-detected
+// packets in parity-coded rows — a byte that failed the odd parity of ETSI EN
+// 300 706 §8.1 has its least-confident bit flipped — so a source the threshold
+// detector handles is again untouched, while a tape gets back characters it
+// would otherwise lose (on the reference captures, packets whose 40 data bytes
+// all satisfy parity rise from 70 % to 88 %). What it costs is that a repair
+// which guessed wrong can no longer be told from a byte that arrived intact;
+// the repaired byte carries the low confidence of the bit that was flipped, so
+// consumers weighting repeated copies of a row still prefer one that did.
+TeletextSlicerOptions observer_slicer_options() {
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kAuto;
+  options.parity_repair = true;
+  return options;
+}
+
 }  // namespace
 
 TeletextObserver::TeletextObserver()
     // EBU Tech. 3280-E §1.1.1 Table 1: 4FSC PAL sample rate; the bit rate is
     // fixed at 444 × fH by ETSI EN 300 706 §5.3 (TeletextSlicer default).
-    : slicer_(kPalSampleRate) {}
+    : slicer_(kPalSampleRate, kTeletextBitRate, observer_slicer_options()) {}
 
 void TeletextObserver::process_frame(
     const VideoFrameRepresentation& representation, FrameID frame_id,
@@ -72,6 +96,11 @@ void TeletextObserver::process_frame(
     const FieldID derived_fid(frame_id * 2 + field_idx);
     const size_t line_offset = (field_idx == 0) ? 0 : f1_lines;
 
+    // Recovery diagnostics for this field. The accumulator is local, so the
+    // observer stays stateless (the sink's per-frame coverage skip relies on
+    // that) and one field's profile never bleeds into the next.
+    TeletextRecoveryStats stats;
+
     int32_t line_count = 0;
     for (size_t field_line = kFirstCandidateFieldLine;
          field_line <= kLastCandidateFieldLine; ++field_line) {
@@ -100,12 +129,21 @@ void TeletextObserver::process_frame(
 
       const TeletextLineResult sliced =
           slicer_.slice(line_data, sample_count, black_level, white_level);
+      stats.add_line(static_cast<int>(field_line), sliced);
       if (!sliced.valid) {
         continue;
       }
 
-      context.set(derived_fid, "teletext", t42_key(field_line),
-                  teletext_packet_to_hex(sliced.bytes));
+      // The recovered bytes, and — where the detector could measure it — how
+      // sure it was of each of them, so a consumer combining repeated copies of
+      // a row can weight this one (orc/support/teletext_row_squasher.h). The
+      // suffix is optional at both ends: observations stored by earlier builds
+      // carry none and stay perfectly usable.
+      context.set(
+          derived_fid, "teletext", t42_key(field_line),
+          sliced.has_byte_confidence
+              ? teletext_packet_to_hex(sliced.bytes, sliced.byte_confidence)
+              : teletext_packet_to_hex(sliced.bytes));
       ++line_count;
     }
 
@@ -115,6 +153,15 @@ void TeletextObserver::process_frame(
     if (line_count > 0) {
       ORC_LOG_DEBUG("TeletextObserver: Field {} recovered {} packet(s)",
                     derived_fid.value(), line_count);
+    }
+
+    // Recovery profile for the field. Only fields that carried a data burst
+    // have anything to say, and the summary is built only when the logger
+    // will actually take it — every field of a full decode passes here.
+    if (stats.lines_with_burst() > 0 &&
+        get_logger()->should_log(spdlog::level::debug)) {
+      ORC_LOG_DEBUG("TeletextObserver: Field {} recovery profile\n{}",
+                    derived_fid.value(), stats.summary());
     }
   }
 }
@@ -131,7 +178,8 @@ std::vector<ObservationKey> TeletextObserver::get_provided_observations()
        field_line <= kLastCandidateFieldLine; ++field_line) {
     keys.emplace_back(
         "teletext", t42_key(field_line), ObservationType::STRING,
-        "42 recovered T42 bytes (84 hex chars) for 0-based field line " +
+        "42 recovered T42 bytes (84 hex chars), optionally followed by 42 "
+        "per-byte confidence digits, for 0-based field line " +
             std::to_string(field_line),
         true);
   }

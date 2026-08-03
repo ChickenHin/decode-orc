@@ -110,7 +110,8 @@ bool TeletextPageDecoder::set_subtitle_page(std::string_view page) {
 
 void TeletextPageDecoder::process_packet(
     const std::array<uint8_t, kTeletextPacketBytes>& packet,
-    int64_t field_index, int64_t source) {
+    int64_t field_index, int64_t source,
+    const TeletextPacketConfidence* confidence) {
   last_row_attribution_.reset();
   last_row_number_ = 0;
 
@@ -133,15 +134,23 @@ void TeletextPageDecoder::process_packet(
     // (key-word search labels) and X/26-X/31 (enhancement / non-display
     // packets, §9.4-§9.8) are outside the Level 1 grid and are ignored.
     handle_display_packet(magazine, packet_number, packet, field_index,
-                          source == kAutoSource ? next_source_++ : source);
+                          source == kAutoSource ? next_source_++ : source,
+                          confidence);
   }
+}
+
+int TeletextPageDecoder::erase_epoch(const PageIdentity& identity) const {
+  const auto it = erase_epochs_.find(identity);
+  return it == erase_epochs_.end() ? 0 : it->second;
 }
 
 TeletextPageKey TeletextPageDecoder::page_key(int transmission_magazine) const {
   const MagazineState& state =
       magazines_[static_cast<size_t>(transmission_magazine)];
-  return TeletextPageKey{displayed_magazine(transmission_magazine),
-                         state.page_number, state.subcode};
+  const int magazine = displayed_magazine(transmission_magazine);
+  return TeletextPageKey{
+      magazine, state.page_number, state.subcode,
+      erase_epoch({magazine, state.page_number, state.subcode})};
 }
 
 void TeletextPageDecoder::handle_header_packet(
@@ -237,11 +246,16 @@ void TeletextPageDecoder::handle_header_packet(
   state.subcode = subcode;
   state.erase_page = erase_page;
 
-  // C4 replaces the page's content rather than updating it, so accumulated
-  // copies of its rows describe a page that no longer exists; combining them
-  // with what follows would blend the old page into the new one.
-  if (erase_page && row_squasher_ != nullptr) {
-    row_squasher_->erase_page(page_key(transmission_magazine));
+  // C4 replaces the page's content rather than updating it, so copies of its
+  // rows recorded so far describe a page that no longer exists; combining them
+  // with what follows would blend the old page into the new one. Advancing the
+  // epoch moves the page to a fresh set of buckets, which separates the two
+  // runs without discarding the first: a consumer replaying this stream feeds
+  // the same packets in the same order, so it arrives at the same epoch at the
+  // same point and can still ask about the rows that came before.
+  if (erase_page) {
+    ++erase_epochs_[{displayed_magazine(transmission_magazine), page_number,
+                     subcode}];
   }
   state.newsflash = newsflash;
   state.subtitle = subtitle;
@@ -281,7 +295,8 @@ void TeletextPageDecoder::handle_header_packet(
 void TeletextPageDecoder::handle_display_packet(
     int transmission_magazine, int row,
     const std::array<uint8_t, kTeletextPacketBytes>& packet,
-    int64_t field_index, int64_t source) {
+    int64_t field_index, int64_t source,
+    const TeletextPacketConfidence* confidence) {
   MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
   // Rows belong to the page whose transmission is in progress in this
   // magazine (EN 300 706 §7.2.1); orphan rows with no open page are dropped.
@@ -311,7 +326,15 @@ void TeletextPageDecoder::handle_display_packet(
     TeletextRowBytes display{};
     std::copy(packet.begin() + 2, packet.begin() + 2 + kTeletextRowBytes,
               display.begin());
-    row_squasher_->add_row(key, row, display, source);
+    // The row's own bytes are packet bytes 2 onwards (§9.3.2), so its
+    // confidences are the matching slice of the packet's.
+    TeletextRowConfidence weights{};
+    if (confidence != nullptr) {
+      std::copy(confidence->begin() + 2,
+                confidence->begin() + 2 + kTeletextRowBytes, weights.begin());
+    }
+    row_squasher_->add_row(key, row, display, source,
+                           confidence != nullptr ? &weights : nullptr);
   }
 
   state.last_field_index = field_index;
@@ -371,8 +394,9 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   // rather than from the last one received: repeated transmissions correct
   // each other, and a row recovered during an earlier transmission is still
   // available when the current one was clipped (teletext_row_squasher.h).
-  const TeletextPageKey key{snapshot.magazine, state.page_number,
-                            state.subcode};
+  const TeletextPageKey key{
+      snapshot.magazine, state.page_number, state.subcode,
+      erase_epoch({snapshot.magazine, state.page_number, state.subcode})};
 
   for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
     RowData local_row_data;

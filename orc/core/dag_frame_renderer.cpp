@@ -309,6 +309,10 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
     auto node_outputs = executor_->execute_to_node(*dag_, node_id);
 
     auto it = node_outputs.find(node_id);
+    // Which of the located node's outputs carries this node's frames. Always 0
+    // for the node's own output; a sink substituting its input's output (below)
+    // takes the one the edge actually connects to.
+    size_t output_index = 0;
     if (it == node_outputs.end() || it->second.empty()) {
       // Check whether this is a sink (which produces no output by design).
       bool is_sink = false;
@@ -327,21 +331,30 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
         // pass-through preview without requiring any boilerplate in the plugin.
         if (dag_it != dag_nodes.end() && !dag_it->input_node_ids.empty()) {
           const NodeID& upstream_id = dag_it->input_node_ids[0];
+          // The edge feeding this sink names an output of the upstream node;
+          // a multi-output stage's output 0 is not necessarily the one the
+          // sink consumes, and substituting it would observe (and preview) a
+          // different branch than the sink is actually fed.
+          const size_t upstream_output =
+              dag_it->input_indices.empty() ? 0 : dag_it->input_indices[0];
           auto up_it = node_outputs.find(upstream_id);
-          if (up_it != node_outputs.end() && !up_it->second.empty()) {
+          if (up_it != node_outputs.end() &&
+              upstream_output < up_it->second.size()) {
             auto up_vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(
-                up_it->second[0]);
+                up_it->second[upstream_output]);
             if (up_vfr) {
               ORC_LOG_DEBUG(
                   "DAGFrameRenderer: sink node '{}' — using upstream node "
-                  "'{}' output for preview",
-                  node_id.to_string(), upstream_id.to_string());
+                  "'{}' output {} for preview",
+                  node_id.to_string(), upstream_id.to_string(),
+                  upstream_output);
               it = up_it;
+              output_index = upstream_output;
             }
           }
         }
 
-        if (it == node_outputs.end() || it->second.empty()) {
+        if (it == node_outputs.end() || it->second.size() <= output_index) {
           ORC_LOG_DEBUG(
               "DAGFrameRenderer: sink node '{}' has no upstream VFR for "
               "preview",
@@ -361,8 +374,8 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
       }
     }
 
-    auto vfr =
-        std::dynamic_pointer_cast<VideoFrameRepresentation>(it->second[0]);
+    auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(
+        it->second[output_index]);
     if (!vfr) {
       ORC_LOG_ERROR(
           "DAGFrameRenderer: node '{}' output is not a "
@@ -426,13 +439,19 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
             break;
           }
           const NodeID parent = cur_node.input_node_ids[0];
+          // The edge's output index, not output 0: a multi-output parent feeds
+          // this node from one specific output, and comparing against the
+          // wrong one would just lose the alias.
+          const size_t parent_output =
+              cur_node.input_indices.empty() ? 0 : cur_node.input_indices[0];
           const auto out_it = node_outputs.find(parent);
-          if (out_it == node_outputs.end() || out_it->second.empty()) {
+          if (out_it == node_outputs.end() ||
+              out_it->second.size() <= parent_output) {
             break;
           }
           const auto parent_vfr =
               std::dynamic_pointer_cast<const VideoFrameRepresentation>(
-                  out_it->second[0]);
+                  out_it->second[parent_output]);
           if (!parent_vfr || parent_vfr.get() != src.get()) {
             break;  // declared source is not the DAG input's artifact
           }

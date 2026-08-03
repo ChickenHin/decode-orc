@@ -14,9 +14,14 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/teletext_slicer.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <functional>
+#include <set>
+#include <string_view>
 #include <vector>
 
 #include "teletext_line_synthesizer.h"
@@ -281,6 +286,1174 @@ TEST(TeletextSlicer, RunInWithoutFramingCode_IsRejected) {
   TeletextSlicerOptions options;
   options.tolerant_framing = true;
   EXPECT_FALSE(slice_line(line, options).valid);
+}
+
+// ---------------------------------------------------------------------------
+// Band-limited channels and the MLSE detector
+// ---------------------------------------------------------------------------
+
+// Consumer VHS luma rolls off around 3 MHz. Measured on PAL SP captures the
+// clock run-in (3,47 MHz fundamental) comes back 16-26 dB down while the
+// payload survives, which is exactly the regime the MLSE detector exists for.
+constexpr double kTapeLikeCutoffHz = 2.8e6;
+
+TeletextLineSynthOptions tape_like_options() {
+  TeletextLineSynthOptions options;
+  options.low_pass_cutoff_hz = kTapeLikeCutoffHz;
+  return options;
+}
+
+TEST(TeletextSlicerMlse, BandLimitedLine_RejectedByThresholdDetector) {
+  const auto line = synthesize_teletext_line(make_parity_coded_payload(),
+                                             tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kThreshold;
+  EXPECT_FALSE(slice_line(line, options).valid);
+}
+
+TEST(TeletextSlicerMlse, BandLimitedLine_RecoveredByMlseDetector) {
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.detector, TeletextDetector::kMlse);
+  EXPECT_EQ(result.bytes, payload);
+}
+
+TEST(TeletextSlicerMlse, BandLimitedLine_RecoveredByAutoDetector) {
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kAuto;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.detector, TeletextDetector::kMlse);
+  EXPECT_EQ(result.bytes, payload);
+}
+
+TEST(TeletextSlicerMlse, CleanLine_AutoStopsAtThresholdDetector) {
+  // A source the threshold detector handles must not pay for the fallback,
+  // and must decode identically to kThreshold.
+  const auto payload = make_test_payload();
+  const auto line = synthesize_teletext_line(payload);
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kAuto;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.detector, TeletextDetector::kThreshold);
+  EXPECT_EQ(result.bytes, payload);
+}
+
+TEST(TeletextSlicerMlse, CleanLine_RecoveredByMlseDetectorToo) {
+  // The MLSE detector is a band-limited-channel remedy, not a tape-only one:
+  // it must stay exact on a signal the threshold detector also handles.
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload);
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+}
+
+TEST(TeletextSlicerMlse, BandLimitedNoisyLine_RecoversBytesExactly) {
+  const auto payload = make_parity_coded_payload();
+  auto synth = tape_like_options();
+  synth.noise_amplitude = 12;
+  const auto line = synthesize_teletext_line(payload, synth);
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+}
+
+TEST(TeletextSlicerMlse, BlankLine_IsRejectedByEveryDetector) {
+  const std::vector<int16_t> line(
+      static_cast<size_t>(kPalSamplesPerLineNominal),
+      static_cast<int16_t>(kPalBlack));
+  for (const auto detector :
+       {TeletextDetector::kThreshold, TeletextDetector::kMlse,
+        TeletextDetector::kAuto}) {
+    TeletextSlicerOptions options;
+    options.detector = detector;
+    EXPECT_FALSE(slice_line(line, options).valid);
+  }
+}
+
+std::vector<int16_t> make_noise_line(uint32_t seed, double cutoff_hz) {
+  std::vector<int16_t> line(static_cast<size_t>(kPalSamplesPerLineNominal),
+                            static_cast<int16_t>(kPalBlack));
+  uint32_t state = seed;
+  for (auto& sample : line) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    // Full data-amplitude noise: as hostile as a VBI line can plausibly be.
+    sample = static_cast<int16_t>(kPalBlack + (state % 400));
+  }
+  if (cutoff_hz > 0.0) {
+    band_limit_line(line, kPalSampleRate, cutoff_hz);
+  }
+  return line;
+}
+
+TEST(TeletextSlicerMlse, NoiseOnlyLines_RarelyLock) {
+  // Unlike the threshold detector, which demands an exact framing-code match
+  // (§6.2) and so is absolute about noise, the MLSE detector *fits* the
+  // preamble, and enough noise will occasionally fit. What holds the rate
+  // down is the MRAG filter (§8.2) plus the parity plausibility of the
+  // recovered payload (§9.3.1) — measured at a few per cent of noise-only
+  // lines, and the survivors land almost entirely in the rows that carry
+  // Hamming 24/18 or independent data and so have no parity to check.
+  //
+  // This is why kAuto reaches the MLSE detector only for lines the threshold
+  // detector rejected: on a source it handles, the fallback never runs. On
+  // real captures the observed false-lock count is zero — 2800 LaserDisc VBI
+  // lines carrying no teletext, the blank lines of two VHS captures, and the
+  // 35 776 lines of those two captures that carry a data burst which is not a
+  // teletext packet (0-based field lines 18 and 19, in every field of both).
+  //
+  // The bound is one line above the observed count rather than at it. The
+  // detector's second pass refits the channel to the bits the first pass
+  // decided, which fits noise a little better as well; measured on these seeds
+  // that costs one extra lock in 64 (four before the refit, five after),
+  // against the 71 % more parity-clean packets it recovers from a real tape.
+  constexpr int kSeeds = 64;
+  constexpr int kMaxFalseLocks = 6;
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+
+  for (const double cutoff_hz : {0.0, kTapeLikeCutoffHz}) {
+    int false_locks = 0;
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+      if (slice_line(make_noise_line(seed, cutoff_hz), options).valid) {
+        ++false_locks;
+      }
+    }
+    EXPECT_LE(false_locks, kMaxFalseLocks) << "cutoff_hz=" << cutoff_hz;
+  }
+}
+
+TEST(TeletextSlicerMlse, NoiseAfterARealPreamble_IsRejected) {
+  // The payload gates have to work even when the line genuinely starts with a
+  // preamble: a dropout mid-line must not yield 42 bytes of invented data.
+  auto packet = make_transmission_packet(make_parity_coded_payload());
+  auto line = synthesize_teletext_line_raw(packet, tape_like_options());
+
+  uint32_t state = 12345;
+  const auto burst_start = static_cast<size_t>(14.0 * kPalSampleRate / 1e6);
+  for (size_t s = burst_start; s < line.size(); ++s) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    line[s] = static_cast<int16_t>(kPalBlack + (state % 400));
+  }
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  EXPECT_FALSE(slice_line(line, options).valid);
+}
+
+// ---------------------------------------------------------------------------
+// Fractionally-spaced sampling
+//
+// The MLSE detector reads each bit at three positions within its bit period,
+// so the interpolation kernel sits in the signal path. Linear interpolation
+// is a low-pass in its own right and attenuates the transition band a
+// band-limited channel has already eaten into; these tests pin the kernel's
+// shape and measure its amplitude error against the linear alternative.
+// ---------------------------------------------------------------------------
+
+// Linear interpolation, the alternative the cubic kernel is measured against.
+double linear_interpolate(const std::vector<int16_t>& line, double t) {
+  const auto i = static_cast<size_t>(t);
+  const double frac = t - static_cast<double>(i);
+  return line[i] + (line[i + 1] - line[i]) * frac;
+}
+
+TEST(TeletextInterpolateSample, ReproducesInputSamplesAtIntegerPositions) {
+  // An interpolating kernel passes through its input; a smoothing one does
+  // not, and would shift every bit-centre reading of the detector.
+  const std::vector<int16_t> line{100, -40, 900, 12, -700, 355, 0, 88};
+  for (size_t i = 0; i < line.size(); ++i) {
+    EXPECT_NEAR(teletext_interpolate_sample(line.data(), line.size(),
+                                            static_cast<double>(i)),
+                line[i], 1e-9)
+        << "i=" << i;
+  }
+}
+
+TEST(TeletextInterpolateSample, ImpulseResponseIsTheCatmullRomKernel) {
+  // The four-point cubic evaluates to (-1, 9, 9, -1)/16 at the half sample,
+  // so an isolated impulse must come back with that kernel's shape — the
+  // negative outer lobes are the passband correction linear interpolation
+  // lacks.
+  std::vector<int16_t> line(16, 0);
+  constexpr int kImpulse = 8;
+  constexpr double kAmplitude = 1000.0;
+  line[kImpulse] = static_cast<int16_t>(kAmplitude);
+
+  const auto at = [&line](double t) {
+    return teletext_interpolate_sample(line.data(), line.size(), t);
+  };
+  EXPECT_NEAR(at(kImpulse - 0.5), 0.5625 * kAmplitude, 1e-9);
+  EXPECT_NEAR(at(kImpulse + 0.5), 0.5625 * kAmplitude, 1e-9);
+  EXPECT_NEAR(at(kImpulse - 1.5), -0.0625 * kAmplitude, 1e-9);
+  EXPECT_NEAR(at(kImpulse + 1.5), -0.0625 * kAmplitude, 1e-9);
+}
+
+TEST(TeletextInterpolateSample, PositionsOutsideTheLineClamp) {
+  const std::vector<int16_t> line{50, 60, 70, 80};
+  EXPECT_NEAR(teletext_interpolate_sample(line.data(), line.size(), -4.0), 50.0,
+              1e-9);
+  EXPECT_NEAR(teletext_interpolate_sample(line.data(), line.size(), 9.0), 80.0,
+              1e-9);
+  EXPECT_EQ(teletext_interpolate_sample(nullptr, 0, 1.0), 0.0);
+}
+
+// Peak absolute reconstruction error of each kernel against |truth|, sampled
+// on a fine sub-sample sweep across the interior of the line.
+struct InterpolationError {
+  double cubic = 0.0;
+  double linear = 0.0;
+};
+
+InterpolationError measure_interpolation_error(
+    const std::vector<int16_t>& line,
+    const std::function<double(double)>& truth) {
+  InterpolationError error;
+  // Twenty sub-sample steps per sample across the interior of the line. The
+  // sweep is driven by an integer count rather than an accumulating double so
+  // the step lands on the same positions however long the line is.
+  constexpr double kFirstSample = 4.0;
+  constexpr int kStepsPerSample = 20;
+  const int steps =
+      (static_cast<int>(line.size()) - 5 - static_cast<int>(kFirstSample)) *
+      kStepsPerSample;
+  for (int step = 0; step < steps; ++step) {
+    const double t = kFirstSample + static_cast<double>(step) /
+                                        static_cast<double>(kStepsPerSample);
+    const double expected = truth(t);
+    error.cubic = std::max(
+        error.cubic,
+        std::abs(teletext_interpolate_sample(line.data(), line.size(), t) -
+                 expected));
+    error.linear = std::max(error.linear,
+                            std::abs(linear_interpolate(line, t) - expected));
+  }
+  return error;
+}
+
+TEST(TeletextInterpolateSample, SineErrorIsFarBelowLinearInterpolation) {
+  // A tone at the top of the VHS luma band: the frequencies that survive the
+  // channel are exactly the ones linear interpolation damages most.
+  constexpr double kToneHz = 2.5e6;
+  constexpr double kAmplitude = 400.0;
+  constexpr double kPi = 3.14159265358979323846;
+  const auto truth = [](double t) {
+    return kAmplitude * std::sin(2.0 * kPi * kToneHz * t / kPalSampleRate);
+  };
+
+  std::vector<int16_t> line(256);
+  for (size_t s = 0; s < line.size(); ++s) {
+    line[s] = static_cast<int16_t>(std::lround(truth(static_cast<double>(s))));
+  }
+
+  const auto error = measure_interpolation_error(line, truth);
+  // 2,5 MHz is where the cubic's margin is *narrowest* — its error grows as
+  // the fourth power of frequency against the linear kernel's square — and it
+  // is still better by more than six times, at 1,5 % of the tone amplitude
+  // against 10 %.
+  EXPECT_LT(error.cubic, 0.2 * error.linear)
+      << "cubic=" << error.cubic << " linear=" << error.linear;
+  EXPECT_LT(error.cubic, 0.02 * kAmplitude);
+}
+
+TEST(TeletextInterpolateSample, BandLimitedFixtureErrorIsBelowLinear) {
+  // Three tones spanning the band a consumer VHS luma channel passes.
+  constexpr double kPi = 3.14159265358979323846;
+  const std::array<double, 3> tones{1.0e6, 2.0e6, 2.8e6};
+  const std::array<double, 3> amplitudes{200.0, 120.0, 80.0};
+  const auto truth = [&](double t) {
+    double sum = 0.0;
+    for (size_t i = 0; i < tones.size(); ++i) {
+      sum += amplitudes[i] *
+             std::sin(2.0 * kPi * tones[i] * t / kPalSampleRate + 0.4 * i);
+    }
+    return sum;
+  };
+
+  std::vector<int16_t> line(512);
+  for (size_t s = 0; s < line.size(); ++s) {
+    line[s] = static_cast<int16_t>(std::lround(truth(static_cast<double>(s))));
+  }
+
+  const auto error = measure_interpolation_error(line, truth);
+  EXPECT_LT(error.cubic, 0.15 * error.linear)
+      << "cubic=" << error.cubic << " linear=" << error.linear;
+}
+
+// ---------------------------------------------------------------------------
+// Fractionally-spaced channel fit and branch metric
+// ---------------------------------------------------------------------------
+
+// A channel that is exactly a five-bit-tap response per sample phase.
+//
+// Driving the slicer at a bit rate of a third the sample rate puts three
+// samples in every bit period, so the three positions the detector reads land
+// on integer sample offsets and a sample-spaced FIR spanning ± 2 bit periods
+// *is* the polyphase model the fit claims to recover — a different bit-spaced
+// tap vector at each phase, sharing one DC level. If the fit recovers it, the
+// preamble it was fitted to and the payload it was never shown both reconstruct
+// to within the line's quantisation.
+constexpr double kIntegerGridBitRate = kPalSampleRate / 3.0;
+
+// Deliberately asymmetric so the three phases see genuinely different
+// responses: a symmetric one would make two of them equal and the test
+// vacuous. Normalised to unit DC gain, so the recovered data amplitude still
+// sits at the EN 300 706 §5.2 level.
+constexpr std::array<double, 13> kPolyphaseChannel{0.02, 0.05, 0.09, 0.14, 0.18,
+                                                   0.16, 0.13, 0.09, 0.06, 0.04,
+                                                   0.02, 0.01, 0.01};
+
+std::vector<int16_t> apply_polyphase_channel(const std::vector<int16_t>& line) {
+  double gain = 0.0;
+  for (const double tap : kPolyphaseChannel) {
+    gain += tap;
+  }
+  std::vector<int16_t> out(line.size());
+  for (size_t s = 0; s < line.size(); ++s) {
+    double sum = 0.0;
+    for (size_t m = 0; m < kPolyphaseChannel.size(); ++m) {
+      const auto index = static_cast<long>(s) - static_cast<long>(m);
+      const size_t clamped = static_cast<size_t>(std::max(index, 0L));
+      sum += kPolyphaseChannel[m] * line[clamped];
+    }
+    out[s] = static_cast<int16_t>(std::lround(sum / gain));
+  }
+  return out;
+}
+
+std::vector<int16_t> synthesize_polyphase_channel_line(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload,
+    int32_t noise_amplitude = 0, uint32_t noise_seed = 1) {
+  TeletextLineSynthOptions opt;
+  opt.bit_rate = kIntegerGridBitRate;
+  // 360 bits at three samples each, plus the burst offset and the channel's
+  // group delay (EN 300 706 §7.1).
+  opt.sample_count = 1500;
+  auto line = apply_polyphase_channel(synthesize_teletext_line(payload, opt));
+  if (noise_amplitude > 0) {
+    uint32_t state = noise_seed != 0 ? noise_seed : 1;
+    for (auto& sample : line) {
+      state ^= state << 13;
+      state ^= state >> 17;
+      state ^= state << 5;
+      const int32_t span = 2 * noise_amplitude + 1;
+      const auto noise =
+          static_cast<int32_t>(state % static_cast<uint32_t>(span)) -
+          noise_amplitude;
+      sample = static_cast<int16_t>(sample + noise);
+    }
+  }
+  return line;
+}
+
+TeletextLineResult slice_integer_grid_line(const std::vector<int16_t>& line,
+                                           int samples_per_bit) {
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  options.mlse_samples_per_bit = samples_per_bit;
+  return TeletextSlicer(kPalSampleRate, kIntegerGridBitRate, options)
+      .slice(line.data(), line.size(), static_cast<int16_t>(kPalBlack),
+             static_cast<int16_t>(kPalWhite));
+}
+
+TEST(TeletextSlicerMlse, PolyphaseFitReproducesTheChannelAtEveryPhase) {
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_polyphase_channel_line(payload);
+
+  const auto result = slice_integer_grid_line(line, /*samples_per_bit=*/3);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  // The known preamble and the unknown payload both reconstruct to within the
+  // line's own quantisation: no phase is left mismodelled. A fit that used one
+  // tap vector for all three phases could not reach this — the phases of this
+  // channel differ by far more than a rounding step.
+  EXPECT_LT(result.preamble_residual, 0.01);
+  EXPECT_LT(result.payload_residual, 0.01);
+}
+
+// Byte-level accuracy of |result| against |payload|; an invalid result scores
+// nothing. Counting bytes rather than packets makes the comparison degrade
+// smoothly instead of collapsing at the gates.
+int correct_bytes(const TeletextLineResult& result,
+                  const std::array<uint8_t, kTeletextPacketBytes>& payload) {
+  if (!result.valid) {
+    return 0;
+  }
+  int correct = 0;
+  for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+    correct += result.bytes[i] == payload[i] ? 1 : 0;
+  }
+  return correct;
+}
+
+TEST(TeletextSlicerMlse, PolyphaseMetricBeatsBitCentreUnderNoise) {
+  // Task 2.3's graded-SNR comparison on the exactly-modelled channel above:
+  // three phases of evidence per bit against one, at matched noise. Bytes are
+  // counted rather than packets so the comparison degrades smoothly.
+  const auto payload = make_parity_coded_payload();
+
+  // The sweep stops short of the noise level at which both detectors lose the
+  // packet outright: past that point the totals are two small numbers of
+  // surviving bytes and compare nothing.
+  bool strictly_better_somewhere = false;
+  for (const int32_t noise : {0, 40, 80, 120}) {
+    int centre_total = 0;
+    int polyphase_total = 0;
+    for (uint32_t seed = 1; seed <= 12; ++seed) {
+      const auto line =
+          synthesize_polyphase_channel_line(payload, noise, seed * 7919u + 13u);
+      centre_total += correct_bytes(slice_integer_grid_line(line, 1), payload);
+      polyphase_total +=
+          correct_bytes(slice_integer_grid_line(line, 3), payload);
+    }
+    EXPECT_GE(polyphase_total, centre_total) << "noise=" << noise;
+    strictly_better_somewhere |= polyphase_total > centre_total;
+  }
+  EXPECT_TRUE(strictly_better_somewhere);
+}
+
+TEST(TeletextSlicerMlse, PolyphaseMetricBeatsBitCentreOnATapeLikeChannel) {
+  // The same comparison at the real ≈ 2.556 samples per bit, where the three
+  // grid phases fall between captured samples and are interpolated: the
+  // operational case, against the 2,8 MHz roll-off of consumer VHS luma.
+  //
+  // Packets recovered exactly is the metric here rather than bytes, because the
+  // detector's second pass (see the channel refit in slice_mlse) turned what
+  // used to be a graded byte-error comparison into a mostly all-or-nothing one:
+  // below the noise level at which a line is lost outright, both configurations
+  // now decode nearly every byte of nearly every accepted packet, and counting
+  // bytes measures which lines happened to be accepted rather than how well
+  // they were read. Where the extra phases still tell is at the top of the
+  // range, and there they tell decisively — twice the packets at noise 70.
+  const auto payload = make_parity_coded_payload();
+
+  // Where the channel is stressed enough that noise, not model mismatch,
+  // decides the bits (10-bit level counts, against a ≈ 388-count data step).
+  constexpr int32_t kNoiseDominatedFrom = 70;
+  constexpr uint32_t kSeeds = 96;
+
+  bool strictly_better_somewhere = false;
+  for (const int32_t noise : {0, 20, 40, 60, 70, 80}) {
+    int centre_exact = 0;
+    int polyphase_exact = 0;
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+      auto synth = tape_like_options();
+      synth.noise_amplitude = noise;
+      synth.noise_seed = seed * 7919u + 13u;
+      // Spread the burst across a whole bit period so no single sub-sample
+      // alignment dominates the comparison.
+      synth.phase_offset_samples = 0.2 * static_cast<double>(seed % 13);
+      const auto line = synthesize_teletext_line(payload, synth);
+
+      TeletextSlicerOptions options;
+      options.detector = TeletextDetector::kMlse;
+      options.mlse_samples_per_bit = 1;
+      centre_exact += correct_bytes(slice_line(line, options), payload) ==
+                              static_cast<int>(kTeletextPacketBytes)
+                          ? 1
+                          : 0;
+      options.mlse_samples_per_bit = 3;
+      polyphase_exact += correct_bytes(slice_line(line, options), payload) ==
+                                 static_cast<int>(kTeletextPacketBytes)
+                             ? 1
+                             : 0;
+    }
+
+    // Never materially worse, at any noise level.
+    EXPECT_GE(100 * polyphase_exact, 95 * centre_exact) << "noise=" << noise;
+    if (noise >= kNoiseDominatedFrom) {
+      // And decisively better wherever noise is what is costing the packets.
+      EXPECT_GT(100 * polyphase_exact, 150 * centre_exact) << "noise=" << noise;
+      strictly_better_somewhere = true;
+    }
+  }
+  EXPECT_TRUE(strictly_better_somewhere);
+}
+
+// ---------------------------------------------------------------------------
+// Two-pass detection: terminated trellis and decision-directed channel refit
+// ---------------------------------------------------------------------------
+
+TEST(TeletextSlicerMlse, BandLimitedLine_RecoversExactlyAtEveryBitPhase) {
+  // The channel refit is what makes an undisturbed band-limited line decode
+  // exactly rather than nearly. Five taps fitted to the 24 preamble bits alone
+  // describe the head of the channel's pulse response and not its tail, and on
+  // this fixture that mismodelling cost bytes at most sub-sample alignments;
+  // refitting the same five taps against all 360 bits removes them.
+  const auto payload = make_parity_coded_payload();
+  for (int step = 0; step < 10; ++step) {
+    auto synth = tape_like_options();
+    synth.phase_offset_samples = 0.25 * static_cast<double>(step);
+    const auto line = synthesize_teletext_line(payload, synth);
+
+    TeletextSlicerOptions options;
+    options.detector = TeletextDetector::kMlse;
+    const auto result = slice_line(line, options);
+    ASSERT_TRUE(result.valid) << "phase step " << step;
+    EXPECT_EQ(result.bytes, payload) << "phase step " << step;
+  }
+}
+
+TEST(TeletextSlicerMlse, FinalDataByteIsNoWorseThanTheRestOfThePacket) {
+  // ETSI EN 300 706 §7.1: nothing follows the 360th bit, so the line is back at
+  // black there and the trellis is terminated in that known state. Without it
+  // the final bits are chosen to explain the last samples rather than pinned by
+  // evidence on both sides, and the last data byte decodes several times worse
+  // than any other position — measured at 30,7 % against a 7,3 % packet average
+  // on the reference VHS LP capture.
+  const auto payload = make_parity_coded_payload();
+  for (const int32_t noise : {40, 60, 80}) {
+    int accepted = 0;
+    int final_byte_errors = 0;
+    int other_byte_errors = 0;
+    for (uint32_t seed = 1; seed <= 96; ++seed) {
+      auto synth = tape_like_options();
+      synth.noise_amplitude = noise;
+      synth.noise_seed = seed * 7919u + 13u;
+      synth.phase_offset_samples = 0.2 * static_cast<double>(seed % 13);
+      const auto line = synthesize_teletext_line(payload, synth);
+
+      TeletextSlicerOptions options;
+      options.detector = TeletextDetector::kMlse;
+      const auto result = slice_line(line, options);
+      if (!result.valid) {
+        continue;
+      }
+      ++accepted;
+      const size_t last = kTeletextPacketBytes - 1;
+      final_byte_errors += result.bytes[last] != payload[last] ? 1 : 0;
+      for (size_t i = 2; i < last; ++i) {
+        other_byte_errors += result.bytes[i] != payload[i] ? 1 : 0;
+      }
+    }
+    ASSERT_GT(accepted, 0) << "noise=" << noise;
+    // The final byte sits with the rest rather than apart from it. The bound is
+    // twice the mean error count of the other data positions plus one, which is
+    // wide enough for a single unlucky line and an order of magnitude below the
+    // rate an unterminated trellis leaves behind.
+    const double mean_other = static_cast<double>(other_byte_errors) /
+                              static_cast<double>(kTeletextPacketBytes - 3);
+    EXPECT_LE(static_cast<double>(final_byte_errors), 1.0 + 2.0 * mean_other)
+        << "noise=" << noise << ", accepted=" << accepted;
+  }
+}
+
+TEST(TeletextSlicerMlse, SamplesPerBitIsClampedToTheSupportedRange) {
+  // Out-of-range settings must degrade to a working detector rather than read
+  // off the end of the phase tables.
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+  for (const int samples_per_bit : {-1, 0, 1, 2, 3, 4, 99}) {
+    TeletextSlicerOptions options;
+    options.detector = TeletextDetector::kMlse;
+    options.mlse_samples_per_bit = samples_per_bit;
+    const auto result = slice_line(line, options);
+    ASSERT_TRUE(result.valid) << "samples_per_bit=" << samples_per_bit;
+    EXPECT_EQ(result.bytes, payload) << "samples_per_bit=" << samples_per_bit;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-bit reconstruction error (timing diagnostic)
+//
+// The profile TeletextLineResult::payload_bit_errors reports is what separates
+// a bit clock running at the wrong rate — an error that grows along the packet
+// as each bit is read further from its centre than the last — from noise and
+// intersymbol interference, which cost the same everywhere.
+// ---------------------------------------------------------------------------
+
+// Mean reconstruction error over each quarter of the payload. Quarters rather
+// than raw bits because a single bit's error is dominated by which bits sit
+// around it; the drift question is about the trend along the packet.
+std::array<double, 4> quarter_error_profile(const TeletextLineResult& result) {
+  constexpr size_t kQuarter = kTeletextPayloadBits / 4;
+  std::array<double, 4> means{};
+  for (size_t q = 0; q < means.size(); ++q) {
+    double sum = 0.0;
+    for (size_t bit = q * kQuarter; bit < (q + 1) * kQuarter; ++bit) {
+      sum += static_cast<double>(result.payload_bit_errors[bit]);
+    }
+    means[q] = sum / static_cast<double>(kQuarter);
+  }
+  return means;
+}
+
+TEST(TeletextSlicerDrift, MatchedTimingGivesAFlatErrorProfile) {
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  ASSERT_EQ(result.bytes, payload);
+  const auto quarters = quarter_error_profile(result);
+  // Flat: the model mismatch of the band-limited channel costs the same at both
+  // ends of the packet, so no quarter rises above the first. Quarters do differ
+  // by which bits happen to sit in them — hence a bound rather than equality —
+  // but nothing here trends upwards.
+  for (size_t q = 1; q < quarters.size(); ++q) {
+    EXPECT_LT(quarters[q], 1.1 * quarters[0]) << "quarter " << q;
+  }
+}
+
+TEST(TeletextSlicerDrift, SamplesPerBitErrorGrowsTheErrorProfile) {
+  // The line is synthesized at a bit rate 0,1 % away from the ETSI EN 300 706
+  // §5.3 rate the slicer assumes — far outside the ± 25 ppm the spec allows,
+  // and the signature of a tape whose transport is not running at the speed it
+  // was recorded at. The bit phase is acquired on the preamble at the start of
+  // the line, so the error accumulates from there across the packet: a third of
+  // a bit period by the last byte.
+  const auto payload = make_parity_coded_payload();
+  auto synth = tape_like_options();
+  synth.bit_rate = kTeletextBitRate * 1.001;
+  const auto line = synthesize_teletext_line(payload, synth);
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+
+  const auto quarters = quarter_error_profile(result);
+  for (size_t q = 1; q < quarters.size(); ++q) {
+    EXPECT_GT(quarters[q], quarters[q - 1]) << "quarter " << q;
+  }
+  // And by the end of the packet the rise is unmistakable against the flat
+  // profile of the matched line above.
+  EXPECT_GT(quarters[3], 1.3 * quarters[0]);
+}
+
+TEST(TeletextSlicerDrift, NoDetectionLeavesTheProfileEmpty) {
+  // Lines the MLSE detector never ran on report no profile rather than a stale
+  // one: the threshold detector reconstructs nothing to measure.
+  const auto payload = make_test_payload();
+  const auto line = synthesize_teletext_line(payload);
+  const auto result = slice_line(line);
+
+  ASSERT_TRUE(result.valid);
+  ASSERT_EQ(result.detector, TeletextDetector::kThreshold);
+  for (const float error : result.payload_bit_errors) {
+    EXPECT_EQ(error, 0.0F);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rejection reasons
+//
+// One synthesized line per early-return path of slice(), slice_threshold()
+// and slice_mlse(), asserting the reason each reports. These are diagnostics:
+// what is being pinned here is that a discarded line says which gate
+// discarded it, so a recovery profile can tell "nothing on this line" from
+// "data that did not survive".
+// ---------------------------------------------------------------------------
+
+// A line rising monotonically from black to white across its whole length.
+// It clears the coarse amplitude gate, but the run-in correlation (§6.1) is
+// negative at every phase — each +/- kernel pair straddles a rising edge — so
+// the threshold detector never locks.
+std::vector<int16_t> make_ramp_line() {
+  const auto count = static_cast<size_t>(kPalSamplesPerLineNominal);
+  std::vector<int16_t> line(count);
+  for (size_t s = 0; s < count; ++s) {
+    const double fraction = static_cast<double>(s) / (count - 1);
+    line[s] =
+        static_cast<int16_t>(kPalBlack + fraction * (kPalWhite - kPalBlack));
+  }
+  return line;
+}
+
+// A line held at white: bright enough to pass the coarse gate, but with no
+// structure for a channel fit to explain, so every fitted response has zero
+// gain.
+std::vector<int16_t> make_flat_white_line() {
+  return std::vector<int16_t>(static_cast<size_t>(kPalSamplesPerLineNominal),
+                              static_cast<int16_t>(kPalWhite));
+}
+
+TEST(TeletextSlicerRejectReason, ValidLineReportsNoReason) {
+  const auto result = slice_line(synthesize_teletext_line(make_test_payload()));
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.reject_reason, TeletextRejectReason::kNone);
+}
+
+TEST(TeletextSlicerRejectReason, NullOrShortLine_ReportsInsufficientSamples) {
+  const auto slicer = make_slicer();
+  EXPECT_EQ(slicer
+                .slice(nullptr, 1135, static_cast<int16_t>(kPalBlack),
+                       static_cast<int16_t>(kPalWhite))
+                .reject_reason,
+            TeletextRejectReason::kInsufficientSamples);
+  const std::vector<int16_t> short_line(64, static_cast<int16_t>(kPalBlack));
+  EXPECT_EQ(slicer
+                .slice(short_line.data(), short_line.size(),
+                       static_cast<int16_t>(kPalBlack),
+                       static_cast<int16_t>(kPalWhite))
+                .reject_reason,
+            TeletextRejectReason::kInsufficientSamples);
+}
+
+TEST(TeletextSlicerRejectReason, DegenerateLevels_ReportsInsufficientSamples) {
+  // White at or below black leaves no §5.2 data level to measure against.
+  const auto line = synthesize_teletext_line(make_test_payload());
+  const auto result = make_slicer().slice(line.data(), line.size(),
+                                          static_cast<int16_t>(kPalWhite),
+                                          static_cast<int16_t>(kPalBlack));
+  EXPECT_EQ(result.reject_reason, TeletextRejectReason::kInsufficientSamples);
+}
+
+TEST(TeletextSlicerRejectReason, BlankLine_ReportsAmplitudeGate) {
+  const std::vector<int16_t> line(
+      static_cast<size_t>(kPalSamplesPerLineNominal),
+      static_cast<int16_t>(kPalBlack));
+  EXPECT_EQ(slice_line(line).reject_reason,
+            TeletextRejectReason::kAmplitudeGate);
+}
+
+TEST(TeletextSlicerRejectReason, RampWithoutRunIn_ReportsNoRunInLock) {
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kThreshold;
+  EXPECT_EQ(slice_line(make_ramp_line(), options).reject_reason,
+            TeletextRejectReason::kNoRunInLock);
+}
+
+TEST(TeletextSlicerRejectReason, BandLimitedLine_ReportsRunInAmplitude) {
+  // The tape case: the channel has attenuated the 3,47 MHz run-in fundamental
+  // (§6.1), so the 1 and 0 levels recovered at the locked phase are too close
+  // together to slice between. This reason is what says "try MLSE here".
+  const auto line = synthesize_teletext_line(make_parity_coded_payload(),
+                                             tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kThreshold;
+  EXPECT_EQ(slice_line(line, options).reject_reason,
+            TeletextRejectReason::kRunInAmplitude);
+}
+
+TEST(TeletextSlicerRejectReason, DamagedRunIn_ReportsRunInPattern) {
+  // Second run-in byte reduced to a single one: the correlation still locks
+  // with usable amplitude, but three of the sixteen bits no longer alternate
+  // (§6.1), one more than the note's allowance.
+  auto packet = make_transmission_packet(make_test_payload());
+  packet[1] = 0x40;
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kThreshold;
+  EXPECT_EQ(
+      slice_line(synthesize_teletext_line_raw(packet), options).reject_reason,
+      TeletextRejectReason::kRunInPattern);
+}
+
+TEST(TeletextSlicerRejectReason, NoFramingCode_ReportsFramingCodeMiss) {
+  auto packet = make_transmission_packet(make_test_payload());
+  packet[2] = 0x00;
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kThreshold;
+  EXPECT_EQ(
+      slice_line(synthesize_teletext_line_raw(packet), options).reject_reason,
+      TeletextRejectReason::kFramingCodeMiss);
+}
+
+TEST(TeletextSlicerRejectReason, UncorrectableMrag_ReportsInvalidMrag) {
+  auto payload = make_test_payload();
+  payload[0] ^= 0b00000011;
+  payload[1] ^= 0b00011000;
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kThreshold;
+  EXPECT_EQ(
+      slice_line(synthesize_teletext_line(payload), options).reject_reason,
+      TeletextRejectReason::kInvalidMrag);
+}
+
+TEST(TeletextSlicerRejectReasonMlse, FlatLine_ReportsNoPreambleLock) {
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  EXPECT_EQ(slice_line(make_flat_white_line(), options).reject_reason,
+            TeletextRejectReason::kNoPreambleLock);
+}
+
+TEST(TeletextSlicerRejectReasonMlse, NoiseLine_ReportsPreambleResidual) {
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(make_noise_line(1, 0.0), options);
+  EXPECT_EQ(result.reject_reason, TeletextRejectReason::kPreambleResidual);
+  // The residual is reported even though the line was rejected — the rejected
+  // tail is what the gate is tuned against.
+  EXPECT_GT(result.preamble_residual, 0.0);
+}
+
+TEST(TeletextSlicerRejectReasonMlse,
+     DropoutAfterPreamble_ReportsPayloadResidual) {
+  // A real preamble followed by a dropout that saturates the luma to peak
+  // white: the fitted channel cannot produce a level anywhere near that, so
+  // the reconstruction of the recovered bits misses the samples by far more
+  // than the gate allows.
+  auto packet = make_transmission_packet(make_parity_coded_payload());
+  auto line = synthesize_teletext_line_raw(packet, tape_like_options());
+  const auto dropout_start = static_cast<size_t>(14.0 * kPalSampleRate / 1e6);
+  for (size_t s = dropout_start; s < line.size(); ++s) {
+    line[s] = static_cast<int16_t>(kPalPeak);
+  }
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+  EXPECT_EQ(result.reject_reason, TeletextRejectReason::kPayloadResidual);
+  EXPECT_GT(result.payload_residual, 0.0);
+}
+
+TEST(TeletextSlicerRejectReasonMlse, UncorrectableMrag_ReportsInvalidMrag) {
+  auto payload = make_parity_coded_payload();
+  payload[0] ^= 0b00000011;
+  payload[1] ^= 0b00011000;
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  EXPECT_EQ(slice_line(line, options).reject_reason,
+            TeletextRejectReason::kInvalidMrag);
+}
+
+TEST(TeletextSlicerRejectReasonMlse, UncodedDataBytes_ReportsParityFraction) {
+  // Row 0 is parity coded (§9.3.1), so a payload whose data bytes are not
+  // odd-parity coded fails the plausibility gate however cleanly it decoded.
+  const auto line =
+      synthesize_teletext_line(make_test_payload(), tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  EXPECT_EQ(slice_line(line, options).reject_reason,
+            TeletextRejectReason::kParityFraction);
+}
+
+// ---------------------------------------------------------------------------
+// Soft decisions: per-byte confidence
+//
+// The Viterbi decides a bit by how much better the best sequence carrying it
+// one way is than the best sequence carrying it the other. That margin is a
+// measurement of the bit, and what these pin is that it means what it claims:
+// high where the detector is right, low where it is wrong.
+// ---------------------------------------------------------------------------
+
+TEST(TeletextSlicerConfidence, ThresholdDetectorReportsNone) {
+  // One sample per bit and no channel model: nothing to compare a decision
+  // against, so the detector says so rather than inventing a number.
+  const auto result = slice_line(synthesize_teletext_line(make_test_payload()));
+  ASSERT_TRUE(result.valid);
+  ASSERT_EQ(result.detector, TeletextDetector::kThreshold);
+  EXPECT_FALSE(result.has_byte_confidence);
+}
+
+TEST(TeletextSlicerConfidence, UndamagedLineIsConfidentInEveryByte) {
+  const auto payload = make_parity_coded_payload();
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+
+  // Both ends of the range the detector meets: a signal that arrives intact,
+  // and one a tape has band-limited into intersymbol interference. The second
+  // is inherently the less certain of the two — where the channel smears bits
+  // together, flipping one is partly answered by its neighbours — so it is
+  // held to a lower bar, not to none.
+  struct Case {
+    TeletextLineSynthOptions synth;
+    double floor;
+  };
+  const Case cases[] = {{TeletextLineSynthOptions{}, 0.5},
+                        {tape_like_options(), 0.25}};
+
+  for (const auto& test_case : cases) {
+    const auto line = synthesize_teletext_line(payload, test_case.synth);
+    const auto result = slice_line(line, options);
+    ASSERT_TRUE(result.valid);
+    ASSERT_EQ(result.bytes, payload);
+    ASSERT_TRUE(result.has_byte_confidence);
+    for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+      EXPECT_GE(result.byte_confidence[i], test_case.floor) << "byte " << i;
+      EXPECT_LE(result.byte_confidence[i], 1.0F) << "byte " << i;
+    }
+  }
+}
+
+TEST(TeletextSlicerConfidence, MisreadBytesSitInTheLowConfidenceTail) {
+  // The property that matters is ordering, not calibration: the bytes the
+  // detector got wrong must be the ones it was least sure of. Measured over a
+  // spread of noise levels so the comparison rests on hundreds of errors
+  // rather than on whichever few a single fixture happens to produce.
+  const auto payload = make_parity_coded_payload();
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+
+  double correct_confidence = 0.0;
+  double wrong_confidence = 0.0;
+  int correct_bytes_seen = 0;
+  int wrong_bytes_seen = 0;
+  for (const int32_t noise : {40, 80, 120}) {
+    for (uint32_t seed = 1; seed <= 64; ++seed) {
+      auto synth = tape_like_options();
+      synth.noise_amplitude = noise;
+      synth.noise_seed = seed * 7919u + 13u;
+      synth.phase_offset_samples = 0.2 * static_cast<double>(seed % 13);
+      const auto result =
+          slice_line(synthesize_teletext_line(payload, synth), options);
+      if (!result.valid || !result.has_byte_confidence) {
+        continue;
+      }
+      for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+        const double confidence =
+            static_cast<double>(result.byte_confidence[i]);
+        if (result.bytes[i] == payload[i]) {
+          correct_confidence += confidence;
+          ++correct_bytes_seen;
+        } else {
+          wrong_confidence += confidence;
+          ++wrong_bytes_seen;
+        }
+      }
+    }
+  }
+
+  ASSERT_GT(correct_bytes_seen, 0);
+  ASSERT_GT(wrong_bytes_seen, 50) << "too few errors to rank";
+  const double correct_mean =
+      correct_confidence / static_cast<double>(correct_bytes_seen);
+  const double wrong_mean =
+      wrong_confidence / static_cast<double>(wrong_bytes_seen);
+  EXPECT_LT(wrong_mean, 0.5 * correct_mean)
+      << "correct mean " << correct_mean << ", wrong mean " << wrong_mean;
+}
+
+// ---------------------------------------------------------------------------
+// Parity-guided repair
+// ---------------------------------------------------------------------------
+
+// A parity-coded payload addressed to |row|, with |even_parity_bytes| of its
+// data bytes deliberately left at even parity — a byte that arrived damaged.
+std::array<uint8_t, kTeletextPacketBytes> make_payload_with_damage(
+    int row, std::initializer_list<size_t> even_parity_bytes) {
+  auto payload = make_parity_coded_payload();
+  const auto mrag = make_mrag(/*magazine=*/1, /*packet_number=*/row);
+  payload[0] = mrag[0];
+  payload[1] = mrag[1];
+  for (const size_t index : even_parity_bytes) {
+    // ETSI EN 300 706 §8.1: bit 8 is the parity bit, so flipping it is exactly
+    // "the same character, transmitted with the wrong parity".
+    payload[index] = static_cast<uint8_t>(payload[index] ^ 0x80);
+  }
+  return payload;
+}
+
+TEST(TeletextSlicerRepair, OffByDefault_DamagedBytesAreLeftAsTransmitted) {
+  // The T42 contract is transmission coding: without being asked, the slicer
+  // hands back what it read, parity failures and all.
+  const auto payload = make_payload_with_damage(/*row=*/1, {5, 17, 33});
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  EXPECT_EQ(result.repaired_bytes, 0);
+}
+
+TEST(TeletextSlicerRepair, RestoresBytesTheDetectorMisread) {
+  // The case the option exists for: noise flips a bit, parity says the byte is
+  // wrong, and the detector's own margins say which bit to doubt. Counted over
+  // a sweep, because whether any single line has a repairable error is a
+  // property of the noise rather than of the detector.
+  const auto payload = make_parity_coded_payload();
+  TeletextSlicerOptions plain;
+  plain.detector = TeletextDetector::kMlse;
+  TeletextSlicerOptions repairing = plain;
+  repairing.parity_repair = true;
+
+  bool strictly_better_somewhere = false;
+  for (const int32_t noise : {40, 80, 120}) {
+    int plain_correct = 0;
+    int repaired_correct = 0;
+    for (uint32_t seed = 1; seed <= 64; ++seed) {
+      auto synth = tape_like_options();
+      synth.noise_amplitude = noise;
+      synth.noise_seed = seed * 7919u + 13u;
+      synth.phase_offset_samples = 0.2 * static_cast<double>(seed % 13);
+      const auto line = synthesize_teletext_line(payload, synth);
+
+      const auto before = slice_line(line, plain);
+      const auto after = slice_line(line, repairing);
+      if (!before.valid || !after.valid) {
+        continue;
+      }
+      plain_correct += correct_bytes(before, payload);
+      repaired_correct += correct_bytes(after, payload);
+
+      // Whatever it changed, the packet it emits is still valid transmission
+      // coding: a repaired byte satisfies the odd parity of §8.1.
+      for (size_t i = 2; i < kTeletextPacketBytes; ++i) {
+        if (after.bytes[i] != before.bytes[i]) {
+          EXPECT_TRUE(teletext_odd_parity_valid(after.bytes[i]))
+              << "byte " << i << " at noise " << noise;
+        }
+      }
+    }
+    EXPECT_GE(repaired_correct, plain_correct) << "noise=" << noise;
+    strictly_better_somewhere |= repaired_correct > plain_correct;
+  }
+  EXPECT_TRUE(strictly_better_somewhere);
+}
+
+TEST(TeletextSlicerRepair, HeaderAddressAndControlBytesAreLeftAlone) {
+  // ETSI EN 300 706 §9.3.1: the first ten bytes of a header are Hamming 8/4
+  // coded. Those carry their own correction, which the page decoder applies
+  // with the whole codeword in view; guessing a bit of one here would only
+  // take that decision away from it.
+  const auto payload = make_payload_with_damage(/*row=*/0, {2, 5, 9});
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  options.parity_repair = true;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  EXPECT_EQ(result.repaired_bytes, 0);
+}
+
+TEST(TeletextSlicerRepair, NonParityCodedRowsAreLeftAlone) {
+  // Rows above 25 carry Hamming 24/18 triplets or independent data (§9.6,
+  // §9.8), which are not byte-wise odd parity: reading a parity failure there
+  // as damage would be reading a coding it does not use.
+  auto payload = make_test_payload();
+  const auto mrag = make_mrag(/*magazine=*/1, /*packet_number=*/26);
+  payload[0] = mrag[0];
+  payload[1] = mrag[1];
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  options.parity_repair = true;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  EXPECT_EQ(result.repaired_bytes, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Observation-string encoding
+// ---------------------------------------------------------------------------
+
+TEST(TeletextHex, ConfidenceSuffixRoundTrip) {
+  const auto payload = make_test_payload();
+  TeletextPacketConfidence confidence{};
+  for (size_t i = 0; i < confidence.size(); ++i) {
+    // Every quantisation level, sampled across the packet.
+    confidence[i] = static_cast<float>(i % kTeletextConfidenceLevels) /
+                    static_cast<float>(kTeletextConfidenceLevels - 1);
+  }
+
+  const std::string hex = teletext_packet_to_hex(payload, confidence);
+  ASSERT_EQ(hex.size(), kTeletextPacketBytes * 3);
+
+  const auto decoded = teletext_hex_to_observed_packet(hex);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->bytes, payload);
+  EXPECT_TRUE(decoded->has_confidence);
+  for (size_t i = 0; i < confidence.size(); ++i) {
+    EXPECT_NEAR(decoded->confidence[i], confidence[i], 1e-6) << "byte " << i;
+  }
+
+  // The bytes are the same 84 characters they always were, so a consumer that
+  // only wants the packet gets it from either form.
+  EXPECT_EQ(hex.substr(0, kTeletextPacketBytes * 2),
+            teletext_packet_to_hex(payload));
+  EXPECT_EQ(teletext_hex_to_packet(hex), payload);
+}
+
+TEST(TeletextHex, LegacyStringDecodesAsFullConfidence) {
+  // An observation stored before confidences existed must stay usable, and
+  // must not be weighted below one that measured itself.
+  const auto payload = make_test_payload();
+  const auto decoded =
+      teletext_hex_to_observed_packet(teletext_packet_to_hex(payload));
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->bytes, payload);
+  EXPECT_FALSE(decoded->has_confidence);
+  for (const float value : decoded->confidence) {
+    EXPECT_EQ(value, 1.0F);
+  }
+}
+
+TEST(TeletextHex, RejectsPartialAndMalformedConfidenceSuffixes) {
+  const std::string full =
+      teletext_packet_to_hex(make_test_payload(), TeletextPacketConfidence{});
+  EXPECT_FALSE(teletext_hex_to_observed_packet(full.substr(0, full.size() - 1))
+                   .has_value());
+  EXPECT_FALSE(teletext_hex_to_observed_packet(full.substr(0, full.size() - 20))
+                   .has_value());
+  std::string bad = full;
+  bad.back() = 'z';
+  EXPECT_FALSE(teletext_hex_to_observed_packet(bad).has_value());
+}
+
+TEST(TeletextSlicerConfidence, RecoveredPacketSurvivesTheObservationRoundTrip) {
+  // What the observer stores and what the sink and the previewer read back are
+  // the same measurement, to a quantisation step.
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+  ASSERT_TRUE(result.valid);
+  ASSERT_TRUE(result.has_byte_confidence);
+
+  const auto decoded = teletext_hex_to_observed_packet(
+      teletext_packet_to_hex(result.bytes, result.byte_confidence));
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->bytes, result.bytes);
+  ASSERT_TRUE(decoded->has_confidence);
+  const float step = 1.0F / static_cast<float>(kTeletextConfidenceLevels - 1);
+  for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+    EXPECT_NEAR(decoded->confidence[i], result.byte_confidence[i], step)
+        << "byte " << i;
+  }
+}
+
+TEST(TeletextRejectReasonName, EveryReasonHasItsOwnName) {
+  std::set<std::string_view> names;
+  for (size_t index = 0; index < kTeletextRejectReasonCount; ++index) {
+    const auto name =
+        teletext_reject_reason_name(static_cast<TeletextRejectReason>(index));
+    EXPECT_FALSE(name.empty()) << "index=" << index;
+    EXPECT_NE(name, "unknown") << "index=" << index;
+    names.insert(name);
+  }
+  EXPECT_EQ(names.size(), kTeletextRejectReasonCount);
 }
 
 }  // namespace

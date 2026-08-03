@@ -14,8 +14,10 @@
 #include <orc/support/logging.h>
 #include <orc/support/teletext_page_decoder.h>
 
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <variant>
 
 #include "teletext_sink_stage_deps.h"
@@ -150,6 +152,23 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "detector";
+    desc.display_name = "Bit Detector";
+    desc.description =
+        "How data bits are recovered from each line. Threshold slices at bit "
+        "centres and suits discs and direct captures, which pass the whole "
+        "data band. MLSE fits the recording's frequency response to the known "
+        "start of each line and is what recovers teletext from tape, where "
+        "the limited bandwidth smears bits into their neighbours. Automatic "
+        "tries Threshold first and falls back to MLSE only where it fails";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {"Automatic", "Threshold", "MLSE"};
+    desc.constraints.default_value = std::string("Automatic");
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "tolerant_framing";
     desc.display_name = "Tolerant Framing";
     desc.description =
@@ -174,6 +193,25 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "repair_damaged_bytes";
+    desc.display_name = "Repair Damaged Bytes";
+    desc.description =
+        "Every display byte carries a parity bit, so a byte that fails its "
+        "parity check is known to be damaged. Restore it by flipping the bit "
+        "the MLSE detector came closest to reading the other way. Recovers "
+        "characters a difficult tape would otherwise lose, at the cost of the "
+        "repaired bytes becoming indistinguishable from undamaged ones — a "
+        "repair that guessed wrong is no longer marked as damage. Applies to "
+        "the MLSE detector only, so a disc or direct capture is unaffected";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    desc.constraints.depends_on =
+        ParameterDependency{"detector", {"Automatic", "MLSE"}};
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "squash_repeated_rows";
     desc.display_name = "Combine Repeated Rows";
     desc.description =
@@ -184,6 +222,22 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
         "packets, held in memory";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "write_report";
+    desc.display_name = "Write Report File";
+    desc.description =
+        "Write the run's diagnostic report next to the packet stream, named "
+        "after it with a .txt extension (mydata.t42 gives mydata.t42.txt). "
+        "The report says how many candidate lines yielded packets, how the "
+        "odd-parity failures of the recovered packets are spread across the "
+        "40 display-byte positions, and what combining repeated rows changed. "
+        "The same report is always written to the log at debug level";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
     descriptors.push_back(desc);
   }
 
@@ -280,9 +334,23 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
   options.tolerant_framing = get_bool_or(parameters, "tolerant_framing", false);
   options.require_valid_mrag =
       get_bool_or(parameters, "require_valid_mrag", true);
+  options.parity_repair = get_bool_or(parameters, "repair_damaged_bytes", true);
+
+  const std::string detector =
+      get_string_or(parameters, "detector", "Automatic");
+  if (detector == "Automatic") {
+    options.detector = TeletextDetector::kAuto;
+  } else if (detector == "Threshold") {
+    options.detector = TeletextDetector::kThreshold;
+  } else if (detector == "MLSE") {
+    options.detector = TeletextDetector::kMlse;
+  } else {
+    throw std::runtime_error("Unknown bit detector: " + detector);
+  }
 
   options.squash_repeated_rows =
       get_bool_or(parameters, "squash_repeated_rows", true);
+  options.write_report = get_bool_or(parameters, "write_report", false);
   options.export_subtitles = get_bool_or(parameters, "export_subtitles", false);
   if (options.export_subtitles) {
     options.subtitle_page = get_string_or(parameters, "subtitle_page", "888");
@@ -347,6 +415,15 @@ bool TeletextSinkStage::trigger(
 
     is_processing_.store(false);
 
+    // Diagnostic report of the run: recovery profile plus what combining
+    // repeated rows changed. Reported for a run that was cancelled part-way as
+    // well as one that finished — how it was going is exactly the question a
+    // cancelled run leaves — at debug level, because it is many lines and the
+    // answer most runs need is the one-line status below.
+    if (!result.report.empty()) {
+      ORC_LOG_DEBUG("TeletextSink:\n{}", result.report);
+    }
+
     if (!result.success) {
       trigger_status_ = "Error: " + (result.message.empty()
                                          ? std::string("Teletext export failed")
@@ -359,9 +436,33 @@ bool TeletextSinkStage::trigger(
                       " teletext packets (" +
                       std::to_string(result.fields_with_data) +
                       " fields with data) to " + result.output_path;
+    if (result.bytes_repaired > 0) {
+      trigger_status_ += "; repaired " + std::to_string(result.bytes_repaired) +
+                         " damaged bytes";
+    }
+    if (result.packets_corrected > 0) {
+      trigger_status_ += "; combined repeated rows corrected " +
+                         std::to_string(result.packets_corrected) + " packets";
+    }
+    // The result in one figure, on the same terms as the report's headline:
+    // characters that still fail their parity check are characters the reader
+    // will see damaged.
+    if (result.characters_written > 0) {
+      char loss[32];
+      std::snprintf(loss, sizeof(loss), "%.2f",
+                    100.0 * static_cast<double>(result.characters_damaged) /
+                        static_cast<double>(result.characters_written));
+      trigger_status_ += "; data loss " + std::string(loss) + "% (" +
+                         std::to_string(result.characters_damaged) + " of " +
+                         std::to_string(result.characters_written) +
+                         " characters damaged)";
+    }
     if (!result.subtitle_path.empty()) {
       trigger_status_ += "; " + std::to_string(result.subtitle_cues_written) +
                          " subtitle cues to " + result.subtitle_path;
+    }
+    if (!result.report_path.empty()) {
+      trigger_status_ += "; report to " + result.report_path;
     }
     ORC_LOG_INFO("TeletextSink: {}", trigger_status_);
     return true;

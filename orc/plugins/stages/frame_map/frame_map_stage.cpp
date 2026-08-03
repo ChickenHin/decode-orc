@@ -396,7 +396,7 @@ size_t FrameMapStage::apply_remove_duplicates(
     if (prev_cfi >= 0 && cur_cfi >= 0 && prev_cfi == cur_cfi) {
       ORC_LOG_DEBUG(
           "FrameMapStage: removing duplicate frame {} (colour_frame_index {})",
-          cur.value(), cur_cfi);
+          cur, cur_cfi);
       mapping.erase(mapping.begin() + static_cast<std::ptrdiff_t>(i));
       ++removed;
       // Don't advance i — re-compare the new pair at position i
