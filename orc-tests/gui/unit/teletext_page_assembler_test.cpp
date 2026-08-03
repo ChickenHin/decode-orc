@@ -197,6 +197,35 @@ TEST(TeletextPageAssemblerTest, LatestTransmissionOfPageWins) {
   EXPECT_EQ(entry->seen_frame, 3u);
 }
 
+TEST(TeletextPageAssemblerTest, ConfidentRowCopyOutweighsALaterUncertainOne) {
+  // Repeated copies of a row correct each other, and where the recovery chain
+  // could say how sure it was of each byte, that is what decides between them.
+  // Both copies here are parity-clean, so parity cannot separate them and the
+  // unweighted rule would simply take the newer one.
+  TeletextPageAssembler assembler;
+  assembler.setCurrentFrame(4);
+
+  fillGapsBefore(assembler, 1);
+  assembler.storeFrame(
+      1,
+      makeFieldViewWithConfidence(
+          {makeHeaderPacket(1, 0x00), makeRowPacket(1, 1, "HELLO TELETEXT")},
+          0.9F),
+      makeEmptyFieldView());
+  fillGapsBefore(assembler, 3);
+  assembler.storeFrame(
+      3,
+      makeFieldViewWithConfidence(
+          {makeHeaderPacket(1, 0x00), makeRowPacket(1, 1, "XELLO TELETEXT")},
+          0.1F),
+      makeFieldView({makeTimeFillingHeader(1)}));
+
+  const auto* entry = assembler.findPage(1, 0x00);
+
+  ASSERT_NE(entry, nullptr);
+  EXPECT_EQ(rowText(entry->page, 1), "HELLO TELETEXT");
+}
+
 // A frame's packets are released the moment the decoder has consumed them, so
 // a later retransmission carrying only part of the page has nothing left to
 // re-read. Rows it did not carry must survive from the earlier transmission —

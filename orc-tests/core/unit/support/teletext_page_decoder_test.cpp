@@ -467,6 +467,92 @@ TEST_F(TeletextPageDecoderTest, SquasherDropsAccumulatedRowsOnErasePage) {
   EXPECT_FALSE(fresh.row_received[2]);
 }
 
+// The copies from before an erase are separated from those after it by the
+// key's erase_epoch, not deleted: a consumer replaying the same stream reaches
+// the same epoch at the same packet and can still ask about the earlier run.
+TEST_F(TeletextPageDecoderTest, ErasePageSeparatesRunsWithoutDiscardingThem) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "OLD ONE"), 1);
+  HeaderFlags erase;
+  erase.erase_page = true;
+  decoder_.process_packet(make_header(1, 0x00, 0, erase), 2);
+  decoder_.process_packet(make_row(1, 1, "NEW ONE"), 3);
+
+  const orc::TeletextPageKey before{1, 0x00, 0, 0};
+  const orc::TeletextPageKey after{1, 0x00, 0, 1};
+  ASSERT_EQ(squasher.copy_count(before, 1), 1u);
+  ASSERT_EQ(squasher.copy_count(after, 1), 1u);
+
+  const auto old_row = squasher.squashed_row(before, 1);
+  ASSERT_TRUE(old_row.has_value());
+  EXPECT_EQ((*old_row)[0], orc::teletext_odd_parity_encode('O'));
+  const auto new_row = squasher.squashed_row(after, 1);
+  ASSERT_TRUE(new_row.has_value());
+  EXPECT_EQ((*new_row)[0], orc::teletext_odd_parity_encode('N'));
+}
+
+// Erasing one page must not orphan the copies of another page carried in the
+// same magazine: the epoch is counted per sub-page, not per magazine.
+TEST_F(TeletextPageDecoderTest, ErasePageLeavesOtherPagesOfTheMagazineAlone) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  decoder_.process_packet(make_header(1, 0x10, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "PAGE TEN"), 1);
+  HeaderFlags erase;
+  erase.erase_page = true;
+  decoder_.process_packet(make_header(1, 0x20, 0, erase), 2);
+  decoder_.process_packet(make_row(1, 1, "PAGE TWENTY"), 3);
+  // Page 0x10 comes round again and must land in the epoch it started in.
+  decoder_.process_packet(make_header(1, 0x10, 0, {}), 4);
+  decoder_.process_packet(make_row(1, 1, "PAGE TEN"), 5);
+
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x10, 0, 0}, 1), 2u);
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x20, 0, 1}, 1), 1u);
+}
+
+// A consumer rewriting a recovered stream feeds it once to build the squasher
+// and again to apply it. The second pass must not destroy what the first
+// built — which is what deleting the copies on C4 used to do, leaving the
+// rewrite with nothing to correct against.
+TEST_F(TeletextPageDecoderTest, ReplayingAStreamPreservesTheAccumulatedCopies) {
+  orc::TeletextRowSquasher squasher;
+
+  HeaderFlags erase;
+  erase.erase_page = true;
+  const std::vector<std::array<uint8_t, kTeletextPacketBytes>> stream{
+      make_header(1, 0x00, 0, erase),
+      make_row(1, 1, "HELLO"),
+      make_header(1, 0x00, 0, erase),
+      make_row(1, 1, "HELLO"),
+  };
+
+  TeletextPageDecoder first;
+  first.set_row_squasher(&squasher);
+  for (size_t i = 0; i < stream.size(); ++i) {
+    first.process_packet(stream[i], static_cast<int64_t>(i),
+                         static_cast<int64_t>(i));
+  }
+  const size_t runs_after_first_pass = squasher.page_count();
+
+  // Second pass, fresh decoder, same squasher, same source ids.
+  TeletextPageDecoder second;
+  second.set_row_squasher(&squasher);
+  for (size_t i = 0; i < stream.size(); ++i) {
+    second.process_packet(stream[i], static_cast<int64_t>(i),
+                          static_cast<int64_t>(i));
+  }
+
+  EXPECT_EQ(squasher.page_count(), runs_after_first_pass)
+      << "the replay created runs the first pass did not";
+  // Each copy was replaced under its own source id, not counted again.
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x00, 0, 1}, 1), 1u);
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x00, 0, 2}, 1), 1u);
+}
+
 TEST_F(TeletextPageDecoderTest, RendersLevel1ColourAndMosaicAttributes) {
   // 0/1 alpha red ("Set-After"), text, 1/2 mosaic green, mosaic glyphs.
   std::string row;

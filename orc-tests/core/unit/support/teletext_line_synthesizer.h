@@ -11,8 +11,10 @@
 #pragma once
 
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/support/teletext_page_decoder.h>
 #include <orc/support/teletext_slicer.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -43,7 +45,53 @@ struct TeletextLineSynthOptions {
   // Uniform noise in ± this amplitude (10-bit domain counts); 0 = clean.
   int32_t noise_amplitude = 0;
   uint32_t noise_seed = 1;
+  // Optional band limiting, applied after the NRZ pulses and before the
+  // noise. Models a channel that cannot pass the whole data band: consumer
+  // VHS luma rolls off around 3 MHz, below the 3,47 MHz clock run-in
+  // fundamental (EN 300 706 §6.1), so the run-in is attenuated far more than
+  // the payload and each bit smears into its neighbours. 0 = unlimited.
+  double low_pass_cutoff_hz = 0.0;
 };
+
+// Band-limit |line| in place with a Hamming-windowed sinc low-pass. Edge
+// samples clamp to the first/last value, which is harmless here: the burst
+// sits well inside the line.
+inline void band_limit_line(std::vector<int16_t>& line, double sample_rate,
+                            double cutoff_hz) {
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr int kHalfTaps = 20;
+  const double fc = cutoff_hz / sample_rate;  // cycles per sample
+
+  std::vector<double> taps(2 * kHalfTaps + 1);
+  double gain = 0.0;
+  for (int i = -kHalfTaps; i <= kHalfTaps; ++i) {
+    const double sinc = (i == 0) ? 2.0 * fc
+                                 : std::sin(2.0 * kPi * fc * i) /
+                                       (kPi * static_cast<double>(i));
+    const double window =
+        0.54 + 0.46 * std::cos(kPi * static_cast<double>(i) / kHalfTaps);
+    taps[static_cast<size_t>(i + kHalfTaps)] = sinc * window;
+    gain += sinc * window;
+  }
+  for (auto& tap : taps) {
+    tap /= gain;
+  }
+
+  const std::vector<int16_t> input = line;
+  const auto at = [&input](int index) {
+    const int clamped =
+        std::max(0, std::min(index, static_cast<int>(input.size()) - 1));
+    return static_cast<double>(input[static_cast<size_t>(clamped)]);
+  };
+  for (size_t s = 0; s < line.size(); ++s) {
+    double sum = 0.0;
+    for (int i = -kHalfTaps; i <= kHalfTaps; ++i) {
+      sum += taps[static_cast<size_t>(i + kHalfTaps)] *
+             at(static_cast<int>(s) + i);
+    }
+    line[s] = static_cast<int16_t>(std::lround(sum));
+  }
+}
 
 // Build the 45-byte transmission packet for a 42-byte T42 payload.
 // Bytes are LSB-first on air (EN 300 706 §7.1): run-in 1010… → 0x55 0x55
@@ -102,6 +150,10 @@ inline std::vector<int16_t> synthesize_teletext_line_raw(
         static_cast<int16_t>(bit ? std::lround(one_level) : opt.black_level);
   }
 
+  if (opt.low_pass_cutoff_hz > 0.0) {
+    band_limit_line(line, opt.sample_rate, opt.low_pass_cutoff_hz);
+  }
+
   if (opt.noise_amplitude > 0) {
     uint32_t state = opt.noise_seed != 0 ? opt.noise_seed : 1;
     for (auto& sample : line) {
@@ -135,6 +187,19 @@ inline std::array<uint8_t, kTeletextPacketBytes> make_test_payload() {
   payload[1] = mrag[1];
   for (size_t i = 2; i < payload.size(); ++i) {
     payload[i] = static_cast<uint8_t>(0x5A ^ (i * 37));
+  }
+  return payload;
+}
+
+// As make_test_payload(), but with the 40 data bytes odd-parity coded the way
+// a real display row is (EN 300 706 §9.3.1). Detectors that check the
+// transmission coding — the MLSE detector applies a parity plausibility gate
+// to rows 0-25 — need a payload that is coded as transmitted, not arbitrary
+// bytes.
+inline std::array<uint8_t, kTeletextPacketBytes> make_parity_coded_payload() {
+  auto payload = make_test_payload();
+  for (size_t i = 2; i < payload.size(); ++i) {
+    payload[i] = teletext_odd_parity_encode(payload[i] & 0x7F);
   }
   return payload;
 }

@@ -26,6 +26,10 @@ namespace {
 static_assert(std::tuple_size<decltype(TeletextPacketView::bytes)>::value ==
                   orc::kTeletextPacketBytes,
               "TeletextPacketView::bytes must match the SDK T42 packet size");
+static_assert(
+    std::tuple_size<decltype(TeletextPacketView::confidence)>::value ==
+        orc::kTeletextPacketBytes,
+    "TeletextPacketView::confidence must match the SDK T42 packet size");
 
 // Map a 7-bit G0 character code to Unicode: Latin G0 primary set
 // (ETSI EN 300 706 §15.6.1 Table 35) with the English national option
@@ -129,15 +133,17 @@ TeletextFieldPacketsView TeletextObservationPresenter::extractFieldObservations(
     if (!packet_obs || !std::holds_alternative<std::string>(*packet_obs)) {
       continue;
     }
-    const auto bytes =
-        orc::teletext_hex_to_packet(std::get<std::string>(*packet_obs));
-    if (!bytes) {
+    const auto observed = orc::teletext_hex_to_observed_packet(
+        std::get<std::string>(*packet_obs));
+    if (!observed) {
       continue;
     }
 
     TeletextPacketView packet;
     packet.field_line = field_line;
-    packet.bytes = *bytes;
+    packet.bytes = observed->bytes;
+    packet.has_confidence = observed->has_confidence;
+    packet.confidence = observed->confidence;
     result.packets.push_back(packet);
   }
 

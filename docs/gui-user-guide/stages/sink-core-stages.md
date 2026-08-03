@@ -366,9 +366,9 @@ This stage extracts raw EFM (Eight-to-Fourteen Modulation) t-values from the inc
 
 **What it does**
 
-Probes the candidate VBI lines of both fields of every frame for teletext data lines (clock run-in and framing code), recovers the 42-byte packets, and writes them as a flat, headerless `.t42` packet stream in strictly temporal order (frame → field → ascending line). Packets keep their transmission coding (Hamming 8/4 addressing, odd-parity display bytes) with no correction applied, so consumers decode the stream exactly as a receiver decodes a live broadcast.
+Probes the candidate VBI lines of both fields of every frame for teletext data lines, recovers the 42-byte packets, and writes them as a flat, headerless `.t42` packet stream in strictly temporal order (frame → field → ascending line). Packets keep their transmission coding (Hamming 8/4 addressing, odd-parity display bytes), so consumers decode the stream exactly as a receiver decodes a live broadcast. By default the stage mends display bytes that fail their parity check and combines the repeated transmissions of each page row before writing (`repair_damaged_bytes`, `squash_repeated_rows`); turn both off to write the packets exactly as recovered.
 
-PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-quality CVBS captures are expected to decode cleanly, while consumer VHS recordings will be degraded.
+PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-quality CVBS captures are read exactly by threshold slicing, while consumer VHS loses the clock run-in entirely and needs the MLSE detector, which recovers readable pages from PAL SP and LP recordings. The default `detector` setting picks between the two per line, so neither source needs configuring.
 
 **Parameters**
 
@@ -384,15 +384,26 @@ PAL WST only (ETSI EN 300 706 System B, 625-line). Recovery quality tracks the s
 * `keep_empty_packets` (boolean)
     - Emit 42 zero bytes for candidate lines with no data so packet position maps 1:1 to (frame, field, line) — the vhs-decode convention.
     - Default: `false`.
+* `detector` (string)
+    - How data bits are recovered: `Threshold` (slice at bit centres; exact on discs and direct captures), `MLSE` (fit the recording's frequency response to the known start of each line, detect against it, then refit that response to the whole packet just read and read it again; recovers teletext from tape, where limited bandwidth smears bits into their neighbours), or `Automatic` (threshold first, MLSE only where it fails — same behaviour and cost as before on a disc source).
+    - Default: `Automatic`.
 * `tolerant_framing` (boolean)
     - Accept framing codes with one bit error (more packets from noisy sources, higher false-positive rate).
     - Default: `false`.
 * `require_valid_mrag` (boolean)
     - Drop packets whose magazine/row address fails Hamming 8/4 correction (suppresses false locks on noise).
     - Default: `true`.
-* `squash_repeated_rows` (boolean)
-    - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. Needs a second pass over the recovered packets, held in memory (roughly 50 bytes each).
+* `repair_damaged_bytes` (boolean)
+    - Every display byte carries a parity bit, so a byte that fails its parity check is known to be damaged. Restore it by flipping the bit the MLSE detector came closest to reading the other way. Recovers characters a difficult tape would otherwise lose; the cost is that a repaired byte can no longer be told from an undamaged one, so a repair that guessed wrong is no longer marked as damage. Applies to the MLSE detector only, so a disc or direct capture is unaffected. Turning it off makes the stage slice for itself, because the host observer's cached packets are repaired.
     - Default: `true`.
+* `squash_repeated_rows` (boolean)
+    - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check, then weighting by how sure the detector was of each byte — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. Needs a second pass over the recovered packets, held in memory (roughly 50 bytes each).
+    - Copies are combined only within one run of a page: a header with the erase bit set (C4) says the content is being replaced, so what follows is a different page sharing a number. A service that erases on every transmission gives each one a run of its own, and nothing can be combined — the report says so, as a run count matching the transmission count.
+    - Default: `true`.
+* `write_report` (boolean)
+    - Write the run's diagnostic report next to the packet stream under its full name plus `.txt` (`mydata.t42` gives `mydata.t42.txt`). It opens with the result in one line — `Data loss 1.14% — 30 of 2,640 recovered characters are damaged` — and the same figure appears in the stage's status when the run finishes. Below that it covers what was exported, how recovery went, and what combining repeated rows changed. The same report always goes to the log at debug level.
+    - Damage is counted by the odd parity every display byte carries, over the display rows as written. It is a floor rather than an exact count — a byte damaged in two bits passes parity — and it says nothing about rows that never arrived.
+    - Default: `false`.
 * `export_subtitles` (boolean)
     - Decode the subtitle page alongside the T42 export and write timed cues to a `.srt` file next to the output.
     - Default: `false`.
@@ -513,7 +524,7 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
     - FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only. Default: `false`.
 
 * `embed_teletext_subtitles` (bool)
-    - FFmpeg mode only. Decode teletext subtitles (PAL WST sources only) and embed them as mov_text subtitles. MP4/MOV output only; mutually exclusive with `embed_closed_captions`. Default: `false`.
+    - FFmpeg mode only. Decode teletext subtitles (PAL WST sources only) and embed them as mov_text subtitles. MP4/MOV output only; mutually exclusive with `embed_closed_captions`. Cues are decoded from the packets as they arrive, without combining the repeated transmissions of each page row, so on a difficult tape source the Teletext Sink's `.srt` export carries fewer damaged characters. Default: `false`.
 
 * `teletext_subtitle_page` (string)
     - FFmpeg mode only; available only when `embed_teletext_subtitles` is enabled. Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`. Default: `888`.

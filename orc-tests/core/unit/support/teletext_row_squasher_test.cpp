@@ -41,6 +41,21 @@ std::string text_of(const TeletextRowBytes& bytes) {
   return text;
 }
 
+// Uniform per-byte confidence, for tests that vary how sure a whole copy is.
+TeletextRowConfidence confidence_of(float value) {
+  TeletextRowConfidence confidence{};
+  confidence.fill(value);
+  return confidence;
+}
+
+// Record one copy of row 1 of kPage, every byte of it recovered with
+// |confidence|.
+void add_copy(TeletextRowSquasher& squasher, const TeletextRowBytes& bytes,
+              int64_t source, float confidence) {
+  const TeletextRowConfidence weights = confidence_of(confidence);
+  squasher.add_row(kPage, 1, bytes, source, &weights);
+}
+
 }  // namespace
 
 TEST(TeletextRowSquasher, SingleCopyIsReturnedUnchanged) {
@@ -177,6 +192,99 @@ TEST(TeletextRowSquasher, HeaderAndOutOfRangeRowsAreNotStored) {
   EXPECT_EQ(squasher.copy_count(kPage, 0), 0u);
   EXPECT_EQ(squasher.copy_count(kPage, 25), 0u);
   EXPECT_EQ(squasher.page_count(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Confidence-weighted voting
+//
+// Copies recovered from tape are not equally believable. Where the detector can
+// say how sure it was of a byte, the vote counts that instead of heads.
+// ---------------------------------------------------------------------------
+
+TEST(TeletextRowSquasher, ConfidentMinorityBeatsAnUncertainMajority) {
+  TeletextRowSquasher squasher;
+  add_copy(squasher, row_of("WRONG"), 0, 0.2F);
+  add_copy(squasher, row_of("WRONG"), 1, 0.2F);
+  add_copy(squasher, row_of("RIGHT"), 2, 0.9F);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed), "RIGHT")
+      << "two barely-decided copies outvoted one the detector was sure of";
+}
+
+TEST(TeletextRowSquasher, UncertainMinorityStillLosesToAConfidentMajority) {
+  // The weighting is not a licence for one copy to overrule the transmission:
+  // two confident copies still carry more weight than one.
+  TeletextRowSquasher squasher;
+  add_copy(squasher, row_of("RIGHT"), 0, 0.6F);
+  add_copy(squasher, row_of("RIGHT"), 1, 0.6F);
+  add_copy(squasher, row_of("WRONG"), 2, 1.0F);
+
+  EXPECT_EQ(text_of(*squasher.squashed_row(kPage, 1)), "RIGHT");
+}
+
+TEST(TeletextRowSquasher, ParityStillOutranksConfidence) {
+  // Parity is certain where confidence is only graded: a byte known to be
+  // corrupt cannot win however sure the detector was of the bits it read.
+  TeletextRowSquasher squasher;
+  auto damaged = row_of("XELLO");
+  damaged[0] ^= 0x01;
+  ASSERT_FALSE(teletext_odd_parity_valid(damaged[0]));
+
+  add_copy(squasher, damaged, 0, 1.0F);
+  add_copy(squasher, damaged, 1, 1.0F);
+  add_copy(squasher, row_of("HELLO"), 2, 0.1F);
+
+  EXPECT_EQ(text_of(*squasher.squashed_row(kPage, 1)), "HELLO");
+}
+
+TEST(TeletextRowSquasher, CopiesWithoutConfidenceVoteAtFullWeight) {
+  // A caller that cannot say — a threshold-detected packet, or an observation
+  // stored before confidences existed — must not be discounted against one
+  // that can.
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of("RIGHT"), 0);
+  add_copy(squasher, row_of("WRONG"), 1, 0.9F);
+  EXPECT_EQ(text_of(*squasher.squashed_row(kPage, 1)), "RIGHT");
+
+  // Against a copy that measured itself as certain the two weigh the same, and
+  // the tie falls to the newest — the rule an unweighted vote always used.
+  TeletextRowSquasher tied;
+  tied.add_row(kPage, 1, row_of("OLDER"), 0);
+  add_copy(tied, row_of("NEWER"), 1, 1.0F);
+  EXPECT_EQ(text_of(*tied.squashed_row(kPage, 1)), "NEWER");
+}
+
+TEST(TeletextRowSquasher, WeightsAreCountedPerByteNotPerCopy) {
+  // Confidence is per byte, and a copy read well in one place and badly in
+  // another contributes accordingly rather than as a whole: here neither copy
+  // wins outright, and the row that comes out is taken from both.
+  TeletextRowSquasher squasher;
+  auto first_strong = confidence_of(0.1F);
+  first_strong[0] = 0.9F;
+  auto last_strong = confidence_of(0.1F);
+  last_strong[4] = 0.9F;
+
+  squasher.add_row(kPage, 1, row_of("HELLO"), 0, &first_strong);
+  squasher.add_row(kPage, 1, row_of("XELLX"), 1, &last_strong);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed), "HELLX");
+}
+
+TEST(TeletextRowSquasher, ReplacedCopyBringsItsNewConfidence) {
+  // Re-reading a line replaces the copy; its confidence has to travel with it,
+  // or a re-read would leave the old weight voting for the new bytes.
+  TeletextRowSquasher squasher;
+  add_copy(squasher, row_of("WRONG"), /*source=*/7, 0.9F);
+  add_copy(squasher, row_of("RIGHT"), /*source=*/8, 0.5F);
+  ASSERT_EQ(text_of(*squasher.squashed_row(kPage, 1)), "WRONG");
+
+  add_copy(squasher, row_of("WRONG"), /*source=*/7, 0.1F);
+  EXPECT_EQ(text_of(*squasher.squashed_row(kPage, 1)), "RIGHT");
+  EXPECT_EQ(squasher.copy_count(kPage, 1), 2u);
 }
 
 TEST(TeletextRowSquasher, ClearDropsEverything) {

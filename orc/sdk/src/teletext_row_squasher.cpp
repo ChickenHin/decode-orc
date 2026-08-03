@@ -26,11 +26,16 @@ namespace {
 // Odd parity (ETSI EN 300 706 §8.1) detects every single-bit error, so a byte
 // that fails it is known to be corrupt: the vote is held among the
 // parity-clean candidates whenever there are any, and only falls back to all
-// candidates when every copy of this position is damaged. Ties go to the
-// value from the most recently added copy: with only two differing copies
-// there is no majority to find, and the newer transmission is what a plain
-// Level 1 decoder would be showing.
-uint8_t vote(const std::vector<TeletextRowBytes>& copies, size_t position) {
+// candidates when every copy of this position is damaged. Within that, each
+// copy contributes how sure the recovery chain was of the byte (1 where it
+// cannot say), so a value read cleanly outweighs the same number of copies of
+// one the detector nearly decided the other way. Ties go to the value from the
+// most recently added copy: with only two differing copies there is no majority
+// to find, and the newer transmission is what a plain Level 1 decoder would be
+// showing.
+uint8_t vote(const std::vector<TeletextRowBytes>& copies,
+             const std::vector<TeletextRowConfidence>& confidences,
+             size_t position) {
   const auto tally = [&](bool parity_clean_only) -> std::optional<uint8_t> {
     // The candidates are the copies themselves — at most max_copies_per_row of
     // them — so the vote is counted over those rather than over all 256 byte
@@ -38,32 +43,35 @@ uint8_t vote(const std::vector<TeletextRowBytes>& copies, size_t position) {
     // which a previewer does on each frame it steps, so the difference is not
     // academic.
     uint8_t best = 0;
-    size_t best_count = 0;
+    double best_weight = 0.0;
     size_t best_last = 0;
+    bool found = false;
     for (size_t i = 0; i < copies.size(); ++i) {
       const uint8_t value = copies[i][position];
       if (parity_clean_only && !teletext_odd_parity_valid(value)) {
         continue;
       }
-      // Every copy holding this same value is one vote for it; the outer
-      // guard already established that the value passes the parity filter.
-      size_t count = 0;
+      // Every copy holding this same value votes for it, by its confidence in
+      // it; the outer guard already established that the value passes the
+      // parity filter.
+      double weight = 0.0;
       size_t last_seen = 0;
       for (size_t j = 0; j < copies.size(); ++j) {
         if (copies[j][position] != value) {
           continue;
         }
-        ++count;
+        weight += static_cast<double>(confidences[j][position]);
         last_seen = j;
       }
-      if (count > best_count ||
-          (count == best_count && last_seen > best_last)) {
+      if (!found || weight > best_weight ||
+          (weight == best_weight && last_seen > best_last)) {
+        found = true;
         best = value;
-        best_count = count;
+        best_weight = weight;
         best_last = last_seen;
       }
     }
-    if (best_count == 0) {
+    if (!found) {
       return std::nullopt;
     }
     return best;
@@ -78,8 +86,8 @@ uint8_t vote(const std::vector<TeletextRowBytes>& copies, size_t position) {
 }  // namespace
 
 void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
-                                  const TeletextRowBytes& bytes,
-                                  int64_t source) {
+                                  const TeletextRowBytes& bytes, int64_t source,
+                                  const TeletextRowConfidence* confidence) {
   if (row < 1 || row >= static_cast<int>(
                             std::tuple_size<decltype(PageRows::rows)>::value)) {
     return;  // header row and enhancement packets are not squashed
@@ -94,23 +102,34 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
 
   RowCopies& copies = it->second.rows[static_cast<size_t>(row)];
 
+  TeletextRowConfidence weights;
+  if (confidence != nullptr) {
+    weights = *confidence;
+  } else {
+    weights.fill(1.0F);
+  }
+
   // Re-reading the same recovered line replaces its earlier copy: a previewer
   // that rebuilds a sliding window would otherwise let a long-resident frame
   // outvote the rest purely by being read more often.
   const auto existing =
       std::find(copies.sources.begin(), copies.sources.end(), source);
   if (existing != copies.sources.end()) {
-    copies.copies[static_cast<size_t>(
-        std::distance(copies.sources.begin(), existing))] = bytes;
+    const auto index =
+        static_cast<size_t>(std::distance(copies.sources.begin(), existing));
+    copies.copies[index] = bytes;
+    copies.confidences[index] = weights;
     return;
   }
 
   if (copies.sources.size() >= options_.max_copies_per_row) {
     copies.sources.erase(copies.sources.begin());
     copies.copies.erase(copies.copies.begin());
+    copies.confidences.erase(copies.confidences.begin());
   }
   copies.sources.push_back(source);
   copies.copies.push_back(bytes);
+  copies.confidences.push_back(weights);
 }
 
 std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
@@ -131,7 +150,7 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
 
   TeletextRowBytes result{};
   for (size_t position = 0; position < kTeletextRowBytes; ++position) {
-    result[position] = vote(copies.copies, position);
+    result[position] = vote(copies.copies, copies.confidences, position);
   }
   return result;
 }

@@ -101,6 +101,21 @@ inline orc::presenters::TeletextFieldPacketsView makeFieldView(
   return view;
 }
 
+// As makeFieldView(), with every byte of every packet recovered at the given
+// confidence — how sure the recovery chain was of it (see the SDK's
+// teletext_slicer.h).
+inline orc::presenters::TeletextFieldPacketsView makeFieldViewWithConfidence(
+    std::initializer_list<std::array<uint8_t, orc::kTeletextPacketBytes>>
+        packets,
+    float confidence, int first_line = 7) {
+  auto view = makeFieldView(packets, first_line);
+  for (auto& packet : view.packets) {
+    packet.has_confidence = true;
+    packet.confidence.fill(confidence);
+  }
+  return view;
+}
+
 // An observed field that carried no teletext data.
 inline orc::presenters::TeletextFieldPacketsView makeEmptyFieldView() {
   orc::presenters::TeletextFieldPacketsView view;

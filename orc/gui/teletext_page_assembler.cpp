@@ -401,7 +401,12 @@ void TeletextPageAssembler::refreshCatalogue() const {
         // it outvote the rest.
         const int64_t source = field_index * kFieldLineStride +
                                (packet.field_line % kFieldLineStride);
-        decoder_->process_packet(packet.bytes, field_index, source);
+        // Where the recovery chain measured its confidence in each byte, the
+        // squasher's vote is weighted by it; where it could not, the copy
+        // votes at full weight.
+        const orc::TeletextPacketConfidence* confidence =
+            packet.has_confidence ? &packet.confidence : nullptr;
+        decoder_->process_packet(packet.bytes, field_index, source, confidence);
       }
       // Recorded for every decoded field, empty ones included: an empty field
       // in the middle of a page transmission is exactly what lost packets

@@ -2,6 +2,7 @@ set(STAGE_PLUGIN_SOURCES
     plugin.cpp
     teletext_sink_stage.cpp
     teletext_sink_stage_deps.cpp
+    teletext_squash_stats.cpp
 )
 
 orc_add_stage_plugin(

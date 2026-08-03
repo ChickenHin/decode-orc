@@ -12,12 +12,14 @@
 
 #include <orc/stage/observation/observation_service_interface.h>
 #include <orc/stage/triggerable_stage.h>
+#include <orc/support/teletext_recovery_stats.h>
 
 #include <atomic>
 #include <cstdint>
 #include <string>
 
 #include "teletext_sink_stage_deps_interface.h"
+#include "teletext_squash_stats.h"
 
 namespace orc {
 
@@ -54,6 +56,22 @@ class TeletextSinkStageDeps : public ITeletextSinkStageDeps {
                                 const TeletextSinkOptions& options) override;
 
  private:
+  // Assemble the run's diagnostic report: what was exported, how recovery
+  // went, and what combining repeated rows changed. Always built — it costs a
+  // string, and a run that recovered little is exactly when it is worth
+  // reading.
+  static std::string build_report(const TeletextSinkOptions& options,
+                                  const TeletextSinkResult& result,
+                                  uint64_t total_frames,
+                                  const TeletextRecoveryStats& stats,
+                                  const TeletextSquashStats& squash_stats);
+
+  // Write |result.report| to <output>.txt when the option asks for it,
+  // stamping result.report_path on success. A failure here is logged and
+  // otherwise ignored: the .t42 is the product, the report is a note about it.
+  void write_report(const TeletextSinkOptions& options,
+                    TeletextSinkResult& result) const;
+
   IStageServices* stage_services_{nullptr};
   IObservationService* observation_service_{nullptr};
   TriggerProgressCallback progress_callback_;

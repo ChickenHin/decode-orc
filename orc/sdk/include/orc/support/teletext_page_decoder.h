@@ -17,6 +17,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -213,6 +214,12 @@ class TeletextPageDecoder {
    * a page be assembled from several partial transmissions — a page whose
    * transmission was clipped still renders from rows recovered earlier.
    *
+   * A header with C4 (erase page) set advances the page's erase_epoch rather
+   * than deleting the copies recorded before it: the earlier run stays
+   * addressable for a consumer replaying the same stream, while this decoder
+   * — which always keys on the current epoch — sees a clean page, exactly as
+   * ETSI EN 300 706 §9.3.1.3 Table 2 requires.
+   *
    * The squasher is not owned and must outlive the decoder. Pass nullptr to
    * detach. See teletext_row_squasher.h for the technique and its origin.
    */
@@ -228,8 +235,14 @@ class TeletextPageDecoder {
   // rebuild) must reuse its source so the copy is replaced rather than
   // counted again. The default derives a unique id per call, which is what a
   // one-pass consumer wants.
+  //
+  // |confidence| is how sure the recovery chain was of each of the 42 bytes,
+  // passed on to an attached squasher so its vote can be weighted by it (see
+  // teletext_row_squasher.h). nullptr — the default — means the caller cannot
+  // say, and the copy votes at full weight.
   void process_packet(const std::array<uint8_t, kTeletextPacketBytes>& packet,
-                      int64_t field_index, int64_t source = kAutoSource);
+                      int64_t field_index, int64_t source = kAutoSource,
+                      const TeletextPacketConfidence* confidence = nullptr);
 
   /// Sentinel for process_packet()'s |source|: allocate a fresh copy id.
   static constexpr int64_t kAutoSource = -1;
@@ -307,10 +320,18 @@ class TeletextPageDecoder {
   void handle_display_packet(
       int transmission_magazine, int row,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
-      int64_t field_index, int64_t source);
+      int64_t field_index, int64_t source,
+      const TeletextPacketConfidence* confidence);
+
+  // A sub-page's identity without the erase epoch, which is what the epoch
+  // counter below is keyed on: {displayed magazine, page number, sub-code}.
+  using PageIdentity = std::array<int, 3>;
 
   // Identity of the page currently open in |magazine|, for squasher keying.
   TeletextPageKey page_key(int transmission_magazine) const;
+
+  // Erase epoch of |identity| (0 until its first C4 header).
+  int erase_epoch(const PageIdentity& identity) const;
 
   // Emit the open page of |magazine| (if any) through the callback and the
   // subtitle machinery, then mark it closed (row data retained).
@@ -332,6 +353,12 @@ class TeletextPageDecoder {
       const TeletextPageSnapshot& snapshot);
 
   std::array<MagazineState, 8> magazines_{};
+
+  // How many C4 (erase page) headers each sub-page has been given, which is
+  // the erase_epoch of its TeletextPageKey. Kept per sub-page rather than per
+  // magazine so erasing one page does not orphan the copies of another page
+  // carried in the same magazine. One int per distinct sub-page seen.
+  std::map<PageIdentity, int> erase_epochs_;
 
   // Not owned; see set_row_squasher().
   TeletextRowSquasher* row_squasher_ = nullptr;

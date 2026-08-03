@@ -509,6 +509,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues"
+  - path: orc/support/teletext_recovery_stats.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Accumulates teletext recovery outcomes into a diagnostic profile of a run"
   - path: orc/support/teletext_row_squasher.h
     tier: support
     domain: ""

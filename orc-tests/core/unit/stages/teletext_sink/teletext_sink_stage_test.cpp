@@ -16,9 +16,13 @@
 
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/logging.h>
+#include <spdlog/sinks/ostream_sink.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <variant>
 #include <vector>
@@ -36,6 +40,36 @@ using testing::StrictMock;
 // using different namespace from module-under-test so that we can use the same
 // class names in the tests as in the module-under-test
 namespace orc_unit_test {
+
+// Captures what the stage logs while it is alive, so a diagnostic that exists
+// only as a log line can be asserted at the boundary it is emitted from. No
+// file or console I/O: the sink writes into an in-memory stream.
+class LogCapture {
+ public:
+  LogCapture() : logger_(orc::get_logger()) {
+    sink_ = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+    previous_level_ = logger_->level();
+    logger_->sinks().push_back(sink_);
+    logger_->set_level(spdlog::level::trace);
+  }
+
+  ~LogCapture() {
+    auto& sinks = logger_->sinks();
+    sinks.erase(std::remove(sinks.begin(), sinks.end(), sink_), sinks.end());
+    logger_->set_level(previous_level_);
+  }
+
+  LogCapture(const LogCapture&) = delete;
+  LogCapture& operator=(const LogCapture&) = delete;
+
+  std::string text() const { return stream_.str(); }
+
+ private:
+  std::ostringstream stream_;
+  std::shared_ptr<spdlog::logger> logger_;
+  std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink_;
+  spdlog::level::level_enum previous_level_{spdlog::level::info};
+};
 
 class TeletextSinkStage : public ::testing::Test {
  public:
@@ -94,7 +128,7 @@ TEST_F(TeletextSinkStage, NodeTypeInfo_MatchesDesign) {
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 10u);
+  ASSERT_EQ(descriptors.size(), 13u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
@@ -116,44 +150,64 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   ASSERT_TRUE(descriptors[3].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[3].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[4].name, "tolerant_framing");
-  EXPECT_EQ(descriptors[4].type, orc::ParameterType::BOOL);
+  EXPECT_EQ(descriptors[4].name, "detector");
+  EXPECT_EQ(descriptors[4].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[4].constraints.allowed_strings,
+            (std::vector<std::string>{"Automatic", "Threshold", "MLSE"}));
   ASSERT_TRUE(descriptors[4].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[4].constraints.default_value), false);
+  EXPECT_EQ(std::get<std::string>(*descriptors[4].constraints.default_value),
+            "Automatic");
 
-  EXPECT_EQ(descriptors[5].name, "require_valid_mrag");
+  EXPECT_EQ(descriptors[5].name, "tolerant_framing");
   EXPECT_EQ(descriptors[5].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[5].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[5].constraints.default_value), true);
+  EXPECT_EQ(std::get<bool>(*descriptors[5].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[6].name, "squash_repeated_rows");
+  EXPECT_EQ(descriptors[6].name, "require_valid_mrag");
   EXPECT_EQ(descriptors[6].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[6].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[7].name, "export_subtitles");
+  EXPECT_EQ(descriptors[7].name, "repair_damaged_bytes");
   EXPECT_EQ(descriptors[7].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[7].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[7].constraints.default_value), false);
+  EXPECT_EQ(std::get<bool>(*descriptors[7].constraints.default_value), true);
+  ASSERT_TRUE(descriptors[7].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[7].constraints.depends_on->parameter_name, "detector");
 
-  EXPECT_EQ(descriptors[8].name, "subtitle_page");
-  EXPECT_EQ(descriptors[8].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[8].name, "squash_repeated_rows");
+  EXPECT_EQ(descriptors[8].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[8].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[8].constraints.default_value),
+  EXPECT_EQ(std::get<bool>(*descriptors[8].constraints.default_value), true);
+
+  EXPECT_EQ(descriptors[9].name, "write_report");
+  EXPECT_EQ(descriptors[9].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[9].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[9].constraints.default_value), false);
+
+  EXPECT_EQ(descriptors[10].name, "export_subtitles");
+  EXPECT_EQ(descriptors[10].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[10].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[10].constraints.default_value), false);
+
+  EXPECT_EQ(descriptors[11].name, "subtitle_page");
+  EXPECT_EQ(descriptors[11].type, orc::ParameterType::STRING);
+  ASSERT_TRUE(descriptors[11].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[11].constraints.default_value),
             "888");
-  ASSERT_TRUE(descriptors[8].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[8].constraints.depends_on->parameter_name,
+  ASSERT_TRUE(descriptors[11].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[11].constraints.depends_on->parameter_name,
             "export_subtitles");
 
-  EXPECT_EQ(descriptors[9].name, "subtitle_format");
-  EXPECT_EQ(descriptors[9].type, orc::ParameterType::STRING);
-  ASSERT_EQ(descriptors[9].constraints.allowed_strings.size(), 1u);
-  EXPECT_EQ(descriptors[9].constraints.allowed_strings[0], "SRT");
-  ASSERT_TRUE(descriptors[9].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[9].constraints.default_value),
+  EXPECT_EQ(descriptors[12].name, "subtitle_format");
+  EXPECT_EQ(descriptors[12].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[12].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[12].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[12].constraints.default_value),
             "SRT");
-  ASSERT_TRUE(descriptors[9].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[9].constraints.depends_on->parameter_name,
+  ASSERT_TRUE(descriptors[12].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[12].constraints.depends_on->parameter_name,
             "export_subtitles");
 }
 
@@ -269,6 +323,20 @@ TEST_F(TeletextSinkStage, Trigger_ConvertsUiLinesToZeroBasedFieldLines) {
   EXPECT_FALSE(captured.require_valid_mrag);
 }
 
+TEST_F(TeletextSinkStage, Trigger_PassesParityRepairChoiceToDeps) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  instance_->trigger(
+      make_valid_input(),
+      {{"output_path", std::string("out")}, {"repair_damaged_bytes", false}},
+      mockObservationContext_);
+
+  EXPECT_FALSE(captured.parity_repair);
+}
+
 TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
   orc::TeletextSinkResult deps_result;
   deps_result.success = true;
@@ -286,6 +354,40 @@ TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
   EXPECT_FALSE(captured.keep_empty_packets);
   EXPECT_FALSE(captured.tolerant_framing);
   EXPECT_TRUE(captured.require_valid_mrag);
+  EXPECT_TRUE(captured.parity_repair);
+  // The default has to match the host observer's fixed configuration, or a
+  // default run cannot consume its cached observations.
+  EXPECT_EQ(captured.detector, orc::TeletextDetector::kAuto);
+}
+
+TEST_F(TeletextSinkStage, Trigger_PassesDetectorChoiceToDeps) {
+  for (const auto& [name, detector] :
+       std::vector<std::pair<std::string, orc::TeletextDetector>>{
+           {"Automatic", orc::TeletextDetector::kAuto},
+           {"Threshold", orc::TeletextDetector::kThreshold},
+           {"MLSE", orc::TeletextDetector::kMlse}}) {
+    orc::TeletextSinkResult deps_result;
+    deps_result.success = true;
+    deps_result.output_path = "out.t42";
+    orc::TeletextSinkOptions captured;
+    expect_export(deps_result, captured);
+
+    EXPECT_TRUE(instance_->trigger(
+        make_valid_input(),
+        {{"output_path", std::string("out")}, {"detector", name}},
+        mockObservationContext_));
+    EXPECT_EQ(captured.detector, detector) << name;
+  }
+}
+
+TEST_F(TeletextSinkStage, Trigger_RejectsUnknownDetector) {
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")}, {"detector", std::string("Magic")}};
+
+  EXPECT_FALSE(
+      instance_->trigger(make_valid_input(), params, mockObservationContext_));
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Error: Unknown bit detector: Magic");
 }
 
 TEST_F(TeletextSinkStage, Trigger_ReportsCountsFromDepsResult) {
@@ -304,6 +406,26 @@ TEST_F(TeletextSinkStage, Trigger_ReportsCountsFromDepsResult) {
   EXPECT_EQ(instance_->get_trigger_status(),
             "Exported 84 teletext packets (2 fields with data) to out.t42");
   EXPECT_FALSE(instance_->is_trigger_in_progress());
+}
+
+TEST_F(TeletextSinkStage, Trigger_ReportsRepairedBytesFromDepsResult) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  deps_result.packets_written = 84;
+  deps_result.fields_with_data = 2;
+  deps_result.bytes_repaired = 17;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"output_path", std::string("out")}, {"repair_damaged_bytes", true}},
+      mockObservationContext_));
+
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Exported 84 teletext packets (2 fields with data) to out.t42; "
+            "repaired 17 damaged bytes");
 }
 
 TEST_F(TeletextSinkStage, Trigger_PassesSubtitleOptionsToDeps) {
@@ -385,6 +507,108 @@ TEST_F(TeletextSinkStage, Trigger_ReportsSubtitleCountsFromDepsResult) {
   EXPECT_EQ(instance_->get_trigger_status(),
             "Exported 84 teletext packets (2 fields with data) to out.t42; "
             "3 subtitle cues to out.srt");
+}
+
+TEST_F(TeletextSinkStage, Trigger_EmitsTheReportFromDeps) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  deps_result.report =
+      "Teletext recovery: 12 candidate lines, 4 with a data burst";
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  LogCapture log;
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_NE(log.text().find(deps_result.report), std::string::npos)
+      << log.text();
+  // The report is a log-level diagnostic; the user-facing status is unchanged.
+  EXPECT_EQ(instance_->get_trigger_status().find("candidate lines"),
+            std::string::npos);
+}
+
+TEST_F(TeletextSinkStage, Trigger_EmitsNothingWhenDepsReportNoProfile) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  LogCapture log;
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_EQ(log.text().find("Teletext recovery"), std::string::npos)
+      << log.text();
+}
+
+// The report file is the sink's own product, so the path it lands at is worth
+// saying in the status: a reader who asked for it needs to know where it went.
+TEST_F(TeletextSinkStage, Trigger_ReportsTheSquashAndReportPathInTheStatus) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  deps_result.packets_written = 84;
+  deps_result.fields_with_data = 2;
+  deps_result.packets_corrected = 31;
+  deps_result.report_path = "out.t42.txt";
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"output_path", std::string("out")}, {"write_report", true}},
+      mockObservationContext_));
+
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Exported 84 teletext packets (2 fields with data) to out.t42; "
+            "combined repeated rows corrected 31 packets; report to "
+            "out.t42.txt");
+  EXPECT_TRUE(captured.write_report);
+}
+
+// The result in the terms a reader thinks in: characters, and how many of them
+// are known damaged.
+TEST_F(TeletextSinkStage, Trigger_ReportsDataLossInTheStatus) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  deps_result.packets_written = 84;
+  deps_result.fields_with_data = 2;
+  deps_result.characters_written = 10234;
+  deps_result.characters_damaged = 111;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Exported 84 teletext packets (2 fields with data) to out.t42; "
+            "data loss 1.08% (111 of 10234 characters damaged)");
+}
+
+// A run that wrote no display row has no denominator, so it claims no figure
+// rather than reporting a loss of zero out of zero.
+TEST_F(TeletextSinkStage, Trigger_OmitsDataLossWhenNoCharactersWereWritten) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_EQ(instance_->get_trigger_status().find("data loss"),
+            std::string::npos)
+      << instance_->get_trigger_status();
 }
 
 TEST_F(TeletextSinkStage, Trigger_ReportsDepsFailure) {

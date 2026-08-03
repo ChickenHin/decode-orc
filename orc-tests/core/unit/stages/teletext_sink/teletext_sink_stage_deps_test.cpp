@@ -306,6 +306,16 @@ TEST_F(TeletextSinkStageDeps, ExportT42_WritesPacketsInTemporalOrder) {
   EXPECT_EQ(result.output_path, "out.t42");
   EXPECT_EQ(result.packets_written, 3u);
   EXPECT_EQ(result.fields_with_data, 3u);
+  // No line was sliced here, but the packets read back from the observations
+  // still profile the run: the candidate lines probed and what came of them.
+  EXPECT_NE(result.report.find("candidate lines"), std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find("from stored observations"), std::string::npos)
+      << result.report;
+  // Burst, detector and rejection figures belong to the slice that produced
+  // the observation, so they are not claimed here.
+  EXPECT_EQ(result.report.find("with a data burst"), std::string::npos)
+      << result.report;
 
   // Strictly temporal: frame → field (1 then 2) → ascending line.
   std::vector<uint8_t> expected;
@@ -512,6 +522,10 @@ TEST_F(TeletextSinkStageDeps, ExportT42_CancelAbortsWithTruthfulStatus) {
   EXPECT_EQ(result.message,
             "Cancelled after 0 of 5 frames; partial output left at out.t42");
   EXPECT_EQ(result.packets_written, 0u);
+  // How the run was going is exactly what a cancelled run leaves to be asked,
+  // so the report is built for one too.
+  EXPECT_NE(result.report.find("Teletext export report"), std::string::npos)
+      << result.report;
 }
 
 TEST_F(TeletextSinkStageDeps, ExportT42_ThrottlesProgressReporting) {
@@ -659,6 +673,380 @@ TEST_F(TeletextSinkStageDeps,
             "subtitle output: out.srt");
 }
 
+// A stored observation may carry how sure the detector was of each byte
+// (orc/support/teletext_slicer.h). Where it does, the vote that combines
+// repeated copies of a row weighs them by it instead of counting heads.
+TEST_F(TeletextSinkStageDeps, ExportT42_SquashingWeighsStoredConfidence) {
+  const auto header = make_header_packet(0x00, /*subtitle=*/false,
+                                         /*erase=*/false);
+  const auto confident = make_row_packet(1, "HELLO");
+  const auto uncertain = make_row_packet(1, "XELLO");
+  // Both copies are parity-clean, so parity cannot separate them and a plain
+  // vote would tie — and a tie goes to the newest copy, which here is the one
+  // the detector nearly misread.
+  ASSERT_TRUE(orc::teletext_odd_parity_valid(uncertain[2]));
+
+  orc::TeletextPacketConfidence high{};
+  high.fill(0.9F);
+  orc::TeletextPacketConfidence low{};
+  low.fill(0.1F);
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 1}));
+
+  expect_writer("out.t42");
+
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(confident, high))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(uncertain, low))));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 8;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  ASSERT_TRUE(result.success);
+  EXPECT_EQ(result.packets_written, 4u);
+  // Both copies of the row come out as the one that was read cleanly.
+  std::vector<uint8_t> expected;
+  expected.insert(expected.end(), header.begin(), header.end());
+  expected.insert(expected.end(), confident.begin(), confident.end());
+  expected.insert(expected.end(), header.begin(), header.end());
+  expected.insert(expected.end(), confident.begin(), confident.end());
+  EXPECT_EQ(written_, expected);
+}
+
+// Many services set C4 (erase page) on the header of each transmission. The
+// rewrite pass replays the stream through a fresh decoder, so an erase that
+// discarded the accumulated copies would wipe the table the pass exists to
+// apply — leaving every row correcting against itself alone.
+TEST_F(TeletextSinkStageDeps, ExportT42_SquashingSurvivesErasePageHeaders) {
+  const auto erasing_header = make_header_packet(0x00, /*subtitle=*/false,
+                                                 /*erase=*/true);
+  const auto clean = make_row_packet(1, "HELLO");
+  auto damaged = clean;
+  damaged[2] ^= 0x01;  // break odd parity on the leading display byte
+  ASSERT_FALSE(orc::teletext_odd_parity_valid(damaged[2]));
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 1}));
+
+  expect_writer("out.t42");
+
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(erasing_header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(damaged))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(erasing_header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(clean))));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 8;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  ASSERT_TRUE(result.success);
+  // Each transmission is a run of its own, so neither copy can correct the
+  // other — but the stream must still come through with both runs intact and
+  // in order, which is what the destroyed-table failure could not do.
+  std::vector<uint8_t> expected;
+  expected.insert(expected.end(), erasing_header.begin(), erasing_header.end());
+  expected.insert(expected.end(), damaged.begin(), damaged.end());
+  expected.insert(expected.end(), erasing_header.begin(), erasing_header.end());
+  expected.insert(expected.end(), clean.begin(), clean.end());
+  EXPECT_EQ(written_, expected);
+  // Two runs of one page, and the report says so: a reader who sees as many
+  // runs as transmissions knows why nothing could be combined.
+  EXPECT_NE(result.report.find("2 page runs"), std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find("No row was transmitted more than once"),
+            std::string::npos)
+      << result.report;
+}
+
+// Without C4 the copies share a run, so the damaged byte is corrected and the
+// report says what it cost and what it gained.
+TEST_F(TeletextSinkStageDeps, ExportT42_ReportProfilesWhatSquashingChanged) {
+  const auto header = make_header_packet(0x00, /*subtitle=*/false,
+                                         /*erase=*/false);
+  const auto clean = make_row_packet(1, "HELLO");
+  auto damaged = clean;
+  damaged[2] ^= 0x01;
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 1}));
+
+  expect_writer("out.t42");
+
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(damaged))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(2), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(clean))));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 8;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  ASSERT_TRUE(result.success);
+  EXPECT_EQ(result.packets_corrected, 1u);
+  // The export section names the run.
+  EXPECT_NE(result.report.find("Teletext export report"), std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find("out.t42"), std::string::npos) << result.report;
+  // The squash section says what moved and, in parity terms, whether it
+  // helped: one damaged byte in, none out.
+  EXPECT_NE(result.report.find("2 row packets over 1 page run;"),
+            std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find("Odd-parity failures: 1 before"),
+            std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find(", 0 after"), std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find("2 copies 2"), std::string::npos)
+      << result.report;
+  // The headline leads the report and is the same figure the result carries:
+  // 2 rows × 40 characters, of which the one damaged byte was mended.
+  EXPECT_EQ(result.characters_written, 80u);
+  EXPECT_EQ(result.characters_damaged, 0u);
+  EXPECT_NE(result.report.find("Data loss 0.00% — 0 of 80 recovered"),
+            std::string::npos)
+      << result.report;
+  EXPECT_LT(result.report.find("Data loss"), result.report.find("Output:"))
+      << "the headline must come before the detail";
+}
+
+// The loss figure has to mean the same thing whether or not rows were
+// combined, so the pass-through path counts characters too.
+TEST_F(TeletextSinkStageDeps, ExportT42_ReportsCharacterLossWithSquashingOff) {
+  const auto header = make_header_packet(0x00, /*subtitle=*/false,
+                                         /*erase=*/false);
+  const auto clean = make_row_packet(1, "HELLO");
+  auto damaged = clean;
+  damaged[2] ^= 0x01;
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+
+  expect_writer("out.t42");
+
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_7"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(header))));
+  EXPECT_CALL(mockContext_, get(orc::FieldID(0), "teletext", "t42_8"))
+      .WillRepeatedly(Return(std::optional<orc::ObservationValue>(
+          orc::teletext_packet_to_hex(damaged))));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 8;
+  options.squash_repeated_rows = false;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  ASSERT_TRUE(result.success);
+  // One display row of 40 characters, one of them damaged; the header packet
+  // is not a display row and is not counted.
+  EXPECT_EQ(result.characters_written, 40u);
+  EXPECT_EQ(result.characters_damaged, 1u);
+  EXPECT_NE(result.report.find("Data loss 2.50% — 1 of 40 recovered"),
+            std::string::npos)
+      << result.report;
+  // Nothing was combined, so the headline makes no claim about mending.
+  EXPECT_EQ(result.report.find("mended"), std::string::npos) << result.report;
+}
+
+TEST_F(TeletextSinkStageDeps, ExportT42_SquashingDisabledSaysSoInTheReport) {
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+
+  expect_writer("out.t42");
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.squash_repeated_rows = false;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  ASSERT_TRUE(result.success);
+  EXPECT_NE(result.report.find("Teletext squashing: disabled"),
+            std::string::npos)
+      << result.report;
+}
+
+// The report file is opened through the same writer service as the packet
+// stream, under the stream's full name plus .txt.
+TEST_F(TeletextSinkStageDeps, ExportT42_WritesTheReportBesideThePacketStream) {
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+
+  auto report_writer = std::make_shared<StrictMock<MockFileWriterUint8>>();
+  std::vector<uint8_t> report_bytes;
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(1UL * 1024 * 1024))
+      .Times(2)
+      .WillOnce(Return(pMockFileWriterUint8_))
+      .WillOnce(Return(report_writer));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("out.t42")).WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(_, _)).Times(0);
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+  EXPECT_CALL(*report_writer, open("out.t42.txt")).WillOnce(Return(true));
+  EXPECT_CALL(*report_writer, write(_, _))
+      .WillRepeatedly(Invoke([&report_bytes](const uint8_t* data, size_t n) {
+        report_bytes.insert(report_bytes.end(), data, data + n);
+      }));
+  EXPECT_CALL(*report_writer, close()).Times(1);
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.write_report = true;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  ASSERT_TRUE(result.success);
+  EXPECT_EQ(result.report_path, "out.t42.txt");
+  const std::string written(report_bytes.begin(), report_bytes.end());
+  EXPECT_EQ(written, result.report + "\n");
+}
+
+// A report that cannot be written is a note that went missing, not a failed
+// export: the packet stream is the product and it was written.
+TEST_F(TeletextSinkStageDeps, ExportT42_ReportWriteFailureDoesNotFailTheRun) {
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockContext_, get(_, _, _)).WillRepeatedly(Return(std::nullopt));
+
+  auto report_writer = std::make_shared<StrictMock<MockFileWriterUint8>>();
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(1UL * 1024 * 1024))
+      .Times(2)
+      .WillOnce(Return(pMockFileWriterUint8_))
+      .WillOnce(Return(report_writer));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("out.t42")).WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(_, _)).Times(0);
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+  EXPECT_CALL(*report_writer, open("out.t42.txt")).WillOnce(Return(false));
+
+  auto deps = make_deps(/*with_observation_service=*/false);
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.write_report = true;
+
+  const auto result =
+      deps.export_t42(&mockRepresentation_, mockContext_, options);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_TRUE(result.report_path.empty());
+  EXPECT_FALSE(result.report.empty());
+}
+
+TEST_F(TeletextSinkStageDeps, ExportT42_ParityRepairOffSlicesDirectly) {
+  // The host observer repairs, so its cached observations cannot answer for a
+  // run that asked for the packets as transmitted: turning repair off has to
+  // bypass them, or the export would silently carry repaired bytes.
+  const auto payload = orc::tests::make_parity_coded_payload();
+  orc::tests::TeletextLineSynthOptions synth;
+  synth.low_pass_cutoff_hz = 2.8e6;
+  const auto line = orc::tests::synthesize_teletext_line(payload, synth);
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), 7))
+      .WillRepeatedly(Return(line.data()));
+  EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), 320))
+      .WillRepeatedly(Return(nullptr));
+
+  expect_writer("out.t42");
+
+  auto deps = make_deps();
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.parity_repair = false;
+
+  // Strict mocks: any use of the observation service or context fails.
+  StrictMock<MockObservationContext> strictContext;
+  const auto result =
+      deps.export_t42(&mockRepresentation_, strictContext, options);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.packets_written, 1u);
+  EXPECT_EQ(result.bytes_repaired, 0u);
+  EXPECT_EQ(written_, std::vector<uint8_t>(payload.begin(), payload.end()));
+}
+
 TEST_F(TeletextSinkStageDeps, ExportT42_NonDefaultOptionsSliceDirectly) {
   const auto payload = orc::tests::make_test_payload();
   const auto line = orc::tests::synthesize_teletext_line(payload);
@@ -693,6 +1081,85 @@ TEST_F(TeletextSinkStageDeps, ExportT42_NonDefaultOptionsSliceDirectly) {
   EXPECT_EQ(result.packets_written, 1u);
   EXPECT_EQ(result.fields_with_data, 1u);
   EXPECT_EQ(written_, std::vector<uint8_t>(payload.begin(), payload.end()));
+}
+
+TEST_F(TeletextSinkStageDeps, ExportT42_ExplicitDetectorSlicesDirectly) {
+  // Only the automatic detector matches the host observer's configuration, so
+  // naming one explicitly must bypass the observer and slice here — otherwise
+  // the run would silently use the observer's detector instead of the chosen
+  // one.
+  const auto payload = orc::tests::make_parity_coded_payload();
+  orc::tests::TeletextLineSynthOptions synth;
+  synth.low_pass_cutoff_hz = 2.8e6;  // a tape-like, threshold-proof line
+  const auto line = orc::tests::synthesize_teletext_line(payload, synth);
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), 7))
+      .WillRepeatedly(Return(line.data()));
+  EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), 320))
+      .WillRepeatedly(Return(nullptr));
+
+  expect_writer("out.t42");
+
+  auto deps = make_deps();
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.detector = orc::TeletextDetector::kMlse;
+
+  StrictMock<MockObservationContext> strictContext;
+  const auto result =
+      deps.export_t42(&mockRepresentation_, strictContext, options);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.packets_written, 1u);
+  EXPECT_EQ(written_, std::vector<uint8_t>(payload.begin(), payload.end()));
+}
+
+TEST_F(TeletextSinkStageDeps, ExportT42_ReportsARecoveryProfileWhenSlicing) {
+  // Where the stage does its own slicing it also owns the line results, so it
+  // reports the run's recovery profile for the stage to log.
+  const auto payload = orc::tests::make_test_payload();
+  const auto line = orc::tests::synthesize_teletext_line(payload);
+
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  // Field 1 line 7 carries a packet; the same line of field 2 is blank.
+  EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), 7))
+      .WillRepeatedly(Return(line.data()));
+  const std::vector<int16_t> blank(line.size(),
+                                   static_cast<int16_t>(orc::kPalBlack));
+  EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), 320))
+      .WillRepeatedly(Return(blank.data()));
+
+  expect_writer("out.t42");
+
+  auto deps = make_deps();
+  orc::TeletextSinkOptions options;
+  options.output_path = "out.t42";
+  options.first_field_line = 7;
+  options.last_field_line = 7;
+  options.detector = orc::TeletextDetector::kThreshold;
+
+  StrictMock<MockObservationContext> strictContext;
+  const auto result =
+      deps.export_t42(&mockRepresentation_, strictContext, options);
+
+  ASSERT_TRUE(result.success);
+  ASSERT_FALSE(result.report.empty());
+  EXPECT_NE(result.report.find("2 candidate lines"), std::string::npos)
+      << result.report;
+  EXPECT_NE(result.report.find("1 packets recovered"), std::string::npos)
+      << result.report;
+  // The blank field-2 line is reported as an empty line, not as a failure.
+  EXPECT_NE(result.report.find("amplitude gate 1"), std::string::npos)
+      << result.report;
 }
 
 }  // namespace orc_unit_test

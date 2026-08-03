@@ -110,6 +110,8 @@ FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output on
 ### embed_teletext_subtitles (bool)
 FFmpeg mode only. Decode teletext subtitles (PAL WST sources only) and embed them as mov_text subtitles. MP4/MOV output only. The subtitle page is decoded from the VBI teletext transmission; colour and positioning are dropped — the embedded track carries plain text. Mutually exclusive with `embed_closed_captions` (both share the single subtitle stream; closed captions take precedence). Default: `false`.
 
+Cues are decoded from the recovered packets as they arrive, without combining the repeated transmissions of each page row the way the Teletext Sink's `.srt` export does. On a clean source the two agree; on a difficult tape the embedded track carries more damaged characters than an `.srt` exported from the same recording, so prefer the Teletext Sink there.
+
 ### teletext_subtitle_page (string)
 FFmpeg mode only; available only when `embed_teletext_subtitles` is enabled. The teletext page carrying the subtitles: a magazine digit (1–8) followed by two hexadecimal page digits, e.g. `888` (the UK convention). Default: `888`.
 

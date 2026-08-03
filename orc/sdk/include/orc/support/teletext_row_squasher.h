@@ -38,6 +38,12 @@ constexpr size_t kTeletextRowBytes = 40;
 
 using TeletextRowBytes = std::array<uint8_t, kTeletextRowBytes>;
 
+// How sure the recovery chain was of each byte of a row, 0 … 1 (see
+// TeletextLineResult::byte_confidence). A copy recorded without one counts as
+// wholly confident, which is what makes the weighting invisible to a caller
+// that has nothing to say about it.
+using TeletextRowConfidence = std::array<float, kTeletextRowBytes>;
+
 // Identity of the page a row belongs to. Sub-code is part of the key because
 // a different sub-code is a different page (ETSI EN 300 706 §9.3.1.2) —
 // merging rotating sub-pages would blend unrelated content.
@@ -45,16 +51,26 @@ struct TeletextPageKey {
   int magazine = 8;
   int page_number = 0;
   int subcode = 0;
+  // Which run of this page's content the row belongs to. A header with C4
+  // (erase page, ETSI EN 300 706 §9.3.1.3 Table 2) says the content is being
+  // replaced, so copies either side of it are copies of different pages and
+  // must not be combined. Counting the erases rather than deleting the earlier
+  // copies keeps both runs addressable: a consumer replaying a recovered
+  // stream can ask for the run each packet actually belonged to, which a
+  // consumer that only ever wants the newest run gets for free by keying on
+  // the decoder's current key.
+  int erase_epoch = 0;
 
   bool operator<(const TeletextPageKey& other) const {
     if (magazine != other.magazine) return magazine < other.magazine;
     if (page_number != other.page_number)
       return page_number < other.page_number;
-    return subcode < other.subcode;
+    if (subcode != other.subcode) return subcode < other.subcode;
+    return erase_epoch < other.erase_epoch;
   }
   bool operator==(const TeletextPageKey& other) const {
     return magazine == other.magazine && page_number == other.page_number &&
-           subcode == other.subcode;
+           subcode == other.subcode && erase_epoch == other.erase_epoch;
   }
 };
 
@@ -75,6 +91,17 @@ struct TeletextPageKey {
  * corrupt and should never win over one that passes, however often it was
  * seen. The plain mode is the fallback when no copy of a byte is
  * parity-clean.
+ *
+ * Within that restriction the vote is by weight rather than by head count: a
+ * copy recorded with per-byte confidences (see add_row()) contributes its
+ * confidence in the byte instead of one vote. Parity and confidence answer
+ * different questions and neither subsumes the other — parity is certain and
+ * blind (it catches every single-bit error but says nothing about which byte to
+ * believe among those that pass), while confidence is graded and fallible (a
+ * bit the detector was sure of can still be wrong). Ordering them this way
+ * keeps the certainty first: a value known to be corrupt cannot win however
+ * confidently it was recovered, and among values that might be right the one
+ * the detector nearly misread does not outvote the one it read cleanly.
  *
  * Copies are keyed by an opaque source id so a consumer that re-reads the
  * same recovered line — as a sliding-window previewer does every time its
@@ -110,22 +137,26 @@ class TeletextRowSquasher {
    * @param source Opaque identity of where this copy came from. Adding the
    *               same source twice replaces the earlier copy rather than
    *               counting it again.
+   * @param confidence How sure the recovery chain was of each byte, or nullptr
+   *               when it cannot say — which counts as wholly sure, so a caller
+   *               with no confidences to offer votes exactly as it always did.
    */
   void add_row(const TeletextPageKey& key, int row,
-               const TeletextRowBytes& bytes, int64_t source);
+               const TeletextRowBytes& bytes, int64_t source,
+               const TeletextRowConfidence* confidence = nullptr);
 
   /// Best estimate of @p row, or nullopt when no copy has been recorded
   std::optional<TeletextRowBytes> squashed_row(const TeletextPageKey& key,
                                                int row) const;
 
   /**
-   * @brief Drop every copy held for a page
+   * @brief Drop every copy held for one run of a page
    *
-   * Call this when the transmission says the page's content is being
-   * replaced — a header with C4 (erase page) set, ETSI EN 300 706 §9.3.1.3
-   * Table 2. Combining copies assumes they are copies of the *same* content;
-   * across an erase they are not, and voting would blend the old page into
-   * the new one.
+   * Combining copies assumes they are copies of the *same* content, so a page
+   * whose content is replaced must not vote across the replacement. The key's
+   * erase_epoch is what keeps the runs apart, and TeletextPageDecoder advances
+   * it for you on a C4 header — this is for a consumer keying the squasher
+   * itself, and for reclaiming a run it knows it will not ask about again.
    */
   void erase_page(const TeletextPageKey& key);
 
@@ -140,6 +171,7 @@ class TeletextRowSquasher {
  private:
   struct RowCopies {
     std::vector<TeletextRowBytes> copies;
+    std::vector<TeletextRowConfidence> confidences;
     std::vector<int64_t> sources;
   };
   struct PageRows {

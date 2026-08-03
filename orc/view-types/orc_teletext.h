@@ -27,6 +27,15 @@ struct TeletextPacketView {
   /// MRAG + 40 data bytes, transmission coding (matches the SDK
   /// kTeletextPacketBytes contract; static_assert'ed in the presenter)
   std::array<uint8_t, 42> bytes{};
+  /// Whether the recovery chain could say how sure it was of each byte. False
+  /// for packets recovered by threshold slicing and for observations stored
+  /// before confidences existed.
+  bool has_confidence = false;
+  /// How sure it was, 0-1 per byte — 1 throughout when it could not say, so a
+  /// consumer weighting a vote by this needs no special case. Combining
+  /// repeated copies of a page row uses it to prefer the copy that was read
+  /// cleanly (see the SDK's teletext_row_squasher.h).
+  std::array<float, 42> confidence{};
 };
 
 /**
