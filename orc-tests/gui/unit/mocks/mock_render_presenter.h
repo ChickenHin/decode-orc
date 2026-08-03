@@ -31,6 +31,38 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(void, setBackgroundObservationEnabled, (bool enabled),
               (override));
 
+  // Real (non-mocked) execution-progress sink so tests can drive the
+  // coordinator's worker-thread callback -> queued-signal wiring end to end.
+  void setExecutionProgressCallback(
+      orc::presenters::DagExecutionProgressCallback callback) override {
+    std::lock_guard<std::mutex> lock(execution_progress_mutex_);
+    execution_progress_ = std::move(callback);
+  }
+
+  // Test helper: simulate a node of an on-demand execution starting.
+  void fireExecutionProgress(int node_id, std::uint64_t current,
+                             std::uint64_t total) {
+    orc::presenters::DagExecutionProgressCallback callback;
+    {
+      std::lock_guard<std::mutex> lock(execution_progress_mutex_);
+      callback = execution_progress_;
+    }
+    if (!callback) {
+      return;
+    }
+    orc::presenters::DagExecutionProgressEvent event;
+    event.node_id = node_id;
+    event.current = current;
+    event.total = total;
+    callback(event);
+  }
+
+  // Test helper: whether an execution-progress observer is installed.
+  bool hasExecutionProgressCallback() {
+    std::lock_guard<std::mutex> lock(execution_progress_mutex_);
+    return static_cast<bool>(execution_progress_);
+  }
+
   // Real (non-mocked) invalidation registry so tests can exercise the
   // coordinator's subscribe/fire/unsubscribe wiring end to end.
   uint64_t subscribeInvalidation(
@@ -252,6 +284,9 @@ class MockRenderPresenter : public IRenderPresenter {
   std::map<uint64_t, orc::presenters::ObservationProgressCallback>
       progress_subscribers_;
   uint64_t next_progress_id_ = 1;
+
+  std::mutex execution_progress_mutex_;
+  orc::presenters::DagExecutionProgressCallback execution_progress_;
 };
 
 }  // namespace orc::presenters::test

@@ -35,6 +35,7 @@
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/video_parameter_observation_presenter.h"
 #include "previewdialog.h"
+#include "project_load_status_formatter.h"
 #include "projectpropertiesdialog.h"
 #include "quick_project_planner.h"
 #include "render_coordinator.h"
@@ -114,6 +115,14 @@ namespace {
 constexpr const char* kLineScopeViewId = "preview.linescope";
 constexpr const char* kFrameTimingViewId = "preview.frame_timing";
 constexpr const char* kWaveformMonitorViewId = "preview.frame_timing";
+
+// How long a project load may run before the modal progress dialog appears.
+// Small sources are ready well inside this, so the common case never sees a
+// dialog flash on screen.
+constexpr int kProjectLoadProgressDelayMs = 400;
+
+// Refresh interval for the dialog's elapsed-seconds counter.
+constexpr int kProjectLoadProgressTickMs = 500;
 
 // --- Simple hand-drawn toolbar icons ------------------------------------
 // The GUI ships no icon assets, so the toolbar glyphs are painted with
@@ -462,6 +471,8 @@ MainWindow::MainWindow(QWidget* parent)
           this, &MainWindow::onObservationDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::observationProgress,
           this, &MainWindow::onObservationProgress, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::executionProgress,
+          this, &MainWindow::onExecutionProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(),
           &RenderCoordinator::observationsInvalidated, this,
           &MainWindow::onObservationsInvalidated, Qt::QueuedConnection);
@@ -490,6 +501,27 @@ MainWindow::MainWindow(QWidget* parent)
       preview_dialog_->setWindowTitle("Field/Frame Preview - Rendering...");
     }
   });
+
+  // Project-load progress timers. The show timer keeps the modal off screen for
+  // loads that finish quickly; the tick timer refreshes the elapsed counter so
+  // a stage that holds position for a minute still looks alive.
+  project_load_show_timer_ = new QTimer(this);
+  project_load_show_timer_->setSingleShot(true);
+  project_load_show_timer_->setInterval(kProjectLoadProgressDelayMs);
+  connect(project_load_show_timer_, &QTimer::timeout, this, [this]() {
+    if (project_load_in_progress_ && project_load_progress_dialog_) {
+      ORC_LOG_DEBUG("Project load exceeded {} ms; showing progress dialog",
+                    kProjectLoadProgressDelayMs);
+      updateProjectLoadProgressLabel();
+      project_load_progress_dialog_->show();
+      project_load_tick_timer_->start();
+    }
+  });
+
+  project_load_tick_timer_ = new QTimer(this);
+  project_load_tick_timer_->setInterval(kProjectLoadProgressTickMs);
+  connect(project_load_tick_timer_, &QTimer::timeout, this,
+          [this]() { updateProjectLoadProgressLabel(); });
 
   updateWindowTitle();
 
@@ -1515,6 +1547,11 @@ void MainWindow::openProject(const QString& filename) {
 
   updateUIState();
 
+  // Everything from here hands work to the coordinator's worker thread, and the
+  // preview window only appears once it answers. Cover that wait.
+  const uint64_t outputs_request_before_load = pending_outputs_request_id_;
+  beginProjectLoadProgress();
+
   // Initialize preview renderer with project DAG
   updatePreviewRenderer();
   reportPluginRuntimeDiagnostics(false);
@@ -1527,6 +1564,12 @@ void MainWindow::openProject(const QString& filename) {
 
   // Automatically select the source stage with the lowest node ID
   selectLowestSourceStage();
+
+  // No available-outputs request was issued (nothing selectable in the DAG), so
+  // nothing will ever arrive to retire the modal.
+  if (pending_outputs_request_id_ == outputs_request_before_load) {
+    endProjectLoadProgress();
+  }
 
   statusBar()->showMessage(
       QString("Opened project: %1").arg(project_.projectName()));
@@ -2028,8 +2071,12 @@ void MainWindow::quickProject(const QString& filename) {
   // Remember this source directory
   setLastSourceDirectory(QFileInfo(filename).absolutePath());
 
-  // Update UI - preview renderer and DAG display
+  // Update UI - preview renderer and DAG display. As with openProject(), the
+  // wait that follows belongs to the coordinator's worker thread, so cover it
+  // with the project-load modal.
   updateUIState();
+  const uint64_t outputs_request_before_load = pending_outputs_request_id_;
+  beginProjectLoadProgress();
   updatePreviewRenderer();
   reportPluginRuntimeDiagnostics(false);
   loadProjectDAG();
@@ -2039,6 +2086,10 @@ void MainWindow::quickProject(const QString& filename) {
 
   // Automatically select the source stage with the lowest node ID
   selectLowestSourceStage();
+
+  if (pending_outputs_request_id_ == outputs_request_before_load) {
+    endProjectLoadProgress();
+  }
 
   statusBar()->showMessage("Quick project created successfully", 5000);
 }
@@ -2413,6 +2464,13 @@ bool MainWindow::checkUnsavedChanges() {
 }
 
 void MainWindow::updatePreviewInfo() {
+  // Update standard-specific observer menu availability: the NTSC observers
+  // (FM code, white flag) and closed captions are NTSC-only, teletext is
+  // PAL-only. Done before the early returns so the menu never keeps the
+  // previous project's availability while no stage is selected.
+  auto video_format_presenter = project_.presenter()->getVideoFormat();
+  preview_dialog_->setObserverAvailabilityForFormat(video_format_presenter);
+
   if (current_view_node_id_.is_valid() == false) {
     preview_dialog_->previewInfoLabel()->setText("No stage selected");
     preview_dialog_->sliderMinLabel()->setText("");
@@ -2428,11 +2486,7 @@ void MainWindow::updatePreviewInfo() {
     return;
   }
 
-  // Update NTSC observer menu item availability (only for NTSC)
-  // NTSC observers (FM code, white flag) are NTSC-specific
-  auto video_format_presenter = project_.presenter()->getVideoFormat();
   bool is_ntsc = (video_format_presenter == orc::presenters::VideoFormat::NTSC);
-  preview_dialog_->ntscObserverAction()->setEnabled(is_ntsc);
 
   // ITU-R BT.470-6 §5.1 (PAL 25 fps) / SMPTE 170M-2004 §2 (NTSC ~29.97 fps).
   // ITU-R BT.1700-1 Annex 1 Part B (PAL-M 29.97 fps, same rate as NTSC).
@@ -4735,10 +4789,12 @@ void MainWindow::onFrameTimingDataReady(
       c_samples_2, video_params, marker_sample, first_field_height,
       second_field_height);
 
-  // Only show/raise/activate if not already visible, and only if the parent
-  // preview dialog is still open. Guards against pending async callbacks
-  // re-opening the dialog after the user has closed the preview window.
-  if (!frame_timing_dialog->isVisible() && preview_dialog_->isVisible()) {
+  // Only show/raise/activate if not already visible, the parent preview
+  // dialog is still open, and the user still wants this dialog open. Guards
+  // against pending async callbacks re-opening the dialog after the user has
+  // closed either it or the preview window.
+  if (!frame_timing_dialog->isVisible() && preview_dialog_->isVisible() &&
+      preview_dialog_->isFrameTimingOpenRequested()) {
     frame_timing_dialog->show();
     frame_timing_dialog->raise();
     frame_timing_dialog->activateWindow();
@@ -4804,6 +4860,17 @@ void MainWindow::onWaveformMonitorDataReady(
   wm_dialog->setData(std::move(composite_samples), std::move(y_samples),
                      std::move(c_samples), first_field_height,
                      second_field_height, video_params);
+
+  // Only show/raise/activate if not already visible, the parent preview
+  // dialog is still open, and the user still wants this dialog open. Guards
+  // against pending async callbacks re-opening the dialog after the user has
+  // closed either it or the preview window.
+  if (!wm_dialog->isVisible() && preview_dialog_->isVisible() &&
+      preview_dialog_->isWaveformMonitorOpenRequested()) {
+    wm_dialog->show();
+    wm_dialog->raise();
+    wm_dialog->activateWindow();
+  }
 }
 
 // Vectorscope is preview-owned and refreshed through the registry request
@@ -4820,6 +4887,81 @@ void MainWindow::endPreviewRenderInFlight() {
     preview_dialog_->setWindowTitle("Field/Frame Preview");
   }
   preview_render_in_flight_ = false;
+}
+
+void MainWindow::beginProjectLoadProgress() {
+  // A load already in progress keeps its dialog and its elapsed time.
+  if (project_load_in_progress_) {
+    return;
+  }
+
+  project_load_in_progress_ = true;
+  project_load_stage_label_.clear();
+  project_load_current_ = 0;
+  project_load_total_ = 0;
+  project_load_elapsed_.start();
+
+  // No cancel button: the wait is a stage executing inside the worker thread
+  // (typically a source opening its metadata) and nothing in that path is
+  // interruptible, so offering Cancel would be a lie. Created hidden — the show
+  // timer decides whether the load lasts long enough to warrant a dialog.
+  auto* dialog = new QProgressDialog("Preparing preview\xE2\x80\xA6", QString(),
+                                     0, 0, this);
+  dialog->setWindowTitle("Opening Project");
+  dialog->setWindowModality(Qt::ApplicationModal);
+  dialog->setCancelButton(nullptr);
+  dialog->setAutoClose(false);
+  dialog->setAutoReset(false);
+  dialog->setAttribute(Qt::WA_DeleteOnClose, false);
+  // QProgressDialog puts itself on screen from an internal timer once
+  // minimumDuration elapses, which would race project_load_show_timer_ and can
+  // flash the dialog on loads that finish immediately. Push that duration out
+  // of reach and reset() (which stops the internal timer) so our own timer is
+  // the only thing that can show it.
+  dialog->setMinimumDuration(std::numeric_limits<int>::max());
+  dialog->reset();
+  dialog->hide();
+  project_load_progress_dialog_ = dialog;
+
+  project_load_show_timer_->start();
+}
+
+void MainWindow::updateProjectLoadProgressLabel() {
+  if (!project_load_in_progress_ || !project_load_progress_dialog_) {
+    return;
+  }
+  const int elapsed_seconds =
+      static_cast<int>(project_load_elapsed_.elapsed() / 1000);
+  const std::string text = orc::gui::formatProjectLoadStatus(
+      project_load_stage_label_.toStdString(), project_load_current_,
+      project_load_total_, elapsed_seconds);
+  // setLabelText() on a modal QProgressDialog can re-enter the event loop, so
+  // re-check the pointer before touching the dialog again elsewhere.
+  project_load_progress_dialog_->setLabelText(QString::fromStdString(text));
+}
+
+void MainWindow::endProjectLoadProgress() {
+  if (!project_load_in_progress_) {
+    return;
+  }
+  project_load_in_progress_ = false;
+  project_load_show_timer_->stop();
+  project_load_tick_timer_->stop();
+
+  ORC_LOG_DEBUG("Project load preparation finished after {} ms",
+                project_load_elapsed_.elapsed());
+
+  // Clear the member before closing: a modal dialog's close can re-enter the
+  // event loop and deliver another coordinator response, which would otherwise
+  // find a half-torn-down dialog (the crash pattern documented on the analysis
+  // progress dialogs).
+  QProgressDialog* dialog = project_load_progress_dialog_.data();
+  project_load_progress_dialog_.clear();
+  if (dialog) {
+    dialog->blockSignals(true);
+    dialog->hide();
+    dialog->deleteLater();
+  }
 }
 
 void MainWindow::updateAllPreviewComponents() {

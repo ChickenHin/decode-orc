@@ -16,7 +16,7 @@ When you are ready to ship, continue with the
 [Plugin Publishing Guide](plugin-publishing.md).
 
 The canonical minimal example referenced throughout is the in-repo CI fixture
-[`orc-tests/fixtures/external-stage-plugin/`](../../orc-tests/fixtures/external-stage-plugin/)
+[`orc-tests/fixtures/external-stage-plugin/`](https://github.com/simoninns/decode-orc/tree/main/orc-tests/fixtures/external-stage-plugin){target="_blank"}
 — three files that configure, build, and load exactly as an external plugin,
 and that decode-orc CI builds against a freshly installed SDK on every push, so
 it never drifts from the shipped package.
@@ -79,7 +79,7 @@ git clone https://github.com/simoninns/orc-plugin_skeleton my-orc-plugin
 ```
 
 > The skeleton may lag the SDK. If in doubt, mirror the always-in-sync fixture
-> at [`orc-tests/fixtures/external-stage-plugin/`](../../orc-tests/fixtures/external-stage-plugin/).
+> at [`orc-tests/fixtures/external-stage-plugin/`](https://github.com/simoninns/decode-orc/tree/main/orc-tests/fixtures/external-stage-plugin){target="_blank"}.
 
 Or start from scratch — a minimal plugin is just three files:
 

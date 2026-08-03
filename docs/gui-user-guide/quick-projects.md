@@ -18,6 +18,8 @@ The Quick Project feature provides the fastest way to get started with decoding 
     - Build a pipeline appropriate to the decoder that produced the source (see [Pipeline layout](#pipeline-layout) below)
     - Select the source stage (with **View → Show Preview on Selection** enabled, the preview opens automatically)
 
+Large sources take a moment to open before the preview can appear: the pipeline is run far enough to discover what the selected stage can show. When that takes longer than a fraction of a second an **Opening Project** dialog reports which stage is being executed and how long it has been running. It closes on its own once the preview is ready.
+
 ### Pipeline layout
 
 The stages a quick project creates depend on the decoder recorded in the source metadata:

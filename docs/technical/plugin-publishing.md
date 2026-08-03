@@ -151,7 +151,7 @@ trust <id>`). See [Registry entry](plugin-sdk.md#registry-entry).
 
 The curated index is the list users browse under **Plugin Manager → Browse
 Plugins…** and query with `orc-cli plugins search / info / install`. It lives in
-[`orc-plugin-registry/`](../../orc-plugin-registry/) and the host fetches it from
+[`orc-plugin-registry/`](https://github.com/simoninns/decode-orc/tree/main/orc-plugin-registry){target="_blank"} and the host fetches it from
 the default-branch head over HTTPS — **a merged pull request publishes
 immediately**, with no Decode-Orc release and no registry tag.
 
@@ -164,7 +164,7 @@ release working and correctly named, because it is what users get.
 Submit an entry:
 
 1. Fork the registry and append your plugin under `plugins:` in `index.yaml`,
-   following [`registry_schema: 2`](../../orc-plugin-registry/README.md):
+   following [`registry_schema: 2`](https://github.com/simoninns/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}:
 
    ```yaml
    - id: com.example.deinterlace

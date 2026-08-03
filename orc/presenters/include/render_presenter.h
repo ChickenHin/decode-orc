@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "dag_execution_progress_view.h"    // DagExecutionProgressCallback
 #include "observation_invalidation_view.h"  // ObservationInvalidationEvent
 #include "observation_progress_view.h"  // ObservationProgressEvent, ObservationDataReadyCallback
 
@@ -384,6 +385,25 @@ class RenderPresenter {
    * effect once the store/scheduler have been created.
    */
   void setBackgroundObservationEnabled(bool enabled);
+
+  /**
+   * @brief Observe on-demand DAG execution driven by preview queries.
+   *
+   * getAvailableOutputs()/renderPreview() execute the DAG up to the queried
+   * node on the calling thread; a single node (opening a large source) can take
+   * many seconds. The callback fires once per node, immediately before that
+   * node runs, so the view can report what the worker is doing. Pass an empty
+   * function to stop observing.
+   *
+   * The callback survives DAG rebuilds — it is reinstalled on the renderer
+   * every setDAG()/updateDAG().
+   *
+   * Thread-safety: invoked synchronously on the thread driving the query; the
+   * setter is expected to be called from that same thread (the render
+   * coordinator's worker).
+   */
+  void setExecutionProgressCallback(
+      orc::presenters::DagExecutionProgressCallback callback);
 
   // === Dropout Visualization ===
 

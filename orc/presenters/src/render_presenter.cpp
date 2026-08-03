@@ -372,6 +372,12 @@ class RenderPresenter::Impl {
   // and one background pipeline per process is enough.
   bool background_observation_enabled_ = true;
 
+  // Optional observer of on-demand preview execution, reinstalled on the
+  // renderer after every rebuild so it survives DAG changes. Set and fired on
+  // the thread driving preview queries (the coordinator's worker), so it needs
+  // no locking of its own.
+  orc::presenters::DagExecutionProgressCallback execution_progress_;
+
   // Phase 3: previous fingerprint map + undo retention window drive change
   // propagation (invalidation notifications) and store garbage collection.
   orc::NodeFingerprintMap prev_fingerprints_;
@@ -487,6 +493,30 @@ class RenderPresenter::Impl {
     const auto it = fingerprints_shared_->find(node);
     return it != fingerprints_shared_->end() ? it->second
                                              : orc::NodeFingerprint{};
+  }
+
+  // Point the current renderer's executor at execution_progress_ (or clear it
+  // when nobody is observing). Called whenever either side changes: the
+  // subscriber via setExecutionProgressCallback(), the renderer on rebuild.
+  void installExecutionProgress() {
+    if (!preview_renderer_) {
+      return;
+    }
+    if (!execution_progress_) {
+      preview_renderer_->set_execution_progress_callback(nullptr);
+      return;
+    }
+    preview_renderer_->set_execution_progress_callback(
+        [this](NodeID node_id, std::size_t current, std::size_t total) {
+          if (!execution_progress_) {
+            return;
+          }
+          orc::presenters::DagExecutionProgressEvent event;
+          event.node_id = node_id.value();
+          event.current = static_cast<std::uint64_t>(current);
+          event.total = static_cast<std::uint64_t>(total);
+          execution_progress_(event);
+        });
   }
 
   // Number of frames (a frame is a field pair) available at a node's output, or
@@ -967,6 +997,9 @@ class RenderPresenter::Impl {
     preview_view_registry_ = orc::PreviewViewRegistry{};
     orc::PreviewViewRegistry::register_default_views(
         preview_view_registry_, dag, preview_renderer_.get());
+
+    // The renderer is new, so re-arm the execution observer on it.
+    installExecutionProgress();
 
     // Restore dropout state
     if (preview_renderer_) {
@@ -1490,6 +1523,12 @@ uint64_t RenderPresenter::requestObservations(
 
 void RenderPresenter::setBackgroundObservationEnabled(bool enabled) {
   impl_->background_observation_enabled_ = enabled;
+}
+
+void RenderPresenter::setExecutionProgressCallback(
+    orc::presenters::DagExecutionProgressCallback callback) {
+  impl_->execution_progress_ = std::move(callback);
+  impl_->installExecutionProgress();
 }
 
 uint64_t RenderPresenter::subscribeObservationProgress(

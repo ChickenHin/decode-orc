@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "presenters/include/hints_view_models.h"  // For VideoParametersView
+#include "presenters/include/project_presenter_types.h"  // For VideoFormat
 
 class FieldPreviewWidget;
 class FrameScopeDialog;
@@ -94,6 +95,18 @@ class PreviewDialog : public QDialog {
   QAction* ntscObserverAction() {
     return show_ntsc_observer_action_;
   }  ///< Get NTSC observer menu action
+  QAction* teletextAction() {
+    return show_teletext_action_;
+  }  ///< Get teletext pages menu action
+  QAction* closedCaptionAction() {
+    return show_closed_caption_action_;
+  }  ///< Get closed captions menu action
+  QAction* frameTimingAction() {
+    return show_frame_timing_action_;
+  }  ///< Get frame timing menu action
+  QAction* waveformMonitorAction() {
+    return show_waveform_monitor_action_;
+  }  ///< Get waveform monitor menu action
   QPushButton* dropoutsButton() {
     return dropouts_button_;
   }  ///< Get dropouts button for state control
@@ -110,6 +123,17 @@ class PreviewDialog : public QDialog {
    * @param visible True to show signal controls, false to hide them
    */
   void setSignalControlsVisible(bool visible);
+
+  /**
+   * @brief Enable the observer menu entries that only apply to one standard
+   * @param format Video format of the project being previewed
+   *
+   * The NTSC observers (FM code, white flag) and EIA-608 closed captions are
+   * 525-line NTSC features, while ETSI EN 300 706 System B teletext is only
+   * carried on 625-line PAL. Anything else (including PAL-M and an unknown
+   * format) leaves all three entries disabled.
+   */
+  void setObserverAvailabilityForFormat(orc::presenters::VideoFormat format);
 
   /**
    * @brief Set the currently previewed node
@@ -239,6 +263,26 @@ class PreviewDialog : public QDialog {
    * @brief Check if line scope dialog is currently visible
    */
   bool isLineScopeVisible() const;
+
+  /**
+   * @brief True while the user wants the frame timing dialog open.
+   *
+   * Set when the user triggers the View menu action, cleared when the dialog
+   * closes. Async data callbacks must consult this before auto-showing the
+   * dialog: a request issued before the user closed it would otherwise
+   * re-open the window when its response arrives.
+   */
+  bool isFrameTimingOpenRequested() const {
+    return frame_timing_open_requested_;
+  }
+
+  /**
+   * @brief True while the user wants the waveform monitor dialog open.
+   * @see isFrameTimingOpenRequested()
+   */
+  bool isWaveformMonitorOpenRequested() const {
+    return waveform_monitor_open_requested_;
+  }
 
   /**
    * @brief Notify that the preview frame/mode has changed
@@ -401,6 +445,13 @@ class PreviewDialog : public QDialog {
   orc::NodeID current_node_id_;
   std::optional<orc::PreviewCoordinate> shared_preview_coordinate_;
   std::unordered_set<std::string> available_preview_view_ids_;
+
+  // User intent to have each supplementary dialog open. Data for these
+  // dialogs is fetched asynchronously, so a response can arrive after the
+  // user has closed the window; without these flags the response re-opens it.
+  bool line_scope_open_requested_{false};
+  bool frame_timing_open_requested_{false};
+  bool waveform_monitor_open_requested_{false};
 
   // Current line scope context for cross-hair updates
   int current_line_scope_line_ =

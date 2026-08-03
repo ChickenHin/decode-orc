@@ -35,6 +35,10 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   void setBackgroundObservationEnabled(bool enabled) override {
     presenter_.setBackgroundObservationEnabled(enabled);
   }
+  void setExecutionProgressCallback(
+      orc::presenters::DagExecutionProgressCallback callback) override {
+    presenter_.setExecutionProgressCallback(std::move(callback));
+  }
 
   uint64_t subscribeInvalidation(
       orc::presenters::ObservationInvalidationCallback callback) override {
@@ -734,6 +738,18 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
                     event.active, event.percent_complete, event.computing,
                     static_cast<qulonglong>(event.outstanding_nodes));
               });
+
+      // Report on-demand execution so the view can show what the worker is
+      // doing while a large source is opened. The callback fires on this
+      // worker thread inside a request; the queued signal marshals to the GUI
+      // thread. Node-granular and low-rate (one event per node), so unlike the
+      // per-frame trigger progress it needs no rate gate.
+      worker_render_presenter_->setExecutionProgressCallback(
+          [this](const orc::presenters::DagExecutionProgressEvent& event) {
+            emit executionProgress(event.node_id,
+                                   static_cast<qulonglong>(event.current),
+                                   static_cast<qulonglong>(event.total));
+          });
     }
 
     // Set the new DAG (cast away const since setDAG signature uses non-const

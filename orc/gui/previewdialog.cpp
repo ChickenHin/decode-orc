@@ -91,6 +91,20 @@ void PreviewDialog::setSignalControlsVisible(bool visible) {
   signal_combo_->setVisible(visible);
 }
 
+void PreviewDialog::setObserverAvailabilityForFormat(
+    orc::presenters::VideoFormat format) {
+  // SMPTE 170M-2004 §8.4 / CEA-608-E §4: the NTSC-specific observers (FM code,
+  // white flag) and line 21 closed captions exist only on 525-line NTSC.
+  const bool is_ntsc = (format == orc::presenters::VideoFormat::NTSC);
+  // ETSI EN 300 706 §1: System B teletext is carried on 625-line PAL only, so
+  // PAL-M (525-line) is deliberately excluded here.
+  const bool is_pal = (format == orc::presenters::VideoFormat::PAL);
+
+  show_ntsc_observer_action_->setEnabled(is_ntsc);
+  show_closed_caption_action_->setEnabled(is_ntsc);
+  show_teletext_action_->setEnabled(is_pal);
+}
+
 PreviewDialog::~PreviewDialog() = default;
 
 const std::string& PreviewDialog::kComponentVectorscopeViewIdRef() {
@@ -184,6 +198,7 @@ void PreviewDialog::setupUI() {
                                2000);
       return;
     }
+    frame_timing_open_requested_ = true;
     emit frameTimingRequested();
   });
 
@@ -198,6 +213,7 @@ void PreviewDialog::setupUI() {
           "Waveform monitor is not available for this stage", 2000);
       return;
     }
+    waveform_monitor_open_requested_ = true;
     emit waveformMonitorRequested();
   });
 
@@ -463,11 +479,23 @@ void PreviewDialog::setupUI() {
   // Create waveform monitor dialog
   waveform_monitor_dialog_ = new WaveformMonitorDialog(this);
 
-  // Connect to dialog hide/close events to disable cross-hairs
-  connect(frame_scope_dialog_, &QDialog::finished, this,
-          [this]() { preview_widget_->setCrosshairsEnabled(false); });
-  connect(frame_scope_dialog_, &QDialog::rejected, this,
-          [this]() { preview_widget_->setCrosshairsEnabled(false); });
+  // Connect to dialog hide/close events to disable cross-hairs and drop the
+  // "user wants this open" intent, so an in-flight data response cannot
+  // re-open a dialog the user has just closed.
+  connect(frame_scope_dialog_, &QDialog::finished, this, [this]() {
+    line_scope_open_requested_ = false;
+    preview_widget_->setCrosshairsEnabled(false);
+  });
+  connect(frame_scope_dialog_, &QDialog::rejected, this, [this]() {
+    line_scope_open_requested_ = false;
+    preview_widget_->setCrosshairsEnabled(false);
+  });
+
+  connect(frame_timing_dialog_, &QDialog::finished, this,
+          [this]() { frame_timing_open_requested_ = false; });
+
+  connect(waveform_monitor_dialog_, &QDialog::finished, this,
+          [this]() { waveform_monitor_open_requested_ = false; });
 
   // Adapt FrameScopeDialog::lineNavigationRequested (size_t frame_line) to
   // PreviewDialog::lineNavigationRequested (int current_line).
@@ -487,6 +515,7 @@ void PreviewDialog::setupUI() {
                   "Line scope is not available for this stage", 2000);
               return;
             }
+            line_scope_open_requested_ = true;
             emit lineScopeRequested(image_x, image_y);
           });
 }
@@ -546,19 +575,25 @@ void PreviewDialog::setAvailablePreviewViews(
     show_waveform_monitor_action_->setEnabled(waveform_monitor_available);
   }
 
-  if (!line_scope_available && frame_scope_dialog_ &&
-      frame_scope_dialog_->isVisible()) {
-    frame_scope_dialog_->close();
+  if (!line_scope_available) {
+    line_scope_open_requested_ = false;
+    if (frame_scope_dialog_ && frame_scope_dialog_->isVisible()) {
+      frame_scope_dialog_->close();
+    }
   }
 
-  if (!frame_timing_available && frame_timing_dialog_ &&
-      frame_timing_dialog_->isVisible()) {
-    frame_timing_dialog_->close();
+  if (!frame_timing_available) {
+    frame_timing_open_requested_ = false;
+    if (frame_timing_dialog_ && frame_timing_dialog_->isVisible()) {
+      frame_timing_dialog_->close();
+    }
   }
 
-  if (!waveform_monitor_available && waveform_monitor_dialog_ &&
-      waveform_monitor_dialog_->isVisible()) {
-    waveform_monitor_dialog_->close();
+  if (!waveform_monitor_available) {
+    waveform_monitor_open_requested_ = false;
+    if (waveform_monitor_dialog_ && waveform_monitor_dialog_->isVisible()) {
+      waveform_monitor_dialog_->close();
+    }
   }
 
   if (show_component_vectorscope_action_) {
@@ -681,6 +716,13 @@ void PreviewDialog::closeEvent(QCloseEvent* event) {
 }
 
 void PreviewDialog::closeChildDialogs() {
+  // Drop every open-intent first: a request may still be in flight for a
+  // dialog that is not yet visible, and its response must not open a window
+  // after the preview has gone.
+  line_scope_open_requested_ = false;
+  frame_timing_open_requested_ = false;
+  waveform_monitor_open_requested_ = false;
+
   if (frame_scope_dialog_ && frame_scope_dialog_->isVisible()) {
     frame_scope_dialog_->close();
   }
@@ -781,6 +823,13 @@ void PreviewDialog::showLineScope(
     const std::vector<int16_t>& y_samples,
     const std::vector<int16_t>& c_samples) {
   if (frame_scope_dialog_) {
+    // Line samples arrive asynchronously. If the user closed the scope while
+    // a request was in flight (easily done during playback, which re-requests
+    // on every frame), the response must not resurrect the window.
+    if (!frame_scope_dialog_->isVisible() && !line_scope_open_requested_) {
+      return;
+    }
+
     current_line_scope_preview_width_ = preview_image_width;
     current_line_scope_samples_count_ = static_cast<int>(samples.size());
     if (current_line_scope_samples_count_ == 0 && !y_samples.empty()) {

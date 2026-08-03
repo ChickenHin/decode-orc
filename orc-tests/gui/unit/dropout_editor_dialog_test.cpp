@@ -63,6 +63,8 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   bool getShowDropouts() const override { return false; }
   void setShowDropouts(bool) override {}
   void setBackgroundObservationEnabled(bool) override {}
+  void setExecutionProgressCallback(
+      orc::presenters::DagExecutionProgressCallback) override {}
 
   uint64_t subscribeInvalidation(
       orc::presenters::ObservationInvalidationCallback) override {

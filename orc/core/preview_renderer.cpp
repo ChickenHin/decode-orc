@@ -631,6 +631,11 @@ void PreviewRenderer::set_show_dropouts(bool show) { show_dropouts_ = show; }
 
 bool PreviewRenderer::get_show_dropouts() const { return show_dropouts_; }
 
+void PreviewRenderer::set_execution_progress_callback(
+    DAGExecutor::ProgressCallback callback) {
+  dag_executor_.set_progress_callback(std::move(callback));
+}
+
 VideoFrameRepresentationPtr PreviewRenderer::get_representation_at_node(
     const NodeID& node_id) const {
   if (!dag_ || !frame_renderer_) {

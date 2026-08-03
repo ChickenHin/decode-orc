@@ -59,6 +59,12 @@ dialogs that update as you navigate frames.
 | Quality Metrics | Ctrl+Shift+M | Per-frame signal quality statistics: SNR, colour burst level, and dropout sample count. |
 | NTSC Observer | Ctrl+Shift+N | NTSC-specific frame metadata: FM code status and white flag bit. |
 | Teletext Pages | Ctrl+Shift+X | Render PAL World System Teletext pages recovered from the VBI of recent frames. |
+| Closed Captions | Ctrl+Shift+C | Decode the EIA-608 line 21 caption service into a running transcript. |
+
+NTSC Observer and Closed Captions are available only on NTSC projects, and
+Teletext Pages only on PAL projects; the standard the entry does not apply to
+leaves it greyed out. PAL-M is 525-line and carries neither, so all three are
+unavailable there.
 
 ## Hints Menu
 

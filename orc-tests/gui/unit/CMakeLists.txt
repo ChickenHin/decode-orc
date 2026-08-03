@@ -93,6 +93,7 @@ orc_add_gui_unit_tests(
             theme_manager_test.cpp
             node_type_helper_port_test.cpp
             observation_status_formatter_test.cpp
+            project_load_status_formatter_test.cpp
             quick_project_planner_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
@@ -130,6 +131,8 @@ orc_add_gui_unit_tests(
         dropout_editor_dialog_test.cpp
         field_preview_crosshair_test.cpp
         preview_dialog_playback_test.cpp
+        preview_dialog_observer_availability_test.cpp
+        preview_dialog_subwindow_lifecycle_test.cpp
         theme_controller_test.cpp
         plugin_browse_dialog_test.cpp
         plugin_manager_dialog_test.cpp

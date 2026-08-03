@@ -16,6 +16,7 @@
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types
 #include <orc_analysis.h>                     // For AnalysisToolInfo
 
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QPointer>
 #include <QProgressDialog>
@@ -179,6 +180,8 @@ class MainWindow : public QMainWindow {
       orc::presenters::ClosedCaptionFieldDataView field2);
   void onObservationProgress(bool active, int percent_complete, bool computing,
                              qulonglong outstanding_nodes);
+  void onExecutionProgress(int node_id_value, qulonglong current,
+                           qulonglong total);
   void onObservationsInvalidated(QVector<int> changed_node_ids);
   void onAvailableOutputsReady(uint64_t request_id,
                                std::vector<orc::PreviewOutputInfo> outputs);
@@ -267,6 +270,16 @@ class MainWindow : public QMainWindow {
   QProgressDialog* createAnalysisProgressDialog(
       const QString& title, const QString& message,
       QPointer<QProgressDialog>& existingDialog);
+
+  // Project-load feedback. Opening a project hands the real work (rebuilding
+  // renderers, then executing the DAG far enough to know what can be previewed)
+  // to the coordinator's worker thread, which for a large source takes long
+  // enough that the window otherwise looks hung — the preview only appears when
+  // the available-outputs response lands. begin/update/end drive a modal
+  // progress dialog across exactly that window.
+  void beginProjectLoadProgress();
+  void updateProjectLoadProgressLabel();
+  void endProjectLoadProgress();
   void closeAllDialogs();  ///< Close all open dialogs when switching projects
   void createAndShowAnalysisDialog(const orc::NodeID& node_id,
                                    const std::string& stage_name);
@@ -437,6 +450,18 @@ class MainWindow : public QMainWindow {
   // Trigger progress tracking (now via coordinator signals)
   // Use QPointer to auto-null when dialog is deleted
   QPointer<QProgressDialog> trigger_progress_dialog_;
+
+  // Project-load progress state (see beginProjectLoadProgress()). The dialog is
+  // created up front but only shown once the load has outlived
+  // project_load_show_timer_, so projects that open quickly never flash it.
+  bool project_load_in_progress_{false};
+  QPointer<QProgressDialog> project_load_progress_dialog_;
+  QTimer* project_load_show_timer_{nullptr};  ///< Delays first appearance
+  QTimer* project_load_tick_timer_{nullptr};  ///< Refreshes the elapsed counter
+  QElapsedTimer project_load_elapsed_;
+  QString project_load_stage_label_;  ///< Stage the worker last reported
+  qulonglong project_load_current_{0};
+  qulonglong project_load_total_{0};
 
   // Analysis progress dialogs per node (QPointer auto-nulls when deleted)
   std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>

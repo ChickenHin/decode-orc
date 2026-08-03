@@ -88,6 +88,11 @@ class FieldPreviewWidget : public QWidget {
   void setCrosshairsEnabled(bool enabled);
 
   /**
+   * @brief Whether cross-hairs display is currently enabled
+   */
+  bool crosshairsEnabled() const { return crosshairs_enabled_; }
+
+  /**
    * @brief Update cross-hairs position (in image coordinates)
    * @param image_x X coordinate in image space
    * @param image_y Y coordinate in image space
