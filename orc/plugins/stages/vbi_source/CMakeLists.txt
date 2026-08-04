@@ -15,6 +15,11 @@ add_library(orc-vbi-source STATIC
     vbi_line_reader.cpp
     vbi_source_validation.cpp
     vbi_transport.cpp
+    vbi_teletext_service.cpp
+    vbi_frame_geometry.cpp
+    vbi_line_mapping.cpp
+    vbi_output_levels.cpp
+    vbi_level_mapper.cpp
 )
 
 target_include_directories(orc-vbi-source
