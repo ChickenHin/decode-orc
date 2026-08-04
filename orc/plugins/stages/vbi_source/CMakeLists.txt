@@ -26,6 +26,11 @@ add_library(orc-vbi-source STATIC
     vbi_cri_correlator.cpp
     vbi_offset_calibration.cpp
     vbi_timing_cross_checks.cpp
+    vbi_vertical_interval.cpp
+    vbi_line_synthesis.cpp
+    vbi_burst_synthesis.cpp
+    vbi_frame_synthesis.cpp
+    vbi_frame_sequence.cpp
 )
 
 target_include_directories(orc-vbi-source

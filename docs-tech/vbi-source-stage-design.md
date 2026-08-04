@@ -744,6 +744,16 @@ standard. ld-decode's `SysParams` is a convenient citable source for the pulse g
 **Recommendation:** default `synthesise_burst: true` for both systems, note it in
 `capture_notes`, and let option 3 remain unimplemented until someone has a use for it.
 
+**Clipping the record to the data region.** A stored record covers more of the output line
+than the data region does, at both ends: with the measured 262-sample offset a bt8x8 PAL
+record opens at 7.39 µs, which is *inside* the burst window, and its 2044 valid samples run
+on past the end of the 360-bit packet into the front porch. The resampled record is
+therefore clipped to the data region, with a guard of one bit period each side so the
+leading edge of the first run-in bit and the trailing edge of the last payload bit survive.
+Without the clip the synthesised burst would be overwritten by a teletext-scaled fragment of
+the source's own burst tail, which both spoils the burst and undermines the `LOCKED` claim
+that rests on it (§2.4).
+
 **Active picture.** Fill all non-teletext lines with a standards-correct blank line — sync,
 burst, and blanking held at black level. The result is a legal black raster that any CVBS
 consumer can open, rather than a frame full of structurally odd lines.
