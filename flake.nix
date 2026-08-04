@@ -100,6 +100,13 @@
           ps."mkdocs-awesome-nav"
         ]);
 
+        # Qt Multimedia dlopens libpipewire-0.3.so.0 at runtime (PipeWire capture
+        # support) but nixpkgs' qtmultimedia carries no RPATH entry for it, so
+        # anything linking Qt6::Multimedia logs
+        #   qt.multimedia.symbolsresolver: Couldn't load pipewire-0.3 library
+        # unless PipeWire is on the library search path. Used on Linux only.
+        pipewireLibPath = "${pkgs.pipewire}/lib";
+
         # Build the decode-orc package (primary output).
         mkDecodeOrc = {}: stdenv.mkDerivation {
           pname = "decode-orc";
@@ -140,6 +147,11 @@
               "--set"
               "GIO_EXTRA_MODULES"
               "${pkgs.glib-networking}/lib/gio/modules"
+              # Let Qt Multimedia resolve libpipewire-0.3 (see pipewireLibPath).
+              "--prefix"
+              "LD_LIBRARY_PATH"
+              ":"
+              pipewireLibPath
             ];
 
           preFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
@@ -166,6 +178,9 @@
             # Qt6 for GUI
             qt6.qtbase
             qt6.qttools
+
+            # Audio output device for preview playback (QAudioSink)
+            qt6.qtmultimedia
 
             # QtNodes built from flake input
             qtNodes
@@ -224,6 +239,7 @@
                     --set-rpath "$out/lib:$out/lib/orc-stage-plugins:${pkgs.lib.makeLibraryPath [
                       pkgs.stdenv.cc.cc
                       pkgs.qt6.qtbase
+                      pkgs.qt6.qtmultimedia
                       pkgs.curl
                       pkgs.ffmpeg
                       pkgs.soxr
@@ -426,6 +442,10 @@
             # Build CMAKE_PREFIX_PATH from all build inputs so that IDEs (e.g. CLion)
             # launched from this shell can run cmake without extra configuration.
             export CMAKE_PREFIX_PATH="$(echo $buildInputs $nativeBuildInputs | tr ' ' '\n' | tr '\n' ':')"
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            # Qt Multimedia dlopens libpipewire-0.3 (see pipewireLibPath).
+            export LD_LIBRARY_PATH="${pipewireLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            ''}
 
             # Ensure build directory exists
             mkdir -p build
@@ -454,6 +474,10 @@
           shellHook = ''
             export EZPWD_INCLUDE_DIR=${ezpwd-headers}
             export CMAKE_PREFIX_PATH="$(echo $buildInputs $nativeBuildInputs | tr ' ' '\n' | tr '\n' ':')"
+            ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            # Qt Multimedia dlopens libpipewire-0.3 (see pipewireLibPath).
+            export LD_LIBRARY_PATH="${pipewireLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            ''}
             mkdir -p build
           '';
 

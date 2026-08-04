@@ -18,8 +18,11 @@
 #include <QMetaType>
 #include <QSignalSpy>
 #include <QThread>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include "mocks/mock_render_presenter.h"
 
@@ -27,6 +30,8 @@ Q_DECLARE_METATYPE(orc::PreviewRenderResult)
 Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
 Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
 Q_DECLARE_METATYPE(orc::presenters::TeletextFieldPacketsView)
+Q_DECLARE_METATYPE(std::vector<orc::AudioPairView>)
+Q_DECLARE_METATYPE(std::shared_ptr<orc::presenters::IAudioStreamReader>)
 
 namespace gui_unit_test {
 
@@ -161,6 +166,47 @@ TEST(RenderCoordinatorTest, TriggerRequests_AreProcessedInOrder) {
   coordinator.stop();
 }
 
+namespace {
+
+// A render the test can hold open: it announces that it has started, then
+// blocks until released. Lets a test fill the request queue behind a render
+// that is provably already in flight, instead of racing the worker.
+struct BlockingRender {
+  std::atomic<bool> started{false};
+  std::atomic<bool> release{false};
+  std::atomic<int> calls{0};
+
+  void wait() {
+    started.store(true);
+    while (!release.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+};
+
+orc::PreviewRenderResult makeRenderResult(orc::NodeID node_id,
+                                          orc::PreviewOutputType output_type,
+                                          uint64_t output_index) {
+  return orc::PreviewRenderResult{
+      {}, true, "", node_id, output_type, output_index, std::nullopt};
+}
+
+// Spin the calling thread (no event loop needed) until @p predicate holds.
+template <typename Predicate>
+bool waitForFlag(Predicate predicate, int timeout_ms = 2000) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return predicate();
+}
+
+}  // namespace
+
 TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
   (void)kMetatypesRegistered;
 
@@ -170,21 +216,20 @@ TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
   EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
   EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
 
-  EXPECT_CALL(*mock_presenter,
-              renderPreview(orc::NodeID(9),
-                            orc::PreviewOutputType::Frame_Field1, 0, ""))
-      .WillOnce(
-          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
-                    uint64_t output_index, const std::string&) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            return orc::PreviewRenderResult{
-                {}, true, "", node_id, output_type, output_index, std::nullopt};
-          }))
-      .WillOnce(
-          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
-                    uint64_t output_index, const std::string&) {
-            return orc::PreviewRenderResult{
-                {}, true, "", node_id, output_type, output_index, std::nullopt};
+  auto blocker = std::make_shared<BlockingRender>();
+  EXPECT_CALL(
+      *mock_presenter,
+      renderPreview(orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 0, "",
+                    testing::_))
+      .Times(2)
+      .WillRepeatedly(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint) {
+            if (blocker->calls.fetch_add(1) == 0) {
+              blocker->wait();
+            }
+            return makeRenderResult(node_id, output_type, output_index);
           }));
 
   RenderCoordinator coordinator(
@@ -201,14 +246,172 @@ TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
 
   const uint64_t first_id = coordinator.requestPreview(
       orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 0);
+
+  // The second request must be queued while the first is already rendering;
+  // otherwise it would supersede the first in the queue and the first would
+  // never run at all (that is the pruning test below, not this one).
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
   const uint64_t second_id = coordinator.requestPreview(
       orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 0);
+  blocker->release.store(true);
 
   ASSERT_TRUE(waitForCount(preview_spy, 1));
   EXPECT_EQ(preview_spy.count(), 1);
   EXPECT_EQ(preview_spy.at(0).at(0).toULongLong(), second_id);
   EXPECT_NE(first_id, second_id);
 
+  coordinator.stop();
+}
+
+// A burst of navigations (playback catching up, or a scrub that outruns the
+// renderer) used to queue one render per position; every one but the last was
+// rendered in full and then thrown away. Only the newest is ever displayed, so
+// the queued ones are dropped before they cost anything.
+TEST(RenderCoordinatorTest, SupersededQueuedPreviews_AreDiscardedUnrendered) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
+
+  auto blocker = std::make_shared<BlockingRender>();
+  std::mutex rendered_mutex;
+  std::vector<uint64_t> rendered_indices;
+
+  EXPECT_CALL(*mock_presenter, renderPreview(orc::NodeID(4), testing::_,
+                                             testing::_, "", testing::_))
+      .WillRepeatedly(Invoke(
+          [&, blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                       uint64_t output_index, const std::string&,
+                       orc::PreviewNavigationHint) {
+            {
+              const std::lock_guard<std::mutex> lock(rendered_mutex);
+              rendered_indices.push_back(output_index);
+            }
+            if (blocker->calls.fetch_add(1) == 0) {
+              blocker->wait();
+            }
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(456));
+
+  // Index 0 occupies the worker; 1..7 pile up behind it.
+  coordinator.requestPreview(orc::NodeID(4),
+                             orc::PreviewOutputType::Frame_Field1, 0);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+
+  uint64_t last_id = 0;
+  for (uint64_t index = 1; index <= 7; ++index) {
+    last_id = coordinator.requestPreview(
+        orc::NodeID(4), orc::PreviewOutputType::Frame_Field1, index);
+  }
+  blocker->release.store(true);
+
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  EXPECT_EQ(preview_spy.count(), 1);
+  EXPECT_EQ(preview_spy.at(0).at(0).toULongLong(), last_id);
+
+  // Give any wrongly-retained request time to be rendered before asserting.
+  QThread::msleep(50);
+  QCoreApplication::processEvents();
+
+  const std::lock_guard<std::mutex> lock(rendered_mutex);
+  EXPECT_EQ(rendered_indices, (std::vector<uint64_t>{0, 7}))
+      << "superseded queued previews were rendered instead of discarded";
+
+  coordinator.stop();
+}
+
+// The hint is what tells a stage that playback is running and adjacent frames
+// are worth pre-fetching. It has to survive the trip through the queue.
+TEST(RenderCoordinatorTest, PreviewNavigationHint_IsForwardedToThePresenter) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
+
+  EXPECT_CALL(*mock_presenter,
+              renderPreview(orc::NodeID(5), testing::_, 3, "",
+                            orc::PreviewNavigationHint::Sequential))
+      .WillOnce(
+          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint) {
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(567));
+
+  coordinator.requestPreview(orc::NodeID(5),
+                             orc::PreviewOutputType::Frame_Field1, 3, "",
+                             orc::PreviewNavigationHint::Sequential);
+
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  coordinator.stop();
+}
+
+// Scrubbing and one-off navigations must keep rendering exactly as before.
+TEST(RenderCoordinatorTest, PreviewRequestsDefaultToTheRandomHint) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
+
+  EXPECT_CALL(*mock_presenter,
+              renderPreview(orc::NodeID(6), testing::_, 2, "",
+                            orc::PreviewNavigationHint::Random))
+      .WillOnce(
+          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint) {
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(678));
+
+  coordinator.requestPreview(orc::NodeID(6),
+                             orc::PreviewOutputType::Frame_Field1, 2);
+
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
   coordinator.stop();
 }
 
@@ -724,6 +927,319 @@ TEST(RenderCoordinatorTest, ExecutionProgress_ForwardedToSignal) {
   EXPECT_EQ(execution_spy.at(1).at(1).toULongLong(), 2ull);
 
   coordinator.stop();
+}
+
+// --- Preview audio playback: pair enumeration and reader creation ---------
+
+namespace {
+
+// Minimal IAudioStreamReader stand-in: the coordinator only moves the pointer
+// across threads, so no behaviour is needed beyond identity.
+class StubAudioStreamReader final : public orc::presenters::IAudioStreamReader {
+ public:
+  void prime(const orc::presenters::AudioPrimeProgressCallback&) override {}
+  std::vector<float> readFrames(orc::FrameID, uint64_t) override { return {}; }
+  uint64_t frameForPairPosition(uint64_t) const override { return 0; }
+  uint64_t pairPositionForFrame(orc::FrameID) const override { return 0; }
+  orc::FrameIDRange frameRange() const override { return {0, 0}; }
+};
+
+orc::AudioPairView makePairView(size_t index, std::string name,
+                                std::string origin) {
+  orc::AudioPairView view;
+  view.index = index;
+  view.name = std::move(name);
+  view.origin = std::move(origin);
+  return view;
+}
+
+}  // namespace
+
+TEST(RenderCoordinatorTest, AudioChannelPairsRequest_RoundTripsThroughWorker) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, getAudioChannelPairs(orc::NodeID(3)))
+      .WillOnce(Return(std::vector<orc::AudioPairView>{
+          makePairView(0, "Analogue", "analogue"),
+          makePairView(1, "EFM digital audio", "efm")}));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy pairs_spy(&coordinator,
+                       &RenderCoordinator::audioChannelPairsReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestAudioChannelPairs(orc::NodeID(3));
+
+  ASSERT_TRUE(waitForCount(pairs_spy, 1));
+  EXPECT_EQ(pairs_spy.at(0).at(0).toULongLong(), request_id);
+  const auto pairs =
+      pairs_spy.at(0).at(1).value<std::vector<orc::AudioPairView>>();
+  ASSERT_EQ(pairs.size(), 2u);
+  EXPECT_EQ(pairs[1].index, 1u);
+  EXPECT_EQ(pairs[1].name, "EFM digital audio");
+  EXPECT_EQ(pairs[1].origin, "efm");
+
+  coordinator.stop();
+}
+
+// An audio-less node answers with an empty list, not an error: the dialogue's
+// combo simply stays disabled.
+TEST(RenderCoordinatorTest,
+     AudioChannelPairsRequest_EmptyListForNodeWithNoAudio) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, getAudioChannelPairs(orc::NodeID(5)))
+      .WillOnce(Return(std::vector<orc::AudioPairView>{}));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy pairs_spy(&coordinator,
+                       &RenderCoordinator::audioChannelPairsReady);
+  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestAudioChannelPairs(orc::NodeID(5));
+
+  ASSERT_TRUE(waitForCount(pairs_spy, 1));
+  EXPECT_TRUE(
+      pairs_spy.at(0).at(1).value<std::vector<orc::AudioPairView>>().empty());
+  EXPECT_EQ(error_spy.count(), 0);
+
+  coordinator.stop();
+}
+
+// The viewed node can change while a heavy DAG is still enumerating, so only
+// the newest enumeration is delivered.
+TEST(RenderCoordinatorTest, StaleAudioChannelPairsResponses_AreSuppressed) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, getAudioChannelPairs(testing::_))
+      .WillOnce(Invoke([](orc::NodeID) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return std::vector<orc::AudioPairView>{
+            makePairView(0, "First", "analogue")};
+      }))
+      .WillOnce(Invoke([](orc::NodeID) {
+        return std::vector<orc::AudioPairView>{
+            makePairView(0, "Second", "efm")};
+      }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy pairs_spy(&coordinator,
+                       &RenderCoordinator::audioChannelPairsReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t first_id =
+      coordinator.requestAudioChannelPairs(orc::NodeID(1));
+  const uint64_t second_id =
+      coordinator.requestAudioChannelPairs(orc::NodeID(2));
+
+  ASSERT_TRUE(waitForCount(pairs_spy, 1));
+  EXPECT_EQ(pairs_spy.count(), 1);
+  EXPECT_EQ(pairs_spy.at(0).at(0).toULongLong(), second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(
+      pairs_spy.at(0).at(1).value<std::vector<orc::AudioPairView>>().at(0).name,
+      "Second");
+
+  coordinator.stop();
+}
+
+TEST(RenderCoordinatorTest, AudioStreamReaderRequest_DeliversReaderFromWorker) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto reader = std::make_shared<StubAudioStreamReader>();
+
+  EXPECT_CALL(*mock_presenter, createAudioStreamReader(orc::NodeID(3), 1u))
+      .WillOnce(Return(reader));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy reader_spy(&coordinator,
+                        &RenderCoordinator::audioStreamReaderReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestAudioStreamReader(orc::NodeID(3), 1);
+
+  ASSERT_TRUE(waitForCount(reader_spy, 1));
+  EXPECT_EQ(reader_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_EQ(reader_spy.at(0)
+                .at(1)
+                .value<std::shared_ptr<orc::presenters::IAudioStreamReader>>()
+                .get(),
+            reader.get());
+
+  coordinator.stop();
+}
+
+// An unusable pair is reported as a null reader rather than an error, so the
+// dialogue can fall back to the video-only playback path.
+TEST(RenderCoordinatorTest,
+     AudioStreamReaderRequest_NullReaderForUnusablePair) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, createAudioStreamReader(orc::NodeID(3), 0u))
+      .WillOnce(Return(nullptr));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy reader_spy(&coordinator,
+                        &RenderCoordinator::audioStreamReaderReady);
+  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestAudioStreamReader(orc::NodeID(3), 0);
+
+  ASSERT_TRUE(waitForCount(reader_spy, 1));
+  EXPECT_EQ(reader_spy.at(0)
+                .at(1)
+                .value<std::shared_ptr<orc::presenters::IAudioStreamReader>>(),
+            nullptr);
+  EXPECT_EQ(error_spy.count(), 0);
+
+  coordinator.stop();
+}
+
+// Reselecting the pair while the first creation is still resolving must not
+// deliver the superseded reader.
+TEST(RenderCoordinatorTest, StaleAudioStreamReaderResponses_AreSuppressed) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto first_reader = std::make_shared<StubAudioStreamReader>();
+  auto second_reader = std::make_shared<StubAudioStreamReader>();
+
+  EXPECT_CALL(*mock_presenter, createAudioStreamReader(orc::NodeID(3), 0u))
+      .WillOnce(Invoke([first_reader](orc::NodeID, size_t) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        return std::static_pointer_cast<orc::presenters::IAudioStreamReader>(
+            first_reader);
+      }));
+  EXPECT_CALL(*mock_presenter, createAudioStreamReader(orc::NodeID(3), 1u))
+      .WillOnce(Return(second_reader));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy reader_spy(&coordinator,
+                        &RenderCoordinator::audioStreamReaderReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t first_id =
+      coordinator.requestAudioStreamReader(orc::NodeID(3), 0);
+  const uint64_t second_id =
+      coordinator.requestAudioStreamReader(orc::NodeID(3), 1);
+
+  ASSERT_TRUE(waitForCount(reader_spy, 1));
+  EXPECT_EQ(reader_spy.count(), 1);
+  EXPECT_EQ(reader_spy.at(0).at(0).toULongLong(), second_id);
+  EXPECT_NE(first_id, second_id);
+  EXPECT_EQ(reader_spy.at(0)
+                .at(1)
+                .value<std::shared_ptr<orc::presenters::IAudioStreamReader>>()
+                .get(),
+            second_reader.get());
+
+  coordinator.stop();
+}
+
+// Requests still queued at shutdown are simply dropped: stop() must return and
+// no reader may be delivered afterwards.
+TEST(RenderCoordinatorTest, Shutdown_WithPendingAudioReaderRequest_IsClean) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto reader = std::make_shared<StubAudioStreamReader>();
+
+  // A slow first creation keeps the worker busy while stop() is called.
+  ON_CALL(*mock_presenter, createAudioStreamReader(testing::_, testing::_))
+      .WillByDefault(Invoke([reader](orc::NodeID, size_t) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        return std::static_pointer_cast<orc::presenters::IAudioStreamReader>(
+            reader);
+      }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy reader_spy(&coordinator,
+                        &RenderCoordinator::audioStreamReaderReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestAudioStreamReader(orc::NodeID(3), 0);
+  coordinator.requestAudioStreamReader(orc::NodeID(3), 1);
+  coordinator.stop();
+
+  // Deliveries are queued signals; none may arrive for a stopped coordinator.
+  QCoreApplication::processEvents();
+  EXPECT_LE(reader_spy.count(), 1);
 }
 
 }  // namespace gui_unit_test

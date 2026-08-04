@@ -15,7 +15,9 @@
 #include <orc/stage/orc_source_parameters.h>   // Public API SourceParameters
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>   // Public API rendering types
+#include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc_analysis_series.h>  // Analysis display-series view types
+#include <orc_audio_views.h>      // AudioPairView
 #include <orc_preview_views.h>
 
 #include <cstdint>
@@ -26,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "audio_stream_reader.h"            // IAudioStreamReader
 #include "dag_execution_progress_view.h"    // DagExecutionProgressCallback
 #include "observation_invalidation_view.h"  // ObservationInvalidationEvent
 #include "observation_progress_view.h"  // ObservationProgressEvent, ObservationDataReadyCallback
@@ -204,14 +207,17 @@ class RenderPresenter {
    * @param output_type Type of output (Field, Frame, Luma, etc.)
    * @param output_index Index of the output (0-based)
    * @param option_id Optional rendering option ID
+   * @param hint How the frame is being navigated to. Sequential tells stages
+   *        that playback is running and adjacent frames are worth pre-fetching;
+   *        scrubbing and one-off renders stay Random.
    * @return Preview render result with RGB image
    *
    * Thread-safe: Yes (uses internal DAG)
    */
-  orc::PreviewRenderResult renderPreview(NodeID node_id,
-                                         orc::PreviewOutputType output_type,
-                                         uint64_t output_index,
-                                         const std::string& option_id = "");
+  orc::PreviewRenderResult renderPreview(
+      NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
+      const std::string& option_id = "",
+      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random);
 
   /**
    * @brief Get available output types for a node
@@ -585,6 +591,43 @@ class RenderPresenter {
    * @return One name per channel pair; empty when no audio or unavailable
    */
   std::vector<std::string> getAudioChannelPairNames(NodeID node_id);
+
+  /**
+   * @brief Audio channel pairs available at a node's output
+   *
+   * Richer form of getAudioChannelPairNames() for callers that need the pair's
+   * provenance as well as its name (the preview dialogue's audio selector).
+   * Resolves the representation produced at @p node_id and returns one entry
+   * per pair, in pair-index order.
+   *
+   * Returns an empty list — the normal case, not an error — when the node
+   * carries no audio, when the representation cannot be resolved, or when the
+   * video system is unknown (the SMPTE 272M-1994 §14.3 cadence is then
+   * undefined, so no audio can be addressed).
+   *
+   * @param node_id Node whose output representation is inspected
+   * @return One view per channel pair; empty when there is no usable audio
+   */
+  std::vector<orc::AudioPairView> getAudioChannelPairs(NodeID node_id);
+
+  /**
+   * @brief Create a frame-addressed reader for one audio channel pair
+   *
+   * Resolves the representation at @p node_id (which executes the DAG) and
+   * wraps channel pair @p pair as an IAudioStreamReader. The reader holds the
+   * representation alive for its own lifetime.
+   *
+   * @warning Must be called on the render worker thread: resolving the
+   * representation executes the DAG, and the renderers are single-threaded by
+   * contract. The returned reader may then be primed and read from one other
+   * thread (see IAudioStreamReader).
+   *
+   * @param node_id Node whose output representation supplies the audio
+   * @param pair    Channel-pair index, < getAudioChannelPairs().size()
+   * @return Reader, or nullptr when the node has no such usable pair
+   */
+  std::shared_ptr<IAudioStreamReader> createAudioStreamReader(NodeID node_id,
+                                                              size_t pair);
 
   /**
    * @brief Execute DAG to a specific node and return field representation

@@ -27,7 +27,7 @@ The stage wraps the incoming frame representation and remaps channels on the fly
 
 By default the resulting pair keeps its existing description. Tick **Add description** to give it a new one (see `set_description` / `description` below).
 
-The stage fails validation when the selected channel pair does not exist on the input, when a chosen target pair does not exist, or when appending would exceed the 8-pair limit.
+When the input cannot satisfy the operation — the selected channel pair does not exist, a chosen target pair does not exist, or appending would exceed the 8-pair limit — the stage passes its input through unchanged and logs a warning. Audio and video reach the output untouched; nothing downstream is interrupted. The most common cause is a source that carries no audio at all (for example a plain TBC without an accompanying audio import), in which case the parameter dialog says so.
 
 ## Parameters
 

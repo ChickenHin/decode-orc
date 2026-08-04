@@ -18,21 +18,28 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMoveEvent>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QSettings>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QStatusBar>
+#include <QThread>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <limits>
+#include <utility>
 
+#include "audio_channel_pair_notice.h"
 #include "fieldpreviewwidget.h"
 #include "framescopedialog.h"
 #include "frametimingdialog.h"
 #include "logging.h"
 #include "preview/histogram_dialog.h"
 #include "preview/vectorscope_dialog.h"
+#include "preview_audio_chase.h"
 #include "stage_help_dialog.h"
 #include "waveformmonitordialog.h"
 
@@ -44,6 +51,19 @@ constexpr const char* kWaveformMonitorViewId = "preview.frame_timing";
 constexpr const char* kComponentVectorscopeViewId = "preview.vectorscope";
 constexpr const char* kHistogramViewId = "preview.histogram";
 
+// Combo entry that plays nothing — it is also how the user silences playback,
+// so it is named for both. Always present, so the selector reads the same
+// whether or not the node happens to carry audio.
+constexpr const char* kNoAudioEntry = "Mute/None";
+
+// Preparing audio is usually instantaneous (a CVBS source reads its WAV per
+// frame) but can take minutes (an EFM disc decode). Only put a dialog on
+// screen once the wait has become long enough to need explaining.
+constexpr int kAudioPrimeDialogDelayMs = 400;
+
+// How often the prime dialog picks up the worker's published progress.
+constexpr int kAudioPrimeTickMs = 200;
+
 }  // namespace
 
 PreviewDialog::PreviewDialog(QWidget* parent)
@@ -53,24 +73,41 @@ PreviewDialog::PreviewDialog(QWidget* parent)
       waveform_monitor_dialog_(nullptr),
       vectorscope_dialog_(nullptr),
       nav_debounce_timer_(new QTimer(this)),
-      playback_timer_(new QTimer(this)) {
+      playback_timer_(new QTimer(this)),
+      audio_controller_(new orc::gui::PreviewAudioController(this)),
+      audio_prime_show_timer_(new QTimer(this)),
+      audio_prime_tick_timer_(new QTimer(this)) {
   nav_debounce_timer_->setSingleShot(true);
   nav_debounce_timer_->setInterval(100);  // ms: coalesces rapid scrub moves
-  connect(nav_debounce_timer_, &QTimer::timeout,
-          [this]() { emit renderRequested(currentIndex()); });
+  connect(nav_debounce_timer_, &QTimer::timeout, this, [this]() {
+    // The scrub has settled: audio suspended by the drag resumes here, at the
+    // position the render about to be requested will show.
+    resumeAudioAtCurrentIndex();
+    emit renderRequested(currentIndex());
+  });
 
   // ITU-R BT.470-6 §5.1 (PAL 25 fps) / SMPTE 170M-2004 §2 (NTSC ~30 fps).
   // Default to PAL rate; MainWindow calls setPlaybackFrameRateMs() once it
-  // knows the video standard.
+  // knows the video standard. With audio playing the interval only sets how
+  // often the chase target is re-read; the audio device sets the pace.
   playback_timer_->setInterval(40);
-  connect(playback_timer_, &QTimer::timeout, [this]() {
-    const int next = currentIndex() + 1;
-    if (next > preview_slider_->maximum()) {
-      stopPlayback();
-      return;
-    }
-    navigateToIndex(next);
-  });
+  connect(playback_timer_, &QTimer::timeout, this,
+          &PreviewDialog::onPlaybackTick);
+
+  // The last frame's audio finishing is what ends an audio-clocked session:
+  // the video may still be several frames behind, but there is nothing left
+  // to chase.
+  connect(audio_controller_, &orc::gui::PreviewAudioController::finished, this,
+          &PreviewDialog::stopPlayback);
+
+  audio_prime_show_timer_->setSingleShot(true);
+  audio_prime_show_timer_->setInterval(kAudioPrimeDialogDelayMs);
+  connect(audio_prime_show_timer_, &QTimer::timeout, this,
+          &PreviewDialog::showAudioPrimeDialog);
+
+  audio_prime_tick_timer_->setInterval(kAudioPrimeTickMs);
+  connect(audio_prime_tick_timer_, &QTimer::timeout, this,
+          &PreviewDialog::updateAudioPrimeDialog);
 
   setupUI();
   setWindowTitle("Field/Frame Preview");
@@ -122,6 +159,7 @@ void PreviewDialog::navigateToIndex(int zero_based) {
                                  preview_slider_->maximum());
   nav_debounce_timer_->stop();  // cancel any pending debounced render
   setIndex(clamped);
+  resumeAudioAtCurrentIndex();  // rebase the audio clock on the new position
   emit positionChanged(clamped);
   emit renderRequested(clamped);
 }
@@ -130,6 +168,7 @@ void PreviewDialog::navigateToIndexDebounced(int zero_based) {
   const int clamped = std::clamp(zero_based, preview_slider_->minimum(),
                                  preview_slider_->maximum());
   setIndex(clamped);  // update UI immediately for visual feedback
+  suspendAudioForScrub();
   emit positionChanged(clamped);
   nav_debounce_timer_
       ->start();  // (re)starts; fires renderRequested when settled
@@ -362,6 +401,8 @@ void PreviewDialog::setupUI() {
   dropouts_button_->setToolTip("Show/hide dropout regions");
   controlLayout->addWidget(dropouts_button_);
 
+  setupAudioControls(controlLayout);
+
   controlLayout->addStretch();
   mainLayout->addLayout(controlLayout);
 
@@ -409,9 +450,7 @@ void PreviewDialog::setupUI() {
       if (currentIndex() >= preview_slider_->maximum()) {
         navigateToIndex(preview_slider_->minimum());
       }
-      is_playing_ = true;
-      play_pause_button_->setText("⏸");  // ⏸ pause symbol
-      playback_timer_->start();
+      startPlayback();
     }
   });
 
@@ -525,10 +564,16 @@ void PreviewDialog::setPlaybackFrameRateMs(int ms) {
 }
 
 void PreviewDialog::stopPlayback() {
+  // Audio teardown runs unconditionally: a session can be waiting for a reader
+  // or priming before is_playing_ has ever driven the timer.
+  endAudioPreparation();
+  audio_controller_->stop();
+  audio_state_ = AudioState::kIdle;
+  playback_timer_->stop();
+
   if (!is_playing_) {
     return;
   }
-  playback_timer_->stop();
   is_playing_ = false;
   play_pause_button_->setText("▶");  // ▶ play symbol
 }
@@ -541,12 +586,445 @@ void PreviewDialog::setCurrentNode(const QString& node_label,
 }
 
 void PreviewDialog::setCurrentNodeId(orc::NodeID node_id) {
+  // Pair indices and the representation behind a reader are both node-
+  // specific, so a different node invalidates everything audio holds. The
+  // owner re-enumerates and calls setAudioChannelPairs() with the new list.
+  if (node_id != current_node_id_) {
+    invalidateAudioSource();
+    setAudioChannelPairs({});
+  }
+
   current_node_id_ = node_id;
 
   if (vectorscope_dialog_ && vectorscope_dialog_->isVisible() &&
       node_id.is_valid()) {
     vectorscope_node_id_ = node_id;
     vectorscope_dialog_->setStage(node_id);
+  }
+}
+
+// ===========================================================================
+// Audio playback
+// ===========================================================================
+
+void PreviewDialog::setupAudioControls(QHBoxLayout* layout) {
+  audio_label_ = new QLabel("Audio:");
+  layout->addWidget(audio_label_);
+
+  audio_pair_combo_ = new QComboBox();
+  layout->addWidget(audio_pair_combo_);
+
+  audio_volume_slider_ = new QSlider(Qt::Horizontal);
+  audio_volume_slider_->setRange(0, 100);  // per cent of full scale
+  audio_volume_slider_->setValue(100);
+  audio_volume_slider_->setFixedWidth(80);
+  audio_volume_slider_->setToolTip("Playback volume");
+  layout->addWidget(audio_volume_slider_);
+
+  connect(audio_pair_combo_,
+          QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this](int) {
+            // Only user-driven changes reach here: repopulating blocks the
+            // signal, so this is the choice worth carrying to the next node.
+            rememberSelectedAudioPair();
+            // A different pair needs a different reader, and the running
+            // session belongs to the old one. Playback is torn down and then
+            // taken up again on the new pair at the position reached, so
+            // comparing pairs does not cost a trip back to the Play button.
+            const bool was_playing = is_playing_;
+            invalidateAudioSource();
+            updateAudioControlStates();
+            if (was_playing) {
+              startPlayback();
+            }
+          });
+
+  connect(audio_volume_slider_, &QSlider::valueChanged, this,
+          [this](int value) {
+            audio_controller_->setVolume(static_cast<double>(value) / 100.0);
+          });
+
+#ifndef ORC_GUI_AUDIO_PLAYBACK
+  // Built without an audio backend: these controls could never do anything, so
+  // they are not offered at all and playback keeps its video-only path.
+  audio_label_->setVisible(false);
+  audio_pair_combo_->setVisible(false);
+  audio_volume_slider_->setVisible(false);
+#endif
+
+  setAudioChannelPairs({});
+}
+
+void PreviewDialog::setAudioChannelPairs(
+    const std::vector<orc::AudioPairView>& pairs) {
+  audio_pairs_ = pairs;
+
+  // Repopulating resets the selection, which must not be read as the user
+  // picking a different pair.
+  const QSignalBlocker block(audio_pair_combo_);
+  audio_pair_combo_->clear();
+  audio_pair_combo_->addItem(kNoAudioEntry);
+  for (const auto& pair : audio_pairs_) {
+    const QString name =
+        QString::fromStdString(pair.name.empty() ? pair.origin : pair.name);
+    const QString label =
+        QString("%1: %2").arg(static_cast<qulonglong>(pair.index)).arg(name);
+    audio_pair_combo_->addItem(label, QVariant::fromValue<qulonglong>(
+                                          static_cast<qulonglong>(pair.index)));
+  }
+  audio_pair_combo_->setCurrentIndex(comboIndexForRememberedPair());
+
+  updateAudioControlStates();
+}
+
+void PreviewDialog::rememberSelectedAudioPair() {
+  const int index = audio_pair_combo_->currentIndex();
+  const size_t pair_index = static_cast<size_t>(index - 1);  // 0 is "Mute/None"
+  if (index <= 0 || pair_index >= audio_pairs_.size()) {
+    remembered_audio_pair_.reset();  // "Mute/None" is a choice worth keeping
+    return;
+  }
+  remembered_audio_pair_ = audio_pairs_[pair_index];
+}
+
+int PreviewDialog::comboIndexForRememberedPair() const {
+  if (!remembered_audio_pair_.has_value()) {
+    return 0;  // "Mute/None"
+  }
+
+  // Pair indices are node-specific, so the remembered pair is matched by what
+  // describes it — name and origin — and the index only breaks ties between
+  // otherwise identical pairs. No match means this node does not carry the
+  // pair and the selector falls back to "Mute/None", leaving the choice
+  // remembered for a node that does.
+  const orc::AudioPairView& want = *remembered_audio_pair_;
+  int fallback = 0;
+  for (size_t i = 0; i < audio_pairs_.size(); ++i) {
+    const orc::AudioPairView& pair = audio_pairs_[i];
+    if (pair.name != want.name || pair.origin != want.origin) {
+      continue;
+    }
+    const int combo_index = static_cast<int>(i) + 1;  // 0 is "Mute/None"
+    if (pair.index == want.index) {
+      return combo_index;
+    }
+    if (fallback == 0) {
+      fallback = combo_index;
+    }
+  }
+  return fallback;
+}
+
+void PreviewDialog::updateAudioControlStates() {
+  const bool has_pairs = !audio_pairs_.empty();
+  const bool pair_selected = selectedAudioPair().has_value();
+
+  audio_label_->setEnabled(has_pairs);
+  audio_pair_combo_->setEnabled(has_pairs);
+  // Volume acts on a selected pair whether or not it is playing, so the level
+  // can be set before pressing Play.
+  audio_volume_slider_->setEnabled(pair_selected);
+
+  audio_pair_combo_->setToolTip(
+      has_pairs
+          ? QString("Audio channel pair to play with the preview")
+          : QString::fromStdString(orc::gui::audioChannelPairPreviewNotice()));
+}
+
+std::optional<size_t> PreviewDialog::selectedAudioPair() const {
+  const QVariant data = audio_pair_combo_->currentData();
+  if (!data.isValid()) {
+    return std::nullopt;  // "Mute/None"
+  }
+  return static_cast<size_t>(data.toULongLong());
+}
+
+bool PreviewDialog::isAudioPlaybackActive() const {
+  return audio_state_ == AudioState::kPlaying;
+}
+
+void PreviewDialog::setAudioOutput(
+    std::unique_ptr<orc::gui::IAudioOutput> output) {
+  audio_controller_->setAudioOutput(std::move(output));
+}
+
+void PreviewDialog::setAudioItemsPerFrame(uint32_t items_per_frame) {
+  audio_controller_->setItemsPerFrame(items_per_frame);
+}
+
+void PreviewDialog::invalidateAudioSource() {
+  stopPlayback();
+  audio_reader_.reset();
+  audio_reader_pair_.reset();
+  audio_controller_->setReader(nullptr);
+}
+
+void PreviewDialog::startPlayback() {
+  const std::optional<size_t> pair = selectedAudioPair();
+  if (!pair.has_value() || !ensureAudioOutput()) {
+    beginVideoOnlyPlayback();
+    return;
+  }
+
+  // Playback intent is taken now, before the reader exists: preparing audio
+  // can take a while and pressing Play again must cancel it.
+  is_playing_ = true;
+  play_pause_button_->setText("⏸");  // ⏸ pause symbol
+
+  if (audio_reader_ && audio_reader_pair_ == pair) {
+    beginAudioPlayback();  // Already primed — resume costs nothing
+    return;
+  }
+
+  audio_state_ = AudioState::kAwaitingReader;
+  status_bar_->showMessage("Preparing audio…");
+  emit audioStreamReaderRequested(*pair);
+}
+
+void PreviewDialog::beginVideoOnlyPlayback() {
+  audio_state_ = AudioState::kIdle;
+  is_playing_ = true;
+  play_pause_button_->setText("⏸");  // ⏸ pause symbol
+  playback_timer_->start();
+}
+
+bool PreviewDialog::ensureAudioOutput() {
+  if (audio_controller_->hasAudioOutput()) {
+    return true;
+  }
+  if (audio_output_unavailable_) {
+    return false;
+  }
+
+  // First playback with a pair selected is what touches the audio subsystem;
+  // a project with no audio never gets here.
+  auto output = orc::gui::createSystemAudioOutput();
+  if (!output) {
+    ORC_LOG_WARN(
+        "PreviewDialog: No audio output backend; playing the preview silently");
+    audio_output_unavailable_ = true;
+    status_bar_->showMessage("No audio output is available; playing video only",
+                             4000);
+    return false;
+  }
+  audio_controller_->setAudioOutput(std::move(output));
+  return true;
+}
+
+void PreviewDialog::setAudioStreamReader(
+    std::shared_ptr<orc::presenters::IAudioStreamReader> reader) {
+  if (audio_state_ != AudioState::kAwaitingReader) {
+    return;  // Superseded: playback was stopped or the pair changed
+  }
+
+  const std::optional<size_t> pair = selectedAudioPair();
+  if (!reader || !pair.has_value()) {
+    ORC_LOG_DEBUG("PreviewDialog: No playable audio for the selected pair");
+    status_bar_->showMessage(
+        "The selected channel pair has no playable audio; playing video only",
+        4000);
+    beginVideoOnlyPlayback();
+    return;
+  }
+
+  audio_reader_ = std::move(reader);
+  audio_reader_pair_ = pair;
+  beginAudioPrime();
+}
+
+void PreviewDialog::beginAudioPrime() {
+  audio_state_ = AudioState::kPriming;
+  ++audio_prime_generation_;
+  const uint64_t generation = audio_prime_generation_;
+
+  audio_prime_state_ = std::make_shared<AudioPrimeProgressState>();
+  auto reader = audio_reader_;
+  auto state = audio_prime_state_;
+
+  // The decode runs off the GUI thread (and off the render worker, which it
+  // would otherwise block for its whole duration). Progress is published into
+  // the shared state and polled here, so the worker never touches a Qt object.
+  // The thread owns a share of the reader, so it stays valid even if the
+  // dialogue abandons the wait.
+  auto* thread = QThread::create([reader, state]() {
+    try {
+      reader->prime(
+          [state](uint64_t done, uint64_t total, const std::string& message) {
+            const std::lock_guard<std::mutex> lock(state->mutex);
+            state->done = done;
+            state->total = total;
+            state->message = message;
+          });
+    } catch (const std::exception& e) {
+      ORC_LOG_ERROR("PreviewDialog: Audio priming failed: {}", e.what());
+    } catch (...) {
+      ORC_LOG_ERROR("PreviewDialog: Audio priming failed");
+    }
+  });
+  connect(thread, &QThread::finished, this,
+          [this, generation]() { finishAudioPrime(generation); });
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  thread->start();
+
+  audio_prime_show_timer_->start();
+}
+
+void PreviewDialog::finishAudioPrime(uint64_t generation) {
+  if (generation != audio_prime_generation_ ||
+      audio_state_ != AudioState::kPriming) {
+    return;  // The wait was abandoned; this decode's result is nobody's
+  }
+
+  endAudioPreparation();
+  audio_controller_->setReader(audio_reader_);
+  beginAudioPlayback();
+}
+
+void PreviewDialog::beginAudioPlayback() {
+  const uint64_t frame = orc::gui::preview_audio::frameForPreviewIndex(
+      static_cast<uint64_t>(std::max(0, currentIndex())),
+      audio_controller_->itemsPerFrame());
+
+  if (!audio_controller_->start(frame)) {
+    ORC_LOG_WARN("PreviewDialog: Audio playback could not start at frame {}",
+                 frame);
+    status_bar_->showMessage("Audio could not be started; playing video only",
+                             4000);
+    beginVideoOnlyPlayback();
+    return;
+  }
+
+  audio_state_ = AudioState::kPlaying;
+  is_playing_ = true;
+  play_pause_button_->setText("⏸");  // ⏸ pause symbol
+  status_bar_->clearMessage();
+  playback_timer_->start();
+}
+
+void PreviewDialog::onPlaybackTick() {
+  if (audio_state_ == AudioState::kPlaying) {
+    if (!audio_controller_->isPlaying()) {
+      stopPlayback();  // The device stopped under us
+      return;
+    }
+
+    // Frames the renderer could not deliver in time are skipped simply by the
+    // target having moved on by more than one; the in-flight gate above this
+    // dialogue coalesces the rest.
+    const uint64_t target = std::min<uint64_t>(
+        audio_controller_->targetPreviewIndex(),
+        static_cast<uint64_t>(std::max(0, preview_slider_->maximum())));
+    const int target_index = static_cast<int>(target);
+    if (target_index != currentIndex()) {
+      chase_navigation_ = true;
+      navigateToIndex(target_index);
+      chase_navigation_ = false;
+    }
+    return;
+  }
+
+  const int next = currentIndex() + 1;
+  if (next > preview_slider_->maximum()) {
+    stopPlayback();
+    return;
+  }
+  navigateToIndex(next);
+}
+
+void PreviewDialog::suspendAudioForScrub() {
+  if (chase_navigation_ || audio_state_ != AudioState::kPlaying) {
+    return;
+  }
+  // A drag emits a new position per mouse move, and rebasing the device on
+  // each one would thrash it. The clock instead goes quiet for the duration of
+  // the scrub and is restarted once the position settles; the chase stops with
+  // it so it cannot pull the preview off the position being dragged to.
+  playback_timer_->stop();
+  audio_controller_->stop();
+}
+
+void PreviewDialog::resumeAudioAtCurrentIndex() {
+  if (chase_navigation_ || audio_state_ != AudioState::kPlaying) {
+    return;
+  }
+  // Restarting the device at the settled position rebases the clock by
+  // construction, so no correction term is ever carried across a seek.
+  beginAudioPlayback();
+}
+
+void PreviewDialog::showAudioPrimeDialog() {
+  if (audio_state_ != AudioState::kPriming || audio_prime_dialog_) {
+    return;
+  }
+
+  // No cancel button: the decode runs inside a producer's std::call_once and
+  // nothing in that path is interruptible, so offering Cancel would be a lie.
+  auto* dialog = new QProgressDialog("Preparing audio…", QString(), 0, 0, this);
+  dialog->setWindowTitle("Preview Audio");
+  dialog->setWindowModality(Qt::WindowModal);
+  dialog->setCancelButton(nullptr);
+  dialog->setAutoClose(false);
+  dialog->setAutoReset(false);
+  dialog->setAttribute(Qt::WA_DeleteOnClose, false);
+  // QProgressDialog shows itself from an internal timer once minimumDuration
+  // elapses, which would race this one. Push it out of reach and reset() (which
+  // stops that timer) so the show decision stays here.
+  dialog->setMinimumDuration(std::numeric_limits<int>::max());
+  dialog->reset();
+  audio_prime_dialog_ = dialog;
+
+  updateAudioPrimeDialog();
+  dialog->show();
+  audio_prime_tick_timer_->start();
+}
+
+void PreviewDialog::updateAudioPrimeDialog() {
+  if (!audio_prime_dialog_ || !audio_prime_state_) {
+    return;
+  }
+
+  uint64_t done = 0;
+  uint64_t total = 0;
+  std::string message;
+  {
+    const std::lock_guard<std::mutex> lock(audio_prime_state_->mutex);
+    done = audio_prime_state_->done;
+    total = audio_prime_state_->total;
+    message = audio_prime_state_->message;
+  }
+
+  audio_prime_dialog_->setLabelText(
+      message.empty() ? QString("Preparing audio…")
+                      : QString("Preparing audio… %1")
+                            .arg(QString::fromStdString(message)));
+
+  // A producer that cannot size the work reports total 0; the dialog then
+  // stays a busy indicator (range 0..0) rather than claiming a percentage.
+  if (total > 0) {
+    audio_prime_dialog_->setRange(0, 100);
+    audio_prime_dialog_->setValue(
+        static_cast<int>(std::min<uint64_t>(99, done * 100 / total)));
+  }
+}
+
+void PreviewDialog::endAudioPreparation() {
+  // Bumping the generation orphans any prime still running: it finishes,
+  // releases its share of the reader and self-deletes with nobody listening.
+  ++audio_prime_generation_;
+  audio_prime_state_.reset();
+  audio_prime_show_timer_->stop();
+  audio_prime_tick_timer_->stop();
+
+  if (audio_prime_dialog_) {
+    audio_prime_dialog_->hide();
+    audio_prime_dialog_->deleteLater();
+    audio_prime_dialog_ = nullptr;
+  }
+
+  if (audio_state_ == AudioState::kAwaitingReader ||
+      audio_state_ == AudioState::kPriming) {
+    audio_state_ = AudioState::kIdle;
+    status_bar_->clearMessage();
   }
 }
 

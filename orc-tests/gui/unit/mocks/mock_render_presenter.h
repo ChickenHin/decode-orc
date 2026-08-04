@@ -191,7 +191,8 @@ class MockRenderPresenter : public IRenderPresenter {
 
   MOCK_METHOD(orc::PreviewRenderResult, renderPreview,
               (NodeID node_id, orc::PreviewOutputType output_type,
-               uint64_t output_index, const std::string& option_id),
+               uint64_t output_index, const std::string& option_id,
+               orc::PreviewNavigationHint hint),
               (override));
 
   MOCK_METHOD((std::optional<orc::presenters::DropoutDisplaySeries>),
@@ -202,6 +203,12 @@ class MockRenderPresenter : public IRenderPresenter {
               getBurstLevelAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD((std::vector<orc::PreviewOutputInfo>), getAvailableOutputs,
               (NodeID node_id), (override));
+
+  MOCK_METHOD((std::vector<orc::AudioPairView>), getAudioChannelPairs,
+              (NodeID node_id), (override));
+  MOCK_METHOD((std::shared_ptr<orc::presenters::IAudioStreamReader>),
+              createAudioStreamReader, (NodeID node_id, size_t pair),
+              (override));
 
   MOCK_METHOD(LineSampleData, getLineSamplesWithYC,
               (NodeID node_id, orc::PreviewOutputType output_type,

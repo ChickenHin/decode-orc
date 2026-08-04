@@ -228,14 +228,34 @@ TEST(AudioChannelMapStageTest, Execute_ThrowsOnMissingInput) {
   EXPECT_THROW(stage.execute({}, {}, ctx), orc::DAGExecutionError);
 }
 
-TEST(AudioChannelMapStageTest, Execute_ThrowsWhenSourcePairOutOfRange) {
+TEST(AudioChannelMapStageTest, SourcePairOutOfRange_PassesInputThrough) {
+  // A pair the input does not carry must not fail the DAG: video (and the
+  // untouched audio) has to keep reaching downstream sinks and the preview.
+  orc::AudioChannelMapStage stage;
+  auto vfr = make_two_pair_source();
+  auto output = run(stage, vfr,
+                    {{"channel_pair", std::string("5")},
+                     {"operation", std::string("left_to_mono")}});
+
+  EXPECT_EQ(output.get(),
+            static_cast<const orc::VideoFrameRepresentation*>(vfr.get()));
+  EXPECT_EQ(output->audio_channel_pair_count(), 2u);
+  EXPECT_EQ(output->get_audio_samples(0, orc::FrameID(0)),
+            (std::vector<int32_t>{100000, 200000, -300000, 400000}));
+}
+
+TEST(AudioChannelMapStageTest, NoAudioPairs_PassesInputThrough) {
+  // The reported case: a TBC source carrying no audio at all.
   orc::AudioChannelMapStage stage;
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-  ON_CALL(*vfr, audio_channel_pair_count()).WillByDefault(Return(1u));
+  ON_CALL(*vfr, audio_channel_pair_count()).WillByDefault(Return(0u));
 
   orc::ObservationContext ctx;
-  EXPECT_THROW(stage.execute({vfr}, {{"channel_pair", std::string("1")}}, ctx),
-               orc::DAGExecutionError);
+  std::vector<orc::ArtifactPtr> outputs;
+  ASSERT_NO_THROW(outputs = stage.execute(
+                      {vfr}, {{"channel_pair", std::string("0")}}, ctx));
+  ASSERT_EQ(outputs.size(), 1u);
+  EXPECT_EQ(outputs[0].get(), static_cast<orc::Artifact*>(vfr.get()));
 }
 
 TEST(AudioChannelMapStageTest, LeftToMono_KeepsLeftAndSilencesRight) {
@@ -330,31 +350,34 @@ TEST(AudioChannelMapStageTest, CopyLeftToExistingTarget_OverwritesTargetOnly) {
   EXPECT_EQ(target->origin, orc::AudioOrigin::DERIVED);
 }
 
-TEST(AudioChannelMapStageTest, CopyToTarget_ThrowsWhenTargetOutOfRange) {
+TEST(AudioChannelMapStageTest, CopyToTarget_PassesThroughWhenTargetOutOfRange) {
   orc::AudioChannelMapStage stage;
   auto vfr = make_two_pair_source();
-  orc::ObservationContext ctx;
-  EXPECT_THROW(stage.execute({vfr},
-                             {{"channel_pair", std::string("0")},
-                              {"operation", std::string("copy_left_to_target")},
-                              {"target_pair", std::string("5")}},
-                             ctx),
-               orc::DAGExecutionError);
+  auto output = run(stage, vfr,
+                    {{"channel_pair", std::string("0")},
+                     {"operation", std::string("copy_left_to_target")},
+                     {"target_pair", std::string("5")}});
+
+  // Nothing is appended or overwritten; the input reaches the output as-is.
+  EXPECT_EQ(output->audio_channel_pair_count(), 2u);
+  EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(0)),
+            (std::vector<int32_t>{5000, 6000, 7000, 8000}));
 }
 
-TEST(AudioChannelMapStageTest, CopyToNewTarget_ThrowsWhenPairCapExceeded) {
+TEST(AudioChannelMapStageTest,
+     CopyToNewTarget_PassesThroughWhenPairCapReached) {
   orc::AudioChannelMapStage stage;
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
   ON_CALL(*vfr, audio_channel_pair_count())
       .WillByDefault(Return(orc::kMaxAudioChannelPairs));
 
-  orc::ObservationContext ctx;
-  EXPECT_THROW(stage.execute({vfr},
-                             {{"channel_pair", std::string("0")},
-                              {"operation", std::string("copy_left_to_target")},
-                              {"target_pair", std::string("new")}},
-                             ctx),
-               orc::DAGExecutionError);
+  auto output = run(stage, vfr,
+                    {{"channel_pair", std::string("0")},
+                     {"operation", std::string("copy_left_to_target")},
+                     {"target_pair", std::string("new")}});
+
+  // The cap still holds: no ninth pair appears.
+  EXPECT_EQ(output->audio_channel_pair_count(), orc::kMaxAudioChannelPairs);
 }
 
 TEST(AudioChannelMapStageTest, Delete_RemovesTargetAndShiftsLaterPairsDown) {

@@ -12,6 +12,8 @@
 
 #include <orc/stage/common_types.h>  // For analysis result types
 
+#include <algorithm>
+
 #include "closed_caption_observation_presenter.h"
 #include "logging.h"
 #include "ntsc_observation_presenter.h"
@@ -64,9 +66,10 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
 
   orc::PreviewRenderResult renderPreview(
       orc::NodeID node_id, orc::PreviewOutputType output_type,
-      uint64_t output_index, const std::string& option_id) override {
+      uint64_t output_index, const std::string& option_id,
+      orc::PreviewNavigationHint hint) override {
     return presenter_.renderPreview(node_id, output_type, output_index,
-                                    option_id);
+                                    option_id, hint);
   }
 
   std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
@@ -87,6 +90,16 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID node_id) override {
     return presenter_.getAvailableOutputs(node_id);
+  }
+
+  std::vector<orc::AudioPairView> getAudioChannelPairs(
+      orc::NodeID node_id) override {
+    return presenter_.getAudioChannelPairs(node_id);
+  }
+
+  std::shared_ptr<orc::presenters::IAudioStreamReader> createAudioStreamReader(
+      orc::NodeID node_id, size_t pair) override {
+    return presenter_.createAudioStreamReader(node_id, pair);
   }
 
   LineSampleData getLineSamplesWithYC(orc::NodeID node_id,
@@ -302,9 +315,20 @@ uint64_t RenderCoordinator::nextRequestId() {
 void RenderCoordinator::enqueueRequest(std::unique_ptr<RenderRequest> request) {
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    request_queue_.push(std::move(request));
+    request_queue_.push_back(std::move(request));
   }
   queue_cv_.notify_one();
+}
+
+size_t RenderCoordinator::discardQueuedPreviewsLocked() {
+  const size_t before = request_queue_.size();
+  auto end = std::remove_if(
+      request_queue_.begin(), request_queue_.end(),
+      [](const std::unique_ptr<RenderRequest>& queued) {
+        return queued && queued->type == RenderRequestType::RenderPreview;
+      });
+  request_queue_.erase(end, request_queue_.end());
+  return before - request_queue_.size();
 }
 
 void RenderCoordinator::updateDAG(std::shared_ptr<const void> dag) {
@@ -321,12 +345,31 @@ void RenderCoordinator::setProject(void* project) {
 uint64_t RenderCoordinator::requestPreview(const orc::NodeID& node_id,
                                            orc::PreviewOutputType output_type,
                                            uint64_t output_index,
-                                           const std::string& option_id) {
+                                           const std::string& option_id,
+                                           orc::PreviewNavigationHint hint) {
   uint64_t id = nextRequestId();
   latest_preview_request_id_.store(id);
-  auto req = std::make_unique<RenderPreviewRequest>(id, node_id, output_type,
-                                                    output_index, option_id);
-  enqueueRequest(std::move(req));
+  auto req = std::make_unique<RenderPreviewRequest>(
+      id, node_id, output_type, output_index, option_id, hint);
+
+  size_t discarded = 0;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    // Only the newest preview is ever displayed, so anything still queued is
+    // already dead work. Removing it here (rather than rendering it and
+    // dropping the response) is what lets a burst of navigations reach the
+    // latest frame in one render instead of N.
+    discarded = discardQueuedPreviewsLocked();
+    request_queue_.push_back(std::move(req));
+  }
+  queue_cv_.notify_one();
+
+  if (discarded > 0) {
+    ORC_LOG_DEBUG(
+        "RenderCoordinator: Discarded {} superseded queued preview request(s) "
+        "for request {}",
+        discarded, id);
+  }
   return id;
 }
 
@@ -390,6 +433,25 @@ uint64_t RenderCoordinator::requestAvailableOutputs(
     const orc::NodeID& node_id) {
   uint64_t id = nextRequestId();
   auto req = std::make_unique<GetAvailableOutputsRequest>(id, node_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
+uint64_t RenderCoordinator::requestAudioChannelPairs(
+    const orc::NodeID& node_id) {
+  uint64_t id = nextRequestId();
+  latest_audio_pairs_request_id_.store(id);
+  auto req = std::make_unique<GetAudioChannelPairsRequest>(id, node_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
+uint64_t RenderCoordinator::requestAudioStreamReader(const orc::NodeID& node_id,
+                                                     size_t pair) {
+  uint64_t id = nextRequestId();
+  latest_audio_reader_request_id_.store(id);
+  auto req =
+      std::make_unique<CreateAudioStreamReaderRequest>(id, node_id, pair);
   enqueueRequest(std::move(req));
   return id;
 }
@@ -542,7 +604,7 @@ void RenderCoordinator::workerLoop() {
 
       if (!request_queue_.empty()) {
         request = std::move(request_queue_.front());
-        request_queue_.pop();
+        request_queue_.pop_front();
       }
     }
 
@@ -625,6 +687,16 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
     case RenderRequestType::GetAvailableOutputs:
       handleGetAvailableOutputs(
           *static_cast<GetAvailableOutputsRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetAudioChannelPairs:
+      handleGetAudioChannelPairs(
+          *static_cast<GetAudioChannelPairsRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::CreateAudioStreamReader:
+      handleCreateAudioStreamReader(
+          *static_cast<CreateAudioStreamReaderRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetLineSamples:
@@ -785,7 +857,8 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
 
   try {
     auto result = worker_render_presenter_->renderPreview(
-        req.node_id, req.output_type, req.output_index, req.option_id);
+        req.node_id, req.output_type, req.output_index, req.option_id,
+        req.hint);
 
     // Drop stale preview responses when a newer preview request exists.
     if (req.request_id != latest_preview_request_id_.load()) {
@@ -1177,6 +1250,89 @@ void RenderCoordinator::handleGetAvailableOutputs(
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Get available outputs failed: {}",
+                  e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleGetAudioChannelPairs(
+    const GetAudioChannelPairsRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Enumerating audio channel pairs for node '{}' "
+      "(request {})",
+      req.node_id.to_string(), req.request_id);
+
+  if (!worker_render_presenter_) {
+    emit error(req.request_id, "Render presenter not initialized");
+    return;
+  }
+
+  try {
+    auto pairs = worker_render_presenter_->getAudioChannelPairs(req.node_id);
+
+    if (req.request_id != latest_audio_pairs_request_id_.load()) {
+      ORC_LOG_DEBUG(
+          "RenderCoordinator: Dropping stale audio pair response {} (latest "
+          "{})",
+          req.request_id, latest_audio_pairs_request_id_.load());
+      return;
+    }
+
+    ORC_LOG_DEBUG("RenderCoordinator: Node '{}' carries {} audio channel pairs",
+                  req.node_id.to_string(), pairs.size());
+
+    emit audioChannelPairsReady(req.request_id, std::move(pairs));
+
+  } catch (const std::exception& e) {
+    if (req.request_id != latest_audio_pairs_request_id_.load()) {
+      return;
+    }
+    ORC_LOG_ERROR(
+        "RenderCoordinator: Audio channel pair enumeration failed: {}",
+        e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleCreateAudioStreamReader(
+    const CreateAudioStreamReaderRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Creating audio stream reader for node '{}', pair {} "
+      "(request {})",
+      req.node_id.to_string(), req.pair, req.request_id);
+
+  if (!worker_render_presenter_) {
+    emit error(req.request_id, "Render presenter not initialized");
+    return;
+  }
+
+  try {
+    // Creation only resolves the representation; the expensive whole-stream
+    // decode happens later in the caller's prime() on the playback thread, so
+    // this never blocks preview rendering for minutes.
+    auto reader = worker_render_presenter_->createAudioStreamReader(req.node_id,
+                                                                    req.pair);
+
+    if (req.request_id != latest_audio_reader_request_id_.load()) {
+      ORC_LOG_DEBUG(
+          "RenderCoordinator: Dropping stale audio reader response {} (latest "
+          "{})",
+          req.request_id, latest_audio_reader_request_id_.load());
+      return;
+    }
+
+    if (!reader) {
+      ORC_LOG_DEBUG("RenderCoordinator: No usable audio pair {} at node '{}'",
+                    req.pair, req.node_id.to_string());
+    }
+
+    emit audioStreamReaderReady(req.request_id, std::move(reader));
+
+  } catch (const std::exception& e) {
+    if (req.request_id != latest_audio_reader_request_id_.load()) {
+      return;
+    }
+    ORC_LOG_ERROR("RenderCoordinator: Audio stream reader creation failed: {}",
                   e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }

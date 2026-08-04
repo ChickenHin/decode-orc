@@ -12,6 +12,7 @@
 #include <orc/stage/common_types.h>
 #include <orc/stage/node_type.h>
 
+#include "audio_channel_pair_notice.h"
 #include "burstlevelanalysisdialog.h"
 #include "closedcaptiondialog.h"
 #include "dropout_editor_dialog.h"
@@ -34,6 +35,7 @@
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/video_parameter_observation_presenter.h"
+#include "preview_audio_chase.h"
 #include "previewdialog.h"
 #include "project_load_status_formatter.h"
 #include "projectpropertiesdialog.h"
@@ -437,6 +439,10 @@ MainWindow::MainWindow(QWidget* parent)
           this, &MainWindow::onClosedCaptionDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::availableOutputsReady,
           this, &MainWindow::onAvailableOutputsReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::audioChannelPairsReady,
+          this, &MainWindow::onAudioChannelPairsReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::audioStreamReaderReady,
+          this, &MainWindow::onAudioStreamReaderReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::lineSamplesReady, this,
           &MainWindow::onLineSamplesReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::frameTimingDataReady,
@@ -667,6 +673,18 @@ void MainWindow::setupUI() {
           [this](bool show) {
             render_coordinator_->setShowDropouts(show);
             updatePreview();
+          });
+  // Creating a playback reader resolves the node's representation, which
+  // executes the DAG — so it goes through the worker like every other query.
+  connect(preview_dialog_, &PreviewDialog::audioStreamReaderRequested, this,
+          [this](size_t pair) {
+            if (!current_view_node_id_.is_valid()) {
+              preview_dialog_->setAudioStreamReader(nullptr);
+              return;
+            }
+            pending_audio_reader_request_id_ =
+                render_coordinator_->requestAudioStreamReader(
+                    current_view_node_id_, pair);
           });
   connect(preview_dialog_, &PreviewDialog::showVBIDialogRequested, this,
           &MainWindow::onShowVBIDialog);
@@ -2719,6 +2737,7 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
   // dropdown to the pairs the node's input actually carries. The stage
   // descriptor lists all container slots; here we narrow it using the upstream
   // node's audio pair count.
+  std::optional<size_t> input_audio_pair_count;
   if (stage_name == "audio_channel_map" || stage_name == "audio_align" ||
       stage_name == "AudioSink") {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
@@ -2743,6 +2762,7 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
 
       const auto pair_names =
           render_presenter.getAudioChannelPairNames(input_source_node_id);
+      input_audio_pair_count = pair_names.size();
       if (!pair_names.empty()) {
         // Combo entry "value␟label": stored value is the bare index (or "new"),
         // display adds the pair description when present, e.g. "0 - Analogue".
@@ -2824,6 +2844,14 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
   std::string stage_description;
   if (type_info && !type_info->description.empty()) {
     stage_description = type_info->description;
+  }
+
+  // An audio stage whose input carries no channel pairs cannot be configured
+  // usefully — say so in the dialog header rather than letting the user pick a
+  // pair the input does not have.
+  if (input_audio_pair_count) {
+    stage_description = orc::gui::withAudioChannelPairNotice(
+        stage_description, *input_audio_pair_count);
   }
 
   // Show parameter dialog
@@ -2960,6 +2988,11 @@ void MainWindow::applyStageSelection(const orc::NodeID& node_id) {
   // Request available outputs from coordinator
   pending_outputs_request_id_ =
       render_coordinator_->requestAvailableOutputs(node_id);
+
+  // Audio channel pairs are node-specific; the dialogue has already cleared
+  // its selector (setCurrentNodeId) and repopulates when this answers.
+  pending_audio_pairs_request_id_ =
+      render_coordinator_->requestAudioChannelPairs(node_id);
 
   // Note: Analysis dialogs (dropout/SNR) are triggered from stage context menu,
   // not automatically updated when switching nodes
@@ -3210,10 +3243,17 @@ void MainWindow::updatePreview() {
                   current_option_id_, suffix, effective_option_id);
   }
 
+  // During playback the next request is almost always the following frame, so
+  // stages are told to expect a sequential run and may pre-fetch. Scrubbing and
+  // one-off navigations stay Random — a pre-fetch there is wasted work.
+  const orc::PreviewNavigationHint navigation_hint =
+      preview_dialog_->isPlaying() ? orc::PreviewNavigationHint::Sequential
+                                   : orc::PreviewNavigationHint::Random;
+
   // Request preview from coordinator (async, thread-safe)
   pending_preview_request_id_ = render_coordinator_->requestPreview(
       current_view_node_id_, current_output_type_, current_index,
-      effective_option_id);
+      effective_option_id, navigation_hint);
 
   // Mark that a render is now in-flight (will be cleared when onPreviewReady is
   // called)
@@ -3511,6 +3551,14 @@ void MainWindow::refreshViewerControls(bool skip_preview) {
   // This helper updates all viewer controls based on current node's available
   // outputs Should be called after available_outputs_ is populated
 
+  // Audio maps to whole frames, so the chase target has to know how many
+  // preview indices one frame spans at the current output.
+  if (preview_dialog_) {
+    preview_dialog_->setAudioItemsPerFrame(
+        orc::gui::preview_audio::itemsPerFrameForOutputType(
+            current_output_type_));
+  }
+
   if (current_view_node_id_.is_valid() == false || available_outputs_.empty()) {
     ORC_LOG_DEBUG("refreshViewerControls: no node or outputs");
     return;
@@ -3581,6 +3629,13 @@ void MainWindow::refreshViewerControls(bool skip_preview) {
 
 void MainWindow::updatePreviewRenderer() {
   ORC_LOG_DEBUG("Updating preview renderer");
+
+  // A playback reader holds the representation it was created from alive, so
+  // any DAG or parameter edit makes it stale. Stop playback and drop it before
+  // the worker rebuilds; the selector repopulates with the refreshed outputs.
+  if (preview_dialog_) {
+    preview_dialog_->invalidateAudioSource();
+  }
 
   // Get the DAG - could be null for empty projects, that's fine
   auto dag = project_.hasSource() ? project_.getDAG() : nullptr;

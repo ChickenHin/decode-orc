@@ -206,6 +206,14 @@ history:
       TBC metadata marks both fields as padding, alongside the synthetic
       gap-fill frames inserted by `frame_map`/`source_align` (issue #77).
       Comment only; no layout or vtable change, no rebuild required.
+      Also ABI-neutral: `orc/stage/audio/audio_sample_feed.h` is a new
+      stage-tier header, promoted verbatim from the private sink-side
+      `orc/plugins/stages/sinks/common/audio_sample_feed.h` so preview
+      playback can share the carrier-domain conversions with the encoders and
+      WAV writers. Additive and inline-only (`audio_carrier_to_float/_s32/
+      _s16`, `audio_apply_gain`, the `kAudioCarrier{Min,Max}` constants): no
+      type crosses the plugin boundary, so nothing existing changes layout or
+      vtable and no rebuild is required.
     summary: >-
       `NodeTypeInfo` drops the free-text `menu_category` field and the unused
       `SinkCategory` enum/`sink_category` field. The Add Stage menu category is

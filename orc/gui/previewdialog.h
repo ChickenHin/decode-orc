@@ -14,6 +14,7 @@
 #include <orc/stage/node_id.h>
 #include <orc/stage/preview/orc_preview_types.h>
 #include <orc/stage/preview/orc_vectorscope.h>
+#include <orc_audio_views.h>
 #include <orc_preview_views.h>
 
 #include <QComboBox>
@@ -28,18 +29,24 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "presenters/include/hints_view_models.h"  // For VideoParametersView
 #include "presenters/include/project_presenter_types.h"  // For VideoFormat
+#include "preview_audio_controller.h"  // PreviewAudioController, IAudioOutput
 
 class FieldPreviewWidget;
 class FrameScopeDialog;
 class FrameTimingDialog;
 class HistogramDialog;
+class QHBoxLayout;
+class QProgressDialog;
 class VectorscopeDialog;
 class WaveformMonitorDialog;
 
@@ -116,6 +123,83 @@ class PreviewDialog : public QDialog {
   QPushButton* playPauseButton() {
     return play_pause_button_;
   }  ///< Get play/pause button
+  QComboBox* audioPairCombo() {
+    return audio_pair_combo_;
+  }  ///< Get audio channel-pair selector
+  QSlider* audioVolumeSlider() {
+    return audio_volume_slider_;
+  }  ///< Get audio volume slider
+  /// @}
+
+  /// @name Audio playback
+  /// @{
+
+  /**
+   * @brief Playback session that makes audio the clock and video chase it.
+   *
+   * Owned by the dialogue and shared with tests, which drive it through a
+   * mocked IAudioOutput rather than a real device.
+   */
+  orc::gui::PreviewAudioController* audioController() {
+    return audio_controller_;
+  }
+
+  /**
+   * @brief Populate the channel-pair selector for the viewed node.
+   *
+   * An empty list is the normal "this node has no audio" answer: the selector
+   * shows a disabled "Mute/None" entry and the volume control is disabled with
+   * it.
+   *
+   * The pair the user last picked is re-selected if this node carries it, so
+   * switching stages keeps the audio playing rather than silently reverting to
+   * "Mute/None"; a node without that pair falls back to "Mute/None" but does
+   * not forget the choice.
+   */
+  void setAudioChannelPairs(const std::vector<orc::AudioPairView>& pairs);
+
+  /**
+   * @brief Install the audio device instead of the platform one.
+   *
+   * Production code never calls this: the dialogue creates the platform output
+   * lazily when playback with a pair selected first starts, so a project with
+   * no audio never touches the audio subsystem. Tests install a device-free
+   * stand-in up front.
+   */
+  void setAudioOutput(std::unique_ptr<orc::gui::IAudioOutput> output);
+
+  /**
+   * @brief Deliver a reader requested via audioStreamReaderRequested().
+   *
+   * A null reader means the pair turned out to be unplayable; playback then
+   * falls back to the timer-paced video-only path. Ignored unless the dialogue
+   * is still waiting for this reader.
+   */
+  void setAudioStreamReader(
+      std::shared_ptr<orc::presenters::IAudioStreamReader> reader);
+
+  /**
+   * @brief Preview items per video frame at the viewed output (1 or 2).
+   *
+   * Audio maps to whole frames, so a field-indexed output advances two preview
+   * indices per frame period. Set whenever the output type changes.
+   */
+  void setAudioItemsPerFrame(uint32_t items_per_frame);
+
+  /// Channel pair the user has selected, or empty for "Mute/None".
+  std::optional<size_t> selectedAudioPair() const;
+
+  /// True while the audio clock is driving the preview position.
+  bool isAudioPlaybackActive() const;
+
+  /**
+   * @brief Drop the cached reader and stop any playback using it.
+   *
+   * The reader holds a resolved representation alive, so it is only valid for
+   * the DAG version it was created from. Call whenever the DAG, its parameters
+   * or the project change.
+   */
+  void invalidateAudioSource();
   /// @}
 
   /**
@@ -351,6 +435,14 @@ class PreviewDialog : public QDialog {
    */
   void stopPlayback();
 
+  /**
+   * @brief True while playback is running (or being prepared).
+   *
+   * The owner uses this to render with PreviewNavigationHint::Sequential, so
+   * stages know a run of adjacent frames is coming and may pre-fetch.
+   */
+  bool isPlaying() const { return is_playing_; }
+
  Q_SIGNALS:
   /**
    * Emitted whenever the current index changes (every navigate/scrub).
@@ -404,6 +496,12 @@ class PreviewDialog : public QDialog {
   void previewCoordinateChanged(
       const orc::PreviewCoordinate&
           coordinate);  // Emitted whenever shared coordinate changes
+  /**
+   * Emitted when playback needs a reader for the selected channel pair.
+   * Creating one executes the DAG, so the owner routes it through the render
+   * coordinator and answers with setAudioStreamReader().
+   */
+  void audioStreamReaderRequested(size_t pair);
 
  private slots:
   void onSampleMarkerMoved(int sample_x);
@@ -412,6 +510,47 @@ class PreviewDialog : public QDialog {
 
  private:
   void setupUI();
+
+  // Audio playback session state. Reader creation and the deferred whole-
+  // stream decode behind it both take an unbounded amount of time, so pressing
+  // Play with a pair selected walks through them before any audio starts.
+  enum class AudioState {
+    kIdle,            ///< No audio session (video-only playback or stopped)
+    kAwaitingReader,  ///< Reader requested from the owner, not yet delivered
+    kPriming,         ///< Deferred decode running on the prime thread
+    kPlaying          ///< Audio is the clock and the video is chasing it
+  };
+
+  // Progress published by the prime thread. Polled from the GUI thread rather
+  // than signalled, so the worker never touches a Qt object it does not own.
+  struct AudioPrimeProgressState {
+    std::mutex mutex;
+    uint64_t done = 0;
+    uint64_t total = 0;
+    std::string message;
+  };
+
+  void setupAudioControls(QHBoxLayout* layout);
+  void updateAudioControlStates();
+
+  // Selection carried across the repopulate that follows a stage change.
+  void rememberSelectedAudioPair();
+  int comboIndexForRememberedPair() const;
+
+  // Playback entry points. startPlayback() picks the audio or the legacy
+  // video-only path from the current selection; the others are its steps.
+  void startPlayback();
+  void beginVideoOnlyPlayback();
+  void beginAudioPlayback();
+  bool ensureAudioOutput();
+  void beginAudioPrime();
+  void finishAudioPrime(uint64_t generation);
+  void endAudioPreparation();
+  void showAudioPrimeDialog();
+  void updateAudioPrimeDialog();
+  void onPlaybackTick();
+  void suspendAudioForScrub();
+  void resumeAudioAtCurrentIndex();
 
   // UI components
   FieldPreviewWidget* preview_widget_;
@@ -473,6 +612,41 @@ class PreviewDialog : public QDialog {
   // Playback
   QTimer* playback_timer_;
   bool is_playing_{false};
+
+  // Audio playback
+  QLabel* audio_label_;
+  QComboBox* audio_pair_combo_;
+  QSlider* audio_volume_slider_;
+  orc::gui::PreviewAudioController* audio_controller_;
+  std::vector<orc::AudioPairView> audio_pairs_;
+
+  // Last pair the user picked, held as a descriptor rather than an index so it
+  // can be found again in another node's list. Survives nodes that offer no
+  // audio at all, so stepping past one does not lose the choice.
+  std::optional<orc::AudioPairView> remembered_audio_pair_;
+
+  // Reader for audio_reader_pair_, kept across pause/resume so restarting
+  // costs nothing; dropped whenever the representation behind it goes stale.
+  std::shared_ptr<orc::presenters::IAudioStreamReader> audio_reader_;
+  std::optional<size_t> audio_reader_pair_;
+
+  AudioState audio_state_{AudioState::kIdle};
+
+  // Set while the playback tick is driving navigation, so the chase target is
+  // not mistaken for a user seek and fed straight back into the audio clock.
+  bool chase_navigation_{false};
+
+  // Remembers that this machine has no audio backend, so playback does not
+  // retry the (failed) device creation on every press of Play.
+  bool audio_output_unavailable_{false};
+
+  // Bumped whenever a preparation step is abandoned. A prime thread cannot be
+  // interrupted, so its completion is matched against this instead.
+  uint64_t audio_prime_generation_{0};
+  std::shared_ptr<AudioPrimeProgressState> audio_prime_state_;
+  QProgressDialog* audio_prime_dialog_{nullptr};
+  QTimer* audio_prime_show_timer_;
+  QTimer* audio_prime_tick_timer_;
 
   void closeVectorscopeDialogs();
   void closeHistogramDialog();

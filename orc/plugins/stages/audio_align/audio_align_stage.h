@@ -127,6 +127,11 @@ class AudioAlignStage : public DAGStage,
   int32_t channel_pair_ = 0;
   double offset_ms_ = 0.0;
 
+  // Last reported pass-through reason (the selected channel pair is absent
+  // from the input), so a repeated render request does not log the same
+  // warning again. Empty while the stage is applying its offset normally.
+  std::string last_inactive_reason_;
+
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
 };
 

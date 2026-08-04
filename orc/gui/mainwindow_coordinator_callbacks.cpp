@@ -486,6 +486,37 @@ void MainWindow::onAvailableOutputsReady(
   updatePreview();
 }
 
+void MainWindow::onAudioChannelPairsReady(
+    uint64_t request_id, std::vector<orc::AudioPairView> pairs) {
+  if (request_id != pending_audio_pairs_request_id_) {
+    return;  // Superseded by a later node selection
+  }
+  pending_audio_pairs_request_id_ = 0;
+
+  ORC_LOG_DEBUG("onAudioChannelPairsReady: request_id={}, pairs={}", request_id,
+                pairs.size());
+
+  // An empty list is the normal answer for most projects: the selector then
+  // shows a disabled "Mute/None" and playback keeps its video-only path.
+  preview_dialog_->setAudioChannelPairs(pairs);
+}
+
+void MainWindow::onAudioStreamReaderReady(
+    uint64_t request_id,
+    std::shared_ptr<orc::presenters::IAudioStreamReader> reader) {
+  if (request_id != pending_audio_reader_request_id_) {
+    return;  // Superseded by a later pair selection
+  }
+  pending_audio_reader_request_id_ = 0;
+
+  ORC_LOG_DEBUG("onAudioStreamReaderReady: request_id={}, usable={}",
+                request_id, reader != nullptr);
+
+  // A null reader means the pair turned out to be unplayable; the dialogue
+  // falls back to timer-paced video-only playback.
+  preview_dialog_->setAudioStreamReader(std::move(reader));
+}
+
 void MainWindow::onTriggerProgress(size_t current, size_t total,
                                    QString message) {
   // Ignore progress updates if we're not waiting for a trigger

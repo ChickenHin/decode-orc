@@ -11,6 +11,7 @@
 
 #ifdef HAVE_FFMPEG
 
+#include <orc/stage/audio/audio_sample_feed.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/field_id.h>
@@ -28,7 +29,6 @@
 #include <thread>
 
 #include "audio_pair_selection.h"
-#include "audio_sample_feed.h"
 #include "componentframe.h"
 #include "subtitle_embed_policy.h"
 #include "teletext_subtitle_feed.h"

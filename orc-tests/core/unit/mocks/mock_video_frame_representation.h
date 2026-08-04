@@ -57,6 +57,8 @@ class MockVideoFrameRepresentation : public orc::VideoFrameRepresentation {
               get_audio_channel_pair_descriptor, (size_t), (const, override));
   MOCK_METHOD((std::vector<int32_t>), get_audio_samples, (size_t, orc::FrameID),
               (const, override));
+  MOCK_METHOD(void, prime_audio_decode, (const orc::AudioDecodeProgressFn&),
+              (const, override));
 
   // EFM
   MOCK_METHOD(bool, has_efm, (), (const, override));

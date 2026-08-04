@@ -163,14 +163,28 @@ std::vector<ArtifactPtr> AudioAlignStage::execute(
 
   if (!parameters.empty()) set_parameters(parameters);
 
+  // A channel pair the input does not carry (most commonly a source with no
+  // audio at all) is a configuration mismatch, not a pipeline failure. The
+  // stage passes its input through instead of throwing, because a DAG
+  // execution error here blanks the preview of every downstream node —
+  // including the video sink — for a fault that only concerns audio.
   const size_t pair = static_cast<size_t>(channel_pair_);
-  if (pair >= vfr->audio_channel_pair_count()) {
-    throw DAGExecutionError("AudioAlignStage: channel pair " +
-                            std::to_string(channel_pair_) +
-                            " is out of range: the input carries " +
-                            std::to_string(vfr->audio_channel_pair_count()) +
-                            " audio channel pair(s)");
+  const size_t pair_count = vfr->audio_channel_pair_count();
+  if (pair >= pair_count) {
+    const std::string reason = "channel pair " + std::to_string(channel_pair_) +
+                               " is out of range: the input carries " +
+                               std::to_string(pair_count) +
+                               " audio channel pair(s)";
+    // Executed once per render request, so only log when the reason changes.
+    if (reason != last_inactive_reason_) {
+      ORC_LOG_WARN("AudioAlignStage: {}; passing the input through unchanged",
+                   reason);
+      last_inactive_reason_ = reason;
+    }
+    cached_output_ = vfr;
+    return {inputs[0]};
   }
+  last_inactive_reason_.clear();
 
   auto output = process(vfr);
   cached_output_ = output;

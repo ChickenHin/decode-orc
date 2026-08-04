@@ -185,6 +185,13 @@ class MainWindow : public QMainWindow {
   void onObservationsInvalidated(QVector<int> changed_node_ids);
   void onAvailableOutputsReady(uint64_t request_id,
                                std::vector<orc::PreviewOutputInfo> outputs);
+  // Preview audio playback: the pair list feeds the dialogue's selector, the
+  // reader is what playback pulls samples from.
+  void onAudioChannelPairsReady(uint64_t request_id,
+                                std::vector<orc::AudioPairView> pairs);
+  void onAudioStreamReaderReady(
+      uint64_t request_id,
+      std::shared_ptr<orc::presenters::IAudioStreamReader> reader);
   void onLineSamplesReady(uint64_t request_id, uint64_t field_index,
                           int line_number, int sample_x,
                           std::vector<int16_t> samples,
@@ -360,6 +367,11 @@ class MainWindow : public QMainWindow {
   orc::NodeID closed_caption_cache_node_id_;
 
   uint64_t pending_outputs_request_id_{0};
+  // Preview audio queries. The coordinator already answers only the newest of
+  // each, so these exist to drop a response that the view has moved past
+  // before the worker got to it.
+  uint64_t pending_audio_pairs_request_id_{0};
+  uint64_t pending_audio_reader_request_id_{0};
   uint64_t pending_trigger_request_id_{0};
   orc::NodeID pending_trigger_node_id_;  // Track which node is being triggered
   uint64_t pending_line_sample_request_id_{0};

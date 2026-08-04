@@ -117,6 +117,7 @@ grouped by domain. A layout change here bumps the host ABI version.
 | Header | Provides |
 |--------|----------|
 | `<orc/stage/audio/audio_channel_pair.h>` | Audio channel-pair model shared by all |
+| `<orc/stage/audio/audio_sample_feed.h>` | Pure conversions from the 24-bit-in-int32 pipeline audio |
 
 **dropout**
 

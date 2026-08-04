@@ -17,6 +17,7 @@ orc/plugin/orc_stage_tooling.h
 orc/stage/analysis_sink_results.h
 orc/stage/artifact.h
 orc/stage/audio/audio_channel_pair.h
+orc/stage/audio/audio_sample_feed.h
 orc/stage/audio_channel_pair.h
 orc/stage/colour_preview_conversion.h
 orc/stage/colour_preview_provider.h

@@ -73,7 +73,18 @@ std::optional<int> parse_pair_index(const std::string& text) {
 // ChannelMappedRepresentation
 // ============================================================================
 
+bool ChannelMappedRepresentation::is_active() const {
+  const size_t count = source_pair_count();
+  if (source_pair_ >= count) return false;
+  if (is_route()) {
+    return target_is_new_ ? count < kMaxAudioChannelPairs
+                          : target_pair_ < count;
+  }
+  return true;
+}
+
 bool ChannelMappedRepresentation::is_result_pair(size_t pair) const {
+  if (!is_active()) return false;
   switch (operation_) {
     case AudioChannelMapOperation::kLeftToMono:
     case AudioChannelMapOperation::kRightToMono:
@@ -89,12 +100,16 @@ bool ChannelMappedRepresentation::is_result_pair(size_t pair) const {
 
 size_t ChannelMappedRepresentation::audio_channel_pair_count() const {
   const size_t count = source_pair_count();
+  // An operation the input cannot satisfy leaves the pair count untouched.
+  if (!is_active()) return count;
   if (is_delete() && count > 0) return count - 1;
   if (is_append()) return count + 1;
   return count;
 }
 
 size_t ChannelMappedRepresentation::source_pair_for(size_t pair) const {
+  // Inactive: every output pair maps straight to the same source pair.
+  if (!is_active()) return pair;
   // Deleting the source pair shifts every later pair up by one source index.
   if (is_delete()) return pair >= source_pair_ ? pair + 1 : pair;
   // The mono result pair (in place, appended, or overwritten target) always
@@ -185,38 +200,29 @@ std::vector<ArtifactPtr> AudioChannelMapStage::execute(
 
   if (!parameters.empty()) set_parameters(parameters);
 
-  const size_t pair_count = vfr->audio_channel_pair_count();
-  const size_t source = static_cast<size_t>(channel_pair_);
-  if (source >= pair_count) {
-    throw DAGExecutionError(
-        "AudioChannelMapStage: channel pair " + std::to_string(channel_pair_) +
-        " is out of range: the input carries " + std::to_string(pair_count) +
-        " audio channel pair(s)");
-  }
-
   const auto operation = parse_operation(operation_)
                              .value_or(AudioChannelMapOperation::kLeftToMono);
-  if (is_route_op(operation)) {
-    if (target_pair_ == kTargetNew) {
-      // Appending a pair must not exceed the pipeline's channel-pair cap; the
-      // limit is enforced here, not just at the container sink, so a DAG that
-      // validates also exports.
-      if (pair_count >= kMaxAudioChannelPairs) {
-        throw DAGExecutionError(
-            "AudioChannelMapStage: cannot append a channel pair: the input "
-            "already carries the maximum of " +
-            std::to_string(kMaxAudioChannelPairs) + " audio channel pairs");
-      }
-    } else {
-      const auto target = parse_pair_index(target_pair_);
-      if (!target || static_cast<size_t>(*target) >= pair_count) {
-        throw DAGExecutionError(
-            "AudioChannelMapStage: target channel pair '" + target_pair_ +
-            "' is out of range: the input carries " +
-            std::to_string(pair_count) + " audio channel pair(s)");
-      }
+
+  // A channel-pair selection the input cannot satisfy (most commonly a source
+  // that carries no audio at all) is a configuration mismatch, not a pipeline
+  // failure. The stage degrades to a transparent pass-through instead of
+  // throwing, because a DAG execution error here blanks the preview of every
+  // downstream node — including the video sink — for a fault that only
+  // concerns audio.
+  const std::string reason =
+      inactive_reason(vfr->audio_channel_pair_count(), operation);
+  if (!reason.empty()) {
+    // Executed once per render request, so only log when the reason changes.
+    if (reason != last_inactive_reason_) {
+      ORC_LOG_WARN(
+          "AudioChannelMapStage: {}; passing the input through unchanged",
+          reason);
+      last_inactive_reason_ = reason;
     }
+    cached_output_ = vfr;
+    return {inputs[0]};
   }
+  last_inactive_reason_.clear();
 
   auto output = process(vfr);
   cached_output_ = output;
@@ -225,6 +231,34 @@ std::vector<ArtifactPtr> AudioChannelMapStage::execute(
   outputs.push_back(std::const_pointer_cast<ChannelMappedRepresentation>(
       std::dynamic_pointer_cast<const ChannelMappedRepresentation>(output)));
   return outputs;
+}
+
+std::string AudioChannelMapStage::inactive_reason(
+    size_t pair_count, AudioChannelMapOperation operation) const {
+  if (static_cast<size_t>(channel_pair_) >= pair_count) {
+    return "channel pair " + std::to_string(channel_pair_) +
+           " is out of range: the input carries " + std::to_string(pair_count) +
+           " audio channel pair(s)";
+  }
+  if (!is_route_op(operation)) return {};
+  if (target_pair_ == kTargetNew) {
+    // Appending a pair must not exceed the pipeline's channel-pair cap; the
+    // limit is checked here, not just at the container sink, so a DAG that
+    // previews also exports.
+    if (pair_count >= kMaxAudioChannelPairs) {
+      return "cannot append a channel pair: the input already carries the "
+             "maximum of " +
+             std::to_string(kMaxAudioChannelPairs) + " audio channel pairs";
+    }
+    return {};
+  }
+  const auto target = parse_pair_index(target_pair_);
+  if (!target || static_cast<size_t>(*target) >= pair_count) {
+    return "target channel pair '" + target_pair_ +
+           "' is out of range: the input carries " +
+           std::to_string(pair_count) + " audio channel pair(s)";
+  }
+  return {};
 }
 
 std::shared_ptr<const VideoFrameRepresentation> AudioChannelMapStage::process(

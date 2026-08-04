@@ -13,7 +13,7 @@ Waveform Monitor, Vectorscope, and several metadata observers.
 |---------|-------------|
 | << | Jump to the first frame or field. |
 | < | Step back one frame or field. Hold to step continuously. |
-| ▶ / ⏸ | Play back at the project frame rate (PAL: 25 fps; NTSC: ~30 fps). Press again to pause. Stops automatically at the last frame. |
+| ▶ / ⏸ | Play back at the project frame rate (PAL: 25 fps; NTSC: ~30 fps), or at the audio rate when a channel pair is selected. Press again to pause. Stops automatically at the last frame. |
 | > | Step forward one frame or field. Hold to step continuously. |
 | >> | Jump to the last frame or field. |
 | Frame spinbox | Type a frame number to jump there directly (1-indexed display). |
@@ -28,6 +28,41 @@ Waveform Monitor, Vectorscope, and several metadata observers.
 | Aspect Ratio | Set the display aspect ratio: Square Pixels, 4:3, 16:9, and others. |
 | Zoom 1:1 | Resize the preview window so the image is displayed at its native pixel resolution. |
 | Dropouts: Off/On | Toggle the dropout overlay. When enabled, samples flagged as dropout are highlighted in red over the preview image. |
+| Audio | Choose an audio channel pair to play with the preview, or **No audio**. Greyed out when the stage's output carries no audio. |
+| Volume | Playback volume for the selected pair. Takes effect immediately, including mid-playback. |
+| 🔊 / 🔇 | Mute the audio without pausing. The preview keeps playing at the same rate. |
+
+## Audio Playback
+
+Select a channel pair in the **Audio** control and press play: the pair is
+played at normal speed and the preview follows it.
+
+Audio is the clock and the video chases it. Preview rendering is not
+guaranteed to reach real time — a 3D chroma decoder or a neural stage can take
+seconds per frame — so instead of slowing the audio to match, the preview shows
+whichever frame the audio has reached and skips the ones the renderer could not
+deliver in time. Sound is always continuous; on a heavy pipeline the picture
+simply updates less often.
+
+A few things worth knowing:
+
+- **The first play may pause to prepare the audio.** Some sources decode their
+  whole audio stream on first access — an EFM disc decode can take minutes.
+  A progress window appears if the wait is long enough to notice, and the
+  prepared audio is kept, so pausing and playing again is instant. A CVBS
+  container reads audio per frame and needs no preparation at all.
+- **Preparing audio can use a lot of memory.** A TBC or imported-WAV source
+  holds the decoded audio in RAM for the whole disc; this can be hundreds of
+  megabytes on a feature-length title.
+- **The selection resets when you change stage.** Channel-pair numbering is a
+  property of the stage's output, so the selector re-reads it and returns to
+  **No audio** whenever you view a different stage.
+- **Editing the pipeline stops playback.** Changing a parameter or the graph
+  invalidates the prepared audio; press play again to restart.
+- **Scrubbing restarts the audio** at the new position rather than trying to
+  catch up.
+- Most projects carry no audio at all. The **Audio** control is then disabled
+  and play behaves exactly as it always has.
 
 ## Line Scope
 

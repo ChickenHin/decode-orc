@@ -133,14 +133,36 @@ TEST(AudioAlignStageTest, Descriptors_DefaultsRoundTripThroughSetGet) {
   EXPECT_EQ(std::get<double>(params.at("offset_ms")), -12.5);
 }
 
-TEST(AudioAlignStageTest, Execute_ThrowsWhenChannelPairOutOfRange) {
+TEST(AudioAlignStageTest, ChannelPairOutOfRange_PassesInputThrough) {
+  // A pair the input does not carry must not fail the DAG: an audio-only
+  // misconfiguration cannot be allowed to blank a downstream video preview.
   orc::AudioAlignStage stage;
   auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
   ON_CALL(*vfr, audio_channel_pair_count()).WillByDefault(Return(1u));
 
   orc::ObservationContext ctx;
-  EXPECT_THROW(stage.execute({vfr}, {{"channel_pair", std::string("1")}}, ctx),
-               orc::DAGExecutionError);
+  std::vector<orc::ArtifactPtr> outputs;
+  ASSERT_NO_THROW(outputs = stage.execute(
+                      {vfr},
+                      {{"channel_pair", std::string("1")}, {"offset_ms", 40.0}},
+                      ctx));
+  ASSERT_EQ(outputs.size(), 1u);
+  EXPECT_EQ(outputs[0].get(), vfr.get());
+}
+
+TEST(AudioAlignStageTest, NoAudioPairs_PassesInputThrough) {
+  orc::AudioAlignStage stage;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+  ON_CALL(*vfr, audio_channel_pair_count()).WillByDefault(Return(0u));
+
+  orc::ObservationContext ctx;
+  std::vector<orc::ArtifactPtr> outputs;
+  ASSERT_NO_THROW(outputs = stage.execute(
+                      {vfr},
+                      {{"channel_pair", std::string("0")}, {"offset_ms", 40.0}},
+                      ctx));
+  ASSERT_EQ(outputs.size(), 1u);
+  EXPECT_EQ(outputs[0].get(), vfr.get());
 }
 
 TEST(AudioAlignStageTest, Execute_ZeroOffsetPassesInputThrough) {
