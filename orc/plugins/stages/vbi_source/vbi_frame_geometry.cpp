@@ -19,6 +19,12 @@ namespace {
 constexpr uint32_t kPALLinesPerFrame = 625;
 constexpr uint32_t kPALSamplesPerFrame = 709379;
 
+// ITU-R BT.1700 Annex 1 Part B Table 1 (625-line PAL): fsc = 4 433 618.75 Hz,
+// so the 4 x fsc lattice runs at exactly 17 734 475 Hz.  That is 709 379
+// samples in each of the 25 frames per second, which is the same statement as
+// the frame size above.
+constexpr double kPALOutputSampleRateHz = 17734475.0;
+
 }  // namespace
 
 VBIFrameGeometry::VBIFrameGeometry(uint32_t lines_per_frame,
@@ -99,6 +105,27 @@ bool make_vbi_frame_geometry(VBITVSystem tv_system,
 
   error_message = "Unrecognised television system.";
   out_geometry = VBIFrameGeometry();
+  return false;
+}
+
+bool vbi_output_sample_rate_hz(VBITVSystem tv_system, double& out_rate_hz,
+                               std::string& error_message) {
+  switch (tv_system) {
+    case VBITVSystem::kPAL:
+      out_rate_hz = kPALOutputSampleRateHz;
+      return true;
+
+    case VBITVSystem::kNTSC:
+    case VBITVSystem::kPALM:
+      error_message =
+          "Output sampling rate for 525-line systems is not implemented yet; "
+          "only PAL frames can currently be synthesised.";
+      out_rate_hz = 0.0;
+      return false;
+  }
+
+  error_message = "Unrecognised television system.";
+  out_rate_hz = 0.0;
   return false;
 }
 

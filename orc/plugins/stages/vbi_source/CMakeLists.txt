@@ -20,6 +20,8 @@ add_library(orc-vbi-source STATIC
     vbi_line_mapping.cpp
     vbi_output_levels.cpp
     vbi_level_mapper.cpp
+    vbi_resampler.cpp
+    vbi_line_placement.cpp
 )
 
 target_include_directories(orc-vbi-source

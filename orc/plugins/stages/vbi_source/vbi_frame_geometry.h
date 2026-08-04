@@ -89,6 +89,16 @@ bool make_vbi_frame_geometry(VBITVSystem tv_system,
                              VBIFrameGeometry& out_geometry,
                              std::string& error_message);
 
+// Sampling rate of the output lattice, in Hz: four times the colour
+// subcarrier frequency of the television system.
+//
+// It is the lattice's own rate, not a free choice — the frame is a whole
+// number of samples at exactly this rate — so it lives with the geometry.
+// Returns false with an error message for systems the stage does not yet
+// synthesise.
+bool vbi_output_sample_rate_hz(VBITVSystem tv_system, double& out_rate_hz,
+                               std::string& error_message);
+
 }  // namespace orc
 
 #endif  // ORC_VBI_FRAME_GEOMETRY_H

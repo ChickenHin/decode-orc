@@ -114,6 +114,8 @@ orc_add_core_unit_tests(
         stages/vbi_source/vbi_line_mapping_test.cpp
         stages/vbi_source/vbi_output_levels_test.cpp
         stages/vbi_source/vbi_level_mapper_test.cpp
+        stages/vbi_source/vbi_resampler_test.cpp
+        stages/vbi_source/vbi_line_placement_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
 
