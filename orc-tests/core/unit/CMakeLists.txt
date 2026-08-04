@@ -57,6 +57,7 @@ function(orc_add_core_unit_tests target labels)
         foreach(_orc_stage_plugin_target
                         orc-stage-plugin-tbc-source
                         orc-stage-plugin-cvbs-source
+                        orc-stage-plugin-vbi-source
                         orc-stage-plugin-stacker
                         orc-stage-plugin-frame-map
                         orc-stage-plugin-video-params
@@ -125,6 +126,8 @@ orc_add_core_unit_tests(
         stages/vbi_source/vbi_burst_synthesis_test.cpp
         stages/vbi_source/vbi_frame_synthesis_test.cpp
         stages/vbi_source/vbi_frame_sequence_test.cpp
+        stages/vbi_source/vbi_frame_index_test.cpp
+        stages/vbi_source/vbi_source_stage_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
 

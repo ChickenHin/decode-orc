@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,14 +44,20 @@ class FakeByteSource : public IVBIByteSource {
     const size_t available = bytes_.size() - static_cast<size_t>(byte_offset);
     const size_t produced = std::min(count, available);
     std::memcpy(out_buffer, bytes_.data() + byte_offset, produced);
+    last_read_count_ = count;
     return produced;
   }
 
   int read_count() const { return read_count_; }
 
+  // Bytes the most recent read asked for, so a test can tell a whole-frame
+  // fetch from a four-byte trailer read.
+  size_t last_read_count() const { return last_read_count_; }
+
  private:
   std::vector<uint8_t> bytes_;
   int read_count_ = 0;
+  size_t last_read_count_ = 0;
 };
 
 VBISourceFormat bt8x8_pal_format() {
@@ -212,6 +219,57 @@ TEST(VBILineReader, FrameCounterIsAbsentWhenTheFormatDeclaresNoTrailer) {
   std::string error;
   ASSERT_TRUE(reader.read_frame(0, records, error)) << error;
   EXPECT_FALSE(records.frame_counter.has_value());
+}
+
+// Frame-drop detection needs a frame's counter and nothing else, and asking
+// for its records as well would decode 64 KiB to read four bytes.
+TEST(VBILineReader, FrameCounterIsReadableWithoutDecodingTheFramesRecords) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  std::vector<uint8_t> bytes = make_capture(format, 3);
+  set_frame_counter(bytes, format, 0, 399598u);
+  set_frame_counter(bytes, format, 1, 399599u);
+  set_frame_counter(bytes, format, 2, 399604u);
+  FakeByteSource source(std::move(bytes));
+  VBILineReader reader(format, source);
+
+  std::optional<uint32_t> counter;
+  std::string error;
+  ASSERT_TRUE(reader.read_frame_counter(2, counter, error)) << error;
+  ASSERT_TRUE(counter.has_value());
+  EXPECT_EQ(*counter, 399604u);
+
+  // Four bytes, one read, and nothing else touched.
+  EXPECT_EQ(source.read_count(), 1);
+  EXPECT_EQ(source.last_read_count(), 4u);
+}
+
+// A format with no counter trailer reports that it has none, which is an
+// answer rather than a failure: such a source cannot report drops at all.
+TEST(VBILineReader, FrameCounterReadIsEmptyWhenTheFormatDeclaresNoTrailer) {
+  VBISourceFormat format = bt8x8_pal_format();
+  format.frame_trailer_bytes = 0;
+  format.frame_trailer_is_counter = false;
+
+  FakeByteSource source(make_capture(format, 1));
+  VBILineReader reader(format, source);
+
+  std::optional<uint32_t> counter;
+  std::string error;
+  EXPECT_TRUE(reader.read_frame_counter(0, counter, error)) << error;
+  EXPECT_FALSE(counter.has_value());
+  EXPECT_EQ(source.read_count(), 0);
+}
+
+TEST(VBILineReader, FrameCounterReadBeyondTheCaptureIsReported) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  FakeByteSource source(make_capture(format, 1));
+  VBILineReader reader(format, source);
+
+  std::optional<uint32_t> counter;
+  std::string error;
+  EXPECT_FALSE(reader.read_frame_counter(4, counter, error));
+  EXPECT_FALSE(counter.has_value());
+  EXPECT_NE(error.find("part-way"), std::string::npos) << error;
 }
 
 // cx88 stores 18 records per field with the data service in 1..16; records 0

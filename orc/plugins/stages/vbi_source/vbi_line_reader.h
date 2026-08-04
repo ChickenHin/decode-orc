@@ -88,6 +88,17 @@ class VBILineReader {
   bool read_frame(uint64_t frame_index, VBIFrameRecords& out_records,
                   std::string& error_message) const;
 
+  // Read one stored frame's counter without decoding its records.
+  //
+  // Frame-drop detection needs the counter of a frame and nothing else, and
+  // asking for the samples as well would decode 64 KiB to read four bytes.
+  // out_counter is empty when the format declares no counter trailer, which
+  // is not an error: it is the answer that the source cannot report drops
+  // (design §6.3).
+  bool read_frame_counter(uint64_t frame_index,
+                          std::optional<uint32_t>& out_counter,
+                          std::string& error_message) const;
+
  private:
   VBISourceFormat format_;
   IVBIByteSource* byte_source_;

@@ -126,19 +126,28 @@ gtest_discover_tests(orc-core-functional-tests-observation
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;observation")
 
-# Raw VBI capture transport: FLAC unwrapping is verified against the reference
-# bt8x8 PAL sample, which is real media on disk and therefore functional. The
-# sample is not checked in (test-data/ is ignored), so the tests skip when it
-# is absent. Links the plugin-side library directly; no stage plugins needed.
+# Raw VBI capture transport and the stage over it: both are verified against
+# the reference bt8x8 PAL sample, which is real media on disk and therefore
+# functional. The sample is not checked in (test-data/ is ignored), so the
+# tests skip when it is absent. The stage plugin target is linked directly so
+# the stage class can be driven in-process.
 if(TARGET orc-vbi-source)
     add_executable(orc-core-functional-tests-vbi-source
         stages/vbi_source/vbi_flac_transport_test.cpp
         stages/vbi_source/vbi_calibration_test.cpp
+        stages/vbi_source/vbi_source_pipeline_test.cpp
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source
         GTest::gmock_main
     )
+    if(TARGET orc-stage-plugin-vbi-source)
+        # orc-core supplies the concrete ObservationContext the stage's
+        # execute() signature takes; at runtime the host provides it.
+        target_link_libraries(orc-core-functional-tests-vbi-source
+            orc-stage-plugin-vbi-source
+            orc-core)
+    endif()
     target_compile_definitions(orc-core-functional-tests-vbi-source PRIVATE
         ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
     )

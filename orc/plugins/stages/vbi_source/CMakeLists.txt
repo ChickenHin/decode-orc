@@ -31,7 +31,12 @@ add_library(orc-vbi-source STATIC
     vbi_burst_synthesis.cpp
     vbi_frame_synthesis.cpp
     vbi_frame_sequence.cpp
+    vbi_frame_index.cpp
 )
+
+# The library is linked into the plugin's shared object, so it has to be
+# position-independent even though it is itself static.
+set_target_properties(orc-vbi-source PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(orc-vbi-source
     PUBLIC
@@ -51,3 +56,19 @@ target_link_libraries(orc-vbi-source PUBLIC orc-plugin-sdk)
 # here as a generic lossless byte compressor, not as audio, which is why
 # libavformat/libavcodec are preferred to adding a libFLAC dependency.
 target_link_libraries(orc-vbi-source PUBLIC PkgConfig::FFMPEG)
+
+# The stage itself: the DAG-facing class and the plugin bundle, over the
+# library above.
+orc_add_stage_plugin(
+    orc-stage-plugin-vbi-source
+    OUTPUT_NAME orc-stage-plugin-vbi-source
+    PLUGIN_VERSION "${ORC_VERSION}"
+    SOURCES
+        vbi_source_stage.cpp
+        plugin.cpp
+    LINK_LIBRARIES orc-vbi-source
+)
+
+install(TARGETS orc-stage-plugin-vbi-source
+    LIBRARY DESTINATION lib/orc/stages
+)
