@@ -23,6 +23,7 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/raw_efm_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
                 ${CMAKE_SOURCE_DIR}/orc/sdk/include
         )
     target_link_libraries(
@@ -33,6 +34,10 @@ function(orc_add_core_unit_tests target labels)
 
         if(TARGET orc-audio-resample)
                 target_link_libraries(${target} orc-audio-resample)
+        endif()
+
+        if(TARGET orc-vbi-source)
+                target_link_libraries(${target} orc-vbi-source)
         endif()
 
     target_compile_definitions(${target} PRIVATE
@@ -101,6 +106,10 @@ orc_add_core_unit_tests(
         stages/tbc_source/pal_tbc_converter_test.cpp
         stages/tbc_source/ntsc_tbc_converter_test.cpp
         stages/cvbs_source/cvbs_source_stage_test.cpp
+        stages/vbi_source/vbi_source_format_test.cpp
+        stages/vbi_source/vbi_line_reader_test.cpp
+        stages/vbi_source/vbi_source_validation_test.cpp
+        stages/vbi_source/vbi_transport_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
 

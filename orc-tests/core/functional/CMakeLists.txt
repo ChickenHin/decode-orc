@@ -125,3 +125,24 @@ gtest_discover_tests(orc-core-functional-tests-observation
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;observation")
+
+# Raw VBI capture transport: FLAC unwrapping is verified against the reference
+# bt8x8 PAL sample, which is real media on disk and therefore functional. The
+# sample is not checked in (test-data/ is ignored), so the tests skip when it
+# is absent. Links the plugin-side library directly; no stage plugins needed.
+if(TARGET orc-vbi-source)
+    add_executable(orc-core-functional-tests-vbi-source
+        stages/vbi_source/vbi_flac_transport_test.cpp
+    )
+    target_link_libraries(orc-core-functional-tests-vbi-source
+        orc-vbi-source
+        GTest::gmock_main
+    )
+    target_compile_definitions(orc-core-functional-tests-vbi-source PRIVATE
+        ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
+    )
+    gtest_discover_tests(orc-core-functional-tests-vbi-source
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;sources")
+endif()
