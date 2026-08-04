@@ -726,7 +726,7 @@ void DefaultObservationSchedulingPolicy::emit_node_items(
 std::vector<ObservationWorkItem> DefaultObservationSchedulingPolicy::plan_sweep(
     const ObservationSchedulingContext& context) {
   std::vector<ObservationWorkItem> out;
-  if (context.total_frames == 0) {
+  if (context.total_frames == 0 || context.total_frames > kMaxWholeNodeFrames) {
     return out;
   }
   const FrameIDRange whole{0, context.total_frames - 1};
@@ -788,7 +788,9 @@ std::vector<ObservationWorkItem>
 DefaultObservationSchedulingPolicy::plan_invalidation(
     const ObservationSchedulingContext& context) {
   std::vector<ObservationWorkItem> out;
-  if (context.total_frames == 0) {
+  // Re-observing a changed node covers its whole range, so it is bounded by
+  // the same limit as the sweep that first observed it.
+  if (context.total_frames == 0 || context.total_frames > kMaxWholeNodeFrames) {
     return out;
   }
   const FrameIDRange whole{0, context.total_frames - 1};

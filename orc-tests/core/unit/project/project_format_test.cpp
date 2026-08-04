@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 
@@ -886,6 +887,54 @@ dag:
     EXPECT_NE(msg.find("NTSC"), std::string::npos)
         << "Error must mention NTSC: " << msg;
   }
+}
+
+// ---------------------------------------------------------------------------
+// project root adoption on save
+// ---------------------------------------------------------------------------
+
+// A project created in-session has no root until it is saved.  Relative
+// file-path parameters are resolved against that root when the DAG is built,
+// so saving must adopt the written file's directory — otherwise every relative
+// path looks missing until the project is closed and reopened.
+TEST(ProjectFormatTest, SaveProject_AdoptsWrittenFileDirectoryAsRoot) {
+  auto project = orc::project_io::create_empty_project(
+      "root-adoption", orc::VideoSystem::PAL, orc::SourceType::Composite);
+  EXPECT_TRUE(project.get_project_root().empty())
+      << "A freshly created project should have no root yet";
+
+  const auto directory =
+      std::filesystem::temp_directory_path() / "orc-save-root-test";
+  std::filesystem::create_directories(directory);
+  const auto file = directory / "adopted.orcprj";
+
+  orc::project_io::save_project(project, file.string());
+
+  EXPECT_EQ(project.get_project_root(),
+            std::filesystem::absolute(file).parent_path().string());
+
+  std::filesystem::remove_all(directory);
+}
+
+// Saving to a different directory re-points the root, matching what a reload
+// of the newly written file would do.
+TEST(ProjectFormatTest, SaveProject_SaveAsElsewhere_UpdatesRoot) {
+  auto project = orc::project_io::create_empty_project(
+      "root-move", orc::VideoSystem::PAL, orc::SourceType::Composite);
+
+  const auto base = std::filesystem::temp_directory_path() / "orc-save-as-test";
+  const auto first = base / "first";
+  const auto second = base / "second";
+  std::filesystem::create_directories(first);
+  std::filesystem::create_directories(second);
+
+  orc::project_io::save_project(project, (first / "p.orcprj").string());
+  EXPECT_EQ(project.get_project_root(), first.string());
+
+  orc::project_io::save_project(project, (second / "p.orcprj").string());
+  EXPECT_EQ(project.get_project_root(), second.string());
+
+  std::filesystem::remove_all(base);
 }
 
 }  // namespace orc_unit_test

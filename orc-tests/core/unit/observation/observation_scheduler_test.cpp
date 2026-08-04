@@ -673,6 +673,82 @@ TEST(DefaultObservationSchedulingPolicy, SweepEmitsOneCombinedItemPerNode) {
   EXPECT_EQ(items[0].priority, ObservationPriority::kSweep);
 }
 
+// A source longer than the whole-node limit gets no sweep at all: every frame
+// of a four-hour VBI capture through the full observer set is tens of hours of
+// background work that would starve the interactive render for its duration.
+// Such a node is served by the prefetch window instead.
+TEST(DefaultObservationSchedulingPolicy, SweepDeclinedBeyondWholeNodeLimit) {
+  DefaultObservationSchedulingPolicy policy({"white_snr"}, {});
+
+  auto map = std::make_shared<NodeFingerprintMap>();
+  (*map)[NodeID(1)] = fp("n1");
+
+  ObservationSchedulingContext ctx;
+  ctx.fingerprints = map;
+  ctx.nodes_of_interest = {NodeID(1)};
+
+  // At the limit the sweep is still planned in full...
+  ctx.total_frames = DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames;
+  const auto at_limit = policy.plan_sweep(ctx);
+  ASSERT_EQ(at_limit.size(), 1u);
+  EXPECT_EQ(at_limit[0].frames.first, 0u);
+  EXPECT_EQ(at_limit[0].frames.last, ctx.total_frames - 1);
+
+  // ... and one frame past it, nothing is enqueued rather than a truncated
+  // range: a partial sweep must never look like full coverage.
+  ctx.total_frames =
+      DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames + 1;
+  EXPECT_TRUE(policy.plan_sweep(ctx).empty());
+
+  // A four-hour bt8x8 VBI capture, the case this limit exists for.
+  ctx.total_frames = 368007;
+  EXPECT_TRUE(policy.plan_sweep(ctx).empty());
+}
+
+// Re-observing a changed node covers the same whole range as the sweep, so it
+// is bounded identically — otherwise a parameter edit on a long source would
+// enqueue exactly the work the sweep limit refused.
+TEST(DefaultObservationSchedulingPolicy,
+     InvalidationDeclinedBeyondWholeNodeLimit) {
+  DefaultObservationSchedulingPolicy policy({"white_snr"}, {});
+
+  auto map = std::make_shared<NodeFingerprintMap>();
+  (*map)[NodeID(1)] = fp("n1");
+
+  ObservationSchedulingContext ctx;
+  ctx.fingerprints = map;
+  ctx.changed_nodes = {NodeID(1)};
+
+  ctx.total_frames = DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames;
+  EXPECT_EQ(policy.plan_invalidation(ctx).size(), 1u);
+
+  ctx.total_frames =
+      DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames + 1;
+  EXPECT_TRUE(policy.plan_invalidation(ctx).empty());
+}
+
+// The prefetch window is what serves a source too long to sweep, so it must
+// keep working at any length.
+TEST(DefaultObservationSchedulingPolicy, PrefetchIsUnaffectedByTheSweepLimit) {
+  DefaultObservationSchedulingPolicy policy({"white_snr"}, {},
+                                            /*prefetch_radius=*/10);
+
+  auto map = std::make_shared<NodeFingerprintMap>();
+  (*map)[NodeID(1)] = fp("n1");
+
+  ObservationSchedulingContext ctx;
+  ctx.fingerprints = map;
+  ctx.total_frames = 368007;
+  ctx.preview_position = 200000;
+  ctx.nodes_of_interest = {NodeID(1)};
+
+  const auto items = policy.plan_prefetch(ctx);
+  ASSERT_EQ(items.size(), 1u);
+  EXPECT_EQ(items[0].frames.first, 199990u);
+  EXPECT_EQ(items[0].frames.last, 200010u);
+  EXPECT_EQ(items[0].priority, ObservationPriority::kPrefetch);
+}
+
 TEST(DefaultObservationSchedulingPolicy, PrefetchClampsWindowToPreview) {
   DefaultObservationSchedulingPolicy policy({"white_snr"}, {},
                                             /*prefetch_radius=*/10);

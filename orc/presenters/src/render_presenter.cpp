@@ -460,6 +460,27 @@ class RenderPresenter::Impl {
   // Meta key prefix for durable sweep-complete markers.
   static constexpr const char* kSweptMetaPrefix = "swept:";
 
+  // Whether a node of @p total frames is short enough to sweep in the
+  // background. The policy would decline to plan the sweep anyway (see
+  // DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames for why); asking
+  // the same question here keeps this class's sweep bookkeeping honest, since
+  // registerPendingSweep would otherwise be left waiting forever on
+  // completions for frames nobody enqueued. Reported once per node, so a
+  // dialog showing only the scrubbed neighbourhood has a stated reason.
+  bool sweepableLength(NodeID node_id, std::uint64_t total) {
+    if (total <= orc::DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames) {
+      return true;
+    }
+    ORC_LOG_INFO(
+        "RenderPresenter: node '{}' holds {} frames, beyond the {}-frame limit "
+        "on whole-node background observation; its observations will be "
+        "gathered around the preview position as you scrub rather than over "
+        "the whole source",
+        node_id.to_string(), total,
+        orc::DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames);
+    return false;
+  }
+
   // A frame observation awaited by an async requestObservations() caller.
   struct PendingObservationRequest {
     uint64_t request_id = 0;
@@ -686,6 +707,12 @@ class RenderPresenter::Impl {
     }
     const std::uint64_t total = frameCountForNode(node_id);
     if (total == 0) {
+      return;
+    }
+    if (!sweepableLength(node_id, total)) {
+      // Recorded as swept so the refusal is decided (and reported) once per
+      // provenance rather than on every dialog request for the node.
+      sched_swept_[node_id] = fp;
       return;
     }
     if (sweepMarkerValid(fp, total)) {
@@ -1092,7 +1119,12 @@ class RenderPresenter::Impl {
             }
           }
         }
-        if (total != 0) {
+        // The re-observation covers the whole node, so it is subject to the
+        // same length limit as the sweep that first observed it. Refusing
+        // leaves the stale sched_swept_ fingerprints in place, which is what
+        // makes a later dialog request re-decide (and re-report) through
+        // sweepNodeForObservation.
+        if (total != 0 && sweepableLength(reobserve.front(), total)) {
           for (const NodeID node : reobserve) {
             const orc::NodeFingerprint fp = fingerprintOf(node);
             sched_swept_[node] = fp;

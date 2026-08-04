@@ -998,7 +998,7 @@ std::string serialize_project_to_yaml(const Project& project,
   return file_text.str();
 }
 
-void save_project(const Project& project, const std::string& filename) {
+void save_project(Project& project, const std::string& filename) {
   std::string yaml_text = serialize_project_to_yaml(project, filename);
 
   // Write to file
@@ -1008,6 +1008,14 @@ void save_project(const Project& project, const std::string& filename) {
   }
   file << yaml_text;
   file.close();
+
+  // Adopt the saved file's directory as the project root.  Relative file-path
+  // parameters are stored relative to the project file, and are resolved
+  // against project_root_ when the DAG is built (see project_to_dag.cpp).
+  // Without this a project created in-session — which has no root until it is
+  // reloaded from disk — leaves those paths unresolved, and every relative
+  // path appears to be missing until the user closes and reopens the project.
+  project.project_root_ = resolve_project_root_for_filename(filename).string();
 
   // Clear modification flag - project has been saved
   project.clear_modified_flag();

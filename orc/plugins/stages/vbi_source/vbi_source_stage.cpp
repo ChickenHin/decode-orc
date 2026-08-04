@@ -100,10 +100,18 @@ constexpr const char* kTvSystemPAL = "PAL";
 
 // Synthesised frames held against a repeat request.  Each PAL frame is 1,4 MB,
 // and synthesis is a resampling pass over the frame's data lines rather than a
-// disk read, so a small window is the right trade: it covers a preview
+// disk read, so a bounded window is the right trade: it covers a preview
 // scrubbing back and forth and the observers that re-read a frame they have
 // just been handed, without holding a decode's worth of frames resident.
-constexpr size_t kFrameCacheSize = 8;
+//
+// It has to be comfortably larger than the number of readers, though. The
+// background observation pool runs one worker per two cores and the preview
+// render is another reader on top, so a window the size of the pool is
+// evicted before its frames are used: every reader then misses, re-synthesises
+// what another reader just built, and evicts a third reader's frame doing it.
+// Sixty-four frames is 90 MB, and covers the pool on any machine this runs on
+// with room for the prefetch window either side of the preview.
+constexpr size_t kFrameCacheSize = 64;
 
 // Stored frames calibration samples across the capture.
 constexpr uint32_t kCalibrationSampleFrames = 16;
@@ -192,8 +200,17 @@ class VBISourceStageDeps final : public IVBISourceStageDeps {
 // uses) and Artifact (so it can be returned from execute()), and implements
 // the frame index's counter source over its own reader.
 //
-// Thread safety: every read path takes the representation's mutex, because
-// they all end at one byte source, which holds a stream position.
+// Thread safety: two locks, deliberately narrow.  io_mutex_ covers reads
+// through the byte source (which holds one stream position, so they are
+// strictly serial) and cache_mutex_ covers the frame cache.  Synthesising the
+// frame from the records that read produced holds neither: the level mapper,
+// the synthesiser and the resampler are const and carry only configuration, so
+// synthesis is reentrant, and it is by far the expensive part — a frame costs
+// tens of milliseconds to synthesise against a fraction of a millisecond to
+// read.  Holding one lock across all of it made every reader in the process
+// queue behind every other, and because std::mutex is not fair, a pool of
+// background observation workers could starve the interactive preview render
+// for a minute at a time.  Nothing that is not stream state is locked here.
 class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
                                                 public Artifact,
                                                 private IVBIFrameCounterSource {
@@ -276,17 +293,18 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   // --------------------------------------------------------------------------
   const sample_type* get_frame(FrameID id) const override {
     if (!has_frame(id)) return nullptr;
-    std::lock_guard<std::mutex> lock(mutex_);
     const DecodedFrame* frame = ensure_frame_cached(id);
     return frame ? frame->samples.data() : nullptr;
   }
 
   std::vector<sample_type> get_frame_copy(FrameID id) const override {
     if (!has_frame(id)) return {};
-    std::lock_guard<std::mutex> lock(mutex_);
-    const DecodedFrame* frame = ensure_frame_cached(id);
-    if (frame == nullptr) return {};
-    return frame->samples;
+    ensure_frame_cached(id);
+    // Copied with the cache lock held so an eviction on another thread cannot
+    // free the entry mid-copy.
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    const DecodedFrame* frame = frame_cache_.get_ptr(id);
+    return frame != nullptr ? frame->samples : std::vector<sample_type>{};
   }
 
   // Line access goes through the stage's own frame geometry rather than the
@@ -408,7 +426,7 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   }
 
   // IVBIFrameCounterSource.  Called by the frame index, which is only ever
-  // reached with the representation's mutex already held.
+  // reached with io_mutex_ already held.
   bool frame_counter(uint64_t stored_frame_index,
                      std::optional<uint32_t>& out_counter,
                      std::string& error_message) const override {
@@ -416,24 +434,52 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
                                        error_message);
   }
 
-  // Caller holds mutex_.
+  // Caller holds no lock.
   const DecodedFrame* ensure_frame_cached(FrameID id) const {
+    {
+      std::lock_guard<std::mutex> lock(cache_mutex_);
+      if (frame_cache_.contains(id)) {
+        return frame_cache_.get_ptr(id);
+      }
+    }
+
+    // Synthesised with no lock held. Two threads racing the same frame
+    // synthesise it twice and the loser's copy is dropped, which costs one
+    // frame of duplicated work — far less than the alternative of holding
+    // every other reader off for the duration (see the class comment).
+    DecodedFrame decoded = synthesise_frame(id);
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
     if (!frame_cache_.contains(id)) {
-      frame_cache_.put(id, synthesise_frame(id));
+      frame_cache_.put(id, std::move(decoded));
     }
     return frame_cache_.get_ptr(id);
   }
 
-  // Caller holds mutex_.  Throws when the frame cannot be synthesised: a
-  // frame that cannot be built is a broken configuration or a broken capture,
-  // and returning blanking for it would hide both.
+  // Caller holds no lock: this takes io_mutex_ for the parts that read the
+  // capture and holds nothing for the rest.  Throws when the frame cannot be
+  // synthesised: a frame that cannot be built is a broken configuration or a
+  // broken capture, and returning blanking for it would hide both.
   DecodedFrame synthesise_frame(FrameID id) const {
     std::string error;
 
     VBIOutputFramePlan plan;
-    if (!index_.frame_plan(static_cast<uint64_t>(id), plan, error)) {
-      throw std::runtime_error("VBI source '" + setup_.input_path +
-                               "': " + error);
+    VBIFrameRecords records;
+    {
+      // Everything that reads through the byte source, and nothing else. The
+      // frame index resolves a plan by reading frame counters through the same
+      // reader, so it belongs inside the same critical section.
+      std::lock_guard<std::mutex> lock(io_mutex_);
+
+      if (!index_.frame_plan(static_cast<uint64_t>(id), plan, error)) {
+        throw std::runtime_error("VBI source '" + setup_.input_path +
+                                 "': " + error);
+      }
+      if (!plan.padding &&
+          !reader_->read_frame(plan.source_frame_index, records, error)) {
+        throw std::runtime_error("VBI source '" + setup_.input_path +
+                                 "': " + error);
+      }
     }
 
     VBISynthesisedFrame frame;
@@ -444,12 +490,6 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
                                  "': " + error);
       }
     } else {
-      VBIFrameRecords records;
-      if (!reader_->read_frame(plan.source_frame_index, records, error)) {
-        throw std::runtime_error("VBI source '" + setup_.input_path +
-                                 "': " + error);
-      }
-
       std::vector<VBIMappedLine> mapped_lines;
       level_mapper_->map_frame(records.lines, mapped_lines);
 
@@ -484,7 +524,12 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   size_t frame_count_ = 0;
   SourceParameters video_params_;
 
-  mutable std::mutex mutex_;
+  // The capture: one stream position, so every read through it is serial.
+  mutable std::mutex io_mutex_;
+
+  // The cache, held only across a lookup or an insertion — never across
+  // synthesis, and never across a read of the capture.
+  mutable std::mutex cache_mutex_;
   mutable LRUCache<FrameID, DecodedFrame> frame_cache_{kFrameCacheSize};
 };
 
