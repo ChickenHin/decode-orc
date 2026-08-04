@@ -56,6 +56,12 @@ enum class AudioChannelMapOperation {
 //   target is "new" the mono pair is appended (count +1); when it is an
 //   existing pair that pair is overwritten (count unchanged).
 //
+// When the input cannot satisfy the operation — the source pair (or an
+// existing routing target) is absent, or appending would exceed the
+// channel-pair cap — the wrapper becomes a transparent pass-through: audio and
+// video reach the output untouched. Audio routing is never a reason to stop
+// video reaching a downstream sink or preview.
+//
 // The produced mono pair reports origin DERIVED; its name is |description| when
 // |override_description| is set, otherwise the source pair's existing name is
 // kept unchanged. The remap is a pure per-sample channel operation on the
@@ -111,6 +117,12 @@ class ChannelMappedRepresentation : public VideoFrameRepresentationWrapper,
            operation_ == AudioChannelMapOperation::kCopyRightToTarget;
   }
   bool is_append() const { return is_route() && target_is_new_; }
+  // Whether the configured operation can be applied to the wrapped source. It
+  // cannot when the source pair (or a routing target) is absent from the
+  // input, or when appending would exceed the channel-pair cap. An inactive
+  // wrapper is a transparent pass-through: every pair keeps its index, count
+  // and samples.
+  bool is_active() const;
   // The mono fill implied by a left/right operation.
   ChannelFill mono_fill() const {
     return (operation_ == AudioChannelMapOperation::kLeftToMono ||
@@ -173,6 +185,12 @@ class AudioChannelMapStage : public DAGStage,
   std::shared_ptr<const VideoFrameRepresentation> process(
       std::shared_ptr<const VideoFrameRepresentation> source) const;
 
+  // Human-readable reason the configured operation cannot be applied to an
+  // input carrying |pair_count| audio channel pairs, or an empty string when
+  // it can. Used to report the mismatch and fall back to a pass-through.
+  std::string inactive_reason(size_t pair_count,
+                              AudioChannelMapOperation operation) const;
+
   // ParameterizedStage
   std::vector<ParameterDescriptor> get_parameter_descriptors(
       VideoSystem project_format, SourceType source_type) const override;
@@ -197,6 +215,11 @@ class AudioChannelMapStage : public DAGStage,
   // Custom name for the result pair (target for copy ops, source for the
   // in-place mono ops), used only when set_description_ is true.
   std::string description_;
+
+  // Last reported pass-through reason, so a repeated render request does not
+  // log the same warning again. Empty while the stage is applying its
+  // operation normally.
+  std::string last_inactive_reason_;
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
 };

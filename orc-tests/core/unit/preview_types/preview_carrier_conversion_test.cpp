@@ -11,6 +11,12 @@
 #include <orc/stage/preview/orc_preview_carriers.h>
 #include <orc/support/colour_preview_conversion.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <vector>
+
 namespace orc_unit_test {
 
 TEST(ColourFrameCarrierTest, InvalidWhenPlaneSizesDoNot_MatchDimensions) {
@@ -221,6 +227,163 @@ TEST(ColourCarrierConversionTest, Bt1886Transfer_ProducesValidImage) {
   ASSERT_TRUE(image.is_valid());
   ASSERT_EQ(image.width, 1u);
   ASSERT_EQ(image.height, 1u);
+}
+
+// =============================================================================
+// Transfer-function lookup tables
+//
+// The conversion evaluates the transfer decode and the sRGB encode through an
+// interpolated table rather than std::pow per component. These tests pin the
+// table's output against the transfer formulae computed directly, so a change
+// to the table resolution or the interpolation cannot silently shift the
+// rendered image.
+// =============================================================================
+
+namespace {
+
+// The reference conversion, written straight from the specifications rather
+// than from the implementation: ITU-R BT.470/BT.709 opto-electronic transfer
+// decode to linear light, then the IEC 61966-2-1 (sRGB) encode.
+double referenceDecodeToLinear(
+    double value, orc::ColorimetricTransferCharacteristics transfer) {
+  value = std::clamp(value, 0.0, 1.0);
+
+  switch (transfer) {
+    case orc::ColorimetricTransferCharacteristics::Gamma28:
+      return std::pow(value, 2.8);
+    case orc::ColorimetricTransferCharacteristics::BT709:
+      // ITU-R BT.709-6 Section 1.2: linear below 0.081, power law above.
+      if (value < 0.081) {
+        return value / 4.5;
+      }
+      return std::pow((value + 0.099) / 1.099, 1.0 / 0.45);
+    case orc::ColorimetricTransferCharacteristics::BT1886:
+    case orc::ColorimetricTransferCharacteristics::BT1886App1:
+      return std::pow(value, 2.4);
+    case orc::ColorimetricTransferCharacteristics::Gamma22:
+    case orc::ColorimetricTransferCharacteristics::Unspecified:
+    default:
+      return std::pow(value, 2.2);
+  }
+}
+
+// IEC 61966-2-1: sRGB opto-electronic transfer function.
+double referenceEncodeToSrgb(double linear) {
+  linear = std::clamp(linear, 0.0, 1.0);
+  if (linear <= 0.0031308) {
+    return 12.92 * linear;
+  }
+  return 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
+}
+
+uint8_t referenceCode(double non_linear,
+                      orc::ColorimetricTransferCharacteristics transfer) {
+  const double srgb =
+      referenceEncodeToSrgb(referenceDecodeToLinear(non_linear, transfer));
+  return static_cast<uint8_t>(std::clamp(srgb, 0.0, 1.0) * 255.0 + 0.5);
+}
+
+// A single-row carrier whose luma sweeps [0, 1] of the black→white range with
+// neutral chroma, so every output byte is the transfer function of a known
+// non-linear input.
+orc::ColourFrameCarrier makeLumaRamp(
+    uint32_t samples, orc::ColorimetricTransferCharacteristics transfer) {
+  constexpr double kWhite = 65535.0;
+
+  orc::ColourFrameCarrier carrier{};
+  carrier.width = samples;
+  carrier.height = 1;
+  carrier.cvbs_blanking = 0.0;
+  carrier.cvbs_black = 0.0;
+  carrier.cvbs_white = kWhite;
+  carrier.colorimetry = orc::ColorimetricMetadata::default_ntsc();
+  carrier.colorimetry.transfer_characteristics = transfer;
+
+  carrier.y_plane.resize(samples);
+  carrier.u_plane.assign(samples, 0.0);
+  carrier.v_plane.assign(samples, 0.0);
+  for (uint32_t i = 0; i < samples; ++i) {
+    carrier.y_plane[i] =
+        kWhite * static_cast<double>(i) / static_cast<double>(samples - 1);
+  }
+  return carrier;
+}
+
+}  // namespace
+
+TEST(ColourCarrierConversionTest, TransferTable_MatchesDirectEvaluation) {
+  // Every supported characteristic, swept densely enough to cross every table
+  // interval many times over.
+  const orc::ColorimetricTransferCharacteristics transfers[] = {
+      orc::ColorimetricTransferCharacteristics::Unspecified,
+      orc::ColorimetricTransferCharacteristics::Gamma22,
+      orc::ColorimetricTransferCharacteristics::Gamma28,
+      orc::ColorimetricTransferCharacteristics::BT709,
+      orc::ColorimetricTransferCharacteristics::BT1886,
+      orc::ColorimetricTransferCharacteristics::BT1886App1,
+  };
+  constexpr uint32_t kSamples = 20000;
+
+  for (const auto transfer : transfers) {
+    const auto carrier = makeLumaRamp(kSamples, transfer);
+    const auto image = orc::render_preview_from_colour_carrier(carrier);
+    ASSERT_TRUE(image.is_valid());
+
+    size_t off_by_one = 0;
+    for (uint32_t i = 0; i < kSamples; ++i) {
+      const double non_linear =
+          static_cast<double>(i) / static_cast<double>(kSamples - 1);
+      const int expected = referenceCode(non_linear, transfer);
+      const int actual = image.rgb_data[static_cast<size_t>(i) * 3];
+
+      // Never more than one 8-bit code away from the directly evaluated
+      // transfer function, for any input.
+      ASSERT_LE(std::abs(actual - expected), 1)
+          << "transfer=" << static_cast<int>(transfer) << " sample=" << i
+          << " expected=" << expected << " actual=" << actual;
+      if (actual != expected) {
+        ++off_by_one;
+      }
+    }
+
+    // Only inputs landing within the table's reconstruction error of a
+    // rounding boundary may differ at all; that is a small fraction of a
+    // percent, not a systematic shift.
+    EXPECT_LT(off_by_one, kSamples / 100)
+        << "transfer=" << static_cast<int>(transfer) << " differed on "
+        << off_by_one << " of " << kSamples << " samples";
+  }
+}
+
+TEST(ColourCarrierConversionTest, TransferTable_IsExactAtTheRangeEndpoints) {
+  // Black and white must not drift: the top endpoint in particular is the one
+  // input that falls outside every interpolation interval.
+  const auto carrier =
+      makeLumaRamp(2, orc::ColorimetricTransferCharacteristics::Gamma22);
+  const auto image = orc::render_preview_from_colour_carrier(carrier);
+  ASSERT_TRUE(image.is_valid());
+
+  EXPECT_EQ(image.rgb_data[0], 0);
+  EXPECT_EQ(image.rgb_data[1], 0);
+  EXPECT_EQ(image.rgb_data[2], 0);
+  EXPECT_EQ(image.rgb_data[3], 255);
+  EXPECT_EQ(image.rgb_data[4], 255);
+  EXPECT_EQ(image.rgb_data[5], 255);
+}
+
+TEST(ColourCarrierConversionTest, TransferTable_StaysMonotonicAcrossTheRamp) {
+  // A table lookup must not introduce a local dip; banding in a preview ramp
+  // is exactly what a badly interpolated table looks like.
+  const auto carrier =
+      makeLumaRamp(4096, orc::ColorimetricTransferCharacteristics::BT709);
+  const auto image = orc::render_preview_from_colour_carrier(carrier);
+  ASSERT_TRUE(image.is_valid());
+
+  for (uint32_t i = 1; i < carrier.width; ++i) {
+    EXPECT_LE(image.rgb_data[static_cast<size_t>(i - 1) * 3],
+              image.rgb_data[static_cast<size_t>(i) * 3])
+        << "output fell at sample " << i;
+  }
 }
 
 namespace {

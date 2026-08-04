@@ -37,6 +37,43 @@ Field indices always refer to the **post-stage output**, not the original source
 
 ---
 
+### Audio playback
+
+When the previewed stage's output carries audio channel pairs, the preview
+dialogue offers an **Audio** selector listing them (plus **Mute/None**),
+together with a volume slider. Selecting a pair and pressing play sounds that
+pair alongside the advancing preview; choosing **Mute/None** silences it.
+
+Playback is **audio-mastered**: the audio plays continuously at normal speed
+and the video chases it. Preview rendering cannot be relied on to reach real
+time — a 3D chroma decoder or a neural stage may need seconds per frame — so
+the preview shows whichever frame the audio has reached and skips the frames
+the renderer could not deliver in time. The sound is always continuous; on a
+heavy pipeline the picture simply refreshes at a lower rate.
+
+Points to be aware of:
+
+* Some sources decode their whole audio stream on first access (a TBC source,
+  an imported WAV, or an EFM disc decode, which can take minutes). A progress
+  window appears when the wait is long enough to notice, and the prepared audio
+  is retained so that pausing and resuming is immediate. CVBS containers read
+  audio per frame and need no preparation.
+* Preparing audio for a TBC, imported or EFM source holds the decoded stream in
+  memory, which can reach hundreds of megabytes on a feature-length title.
+* Channel-pair numbering belongs to the stage's output, so the selector is
+  re-read and reset to **Mute/None** whenever the previewed stage changes.
+* Editing parameters or the graph invalidates the prepared audio and stops
+  playback; press play again to restart.
+* Scrubbing during playback restarts the audio from the new position.
+* Choosing **Mute/None** during playback ends the audio session, so the preview
+  reverts to its timer-paced video-only playback rather than chasing an audio
+  clock. Picking a pair again resumes audio-mastered playback from the position
+  reached.
+* Projects with no audio are the normal case. The audio controls are then
+  disabled and playback behaves exactly as it does without the feature.
+
+---
+
 ### Field parity display
 
 The preview UI indicates whether the currently displayed field is:

@@ -8,6 +8,26 @@ if(NOT Qt6_FOUND)
     return()
 endif()
 
+# =============================================================================
+# Preview audio playback
+# =============================================================================
+# Audio playback in the preview dialogue needs Qt Multimedia for the output
+# device. Everything above the device (the IAudioOutput seam, the chase clock
+# and PreviewAudioController) is device-free and always built, so the feature
+# can be compiled out on a platform that cannot provide the module without
+# disturbing the rest of the GUI: only the QAudioSink-backed implementation
+# and the factory that returns it are guarded.
+# =============================================================================
+option(ORC_GUI_AUDIO_PLAYBACK "Build preview audio playback (needs Qt6 Multimedia)" ON)
+
+if(ORC_GUI_AUDIO_PLAYBACK)
+    find_package(Qt6 COMPONENTS Multimedia QUIET)
+    if(NOT Qt6Multimedia_FOUND)
+        message(WARNING "Qt6 Multimedia not found, building without preview audio playback")
+        set(ORC_GUI_AUDIO_PLAYBACK OFF)
+    endif()
+endif()
+
 # Enable Qt's MOC (Meta-Object Compiler)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -54,6 +74,14 @@ set(ORC_GUI_LIB_SOURCES
     preview_image_qt.h
     previewdialog.cpp
     previewdialog.h
+
+    # Preview audio playback (device-free part; see ORC_GUI_AUDIO_PLAYBACK)
+    audio_output.cpp
+    audio_output.h
+    preview_audio_chase.h
+    preview_audio_controller.cpp
+    preview_audio_controller.h
+
     framescopedialog.cpp
     framescopedialog.h
     line_navigation_mapper.cpp
@@ -184,6 +212,13 @@ set(ORC_GUI_LIB_SOURCES
     orc_gui_resources.qrc
 )
 
+if(ORC_GUI_AUDIO_PLAYBACK)
+    list(APPEND ORC_GUI_LIB_SOURCES
+        qt_audio_output.cpp
+        qt_audio_output.h
+    )
+endif()
+
 add_library(orc-gui-lib STATIC ${ORC_GUI_LIB_SOURCES})
 
 add_executable(orc-gui MACOSX_BUNDLE
@@ -220,6 +255,12 @@ target_link_libraries(orc-gui-lib PUBLIC
     Qt6::Widgets
     ${QTNODES_TARGET}
 )
+
+if(ORC_GUI_AUDIO_PLAYBACK)
+    # PUBLIC so the GUI test targets that link orc-gui-lib inherit the module.
+    target_link_libraries(orc-gui-lib PUBLIC Qt6::Multimedia)
+    target_compile_definitions(orc-gui-lib PUBLIC ORC_GUI_AUDIO_PLAYBACK)
+endif()
 
 target_link_libraries(orc-gui PRIVATE orc-gui-lib)
 

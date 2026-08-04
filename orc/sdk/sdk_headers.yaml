@@ -125,6 +125,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Audio channel-pair model shared by all"
+  - path: orc/stage/audio/audio_sample_feed.h
+    tier: stage
+    domain: "audio"
+    deprecated: false
+    since_abi: ""
+    notes: "Pure conversions from the 24-bit-in-int32 pipeline audio"
   - path: orc/stage/audio_channel_pair.h
     tier: stage
     domain: "foundation"

@@ -1,16 +1,15 @@
 /*
  * File:        audio_sample_feed_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the video sink's carrier-to-encoder sample
- *              conversions and gain application
+ * Purpose:     Unit tests for the SDK carrier-to-consumer sample conversions
+ *              and gain application
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "../../../../orc/plugins/stages/sinks/common/audio_sample_feed.h"
-
 #include <gtest/gtest.h>
+#include <orc/stage/audio/audio_sample_feed.h>
 
 namespace orc_unit_test {
 

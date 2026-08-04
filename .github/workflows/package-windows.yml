@@ -153,6 +153,9 @@ jobs:
           host: 'windows'
           target: 'desktop'
           arch: 'win64_msvc2022_64'
+          # Qt Multimedia is an add-on module in the online installer; the
+          # preview dialogue's audio output (QAudioSink) needs it.
+          modules: 'qtmultimedia'
           cache: true
 
       - name: Fetch ezpwd-reed-solomon headers

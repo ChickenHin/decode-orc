@@ -104,7 +104,8 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   orc::PreviewRenderResult renderPreview(orc::NodeID node_id,
                                          orc::PreviewOutputType output_type,
                                          uint64_t output_index,
-                                         const std::string&) override {
+                                         const std::string&,
+                                         orc::PreviewNavigationHint) override {
     orc::PreviewRenderResult result;
     result.node_id = node_id;
     result.output_type = output_type;
@@ -124,6 +125,13 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   }
 
   // Unused interface surface: inert stubs.
+  std::vector<orc::AudioPairView> getAudioChannelPairs(orc::NodeID) override {
+    return {};
+  }
+  std::shared_ptr<orc::presenters::IAudioStreamReader> createAudioStreamReader(
+      orc::NodeID, size_t) override {
+    return nullptr;
+  }
   std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
       orc::NodeID) override {
     return std::nullopt;

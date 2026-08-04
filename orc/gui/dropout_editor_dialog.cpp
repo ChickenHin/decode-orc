@@ -697,7 +697,8 @@ void DropoutEditorRenderWorker::renderFrame(uint64_t frame_id) {
   result.success = false;
   try {
     result = render_presenter_->renderPreview(
-        input_node_id_, frame_output_type_, frame_id, render_option_id_);
+        input_node_id_, frame_output_type_, frame_id, render_option_id_,
+        orc::PreviewNavigationHint::Random);
   } catch (const std::exception& e) {
     result.error_message = e.what();
     ORC_LOG_ERROR("DropoutEditorRenderWorker: render of frame {} failed: {}",

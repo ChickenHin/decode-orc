@@ -14,7 +14,7 @@ Each frame's audio window is assembled from the neighbouring frames' samples, wi
 
 Sample values and the sample rate are never changed; the shift is pure placement, no resampling.
 
-The stage fails validation when the target channel pair does not exist on the input. A zero offset passes the input through unchanged.
+A zero offset passes the input through unchanged. So does a target channel pair the input does not carry: the stage logs a warning and forwards audio and video untouched rather than interrupting the pipeline. The most common cause is a source that carries no audio at all (for example a plain TBC without an accompanying audio import), in which case the parameter dialog says so.
 
 ## Parameters
 

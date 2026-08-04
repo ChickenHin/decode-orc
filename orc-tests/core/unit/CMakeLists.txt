@@ -201,6 +201,7 @@ orc_add_core_unit_tests(
         presenters/plugin_load_state_test.cpp
         presenters/plugin_selector_test.cpp
         presenters/stage_details_test.cpp
+        presenters/representation_audio_stream_reader_test.cpp
 )
 target_link_libraries(orc-core-unit-tests-presenters orc-presenters)
 
@@ -454,5 +455,6 @@ orc_add_core_unit_tests(
                 preview_types/preview_carrier_conversion_test.cpp
                 preview_types/preview_frame_layout_test.cpp
                 preview_types/preview_helpers_test.cpp
+                preview_types/preview_navigation_hint_test.cpp
                 preview_types/preview_view_registry_test.cpp
         )

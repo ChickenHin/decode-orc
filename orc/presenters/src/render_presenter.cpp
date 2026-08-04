@@ -51,6 +51,7 @@
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
 #include "project_presenter.h"
+#include "representation_audio_stream_reader.h"
 
 namespace orc::presenters {
 
@@ -1546,7 +1547,7 @@ void RenderPresenter::unsubscribeObservationProgress(uint64_t subscription_id) {
 
 orc::PreviewRenderResult RenderPresenter::renderPreview(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    const std::string& option_id) {
+    const std::string& option_id, orc::PreviewNavigationHint hint) {
   if (!impl_->preview_renderer_) {
     return orc::PreviewRenderResult{
         {},      false,       "Preview renderer not initialized",
@@ -1556,7 +1557,7 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
   try {
     // Call core preview renderer
     auto core_result = impl_->preview_renderer_->render_output(
-        node_id, output_type, output_index, option_id);
+        node_id, output_type, output_index, option_id, hint);
 
     // Populate observation cache for the rendered field(s)
     if (impl_->obs_cache_) {
@@ -2353,6 +2354,41 @@ std::vector<std::string> RenderPresenter::getAudioChannelPairNames(
     names.clear();
   }
   return names;
+}
+
+// Both audio accessors resolve the node's representation exactly as
+// getAudioChannelPairNames() does, so they inherit the upstream BFS fallback in
+// get_representation_at_node(): the pair list and the samples always come from
+// the same resolved representation, even when that is an ancestor node's.
+std::vector<orc::AudioPairView> RenderPresenter::getAudioChannelPairs(
+    NodeID node_id) {
+  if (!impl_->preview_renderer_) {
+    return {};
+  }
+
+  try {
+    auto repr = impl_->preview_renderer_->get_representation_at_node(node_id);
+    if (!repr) {
+      return {};
+    }
+    return enumerate_audio_channel_pairs(*repr);
+  } catch (const std::exception&) {
+    return {};
+  }
+}
+
+std::shared_ptr<IAudioStreamReader> RenderPresenter::createAudioStreamReader(
+    NodeID node_id, size_t pair) {
+  if (!impl_->preview_renderer_) {
+    return nullptr;
+  }
+
+  try {
+    auto repr = impl_->preview_renderer_->get_representation_at_node(node_id);
+    return make_audio_stream_reader(std::move(repr), pair);
+  } catch (const std::exception&) {
+    return nullptr;
+  }
 }
 
 // === Analysis Data Access ===

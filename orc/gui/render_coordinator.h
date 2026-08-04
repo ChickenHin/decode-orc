@@ -15,13 +15,16 @@
 #ifndef RENDER_COORDINATOR_H
 #define RENDER_COORDINATOR_H
 
+#include <audio_stream_reader.h>  // IAudioStreamReader (preview audio playback)
 #include <orc/stage/common_types.h>
 #include <orc/stage/field_id.h>
 #include <orc/stage/node_id.h>
 #include <orc/stage/orc_source_parameters.h>   // Public API VideoParameters
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
+#include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc_analysis_series.h>  // Analysis display-series view types
+#include <orc_audio_views.h>      // AudioPairView
 #include <orc_closed_caption.h>   // Closed caption observation view types
 #include <orc_preview_views.h>
 #include <orc_teletext.h>  // Teletext observation view types
@@ -32,11 +35,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <string>
 #include <thread>
 
@@ -71,12 +74,14 @@ enum class RenderRequestType {
   TriggerStage,          // Trigger a stage (batch processing)
   CancelTrigger,         // Cancel ongoing trigger
   GetAvailableOutputs,   // Query available preview outputs
-  GetLineSamples,        // Get 16-bit samples for a line
-  GetFrameTiming,        // Get all frame samples for timing view
-  GetWaveformMonitor,    // Get all frame samples for waveform monitor
-  SavePNG,               // Save preview as PNG file
-  NavigateFrameLine,     // Navigate to next/previous line in frame mode
-  Shutdown               // Shutdown the worker thread
+  GetAudioChannelPairs,  // Query the node's audio channel pairs
+  CreateAudioStreamReader,  // Create a playback reader for one channel pair
+  GetLineSamples,           // Get 16-bit samples for a line
+  GetFrameTiming,           // Get all frame samples for timing view
+  GetWaveformMonitor,       // Get all frame samples for waveform monitor
+  SavePNG,                  // Save preview as PNG file
+  NavigateFrameLine,        // Navigate to next/previous line in frame mode
+  Shutdown                  // Shutdown the worker thread
 };
 
 /**
@@ -111,15 +116,18 @@ struct RenderPreviewRequest : public RenderRequest {
   orc::PreviewOutputType output_type;
   uint64_t output_index;
   std::string option_id;
+  orc::PreviewNavigationHint hint;
 
-  RenderPreviewRequest(uint64_t id, orc::NodeID node,
-                       orc::PreviewOutputType type, uint64_t index,
-                       std::string opt_id = "")
+  RenderPreviewRequest(
+      uint64_t id, orc::NodeID node, orc::PreviewOutputType type,
+      uint64_t index, std::string opt_id = "",
+      orc::PreviewNavigationHint nav_hint = orc::PreviewNavigationHint::Random)
       : RenderRequest(RenderRequestType::RenderPreview, id),
         node_id(std::move(node)),
         output_type(type),
         output_index(index),
-        option_id(std::move(opt_id)) {}
+        option_id(std::move(opt_id)),
+        hint(nav_hint) {}
 };
 
 /**
@@ -255,6 +263,30 @@ struct GetAvailableOutputsRequest : public RenderRequest {
   GetAvailableOutputsRequest(uint64_t id, orc::NodeID node)
       : RenderRequest(RenderRequestType::GetAvailableOutputs, id),
         node_id(std::move(node)) {}
+};
+
+/**
+ * @brief Request to enumerate a node's audio channel pairs
+ */
+struct GetAudioChannelPairsRequest : public RenderRequest {
+  orc::NodeID node_id;
+
+  GetAudioChannelPairsRequest(uint64_t id, orc::NodeID node)
+      : RenderRequest(RenderRequestType::GetAudioChannelPairs, id),
+        node_id(std::move(node)) {}
+};
+
+/**
+ * @brief Request to create a playback reader for one audio channel pair
+ */
+struct CreateAudioStreamReaderRequest : public RenderRequest {
+  orc::NodeID node_id;
+  size_t pair;
+
+  CreateAudioStreamReaderRequest(uint64_t id, orc::NodeID node, size_t p)
+      : RenderRequest(RenderRequestType::CreateAudioStreamReader, id),
+        node_id(std::move(node)),
+        pair(p) {}
 };
 
 /**
@@ -492,9 +524,12 @@ class IRenderPresenter {
       orc::presenters::ObservationProgressCallback callback) = 0;
   virtual void unsubscribeObservationProgress(uint64_t subscription_id) = 0;
 
+  // @p hint tells stages whether the frame is part of a run of adjacent frames
+  // (playback) or a one-off position (scrubbing, a single navigation, an
+  // export). Only the playback path sends Sequential.
   virtual orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-      const std::string& option_id) = 0;
+      const std::string& option_id, orc::PreviewNavigationHint hint) = 0;
 
   virtual std::optional<orc::presenters::DropoutDisplaySeries>
   getDropoutAnalysisData(NodeID node_id) = 0;
@@ -504,6 +539,17 @@ class IRenderPresenter {
   getBurstLevelAnalysisData(NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
+
+  // Audio channel pairs available at the node, for the preview audio selector.
+  // An empty list is the normal "no audio here" answer, not an error.
+  virtual std::vector<orc::AudioPairView> getAudioChannelPairs(
+      NodeID node_id) = 0;
+
+  // Create a frame-addressed reader for one channel pair. Executes the DAG, so
+  // it runs on the coordinator's worker thread; the reader is then primed and
+  // read from the playback thread. Returns nullptr when the pair is unusable.
+  virtual std::shared_ptr<orc::presenters::IAudioStreamReader>
+  createAudioStreamReader(NodeID node_id, size_t pair) = 0;
 
   virtual LineSampleData getLineSamplesWithYC(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
@@ -629,15 +675,22 @@ class RenderCoordinator : public QObject {
    *
    * Result will be emitted via previewReady signal.
    *
+   * Queuing a preview drops any preview still waiting in the queue: the worker
+   * is serial and a superseded render's response is discarded on completion
+   * anyway, so rendering it only delays the one the user is waiting for.
+   *
    * @param node_id Node to render from
    * @param output_type Type of output (field/frame/etc)
    * @param output_index Which field/frame to render
+   * @param option_id Rendering option (preview mode plus any signal suffix)
+   * @param hint Sequential while playback is running so stages can pre-fetch;
+   *        Random for scrubbing and single navigations
    * @return Request ID for matching response
    */
-  uint64_t requestPreview(const orc::NodeID& node_id,
-                          orc::PreviewOutputType output_type,
-                          uint64_t output_index,
-                          const std::string& option_id = "");
+  uint64_t requestPreview(
+      const orc::NodeID& node_id, orc::PreviewOutputType output_type,
+      uint64_t output_index, const std::string& option_id = "",
+      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random);
 
   /**
    * @brief Request VBI data for a field (async)
@@ -741,6 +794,39 @@ class RenderCoordinator : public QObject {
    * @return Request ID for matching response
    */
   uint64_t requestAvailableOutputs(const orc::NodeID& node_id);
+
+  /**
+   * @brief Request the node's audio channel pairs (async)
+   *
+   * Enumeration resolves the node's representation, which executes the DAG, so
+   * it is routed through the worker like every other query. The result is
+   * emitted via audioChannelPairsReady; an empty list means the node carries no
+   * usable audio, which is the normal case for most projects.
+   *
+   * Only the newest request is answered — the viewed node changes faster than
+   * enumeration completes on a heavy DAG.
+   *
+   * @param node_id Node to enumerate
+   * @return Request ID for matching response
+   */
+  uint64_t requestAudioChannelPairs(const orc::NodeID& node_id);
+
+  /**
+   * @brief Request a playback reader for one audio channel pair (async)
+   *
+   * Creation executes the DAG and so must happen on the worker thread; the
+   * reader is delivered via audioStreamReaderReady and may then be primed and
+   * read from the playback thread. A null reader in the response means the pair
+   * is not usable (no audio, unknown video system, or pair out of range).
+   *
+   * Only the newest request is answered, so a rapid pair reselection cannot
+   * deliver a superseded reader.
+   *
+   * @param node_id Node whose representation supplies the audio
+   * @param pair    Channel-pair index
+   * @return Request ID for matching response
+   */
+  uint64_t requestAudioStreamReader(const orc::NodeID& node_id, size_t pair);
 
   /**
    * @brief Request line samples from a field (async)
@@ -994,6 +1080,26 @@ class RenderCoordinator : public QObject {
                              std::vector<orc::PreviewOutputInfo> outputs);
 
   /**
+   * @brief Emitted when an audio channel-pair enumeration completes
+   *
+   * An empty @p pairs list is the normal "this node has no audio" answer.
+   * Marshalled from the worker thread via a queued connection.
+   */
+  void audioChannelPairsReady(uint64_t request_id,
+                              std::vector<orc::AudioPairView> pairs);
+
+  /**
+   * @brief Emitted when a requested audio playback reader has been created
+   *
+   * @p reader is null when the pair turned out to be unusable. Marshalled from
+   * the worker thread via a queued connection; the reader must be primed off
+   * the GUI thread (an EFM decode can take minutes).
+   */
+  void audioStreamReaderReady(
+      uint64_t request_id,
+      std::shared_ptr<orc::presenters::IAudioStreamReader> reader);
+
+  /**
    * @brief Emitted when line samples are ready
    */
   void lineSamplesReady(uint64_t request_id, uint64_t field_index,
@@ -1173,6 +1279,16 @@ class RenderCoordinator : public QObject {
   void handleGetAvailableOutputs(const GetAvailableOutputsRequest& req);
 
   /**
+   * @brief Handle GetAudioChannelPairs request
+   */
+  void handleGetAudioChannelPairs(const GetAudioChannelPairsRequest& req);
+
+  /**
+   * @brief Handle CreateAudioStreamReader request
+   */
+  void handleCreateAudioStreamReader(const CreateAudioStreamReaderRequest& req);
+
+  /**
    * @brief Handle GetLineSamples request
    */
   void handleGetLineSamples(const GetLineSamplesRequest& req);
@@ -1205,6 +1321,15 @@ class RenderCoordinator : public QObject {
   void enqueueRequest(std::unique_ptr<RenderRequest> request);
 
   /**
+   * @brief Drop every queued (not yet started) preview render
+   *
+   * Caller must hold queue_mutex_. Returns how many were removed, for logging.
+   * The request being processed is already off the queue and is unaffected; it
+   * still finishes and is dropped by the existing stale-response check.
+   */
+  size_t discardQueuedPreviewsLocked();
+
+  /**
    * @brief Get next request ID (thread-safe)
    */
   uint64_t nextRequestId();
@@ -1218,10 +1343,18 @@ class RenderCoordinator : public QObject {
 
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
-  std::queue<std::unique_ptr<RenderRequest>> request_queue_;
+  // A deque rather than a queue: superseded previews are removed from the
+  // middle of the pending work (discardQueuedPreviewsLocked()).
+  std::deque<std::unique_ptr<RenderRequest>> request_queue_;
 
   std::atomic<uint64_t> next_request_id_{1};
   std::atomic<uint64_t> latest_preview_request_id_{0};
+
+  // Newest-only audio queries: the viewed node and the selected pair both
+  // change faster than a heavy DAG can answer, so superseded responses are
+  // dropped rather than delivered to a dialogue that has moved on.
+  std::atomic<uint64_t> latest_audio_pairs_request_id_{0};
+  std::atomic<uint64_t> latest_audio_reader_request_id_{0};
 
   // ========================================================================
   // Worker thread state (owned by worker thread, never accessed from GUI)

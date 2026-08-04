@@ -1,15 +1,19 @@
 /*
  * File:        audio_sample_feed.h
- * Module:      orc-core
+ * Module:      decode-orc Plugin SDK (stage contract)
  * Purpose:     Pure conversions from the 24-bit-in-int32 pipeline audio
- *              carrier to the video sink encoders' sample formats
+ *              carrier to consumer sample formats (float, S32, S16)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#ifndef ORC_CORE_AUDIO_SAMPLE_FEED_H
-#define ORC_CORE_AUDIO_SAMPLE_FEED_H
+#pragma once
+
+// SDK TIER: stage/audio — the carrier-domain conversions every audio consumer
+// shares (encoders, WAV writers, preview playback). Inline functions only: no
+// type layout crosses the plugin boundary here, so a change never bumps the
+// host ABI version.
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +26,7 @@ namespace orc {
 inline constexpr int32_t kAudioCarrierMin = -8388608;
 inline constexpr int32_t kAudioCarrierMax = 8388607;
 
-// Float feed (AAC FLTP/FLT): full-scale 24-bit maps to ±1.0.
+// Float feed (AAC FLTP/FLT, QAudioSink Float): full-scale 24-bit maps to ±1.0.
 inline float audio_carrier_to_float(int32_t carrier) {
   return static_cast<float>(carrier) / 8388608.0f;
 }
@@ -47,5 +51,3 @@ inline int32_t audio_apply_gain(int32_t carrier, double gain) {
 }
 
 }  // namespace orc
-
-#endif  // ORC_CORE_AUDIO_SAMPLE_FEED_H

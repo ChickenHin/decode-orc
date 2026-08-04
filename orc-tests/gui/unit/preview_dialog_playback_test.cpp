@@ -89,4 +89,27 @@ TEST(PreviewDialogPlayback, PlayThenPause_TogglesWithoutMoving) {
   EXPECT_EQ(dialog.playPauseButton()->text(), QString::fromUtf8("▶"));
 }
 
+// The owner reads isPlaying() to decide between the Sequential and Random
+// navigation hints, so it has to track the transport exactly — including the
+// stop that the end of the range triggers.
+TEST(PreviewDialogPlayback, IsPlaying_TracksTheTransportState) {
+  ensureApplication();
+  PreviewDialog dialog;
+  dialog.previewSlider()->setRange(kFirstIndex, kLastIndex);
+  dialog.navigateToIndex(kFirstIndex);
+
+  EXPECT_FALSE(dialog.isPlaying());
+
+  dialog.playPauseButton()->click();
+  EXPECT_TRUE(dialog.isPlaying());
+
+  dialog.playPauseButton()->click();
+  EXPECT_FALSE(dialog.isPlaying());
+
+  dialog.playPauseButton()->click();
+  ASSERT_TRUE(dialog.isPlaying());
+  dialog.stopPlayback();
+  EXPECT_FALSE(dialog.isPlaying());
+}
+
 }  // namespace gui_unit_test
