@@ -282,9 +282,12 @@ offset globally, never per line.
   proceed with a bad fit.
 - Records without teletext receive the same global offset and become ordinary
   blanking.
-- `functional` test: calibration on the reference sample converges near the
-  folkloric ~244 samples (§5.3.3) with clean-source spread (≲ 0.5 sample) —
-  the empirical confirmation of the §3.2 `bt8x8-pal` offset.
+- `functional` test: calibration on the reference sample converges, and the
+  fitted offset and its spread are recorded in the design document as measured
+  values (§9). The sample measures 262.1 samples with 4.2 samples of spread,
+  against the folkloric ~244 (§5.3.3); the fitted offset must be stable to
+  under a sample across different samples of the file, and the lock must be at
+  the correct bit alignment rather than a run-in period away from it.
 
 ### Task 4.4 — Independent cross-checks
 

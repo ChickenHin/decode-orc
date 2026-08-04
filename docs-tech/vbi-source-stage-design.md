@@ -491,6 +491,12 @@ The cx88 case sitting right at the edge of its window suggests its true offset i
 larger than the ~214 samples inferred here — another argument for calibrating rather than
 configuring. **[verify]**
 
+**Measured, `bt8x8` PAL.** Calibration against the reference sample puts the run-in at
+**103.2** samples rather than the 121.3 the folkloric 244 predicts, so the offset for that
+capture is **262.1** samples. That is still inside vhs-teletext's (60, 130) window, which is
+the point: the folklore is a search hint and nothing more, and the driver's own comment
+about the value differing between chip revisions is borne out. See §9.
+
 #### 5.3.4 The calibration procedure
 
 `capture_offset: auto` should:
@@ -919,6 +925,25 @@ Offered as a configuration *suggestion*, ranked with confidence, never applied s
 
 ## 9. Open questions
 
+- **[measured]** `capture_offset` for `bt8x8` PAL. Calibration against the reference sample
+  (`0002.vbi.flac`, 512 records sampled across the whole four hours, 80 % of them locking)
+  puts the clock run-in at **103.2 samples** into each record, giving a capture offset of
+  **262.1 samples** — 18 samples (0.5 µs) later than the driver's folkloric 244, and well
+  inside vhs-teletext's (60, 130) search window for this card. The lock is at the correct
+  bit alignment, not two bits away: slicing the framing code at the fitted position recovers
+  `0xE4` on about half the locked records and at no neighbouring bit alignment. The §3.2
+  preset keeps 244 as the search hint, which is its only remaining role.
+- **[measured]** Run-in position spread for `bt8x8` PAL: **4.2 samples**, not the ≲ 0.5 of a
+  cleanly time-base corrected source. The global fit is nevertheless stable to under a
+  sample across different samples of the file, exactly the asymmetry §5.3.6 describes. The
+  preset's thresholds are set accordingly (8 samples), since a bt8x8 card is how tape and
+  off-air material is captured in the first place.
+- **[verify]** The burst remnant disagrees with the teletext lock on the reference sample by
+  **11.3 samples (0.32 µs)**: the burst tail ends at record sample 28.1 where the fitted
+  offset predicts 16.8. Both are reported and the teletext lock governs placement. This is
+  the magnitude EN 300 706 warns about for sync-reprocessed transmissions (§5.2), and it is
+  the same order as the 10.198 vs 10.3 µs question below, so the two should be settled
+  together against a known-good broadcast source.
 - **[verify]** `capture_offset` for cx88 and saa7131 — the values in §3.2 are inferred from
   vhs-teletext's CRI search windows, not measured.
 - **[verify]** The NABTS nominal data amplitude against EIA-516 and a real capture. The

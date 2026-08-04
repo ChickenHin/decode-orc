@@ -57,6 +57,43 @@ struct VBIFieldRange {
   uint32_t count() const { return (end >= start) ? (end - start + 1) : 0; }
 };
 
+// Health thresholds of the clock run-in calibration (design §5.3.4).
+//
+// These belong to the source format rather than being global constants: a
+// clean broadcast or LaserDisc capture locks to a fraction of a sample, while
+// a VHS-sourced one legitimately scatters by several samples because head
+// switching lands inside the teletext lines and the run-in has been very
+// nearly filtered away (design §5.3.6).  A single set of numbers would either
+// accept a broken clean capture or cry wolf on every tape.
+struct VBICalibrationThresholds {
+  // Half-width of the search for the run-in, in source samples, centred on the
+  // position the descriptor's capture offset predicts.  Wide enough to cover a
+  // wrong hardware folklore figure, narrow enough that the search cannot lock
+  // onto data a bit period away.
+  double search_tolerance_samples = 48.0;
+
+  // Normalised correlation a record must reach for its position to be counted.
+  // Records below it carry no data service, and there are many of them.
+  double acceptance_correlation = 0.5;
+
+  // Fraction of the examined records that must lock before a fit is trusted.
+  double minimum_acceptance_fraction = 0.25;
+
+  // Spread below which the source is behaving as a time-base corrected capture
+  // should.
+  double tight_spread_samples = 0.5;
+
+  // Spread above which the fit is rejected outright: either the sampling rate
+  // is wrong or the source was never time-base corrected.
+  double maximum_spread_samples = 3.0;
+
+  // Fitted drift across the sampled span, in samples, above which the run
+  // stops.  A monotonic drift is diagnostic of a sampling-rate error and the
+  // slope gives the correction directly, so it is reported rather than
+  // silently absorbed into the global offset.
+  double maximum_drift_samples = 3.0;
+};
+
 // The generic container descriptor (design §3.1).  Every named preset expands
 // to exactly this structure, so presets are pure data and there is a single
 // code path through the reader.
@@ -105,6 +142,9 @@ struct VBISourceFormat {
   VBITVSystem tv_system = VBITVSystem::kPAL;
   VBITeletextSystem tt_system = VBITeletextSystem::kWST;
   VBISourceFamily family = VBISourceFamily::kCardCapture;
+
+  // What the calibrator should expect of this format's timing.
+  VBICalibrationThresholds calibration{};
 
   // Bytes occupied by one sample word.
   uint32_t bytes_per_sample() const {

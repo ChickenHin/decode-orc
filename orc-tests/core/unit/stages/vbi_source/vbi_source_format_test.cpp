@@ -54,6 +54,32 @@ TEST(VBISourceFormat, Bt8x8PALPresetCalibratesItsCaptureOffset) {
   EXPECT_DOUBLE_EQ(format.capture_offset_samples, 244.0);
 }
 
+// What the calibration should expect of a source is a property of the source
+// format, not a global constant: a cleanly time-base corrected capture locks
+// to a fraction of a sample, where material played off tape into a capture
+// card legitimately scatters by several (design §5.3.4, §5.3.6).
+TEST(VBISourceFormat, Bt8x8PALPresetCarriesCleanSourceCalibrationThresholds) {
+  VBISourceFormat format;
+  std::string error;
+
+  ASSERT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+
+  EXPECT_DOUBLE_EQ(format.calibration.tight_spread_samples, 0.5);
+
+  // A bt8x8 card is how tape and off-air material is captured, so the preset
+  // has to tolerate the line-to-line scatter such a source really shows while
+  // still classifying it as jitter rather than as clean.
+  EXPECT_DOUBLE_EQ(format.calibration.maximum_spread_samples, 8.0);
+  EXPECT_DOUBLE_EQ(format.calibration.maximum_drift_samples, 8.0);
+
+  // The search has to reach the whole span the vhs-teletext windows in
+  // design §5.3.3 imply for this card, without straying into the data.
+  EXPECT_DOUBLE_EQ(format.calibration.search_tolerance_samples, 48.0);
+  EXPECT_GT(format.calibration.acceptance_correlation, 0.0);
+  EXPECT_LT(format.calibration.acceptance_correlation, 1.0);
+  EXPECT_GT(format.calibration.minimum_acceptance_fraction, 0.0);
+}
+
 // A bt8x8 PAL frame is 65 536 bytes: sixteen 2048-byte records in each of two
 // fields, with the frame counter inside the final record's padding rather
 // than appended to the frame.

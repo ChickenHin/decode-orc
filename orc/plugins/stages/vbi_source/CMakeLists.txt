@@ -22,6 +22,10 @@ add_library(orc-vbi-source STATIC
     vbi_level_mapper.cpp
     vbi_resampler.cpp
     vbi_line_placement.cpp
+    vbi_cri_template.cpp
+    vbi_cri_correlator.cpp
+    vbi_offset_calibration.cpp
+    vbi_timing_cross_checks.cpp
 )
 
 target_include_directories(orc-vbi-source

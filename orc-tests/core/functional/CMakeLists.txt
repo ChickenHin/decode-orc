@@ -133,6 +133,7 @@ gtest_discover_tests(orc-core-functional-tests-observation
 if(TARGET orc-vbi-source)
     add_executable(orc-core-functional-tests-vbi-source
         stages/vbi_source/vbi_flac_transport_test.cpp
+        stages/vbi_source/vbi_calibration_test.cpp
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source

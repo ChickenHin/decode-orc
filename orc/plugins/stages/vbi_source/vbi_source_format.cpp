@@ -42,6 +42,19 @@ constexpr uint32_t kBt8x8FrameCounterBytes = 4;
 // is only ever a starting hint for CRI/FRC calibration (design §5.3.3).
 constexpr double kBt8x8CaptureOffsetSamples = 244.0;
 
+// How far either side of the folkloric offset the run-in is looked for, in
+// 8 x fsc samples.  About 1.4 us, which comfortably covers the spread of the
+// vhs-teletext search windows the offsets in design §5.3.3 were inferred from
+// while staying well inside the back porch ahead of the data.
+constexpr double kBt8x8PALSearchToleranceSamples = 48.0;
+
+// Scatter of the run-in position this card's captures are allowed before the
+// fit is rejected, in 8 x fsc samples.  Eight samples is 226 ns, about one and
+// a half teletext bit periods: enough for the line-to-line timing of a tape
+// played into a capture card, and far too little to hide a wrong sampling
+// rate, which walks the position clean out of the search window.
+constexpr double kBt8x8PALMaximumSpreadSamples = 8.0;
+
 struct PresetEntry {
   const char* name;
   VBISourceFormat format;
@@ -63,6 +76,24 @@ VBISourceFormat make_bt8x8_pal() {
   format.tv_system = VBITVSystem::kPAL;
   format.tt_system = VBITeletextSystem::kWST;
   format.family = VBISourceFamily::kCardCapture;
+
+  // A bt8x8 card is how tape and off-air material is captured, so this preset
+  // has to accept what such a source really looks like.  The card's horizontal
+  // phase-locked loop line-locks the sampling clock, but residual jitter,
+  // velocity error and the settling after head switching remain, and the
+  // teletext lines sit inside that recovery window (design §5.3.6).  The
+  // reference capture measures at about four samples of scatter with a global
+  // offset that is nevertheless stable to well under a sample, which is
+  // exactly the asymmetry the design describes: this stage needs a global
+  // offset and the downstream slicer does the per-line lock.
+  //
+  // The tight figure is left at the design §5.3.4 value, so a genuinely clean
+  // capture is still reported as such rather than being flattered by a
+  // threshold set for tape.
+  format.calibration.search_tolerance_samples = kBt8x8PALSearchToleranceSamples;
+  format.calibration.tight_spread_samples = 0.5;
+  format.calibration.maximum_spread_samples = kBt8x8PALMaximumSpreadSamples;
+  format.calibration.maximum_drift_samples = kBt8x8PALMaximumSpreadSamples;
   return format;
 }
 
