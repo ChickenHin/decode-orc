@@ -28,7 +28,6 @@
 #include <vector>
 
 #include "vbi_offset_calibration.h"
-#include "vbi_output_levels.h"
 #include "vbi_source_format.h"
 #include "vbi_source_stage.h"
 
@@ -227,7 +226,13 @@ TEST(VBISourcePipeline, TheFrameCounterIsReadWithoutWalkingTheCapture) {
   EXPECT_TRUE(summary.find("Frame counter") != std::string::npos ||
               summary.find("frame counter") != std::string::npos)
       << summary;
-  EXPECT_NE(summary.find("Signal state"), std::string::npos) << summary;
+
+  // And about what that cost the output, which is the part a user acts on: a
+  // capture whose counter repeats or runs backwards cannot have the source's
+  // own frame numbering rebuilt, and a frame id from this stage then means
+  // something different from one written on the capture.
+  EXPECT_NE(summary.find("Output frame numbering"), std::string::npos)
+      << summary;
 }
 
 // Concurrent readers get the same frames a single reader does, and get them in

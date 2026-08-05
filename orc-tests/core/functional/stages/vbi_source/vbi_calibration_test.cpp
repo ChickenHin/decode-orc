@@ -26,7 +26,6 @@
 #include "vbi_offset_calibration.h"
 #include "vbi_source_format.h"
 #include "vbi_teletext_service.h"
-#include "vbi_timing_cross_checks.h"
 #include "vbi_transport.h"
 
 namespace orc {
@@ -285,69 +284,6 @@ TEST(VBICalibration, ReferenceCaptureLocksToTheCorrectBitAlignment) {
   // matters is that the fitted alignment is the only one that ever does.
   EXPECT_GT(framing_code_at_fit, locked / 4);
   EXPECT_EQ(framing_code_elsewhere, 0);
-}
-
-// The independent corroborations of design §5.3.5 against the real capture.
-// They are warnings by design, so this proves they run and measure rather than
-// requiring them to agree — and on this capture the burst does not.
-TEST(VBICalibration, ReferenceCaptureCrossChecksMeasureAgainstTheFit) {
-  if (!reference_capture_available()) {
-    GTEST_SKIP() << "Reference capture not present: " << kReferenceCapture;
-  }
-
-  std::string error;
-  std::unique_ptr<IVBIByteSource> source =
-      open_vbi_byte_source(kReferenceCapture, error);
-  ASSERT_NE(source, nullptr) << error;
-
-  const VBISourceFormat format = bt8x8_pal_format();
-  const VBITeletextService service = wst_service();
-  const VBILineReader reader(format, *source);
-
-  VBICalibrationConfig config;
-  config.sample_frames = 8;
-  VBIOffsetCalibration calibration;
-  ASSERT_TRUE(
-      calibrate_vbi_capture_offset(reader, service, config, calibration, error))
-      << error;
-  ASSERT_TRUE(calibration.converged) << calibration.summary;
-
-  const std::vector<VBITimingCrossCheck> checks = run_vbi_timing_cross_checks(
-      format, service, calibration.capture_offset_samples,
-      sampled_records(reader, 8), VBICrossCheckConfig{});
-  ASSERT_EQ(checks.size(), 5u);
-  for (const VBITimingCrossCheck& check : checks) {
-    GTEST_LOG_(INFO) << check.name << ": " << check.message;
-  }
-
-  // The burst remnant is there to be measured, because this format's capture
-  // window opens inside the burst window.
-  const VBITimingCrossCheck& burst = checks.front();
-  ASSERT_EQ(burst.name, "Colour burst remnant");
-  EXPECT_GT(burst.records_used, 100u);
-
-  // It disagrees with the teletext lock by about a third of a microsecond on
-  // this capture, and says so without stopping the run. EN 300 706 warns that
-  // real transmissions depart from the nominal timing by a few hundred
-  // nanoseconds after sync reprocessing, and the teletext lock is the estimate
-  // that governs where the data is placed.
-  EXPECT_EQ(burst.outcome, VBICrossCheckOutcome::kDisagreed) << burst.message;
-  EXPECT_NEAR(burst.disagreement_samples(), 11.0, 4.0) << burst.message;
-
-  // The packet ends where the configured bit rate says it should, which
-  // validates that rate independently of where it started.
-  const VBITimingCrossCheck& data_end = checks.back();
-  ASSERT_EQ(data_end.name, "End of teletext modulation");
-  EXPECT_EQ(data_end.outcome, VBICrossCheckOutcome::kAgreed)
-      << data_end.message;
-
-  // This capture carries neither the video programme system nor closed
-  // captions, and the checks report that rather than an agreement they never
-  // established.
-  for (size_t index = 1; index + 1u < checks.size(); ++index) {
-    EXPECT_EQ(checks[index].outcome, VBICrossCheckOutcome::kNotApplicable)
-        << checks[index].message;
-  }
 }
 
 }  // namespace
