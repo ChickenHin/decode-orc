@@ -3,7 +3,7 @@
  * Module:      orc-tests
  * Purpose:     Unit tests for the raw VBI capture source stage
  *
- * Every capture is synthesised in memory and reaches the stage through the
+ * Every capture is rendered in memory and reaches the stage through the
  * injected dependency interface, so nothing here touches the filesystem.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -19,8 +19,10 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/teletext_slicer.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -29,8 +31,7 @@
 #include <string>
 #include <vector>
 
-#include "vbi_frame_geometry.h"
-#include "vbi_output_levels.h"
+#include "vbi_output_frame.h"
 #include "vbi_source_format.h"
 #include "vbi_synthetic_line.h"
 #include "vbi_teletext_service.h"
@@ -306,13 +307,11 @@ TEST(VBISourceStageParameters, RoundTripsTheParametersItIsGiven) {
   ASSERT_TRUE(stage.set_parameters({
       {"input_path", std::string(kCapturePath)},
       {"drops", std::string("pad")},
-      {"synthesise_burst", false},
       {"first_field", uint32_t{2}},
   }));
 
   const auto parameters = stage.get_parameters();
   EXPECT_EQ(std::get<std::string>(parameters.at("drops")), "pad");
-  EXPECT_FALSE(std::get<bool>(parameters.at("synthesise_burst")));
   EXPECT_EQ(std::get<uint32_t>(parameters.at("first_field")), 2u);
 }
 
@@ -377,7 +376,7 @@ TEST(VBISourceStageExecution, ProducesNoOutputUntilACaptureIsConfigured) {
   EXPECT_TRUE(stage.execute({}, {}, observations).empty());
 }
 
-TEST(VBISourceStageExecution, SynthesisesOneOutputFramePerStoredFrame) {
+TEST(VBISourceStageExecution, EmitsOneOutputFramePerStoredFrame) {
   auto deps =
       std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 3));
   VBISourceStage stage(deps);
@@ -444,9 +443,10 @@ TEST(VBISourceStageExecution, DataLandsOnTheTeletextLinesAndNowhereElse) {
       representation_of(run_stage(stage, default_parameters()));
   ASSERT_NE(representation, nullptr);
 
-  VBIOutputLevels levels;
+  VBIOutputFrame output;
   std::string error;
-  ASSERT_TRUE(vbi_output_levels(VBITVSystem::kPAL, levels, error)) << error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, output, error)) << error;
+  const VBIOutputLevels& levels = output.levels;
 
   // How far above blanking a line's data region rises: a teletext line swings
   // to the logic 1 level, a blank one stays at blanking.
@@ -454,7 +454,7 @@ TEST(VBISourceStageExecution, DataLandsOnTheTeletextLinesAndNowhereElse) {
     const std::vector<int16_t> samples =
         representation->get_line_samples(0, line);
     EXPECT_FALSE(samples.empty()) << "line " << line;
-    // Skip the sync and burst regions at the head of the line.
+    // Start inside the data region, past the back porch.
     const size_t data_begin = std::min<size_t>(300, samples.size());
     return *std::max_element(samples.begin() + data_begin, samples.end());
   };
@@ -471,22 +471,44 @@ TEST(VBISourceStageExecution, DataLandsOnTheTeletextLinesAndNowhereElse) {
   }
 }
 
-TEST(VBISourceStageExecution, SwitchingTheBurstOffLeavesTheBurstWindowBlank) {
-  const auto capture = make_synthetic_capture(bt8x8_pal_format(), 1);
+// The stage places data and manufactures nothing: every sample outside the
+// data region of a teletext line is exactly the blanking level, with no sync,
+// no vertical interval and no colour burst anywhere in the frame.
+TEST(VBISourceStageExecution, EverythingOutsideTheDataRegionIsBlanking) {
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 1));
+  VBISourceStage stage(deps);
 
-  VBISourceStage with_burst(std::make_shared<FakeDeps>(capture));
-  auto parameters = default_parameters();
-  const auto burst_frame =
-      representation_of(run_stage(with_burst, parameters))->get_frame_copy(0);
+  const auto representation =
+      representation_of(run_stage(stage, default_parameters()));
+  ASSERT_NE(representation, nullptr);
 
-  VBISourceStage without_burst(std::make_shared<FakeDeps>(capture));
-  parameters["synthesise_burst"] = false;
-  const auto blank_frame =
-      representation_of(run_stage(without_burst, parameters))
-          ->get_frame_copy(0);
+  VBIOutputFrame output;
+  std::string error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, output, error)) << error;
+  const auto blanking = static_cast<int16_t>(output.levels.blanking);
 
-  ASSERT_EQ(burst_frame.size(), blank_frame.size());
-  EXPECT_NE(burst_frame, blank_frame);
+  const std::vector<int16_t> frame = representation->get_frame_copy(0);
+  ASSERT_EQ(frame.size(), static_cast<size_t>(kPalFrameSamples));
+
+  // Every line that carries no data service, sample for sample.
+  for (uint32_t line = 0; line < output.lines_per_frame; ++line) {
+    const bool data_line =
+        (line >= 6u && line <= 21u) || (line >= 319u && line <= 334u);
+    if (data_line) continue;
+    const size_t begin = output.line_offset(line);
+    const size_t length = output.line_length(line);
+    for (size_t sample = 0; sample < length; ++sample) {
+      ASSERT_EQ(frame[begin + sample], blanking)
+          << "line " << line << " sample " << sample;
+    }
+  }
+
+  // And the head of a data line, ahead of everything the record covers.
+  const size_t data_line_begin = output.line_offset(6);
+  for (size_t sample = 0; sample < 120u; ++sample) {
+    EXPECT_EQ(frame[data_line_begin + sample], blanking) << "sample " << sample;
+  }
 }
 
 TEST(VBISourceStageExecution, RepeatedExecutionReusesTheOpenedCapture) {
@@ -501,10 +523,115 @@ TEST(VBISourceStageExecution, RepeatedExecutionReusesTheOpenedCapture) {
 
   // A changed configuration is a different capture and is re-read.
   auto parameters = default_parameters();
-  parameters["synthesise_burst"] = false;
+  parameters["drops"] = std::string("pad");
   const ArtifactPtr third = run_stage(stage, parameters);
   EXPECT_NE(first, third);
   EXPECT_EQ(deps->opens, 2u);
+}
+
+// ---------------------------------------------------------------------------
+// The whole point: what the teletext decoders read back
+// ---------------------------------------------------------------------------
+
+// A recognisable T42 packet: magazine 1 row 0, then 40 display bytes carrying
+// odd parity, as ETSI EN 300 706 §7.1.2 and §8.1 define them.
+std::array<uint8_t, kTeletextPacketBytes> reference_packet() {
+  std::array<uint8_t, kTeletextPacketBytes> bytes{};
+  bytes[0] = teletext_hamming84_encode(1);  // magazine 1, row 0 low bit
+  bytes[1] = teletext_hamming84_encode(0);
+  for (size_t index = 2; index < bytes.size(); ++index) {
+    auto value = static_cast<uint8_t>(0x20u + ((index * 7u) % 0x5Fu));
+    int ones = 0;
+    for (int bit = 0; bit < 7; ++bit) {
+      if (((value >> bit) & 1u) != 0u) ++ones;
+    }
+    if ((ones % 2) == 0) value |= 0x80u;  // odd parity over the whole byte
+    bytes[index] = value;
+  }
+  return bytes;
+}
+
+// The packet's bits in transmission order: each byte least significant bit
+// first (ETSI EN 300 706 §7.1).
+std::vector<bool> packet_bits(
+    const std::array<uint8_t, kTeletextPacketBytes>& bytes) {
+  std::vector<bool> bits;
+  bits.reserve(bytes.size() * 8u);
+  for (const uint8_t byte : bytes) {
+    for (int bit = 0; bit < 8; ++bit) {
+      bits.push_back(((byte >> bit) & 1u) != 0u);
+    }
+  }
+  return bits;
+}
+
+// A capture every one of whose lines carries |bytes|.
+std::vector<uint8_t> make_packet_capture(
+    const VBISourceFormat& format,
+    const std::array<uint8_t, kTeletextPacketBytes>& bytes) {
+  const VBITeletextService service = wst_service();
+  std::vector<uint8_t> capture(static_cast<size_t>(format.bytes_per_frame()),
+                               0);
+
+  SyntheticVBILine line;
+  line.sample_rate_hz = format.sample_rate_hz;
+  line.valid_samples = format.valid_samples;
+  line.anchor_position_samples =
+      service.cri_start_samples(format.sample_rate_hz, kTruthOffsetSamples);
+  line.payload = packet_bits(bytes);
+  line.noise_amplitude = 0.5;
+  const std::vector<double> samples = render_synthetic_vbi_line(line);
+
+  for (uint32_t field = 0; field < 2u; ++field) {
+    for (uint32_t index = 0; index < format.field_lines; ++index) {
+      const uint64_t offset =
+          field * format.bytes_per_field() + index * format.bytes_per_record();
+      for (uint32_t sample = 0; sample < format.valid_samples; ++sample) {
+        capture[static_cast<size_t>(offset + sample)] = static_cast<uint8_t>(
+            std::clamp(std::round(samples[sample]), 0.0, 255.0));
+      }
+    }
+  }
+  return capture;
+}
+
+// The stage exists so that the teletext decoders see what they would see on a
+// native decode.  This is that claim, end to end: a packet put into a raw VBI
+// record comes back out of the slicer byte for byte, off the frame the stage
+// built, with no sync, no burst and no vertical interval anywhere in it.
+TEST(VBISourceStageDecoding, TheTeletextSlicerRecoversThePacketsThatWentIn) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  const std::array<uint8_t, kTeletextPacketBytes> expected = reference_packet();
+
+  VBISourceStage stage(
+      std::make_shared<FakeDeps>(make_packet_capture(format, expected)));
+  const auto representation =
+      representation_of(run_stage(stage, default_parameters()));
+  ASSERT_NE(representation, nullptr);
+
+  // EBU Tech. 3280-E §1.1.1: 4FSC PAL; the bit rate is fixed by ETSI EN
+  // 300 706 §5.3.  These are the observer's own slicer settings.
+  const TeletextSlicer slicer(kPalSampleRate, kTeletextBitRate);
+
+  for (const size_t line : {size_t{6}, size_t{21}, size_t{319}, size_t{334}}) {
+    const std::vector<int16_t> samples =
+        representation->get_line_samples(0, line);
+    ASSERT_FALSE(samples.empty()) << "line " << line;
+
+    const TeletextLineResult result =
+        slicer.slice(samples.data(), samples.size(), kPalBlack, kPalWhite);
+    ASSERT_TRUE(result.valid)
+        << "line " << line
+        << " rejected: " << teletext_reject_reason_name(result.reject_reason);
+    EXPECT_EQ(result.bytes, expected) << "line " << line;
+  }
+
+  // And a line the capture never carried data on yields nothing, rather than
+  // the slicer finding a packet in manufactured signal.
+  const std::vector<int16_t> blank = representation->get_line_samples(0, 100);
+  ASSERT_FALSE(blank.empty());
+  EXPECT_FALSE(
+      slicer.slice(blank.data(), blank.size(), kPalBlack, kPalWhite).valid);
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +688,7 @@ TEST(VBISourceStageCalibration, RefusesACaptureItCannotLockTo) {
 // Frame sequence
 // ---------------------------------------------------------------------------
 
-TEST(VBISourceStageSequence, AContinuousCounterGivesALockedSignalState) {
+TEST(VBISourceStageSequence, AContinuousCounterIsReported) {
   auto deps =
       std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 4));
   VBISourceStage stage(deps);
@@ -569,12 +696,15 @@ TEST(VBISourceStageSequence, AContinuousCounterGivesALockedSignalState) {
   ObservationContext observations;
   ASSERT_FALSE(stage.execute({}, default_parameters(), observations).empty());
 
-  const auto state = observations.get(FieldID(0), "vbi_source", "signal_state");
-  ASSERT_TRUE(state.has_value());
-  EXPECT_EQ(std::get<std::string>(*state), "STANDARD_TBC_LOCKED");
+  const auto summary =
+      observations.get(FieldID(0), "vbi_source", "frame_sequence");
+  ASSERT_TRUE(summary.has_value());
+  EXPECT_NE(std::get<std::string>(*summary).find("continuous"),
+            std::string::npos)
+      << std::get<std::string>(*summary);
 }
 
-TEST(VBISourceStageSequence, PreservingDroppedFramesDowngradesTheSignalState) {
+TEST(VBISourceStageSequence, PreservingDroppedFramesEmitsOnlyWhatIsPresent) {
   auto deps = std::make_shared<FakeDeps>(make_synthetic_capture(
       bt8x8_pal_format(), 4, kTruthOffsetSamples, 399598u, 1u, 2u));
   VBISourceStage stage(deps);
@@ -584,10 +714,14 @@ TEST(VBISourceStageSequence, PreservingDroppedFramesDowngradesTheSignalState) {
       stage.execute({}, default_parameters(), observations);
   ASSERT_FALSE(outputs.empty());
 
-  const auto state = observations.get(FieldID(0), "vbi_source", "signal_state");
-  ASSERT_TRUE(state.has_value());
-  EXPECT_EQ(std::get<std::string>(*state), "STANDARD_TBC_UNLOCKED");
   EXPECT_EQ(representation_of(outputs.front())->frame_count(), 4u);
+
+  const auto summary =
+      observations.get(FieldID(0), "vbi_source", "frame_sequence");
+  ASSERT_TRUE(summary.has_value());
+  EXPECT_NE(std::get<std::string>(*summary).find("2 frame(s) missing"),
+            std::string::npos)
+      << std::get<std::string>(*summary);
 }
 
 TEST(VBISourceStageSequence, PaddingKeepsTheOutputAlignedWithTheSource) {
@@ -607,18 +741,12 @@ TEST(VBISourceStageSequence, PaddingKeepsTheOutputAlignedWithTheSource) {
   ASSERT_NE(representation, nullptr);
   EXPECT_EQ(representation->frame_count(), 6u);
 
-  // The padded frames carry no data, and every frame is still a structurally
-  // valid CVBS frame.
+  // A padded frame carries no data at all: it is blanking throughout.
   const std::vector<int16_t> padded = representation->get_frame_copy(2);
-  EXPECT_EQ(padded.size(), static_cast<size_t>(kPalFrameSamples));
-
+  ASSERT_EQ(padded.size(), static_cast<size_t>(kPalFrameSamples));
   const auto bounds = std::minmax_element(padded.begin(), padded.end());
-  EXPECT_GE(*bounds.first, kVBIOutputSampleMin);
-  EXPECT_LE(*bounds.second, kVBIOutputSampleMax);
-
-  const auto state = observations.get(FieldID(0), "vbi_source", "signal_state");
-  ASSERT_TRUE(state.has_value());
-  EXPECT_EQ(std::get<std::string>(*state), "STANDARD_TBC_LOCKED");
+  EXPECT_EQ(*bounds.first, kPalBlanking);
+  EXPECT_EQ(*bounds.second, kPalBlanking);
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +813,7 @@ TEST(VBISourceStagePreview, AdvertisesNoPreviewUntilACaptureIsLoaded) {
   EXPECT_FALSE(stage.get_preview_capability().is_valid());
 }
 
-TEST(VBISourceStagePreview, AdvertisesTheSynthesisedFramesOnceLoaded) {
+TEST(VBISourceStagePreview, AdvertisesTheBuiltFramesOnceLoaded) {
   auto deps =
       std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 3));
   VBISourceStage stage(deps);

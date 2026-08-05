@@ -13,8 +13,6 @@
 #include <cmath>
 #include <utility>
 
-#include "vbi_resampler.h"
-
 namespace orc {
 
 namespace {
@@ -191,7 +189,6 @@ bool make_vbi_pattern_template(uint32_t pattern, uint32_t bit_count,
   out_template.samples_per_bit = samples_per_bit;
   out_template.anchor_samples = anchor_samples;
   out_template.bit_count = bit_count;
-  out_template.measured = false;
   return true;
 }
 
@@ -204,78 +201,6 @@ bool make_vbi_cri_frc_template(const VBITeletextService& service,
   return make_vbi_pattern_template(service.cri_frc_pattern, bit_count,
                                    service.bit_rate_hz, sample_rate_hz, config,
                                    out_template, error_message);
-}
-
-bool make_vbi_measured_template(const std::vector<double>& waveform,
-                                double waveform_samples_per_bit,
-                                double waveform_anchor_samples,
-                                uint32_t bit_count, double bit_rate_hz,
-                                double sample_rate_hz,
-                                VBICRITemplate& out_template,
-                                std::string& error_message) {
-  out_template = VBICRITemplate();
-
-  if (waveform.size() < 2) {
-    error_message = "A measured template needs at least two samples.";
-    return false;
-  }
-  if (!(waveform_samples_per_bit > 0.0) ||
-      !std::isfinite(waveform_samples_per_bit)) {
-    error_message =
-        "The measured waveform's samples per bit must be a positive number.";
-    return false;
-  }
-  if (!(bit_rate_hz > 0.0) || !(sample_rate_hz > 0.0) ||
-      !std::isfinite(bit_rate_hz) || !std::isfinite(sample_rate_hz)) {
-    error_message =
-        "The bit rate and sampling rate of a measured template must both be "
-        "positive.";
-    return false;
-  }
-
-  const double samples_per_bit = sample_rate_hz / bit_rate_hz;
-  if (samples_per_bit < kMinimumSamplesPerBit) {
-    error_message =
-        "A sampling rate of " + std::to_string(sample_rate_hz) +
-        " Hz gives only " + std::to_string(samples_per_bit) +
-        " samples per bit, which cannot represent the clock run-in.";
-    return false;
-  }
-
-  // The measured waveform is resampled through the same band-limited path the
-  // sample data itself takes, so the template is blurred exactly as much as a
-  // record read at this rate would be.
-  const double ratio = waveform_samples_per_bit / samples_per_bit;
-  const VBIBandLimitedResampler resampler(ratio);
-
-  const size_t sample_count = static_cast<size_t>(
-      std::floor(static_cast<double>(waveform.size() - 1u) / ratio) + 1.0);
-  if (sample_count < 2) {
-    error_message =
-        "The measured waveform is too short to resample onto this source's "
-        "sampling rate.";
-    return false;
-  }
-
-  std::vector<double> samples(sample_count, 0.0);
-  for (size_t index = 0; index < sample_count; ++index) {
-    samples[index] =
-        resampler.sample_at(waveform, static_cast<double>(index) * ratio);
-  }
-  if (!normalise_template(samples)) {
-    error_message =
-        "The measured waveform is a constant, so it carries no position.";
-    return false;
-  }
-
-  out_template.samples = std::move(samples);
-  out_template.sample_rate_hz = sample_rate_hz;
-  out_template.bit_rate_hz = bit_rate_hz;
-  out_template.samples_per_bit = samples_per_bit;
-  out_template.anchor_samples = waveform_anchor_samples / ratio;
-  out_template.bit_count = bit_count;
-  out_template.measured = true;
-  return true;
 }
 
 double vbi_template_autocorrelation(const VBICRITemplate& tmpl,

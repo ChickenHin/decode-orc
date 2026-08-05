@@ -56,7 +56,7 @@ bool VBIFrameIndex::build(const VBISourceFormat& format,
     // The counter advanced by fewer frames than the capture stores, so it
     // repeated or ran backwards somewhere.  Nothing can rebuild the timeline
     // from that, and padding certainly cannot: the frames are emitted as
-    // stored and the run is reported as unlocked.
+    // stored and the break is reported.
     out_index.timeline_broken_ = true;
     return true;
   }
@@ -77,10 +77,10 @@ bool VBIFrameIndex::build(const VBISourceFormat& format,
           "likely corrupt than the capture that many frames short.";
       return false;
     }
-    // Keep output frame n aligned with source frame n by synthesising the
-    // frames the counter says are missing.  The timeline and the colour
-    // sequence survive; the invented frames are flagged so nothing downstream
-    // mistakes them for recovered data (design §6.3).
+    // Keep output frame n aligned with source frame n by emitting a blank
+    // frame wherever the counter says one is missing.  The invented frames are
+    // flagged so nothing downstream mistakes them for recovered data
+    // (design §6.3).
     out_index.output_frame_count_ =
         stored_frame_count + out_index.dropped_frame_count_;
     out_index.identity_mapping_ = false;
@@ -103,16 +103,6 @@ uint64_t VBIFrameIndex::counter_offset(uint32_t counter) const {
   return static_cast<uint64_t>(static_cast<uint32_t>(counter - first_counter_));
 }
 
-VBISignalState VBIFrameIndex::signal_state() const {
-  // Subcarrier phase is only stable and known when the burst was synthesised,
-  // and frame boundaries are only preserved when nothing broke the timeline
-  // (design §2.4).
-  if (!config_.burst_synthesised || timeline_broken_) {
-    return VBISignalState::kStandardTbcUnlocked;
-  }
-  return VBISignalState::kStandardTbcLocked;
-}
-
 uint32_t VBIFrameIndex::first_tv_field() const {
   return vbi_tv_field_for_stored_field(format_, 0);
 }
@@ -129,7 +119,7 @@ std::string VBIFrameIndex::summary() const {
   text += "Output frames: " + std::to_string(output_frame_count_);
   if (output_frame_count_ > stored_frame_count_) {
     text += " (" + std::to_string(output_frame_count_ - stored_frame_count_) +
-            " synthesised to fill counter gaps)";
+            " blank, filling counter gaps)";
   }
   text += ". ";
 
@@ -152,7 +142,11 @@ std::string VBIFrameIndex::summary() const {
                 : ", dropped frames not emitted. ";
   }
 
-  text += "Signal state: " + to_string(signal_state()) + ".";
+  if (timeline_broken_) {
+    text += "Output frame numbering does not follow the capture's own.";
+  } else {
+    text += "Output frame numbering follows the capture's own.";
+  }
   return text;
 }
 

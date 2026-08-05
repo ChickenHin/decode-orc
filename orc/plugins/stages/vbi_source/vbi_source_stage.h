@@ -1,7 +1,8 @@
 /*
  * File:        vbi_source_stage.h
  * Module:      orc-stage-plugin-vbi_source
- * Purpose:     Raw VBI capture source stage: synthesises CVBS from VBI records
+ * Purpose:     Raw VBI capture source stage: places VBI records into CVBS
+ * frames
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -50,24 +51,30 @@ class IVBISourceStageDeps {
 // Raw VBI capture source stage.
 //
 // Third-party VBI captures — bt8x8 and family card dumps, cropped VBI-only
-// .tbc files — hold nothing but the teletext lines: no sync, no burst, no
-// picture, and no timing reference of any kind.  This stage reads those line
-// records and synthesises the CVBS frames they were cut out of, so that the
-// existing teletext decoders see exactly what they see from a native decode
-// (design §1).
+// .tbc files — hold nothing but the teletext lines.  This stage reads those
+// line records and lays them onto CVBS frames at the timing point and the
+// amplitude the standard puts them at, so that the existing teletext decoders
+// see them exactly as they see them on a native decode (design §1).
+//
+// The rest of each frame is blanking.  A capture carries no sync, no vertical
+// interval and no burst, and nothing that reads this stage's output looks for
+// them: the teletext slicer locks to the clock run-in within the line it is
+// handed.  Manufacturing a whole television signal around the data would cost
+// far more than placing the data does and would be spent entirely on samples
+// nobody reads.
 //
 // Nothing is written to disk: the stage's only product is the in-memory
 // CVBS_U10_4FSC representation.  Connect the CVBS sink to export it.
 //
-// Frames are synthesised lazily, one at a time, on the frame a consumer asks
-// for.  The full-frame expansion of a raw capture is 21,6x its size — a
-// four-hour bt8x8 capture is 24 GB of VBI records and 522 GB of CVBS frames —
-// so materialising it is not an option (design §5.7).
+// Frames are built lazily, one at a time, on the frame a consumer asks for.
+// A PAL frame is 1,4 MB against the 64 KiB of VBI records it comes from, so a
+// four-hour capture is 24 GB of records and 522 GB of frames; materialising it
+// is not an option (design §5.7).
 //
-// What the stage is currently able to synthesise is one path end to end: the
-// bt8x8 PAL preset, world system teletext, FLAC-wrapped or raw.  Every other
-// format in the design's table fails at configuration with a message saying
-// so rather than producing plausible but wrong output.
+// What the stage is currently able to place is one path end to end: the bt8x8
+// PAL preset, world system teletext, FLAC-wrapped or raw.  Every other format
+// in the design's table fails at configuration with a message saying so rather
+// than producing plausible but wrong output.
 class VBISourceStage : public DAGStage,
                        public ParameterizedStage,
                        public IStagePreviewCapability {
@@ -124,7 +131,6 @@ class VBISourceStage : public DAGStage,
     std::string container_tv_system = "PAL";
 
     std::string teletext_system = "WST";
-    bool synthesise_burst = true;
     std::string capture_offset_mode = "auto";
     double capture_offset_samples = 0.0;
     std::string levels = "per-line";

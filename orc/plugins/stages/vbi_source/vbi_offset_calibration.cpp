@@ -311,18 +311,9 @@ bool calibrate_vbi_capture_offset(const VBILineReader& reader,
   }
 
   VBICRITemplate cri_template;
-  const bool measured = !config.measured_template.empty();
-  const bool built =
-      measured ? make_vbi_measured_template(
-                     config.measured_template,
-                     config.measured_template_samples_per_bit,
-                     config.measured_template_anchor_samples,
-                     service.cri_bits + service.frc_bits, service.bit_rate_hz,
-                     format.sample_rate_hz, cri_template, error_message)
-               : make_vbi_cri_frc_template(service, format.sample_rate_hz,
-                                           config.template_config, cri_template,
-                                           error_message);
-  if (!built) {
+  if (!make_vbi_cri_frc_template(service, format.sample_rate_hz,
+                                 config.template_config, cri_template,
+                                 error_message)) {
     return false;
   }
 
@@ -379,12 +370,6 @@ bool calibrate_vbi_capture_offset(const VBILineReader& reader,
         "calibration sample was taken from the head of the file rather than "
         "spread across it.");
   }
-  if (measured) {
-    out_calibration.warnings.push_back(
-        "The capture offset was fitted against a measured clock run-in "
-        "waveform rather than the ideal pattern.");
-  }
-
   return true;
 }
 

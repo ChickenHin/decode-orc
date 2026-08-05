@@ -75,6 +75,25 @@ class ProjectConversionError : public std::runtime_error {
 std::shared_ptr<DAG> project_to_dag(const Project& project);
 
 /**
+ * @brief Resolve the file-path parameters of a node against the project root
+ *
+ * Project files store paths as the user gave them: absolute, relative to the
+ * project directory, or written with ${PROJECT_ROOT}. A stage only ever sees
+ * resolved paths, so every consumer of a node's stored parameters has to run
+ * them through this before handing them to a stage — otherwise a stage that
+ * checks its input file (every source stage does, for its status dot) is told
+ * a path that does not resolve from the process working directory and reports
+ * itself unconfigured.
+ *
+ * Parameters whose name does not look like a path are left untouched.
+ *
+ * @param parameters  Parameter map, modified in place
+ * @param project_root Directory the project file lives in; no-op when empty
+ */
+void resolve_path_parameters(std::map<std::string, ParameterValue>& parameters,
+                             const std::string& project_root);
+
+/**
  * @brief Validate that all source nodes in a DAG can be accessed
  *
  * This function attempts to execute each source node in the DAG to verify

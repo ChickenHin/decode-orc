@@ -31,6 +31,17 @@ constexpr double kWSTBitRateHz = 6937500.0;
 
 constexpr double kPi = 3.14159265358979323846;
 
+// A placement that reads a record from |first_position| in steps of |ratio|.
+VBIDataPlacement window_at(double ratio, double first_position,
+                           uint32_t count) {
+  VBIDataPlacement placement;
+  placement.source_samples_per_output_sample = ratio;
+  placement.source_position_at_output_zero = first_position;
+  placement.output_begin = 0;
+  placement.output_end = count;
+  return placement;
+}
+
 std::vector<double> sine_wave(double frequency_hz, double sample_rate_hz,
                               size_t sample_count, double phase_radians) {
   std::vector<double> samples(sample_count, 0.0);
@@ -55,17 +66,20 @@ double root_mean_square(const std::vector<double>& samples) {
 // Amplitude of a single tone after resampling, relative to the unit-amplitude
 // input.  The tone is the only thing in the record, so its root mean square
 // carries its amplitude whether or not it has folded to a new frequency.
-double relative_tone_amplitude(const VBIBandLimitedResampler& resampler,
-                               double frequency_hz) {
-  constexpr size_t kSourceSamples = 6000;
+double relative_tone_amplitude(double frequency_hz) {
+  constexpr uint32_t kRecordSamples = 6000;
   constexpr double kFirstPosition = 1000.37;
   constexpr uint32_t kOutputSamples = 1800;
 
+  const VBIRecordResampler resampler(
+      window_at(kDecimationRatio, kFirstPosition, kOutputSamples),
+      kRecordSamples);
+
   const std::vector<double> source =
-      sine_wave(frequency_hz, kSourceRateHz, kSourceSamples, 0.31);
+      sine_wave(frequency_hz, kSourceRateHz, kRecordSamples, 0.31);
 
   std::vector<double> output;
-  resampler.resample(source, kFirstPosition, kOutputSamples, output);
+  resampler.resample(source, output);
 
   const double input_rms = 1.0 / std::sqrt(2.0);
   return root_mean_square(output) / input_rms;
@@ -74,10 +88,7 @@ double relative_tone_amplitude(const VBIBandLimitedResampler& resampler,
 double to_decibels(double ratio) { return 20.0 * std::log10(ratio); }
 
 TEST(VBIResampler, TheWSTCarrierSurvivesDecimationToFourTimesSubcarrier) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
-  const double loss_db =
-      -to_decibels(relative_tone_amplitude(resampler, kWSTBitRateHz));
+  const double loss_db = -to_decibels(relative_tone_amplitude(kWSTBitRateHz));
 
   EXPECT_LT(loss_db, 0.5) << "WST carrier loss " << loss_db << " dB";
   EXPECT_GT(loss_db, -0.5) << "WST carrier gain " << -loss_db << " dB";
@@ -86,12 +97,10 @@ TEST(VBIResampler, TheWSTCarrierSurvivesDecimationToFourTimesSubcarrier) {
 // The whole passband the data occupies must come through, not just the
 // carrier: half the bit rate is where the clock run-in's energy sits.
 TEST(VBIResampler, ThePassbandUpToTheCarrierIsFlatWithinHalfADecibel) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
   constexpr int kSteps = 16;
   for (int step = 1; step <= kSteps; ++step) {
     const double frequency = kWSTBitRateHz * static_cast<double>(step) / kSteps;
-    const double amplitude = relative_tone_amplitude(resampler, frequency);
+    const double amplitude = relative_tone_amplitude(frequency);
     EXPECT_LT(std::abs(to_decibels(amplitude)), 0.5)
         << "frequency " << frequency << " Hz";
   }
@@ -100,8 +109,6 @@ TEST(VBIResampler, ThePassbandUpToTheCarrierIsFlatWithinHalfADecibel) {
 // Sample dropping would put everything above the output Nyquist straight back
 // onto the data.  Nothing up there may survive at a level that matters.
 TEST(VBIResampler, EnergyAboveTheOutputNyquistIsAttenuatedBySixtyDecibels) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
   // Up to 45 % of the source rate; beyond that the source itself is aliased
   // and the tone is no longer the frequency it was asked for.
   constexpr double kLowest = kOutputNyquistHz * 1.015;
@@ -111,13 +118,14 @@ TEST(VBIResampler, EnergyAboveTheOutputNyquistIsAttenuatedBySixtyDecibels) {
     const double frequency =
         kLowest + (kHighest - kLowest) * static_cast<double>(step) / kSteps;
     const double attenuation_db =
-        -to_decibels(relative_tone_amplitude(resampler, frequency));
+        -to_decibels(relative_tone_amplitude(frequency));
     EXPECT_GT(attenuation_db, 60.0) << "frequency " << frequency << " Hz";
   }
 }
 
 TEST(VBIResampler, TheDecimationCutoffSitsBelowTheOutputNyquist) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
+  const VBIRecordResampler resampler(window_at(kDecimationRatio, 100.0, 64),
+                                     2044);
 
   const double cutoff_hz =
       resampler.cutoff_fraction_of_source_rate() * kSourceRateHz;
@@ -125,39 +133,40 @@ TEST(VBIResampler, TheDecimationCutoffSitsBelowTheOutputNyquist) {
   EXPECT_LT(cutoff_hz, kOutputNyquistHz);
 }
 
-// A resampler that ran late would bias every placement by the same amount,
-// which is exactly the failure the calibrated capture offset is meant to
-// remove.  The kernel is symmetric about the requested position, so there is
-// no delay to compensate.
-TEST(VBIResampler, TheFilterHasNoResidualGroupDelay) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
-  EXPECT_DOUBLE_EQ(resampler.group_delay_samples(), 0.0);
-}
-
 // Linear phase, stated as the property that matters: a symmetric pulse stays
-// symmetric about its own centre rather than developing a leading or
-// trailing tail.
+// symmetric about its own centre rather than developing a leading or trailing
+// tail.  A resampler that ran late would bias every placement by the same
+// amount, which is exactly the failure the calibrated capture offset exists to
+// remove.
 TEST(VBIResampler, ASymmetricPulseStaysSymmetricAboutItsCentre) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
-  constexpr size_t kSourceSamples = 1200;
+  constexpr uint32_t kRecordSamples = 1200;
   constexpr double kCentre = 600.0;
   constexpr double kHalfWidth = 24.0;
+  constexpr uint32_t kOutputSamples = 200;
 
-  std::vector<double> source(kSourceSamples, 0.0);
-  for (size_t index = 0; index < kSourceSamples; ++index) {
+  std::vector<double> source(kRecordSamples, 0.0);
+  for (size_t index = 0; index < kRecordSamples; ++index) {
     const double offset = static_cast<double>(index) - kCentre;
     if (std::abs(offset) < kHalfWidth) {
       source[index] = 0.5 * (1.0 + std::cos(kPi * offset / kHalfWidth));
     }
   }
 
-  for (int step = 1; step <= 120; ++step) {
-    const double distance = 0.5 * static_cast<double>(step);
-    const double before = resampler.sample_at(source, kCentre - distance);
-    const double after = resampler.sample_at(source, kCentre + distance);
-    EXPECT_NEAR(before, after, 1e-9) << "distance " << distance;
+  // The window is centred on the pulse and steps by two, so output sample n
+  // and output sample (count - 1 - n) are equidistant from the centre.
+  const double first_position =
+      kCentre - kDecimationRatio * (kOutputSamples - 1u) / 2.0;
+  const VBIRecordResampler resampler(
+      window_at(kDecimationRatio, first_position, kOutputSamples),
+      kRecordSamples);
+
+  std::vector<double> output;
+  resampler.resample(source, output);
+  ASSERT_EQ(output.size(), kOutputSamples);
+
+  for (uint32_t index = 0; index < kOutputSamples / 2u; ++index) {
+    EXPECT_NEAR(output[index], output[kOutputSamples - 1u - index], 1e-9)
+        << "output sample " << index;
   }
 }
 
@@ -165,13 +174,19 @@ TEST(VBIResampler, ASymmetricPulseStaysSymmetricAboutItsCentre) {
 // phase.  The quiet back porch that logic 0 is read from is exactly such a
 // region, so any phase-dependent gain would ripple the level reference.
 TEST(VBIResampler, ConstantInputIsReproducedExactlyAtEveryFractionalPhase) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
   const std::vector<double> source(800, 137.25);
+
   for (int step = 0; step < 64; ++step) {
-    const double position = 200.0 + static_cast<double>(step) / 64.0;
-    EXPECT_NEAR(resampler.sample_at(source, position), 137.25, 1e-9)
-        << "position " << position;
+    const double first_position = 200.0 + static_cast<double>(step) / 64.0;
+    const VBIRecordResampler resampler(
+        window_at(kDecimationRatio, first_position, 100), 800);
+
+    std::vector<double> output;
+    resampler.resample(source, output);
+    ASSERT_EQ(output.size(), 100u);
+    for (const double sample : output) {
+      EXPECT_NEAR(sample, 137.25, 1e-9) << "phase step " << step;
+    }
   }
 }
 
@@ -179,57 +194,54 @@ TEST(VBIResampler, ConstantInputIsReproducedExactlyAtEveryFractionalPhase) {
 // quiet head or tail keeps its own level instead of being pulled towards an
 // invented zero.
 TEST(VBIResampler, PositionsOutsideTheRecordReadTheNearestStoredSample) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
   const std::vector<double> source(600, 42.0);
 
-  EXPECT_NEAR(resampler.sample_at(source, -50.0), 42.0, 1e-9);
-  EXPECT_NEAR(resampler.sample_at(source, 0.25), 42.0, 1e-9);
-  EXPECT_NEAR(resampler.sample_at(source, 599.75), 42.0, 1e-9);
-  EXPECT_NEAR(resampler.sample_at(source, 900.0), 42.0, 1e-9);
+  // A window that opens before the record and closes after it.
+  const VBIRecordResampler resampler(window_at(kDecimationRatio, -60.0, 360),
+                                     600);
+
+  std::vector<double> output;
+  resampler.resample(source, output);
+  ASSERT_EQ(output.size(), 360u);
+  for (const double sample : output) {
+    EXPECT_NEAR(sample, 42.0, 1e-9);
+  }
 }
 
 TEST(VBIResampler, AnEmptyRecordProducesNoSignal) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
-
-  const std::vector<double> empty;
-  EXPECT_DOUBLE_EQ(resampler.sample_at(empty, 10.0), 0.0);
+  const VBIRecordResampler resampler(window_at(kDecimationRatio, 100.0, 8),
+                                     2044);
 
   std::vector<double> output;
-  resampler.resample(empty, 0.0, 8, output);
+  resampler.resample({}, output);
   ASSERT_EQ(output.size(), 8u);
   for (const double sample : output) {
     EXPECT_DOUBLE_EQ(sample, 0.0);
   }
 }
 
-// The regular-stride path and repeated single-position calls are the same
-// operation; the placement code relies on being able to use either.
-TEST(VBIResampler, TheStridedPathMatchesRepeatedSinglePositionCalls) {
-  const VBIBandLimitedResampler resampler(kDecimationRatio);
+// A source whose rate is a whole multiple of the output's reads every sample
+// at the same fractional delay, so the kernel is resolved once for the whole
+// run rather than once per output sample.
+TEST(VBIResampler, AWholeNumberRatioResolvesToASinglePhaseRow) {
+  const VBIRecordResampler whole(window_at(kDecimationRatio, 120.5, 900), 2044);
+  EXPECT_EQ(whole.phase_row_count(), 1u);
+  EXPECT_EQ(whole.output_count(), 900u);
+  EXPECT_EQ(whole.taps(), 128u);
 
-  const std::vector<double> source =
-      sine_wave(4000000.0, kSourceRateHz, 2000, 0.7);
-
-  constexpr double kFirstPosition = 300.4;
-  constexpr uint32_t kCount = 400;
-  std::vector<double> strided;
-  resampler.resample(source, kFirstPosition, kCount, strided);
-
-  ASSERT_EQ(strided.size(), kCount);
-  for (uint32_t index = 0; index < kCount; ++index) {
-    const double position =
-        kFirstPosition + static_cast<double>(index) * kDecimationRatio;
-    EXPECT_NEAR(strided[index], resampler.sample_at(source, position), 1e-12)
-        << "output sample " << index;
-  }
+  // A ratio that is not a whole number needs more of them, and the phase bank
+  // is what bounds how many.
+  const VBIRecordResampler fractional(window_at(1.5225, 120.5, 900), 2044);
+  EXPECT_GT(fractional.phase_row_count(), 1u);
+  EXPECT_LE(fractional.phase_row_count(), 1024u);
 }
 
 // A source at or below the output lattice rate has no bandwidth to discard,
 // so the cutoff follows the source's own Nyquist instead of the output's.
 TEST(VBIResampler, AUnityRatioKeepsTheFullSourceBandwidth) {
-  const VBIBandLimitedResampler passthrough(1.0);
-  const VBIBandLimitedResampler decimator(kDecimationRatio);
+  const VBIRecordResampler passthrough(window_at(1.0, 100.0, 64), 2044);
+  const VBIRecordResampler decimator(window_at(kDecimationRatio, 100.0, 64),
+                                     2044);
 
   EXPECT_GT(passthrough.cutoff_fraction_of_source_rate(),
             decimator.cutoff_fraction_of_source_rate());
@@ -238,12 +250,19 @@ TEST(VBIResampler, AUnityRatioKeepsTheFullSourceBandwidth) {
 
 // A ratio that is not a usable number must not produce a kernel that silently
 // misplaces every sample.
-TEST(VBIResampler, AnUnusableRatioFallsBackToUnity) {
-  const VBIBandLimitedResampler zero_ratio(0.0);
-  const VBIBandLimitedResampler negative_ratio(-2.0);
+TEST(VBIResampler, AnUnusableRatioProducesNothing) {
+  const VBIRecordResampler zero_ratio(window_at(0.0, 100.0, 64), 2044);
+  const VBIRecordResampler negative_ratio(window_at(-2.0, 100.0, 64), 2044);
+  const VBIRecordResampler empty_record(window_at(kDecimationRatio, 100.0, 64),
+                                        0);
 
-  EXPECT_DOUBLE_EQ(zero_ratio.ratio(), 1.0);
-  EXPECT_DOUBLE_EQ(negative_ratio.ratio(), 1.0);
+  EXPECT_EQ(zero_ratio.output_count(), 0u);
+  EXPECT_EQ(negative_ratio.output_count(), 0u);
+  EXPECT_EQ(empty_record.output_count(), 0u);
+
+  std::vector<double> output;
+  zero_ratio.resample(std::vector<double>(600, 1.0), output);
+  EXPECT_TRUE(output.empty());
 }
 
 }  // namespace

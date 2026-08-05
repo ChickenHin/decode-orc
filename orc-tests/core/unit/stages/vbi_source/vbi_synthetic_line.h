@@ -41,6 +41,11 @@ struct SyntheticVBILine {
   // Pseudo-random data bits following the framing code.
   uint32_t payload_bits = 336;
 
+  // Explicit data bits to transmit after the framing code, in transmission
+  // order.  Empty renders the pseudo-random payload above instead; a caller
+  // that means to recover the payload downstream supplies it here.
+  std::vector<bool> payload;
+
   // Where the leading edge of the pattern's first one bit is to land.
   double anchor_position_samples = 121.3;
 
@@ -109,16 +114,22 @@ inline std::vector<double> render_synthetic_vbi_line(
         line.anchor_position_samples -
         static_cast<double>(first_one) * samples_per_bit;
 
-    const uint32_t total_bits = line.pattern_bits + line.payload_bits;
+    const uint32_t payload_bits =
+        line.payload.empty() ? line.payload_bits
+                             : static_cast<uint32_t>(line.payload.size());
     std::vector<bool> bits;
-    bits.reserve(total_bits);
+    bits.reserve(line.pattern_bits + payload_bits);
     for (uint32_t index = 0; index < line.pattern_bits; ++index) {
       bits.push_back(
           ((line.pattern >> (line.pattern_bits - 1u - index)) & 1u) != 0u);
     }
-    uint32_t payload_state = line.seed * 2654435761u + 1u;
-    for (uint32_t index = 0; index < line.payload_bits; ++index) {
-      bits.push_back(detail::next_uniform(payload_state) >= 0.0);
+    if (line.payload.empty()) {
+      uint32_t payload_state = line.seed * 2654435761u + 1u;
+      for (uint32_t index = 0; index < payload_bits; ++index) {
+        bits.push_back(detail::next_uniform(payload_state) >= 0.0);
+      }
+    } else {
+      bits.insert(bits.end(), line.payload.begin(), line.payload.end());
     }
 
     // Ideal waveform on an oversampled grid.

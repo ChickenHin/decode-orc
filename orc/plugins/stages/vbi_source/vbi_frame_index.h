@@ -96,8 +96,6 @@ class VBIFrameIndex {
   // present, so output frame numbering no longer follows the source's.
   bool timeline_broken() const { return timeline_broken_; }
 
-  VBISignalState signal_state() const;
-
   // Television field the first stored field of each frame carries.
   uint32_t first_tv_field() const;
 
@@ -105,7 +103,7 @@ class VBIFrameIndex {
   std::string field_order_note() const;
 
   // Human-readable account of the sequence: field order, what the counter
-  // showed, what the policy did about it, and the resulting signal state.
+  // showed and what the policy did about it.
   std::string summary() const;
 
   // What an output frame is made from.  Returns false with an error message

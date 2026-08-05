@@ -16,8 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "vbi_frame_geometry.h"
-#include "vbi_line_mapping.h"
+#include "vbi_output_frame.h"
 #include "vbi_resampler.h"
 #include "vbi_source_format.h"
 #include "vbi_teletext_service.h"
@@ -27,11 +26,6 @@ namespace {
 
 constexpr double kOutputRateHz = 17734475.0;  // 4 x fsc PAL
 constexpr double kPi = 3.14159265358979323846;
-
-// The frame lines at which the 4 x fsc PAL lattice takes up its accumulated
-// fraction and holds 1136 samples instead of 1135 (design §2.3).  Placement
-// has to be right on these as much as on any other line.
-constexpr uint32_t kPALLongLines[] = {0, 156, 312, 468};
 
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
@@ -49,25 +43,21 @@ VBITeletextService wst_service() {
   return service;
 }
 
-VBIFrameGeometry pal_geometry() {
-  VBIFrameGeometry geometry;
+VBIOutputFrame pal_output_frame() {
+  VBIOutputFrame frame;
   std::string error;
-  EXPECT_TRUE(make_vbi_frame_geometry(VBITVSystem::kPAL, geometry, error))
-      << error;
-  return geometry;
+  EXPECT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, frame, error)) << error;
+  return frame;
 }
 
-// Every frame line the stage places WST data on, in stored frame-line terms.
-std::vector<uint32_t> teletext_frame_lines() {
-  VBITeletextLineMap line_map;
+VBIDataPlacement placement_at(const VBISourceFormat& format,
+                              double capture_offset_samples) {
+  VBIDataPlacement placement;
   std::string error;
-  EXPECT_TRUE(make_vbi_teletext_line_map(
-      VBITVSystem::kPAL, VBITeletextSystem::kWST, line_map, error))
+  EXPECT_TRUE(make_vbi_data_placement(format, wst_service(), pal_output_frame(),
+                                      capture_offset_samples, placement, error))
       << error;
-
-  std::vector<uint32_t> lines = line_map.field1;
-  lines.insert(lines.end(), line_map.field2.begin(), line_map.field2.end());
-  return lines;
+  return placement;
 }
 
 // A record holding one symmetric raised-cosine pulse centred on the given
@@ -102,384 +92,185 @@ double marker_position(const std::vector<double>& out_samples,
   return (weight_sum != 0.0) ? (weighted_sum / weight_sum) : 0.0;
 }
 
-TEST(VBILinePlacement, TheRatioIsTheSourceRateOverTheOutputLatticeRate) {
+TEST(VBIDataPlacement, TheRatioIsTheSourceRateOverTheOutputLatticeRate) {
   const VBISourceFormat format = bt8x8_pal_format();
-  VBILinePlacement placement;
-  std::string error;
-
-  ASSERT_TRUE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                      format.capture_offset_samples, 6,
-                                      placement, error))
-      << error;
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples);
 
   // bt8x8 PAL samples at 8 x fsc onto a 4 x fsc lattice.
   EXPECT_DOUBLE_EQ(placement.source_samples_per_output_sample, 2.0);
 }
 
-// The data region begins at the service's 0H offset less the line's own
-// sub-sample lattice phase (design §5.2).
-TEST(VBILinePlacement, TheDataStartIsTheServiceOffsetLessTheLinePhase) {
+// Sample zero of a stored output line is that line's 0H, so the data region
+// begins at the service's own 0H offset (design §5.2).
+TEST(VBIDataPlacement, TheDataStartIsTheServiceOffsetOnTheOutputLattice) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIFrameGeometry geometry = pal_geometry();
 
   const double nominal_start = service.t_offset_ns * 1e-9 * kOutputRateHz;
   EXPECT_NEAR(nominal_start, 182.665, 0.001);
 
-  for (const uint32_t frame_line : teletext_frame_lines()) {
-    VBILinePlacement placement;
-    std::string error;
-    ASSERT_TRUE(make_vbi_line_placement(format, service, geometry,
-                                        format.capture_offset_samples,
-                                        frame_line, placement, error))
-        << error;
-
-    EXPECT_NEAR(placement.data_start_samples,
-                nominal_start - geometry.line_phase(frame_line), 1e-9)
-        << "frame line " << frame_line;
-  }
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples);
+  EXPECT_NEAR(placement.data_start_samples, nominal_start, 1e-9);
 }
 
-// The acceptance criterion for the phase: a marker sitting at the service's
-// anchor in the record lands within a tenth of a sample of the anchor's
-// output position, on every teletext line.
-TEST(VBILinePlacement, MarkedDataLandsAtTheServiceAnchorOnEveryTeletextLine) {
+// The acceptance criterion for the phase: a marker in the record lands within
+// a tenth of a sample of where the placement says it should.  One placement
+// serves every data line, so this is the whole of the horizontal accuracy
+// claim.
+//
+// The marker sits a little way into the packet rather than on the run-in
+// itself, so that the whole of its symmetric shape is inside the window the
+// record is clipped to and its centroid measures position rather than the
+// clip.
+TEST(VBIDataPlacement, MarkedDataLandsWhereThePlacementSaysItShould) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIFrameGeometry geometry = pal_geometry();
-  const VBIBandLimitedResampler resampler(format.sample_rate_hz /
-                                          kOutputRateHz);
+  constexpr double kSamplesIntoThePacket = 400.0;
 
   // Source coordinate of the first clock run-in one bit, given the record's
-  // own capture offset.
-  const double marker_source_position = service.cri_start_samples(
+  // own capture offset, and of the marker a little after it.
+  const double anchor_source_position = service.cri_start_samples(
       format.sample_rate_hz, format.capture_offset_samples);
+  const double marker_source_position =
+      anchor_source_position + kSamplesIntoThePacket;
   const std::vector<double> record =
       record_with_marker_at(format.valid_samples, marker_source_position);
 
-  for (const uint32_t frame_line : teletext_frame_lines()) {
-    VBILinePlacement placement;
-    std::string error;
-    ASSERT_TRUE(make_vbi_line_placement(format, service, geometry,
-                                        format.capture_offset_samples,
-                                        frame_line, placement, error))
-        << error;
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples);
+  const VBIRecordResampler resampler(placement, format.valid_samples);
 
-    std::vector<double> line;
-    resample_vbi_line(resampler, record, placement, line);
+  std::vector<double> line;
+  resampler.resample(record, line);
 
-    EXPECT_NEAR(marker_position(line, placement.output_begin),
-                placement.data_start_samples, 0.1)
-        << "frame line " << frame_line;
-  }
+  const double expected =
+      placement.data_start_samples +
+      kSamplesIntoThePacket / placement.source_samples_per_output_sample;
+  EXPECT_NEAR(marker_position(line, placement.output_begin), expected, 0.1);
 }
 
-// The four lines that hold an extra sample are the ones a constant-stride
-// assumption gets wrong, so they are checked explicitly rather than left to
-// the teletext line list, which happens not to include any of them.
-TEST(VBILinePlacement, MarkedDataLandsAtTheServiceAnchorOnTheLongLines) {
+// The clip keeps a bit period of guard at each end, so the leading edge of the
+// first run-in bit and the trailing edge of the last payload bit both survive
+// it (design §5.6).
+TEST(VBIDataPlacement, TheGuardKeepsTheEdgesOfThePacketInsideTheWindow) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIFrameGeometry geometry = pal_geometry();
-  const VBIBandLimitedResampler resampler(format.sample_rate_hz /
-                                          kOutputRateHz);
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples);
 
-  const double marker_source_position = service.cri_start_samples(
-      format.sample_rate_hz, format.capture_offset_samples);
-  const std::vector<double> record =
-      record_with_marker_at(format.valid_samples, marker_source_position);
-
-  for (const uint32_t frame_line : kPALLongLines) {
-    ASSERT_EQ(geometry.line_length(frame_line), 1136u)
-        << "frame line " << frame_line;
-
-    VBILinePlacement placement;
-    std::string error;
-    ASSERT_TRUE(make_vbi_line_placement(format, service, geometry,
-                                        format.capture_offset_samples,
-                                        frame_line, placement, error))
-        << error;
-
-    std::vector<double> line;
-    resample_vbi_line(resampler, record, placement, line);
-
-    EXPECT_NEAR(marker_position(line, placement.output_begin),
-                placement.data_start_samples, 0.1)
-        << "frame line " << frame_line;
-  }
+  const double guard = service.samples_per_bit(kOutputRateHz);
+  EXPECT_LE(static_cast<double>(placement.output_begin),
+            placement.data_start_samples - guard);
+  EXPECT_GE(static_cast<double>(placement.output_end),
+            placement.data_end_samples + guard);
 }
 
 // The calibrated offset is what makes the placement right: a record captured
 // with a different offset than the one supplied lands displaced by exactly
 // that difference, scaled into output samples.
-TEST(VBILinePlacement, AMisstatedCaptureOffsetDisplacesTheDataItPlaces) {
+TEST(VBIDataPlacement, AMisstatedCaptureOffsetDisplacesTheDataItPlaces) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIFrameGeometry geometry = pal_geometry();
-  const VBIBandLimitedResampler resampler(format.sample_rate_hz /
-                                          kOutputRateHz);
-  constexpr uint32_t kFrameLine = 6;
   constexpr double kOffsetError = 10.0;
 
-  const double marker_source_position = service.cri_start_samples(
-      format.sample_rate_hz, format.capture_offset_samples);
+  constexpr double kSamplesIntoThePacket = 400.0;
+  const double marker_source_position =
+      service.cri_start_samples(format.sample_rate_hz,
+                                format.capture_offset_samples) +
+      kSamplesIntoThePacket;
   const std::vector<double> record =
       record_with_marker_at(format.valid_samples, marker_source_position);
 
-  VBILinePlacement placement;
-  std::string error;
-  ASSERT_TRUE(make_vbi_line_placement(
-      format, service, geometry, format.capture_offset_samples + kOffsetError,
-      kFrameLine, placement, error))
-      << error;
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples + kOffsetError);
+  const VBIRecordResampler resampler(placement, format.valid_samples);
 
   std::vector<double> line;
-  resample_vbi_line(resampler, record, placement, line);
+  resampler.resample(record, line);
 
   // Ten source samples is five output samples at 2:1, and believing sample 0
   // of the record sits later after 0H than it does carries everything in the
   // record the same distance later along the line.
-  EXPECT_NEAR(marker_position(line, placement.output_begin),
-              placement.data_start_samples + kOffsetError / 2.0, 0.1);
+  const double expected =
+      placement.data_start_samples +
+      kSamplesIntoThePacket / placement.source_samples_per_output_sample +
+      kOffsetError / 2.0;
+  EXPECT_NEAR(marker_position(line, placement.output_begin), expected, 0.1);
 }
 
-// Resampling is a linear filter and nothing else.  A source that is already
-// band-limited comes back as itself, which is the property the deconvolving
-// slicer downstream depends on (design §5.3.6).
-TEST(VBILinePlacement, ABandLimitedWaveformIsReproducedRatherThanConditioned) {
+// The output window is bounded by the stored record at one end and by the data
+// region at the other; neither may be overrun.
+TEST(VBIDataPlacement, TheOutputWindowIsBoundedByTheRecordAndTheDataRegion) {
   const VBISourceFormat format = bt8x8_pal_format();
-  const VBIBandLimitedResampler resampler(format.sample_rate_hz /
-                                          kOutputRateHz);
+  const VBIOutputFrame output = pal_output_frame();
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples);
 
-  // Three components, the highest at about 4.4 MHz, all comfortably inside
-  // the decimation passband.
-  const double frequencies[] = {0.021, 0.061, 0.124};  // cycles per sample
-  const double amplitudes[] = {1.0, 0.45, 0.2};
-  const double phases[] = {0.3, 1.9, 2.7};
-
-  const auto waveform = [&](double position) {
-    double value = 0.0;
-    for (size_t term = 0; term < 3; ++term) {
-      value +=
-          amplitudes[term] *
-          std::sin(2.0 * kPi * frequencies[term] * position + phases[term]);
-    }
-    return value;
-  };
-
-  std::vector<double> record(format.valid_samples, 0.0);
-  for (uint32_t index = 0; index < format.valid_samples; ++index) {
-    record[index] = waveform(static_cast<double>(index));
-  }
-
-  VBILinePlacement placement;
-  std::string error;
-  ASSERT_TRUE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                      format.capture_offset_samples, 6,
-                                      placement, error))
-      << error;
-
-  std::vector<double> line;
-  resample_vbi_line(resampler, record, placement, line);
-  ASSERT_FALSE(line.empty());
-
-  // Skip the ends of the window, where the kernel runs off the record and
-  // constant extension takes over.
-  constexpr uint32_t kEdgeGuard = 48;
-  ASSERT_GT(line.size(), 2u * kEdgeGuard);
-  for (size_t index = kEdgeGuard; index + kEdgeGuard < line.size(); ++index) {
-    const double position = placement.source_position(
-        static_cast<double>(placement.output_begin + index));
-    EXPECT_NEAR(line[index], waveform(position), 2e-3) << "sample " << index;
-  }
-}
-
-// A band-limited source stays band-limited: a clock run-in that reaches the
-// stage at a few per cent of full amplitude must come out at a few per cent
-// of full amplitude, not be restored, sliced or sharpened (design §5.3.6).
-TEST(VBILinePlacement, ABlurredClockRunInKeepsItsCollapsedAmplitude) {
-  const VBISourceFormat format = bt8x8_pal_format();
-  const VBITeletextService service = wst_service();
-  const VBIBandLimitedResampler resampler(format.sample_rate_hz /
-                                          kOutputRateHz);
-
-  // The VHS waveform measured in design §5.3.6: the run-in has collapsed to
-  // about 5.5 % of the data amplitude, leaving only its fundamental at half
-  // the bit rate.
-  constexpr double kCollapsedAmplitude = 0.055;
-  const double cycles_per_sample =
-      service.bit_rate_hz / (2.0 * format.sample_rate_hz);
-
-  std::vector<double> record(format.valid_samples, 0.5);
-  for (uint32_t index = 0; index < format.valid_samples; ++index) {
-    record[index] +=
-        kCollapsedAmplitude *
-        std::sin(2.0 * kPi * cycles_per_sample * static_cast<double>(index));
-  }
-
-  VBILinePlacement placement;
-  std::string error;
-  ASSERT_TRUE(make_vbi_line_placement(format, service, pal_geometry(),
-                                      format.capture_offset_samples, 6,
-                                      placement, error))
-      << error;
-
-  std::vector<double> line;
-  resample_vbi_line(resampler, record, placement, line);
-  ASSERT_FALSE(line.empty());
-
-  constexpr uint32_t kEdgeGuard = 48;
-  ASSERT_GT(line.size(), 2u * kEdgeGuard);
-  double lowest = line[kEdgeGuard];
-  double highest = line[kEdgeGuard];
-  for (size_t index = kEdgeGuard; index + kEdgeGuard < line.size(); ++index) {
-    lowest = std::min(lowest, line[index]);
-    highest = std::max(highest, line[index]);
-  }
-
-  EXPECT_NEAR(highest - lowest, 2.0 * kCollapsedAmplitude, 2e-3);
-}
-
-// The output window is bounded by the stored record at one end and by the
-// frame line at the other; neither may be overrun.
-TEST(VBILinePlacement, TheOutputWindowIsBoundedByTheRecordAndTheFrameLine) {
-  const VBISourceFormat format = bt8x8_pal_format();
-  const VBIFrameGeometry geometry = pal_geometry();
-  constexpr uint32_t kFrameLine = 6;
-
-  VBILinePlacement placement;
-  std::string error;
-  ASSERT_TRUE(make_vbi_line_placement(format, wst_service(), geometry,
-                                      format.capture_offset_samples, kFrameLine,
-                                      placement, error))
-      << error;
-
-  EXPECT_LE(placement.output_end, geometry.line_length(kFrameLine));
   EXPECT_LT(placement.output_begin, placement.output_end);
+  EXPECT_LE(placement.output_end, output.samples_per_line_nominal);
 
-  // The record starts 244 source samples after 0H, so the first 122 output
-  // samples of the line have no stored data behind them.
+  // Nothing is read from before the start of the record.
   EXPECT_GE(
       placement.source_position(static_cast<double>(placement.output_begin)),
       0.0);
-  EXPECT_LT(placement.source_position(
-                static_cast<double>(placement.output_begin - 1u)),
-            0.0);
   EXPECT_LE(
       placement.source_position(static_cast<double>(placement.output_end - 1u)),
       static_cast<double>(format.valid_samples - 1u));
 
-  // The data region begins after the window opens and ends inside the line.
-  EXPECT_GT(placement.data_start_samples,
-            static_cast<double>(placement.output_begin));
-  EXPECT_LT(placement.data_end_samples,
-            static_cast<double>(geometry.line_length(kFrameLine)));
+  // A record covers more of the line than the data region does at both ends,
+  // and the clip is what stops the rest of the line being written over
+  // (design §5.6).
+  const double guard = wst_service().samples_per_bit(kOutputRateHz);
+  EXPECT_GE(static_cast<double>(placement.output_begin),
+            placement.data_start_samples - guard - 1.0);
+  EXPECT_LE(static_cast<double>(placement.output_end),
+            placement.data_end_samples + guard + 1.0);
 }
 
 // WST carries 360 transmitted bits, which is 51.892 us and just over 920
 // output samples (design §5.2).
-TEST(VBILinePlacement, TheDataEndFollowsTheServicePayloadLength) {
+TEST(VBIDataPlacement, TheDataEndFollowsTheServicePayloadLength) {
   const VBISourceFormat format = bt8x8_pal_format();
-  VBILinePlacement placement;
-  std::string error;
-
-  ASSERT_TRUE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                      format.capture_offset_samples, 6,
-                                      placement, error))
-      << error;
+  const VBIDataPlacement placement =
+      placement_at(format, format.capture_offset_samples);
 
   EXPECT_NEAR(placement.data_end_samples - placement.data_start_samples, 920.31,
               0.05);
 }
 
-TEST(VBILinePlacement, TheSourcePositionMapIsInvertible) {
-  const VBISourceFormat format = bt8x8_pal_format();
-  VBILinePlacement placement;
-  std::string error;
-
-  ASSERT_TRUE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                      format.capture_offset_samples, 319,
-                                      placement, error))
-      << error;
-
-  for (const double index : {0.0, 122.5, 500.0, 1134.0}) {
-    EXPECT_NEAR(placement.output_index(placement.source_position(index)), index,
-                1e-9);
-  }
-}
-
-TEST(VBILinePlacement, AFrameLineOutsideTheGeometryIsRejected) {
-  const VBISourceFormat format = bt8x8_pal_format();
-  VBILinePlacement placement;
-  std::string error;
-
-  EXPECT_FALSE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                       format.capture_offset_samples, 625,
-                                       placement, error));
-  EXPECT_NE(error.find("625"), std::string::npos) << error;
-}
-
-TEST(VBILinePlacement, AnUnusableSourceSamplingRateIsRejected) {
+TEST(VBIDataPlacement, AnUnusableSourceSamplingRateIsRejected) {
   VBISourceFormat format = bt8x8_pal_format();
   format.sample_rate_hz = 0.0;
 
-  VBILinePlacement placement;
+  VBIDataPlacement placement;
   std::string error;
-  EXPECT_FALSE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                       244.0, 6, placement, error));
+  EXPECT_FALSE(make_vbi_data_placement(
+      format, wst_service(), pal_output_frame(), 244.0, placement, error));
   EXPECT_NE(error.find("sampling rate"), std::string::npos) << error;
 }
 
-TEST(VBILinePlacement, ARecordWithNoValidSamplesIsRejected) {
+TEST(VBIDataPlacement, ARecordWithNoValidSamplesIsRejected) {
   VBISourceFormat format = bt8x8_pal_format();
   format.valid_samples = 0;
 
-  VBILinePlacement placement;
+  VBIDataPlacement placement;
   std::string error;
-  EXPECT_FALSE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                       244.0, 6, placement, error));
+  EXPECT_FALSE(make_vbi_data_placement(
+      format, wst_service(), pal_output_frame(), 244.0, placement, error));
   EXPECT_NE(error.find("valid samples"), std::string::npos) << error;
 }
 
-TEST(VBILinePlacement, ANonFiniteCaptureOffsetIsRejected) {
+TEST(VBIDataPlacement, ANonFiniteCaptureOffsetIsRejected) {
   const VBISourceFormat format = bt8x8_pal_format();
-  VBILinePlacement placement;
-  std::string error;
 
-  EXPECT_FALSE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                       std::nan(""), 6, placement, error));
+  VBIDataPlacement placement;
+  std::string error;
+  EXPECT_FALSE(make_vbi_data_placement(format, wst_service(),
+                                       pal_output_frame(), std::nan(""),
+                                       placement, error));
   EXPECT_NE(error.find("capture offset"), std::string::npos) << error;
-}
-
-TEST(VBILinePlacement, FiveHundredTwentyFiveLineSystemsAreNotYetPlaced) {
-  VBISourceFormat format = bt8x8_pal_format();
-  format.tv_system = VBITVSystem::kNTSC;
-
-  VBILinePlacement placement;
-  std::string error;
-  EXPECT_FALSE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                       244.0, 6, placement, error));
-  EXPECT_FALSE(error.empty());
-}
-
-TEST(VBILinePlacement, AnEmptyRecordProducesAnEmptyLine) {
-  const VBISourceFormat format = bt8x8_pal_format();
-  const VBIBandLimitedResampler resampler(2.0);
-  VBILinePlacement placement;
-  std::string error;
-
-  ASSERT_TRUE(make_vbi_line_placement(format, wst_service(), pal_geometry(),
-                                      format.capture_offset_samples, 6,
-                                      placement, error))
-      << error;
-
-  std::vector<double> line;
-  resample_vbi_line(resampler, {}, placement, line);
-
-  ASSERT_EQ(line.size(), placement.output_count());
-  for (const double sample : line) {
-    EXPECT_DOUBLE_EQ(sample, 0.0);
-  }
 }
 
 }  // namespace

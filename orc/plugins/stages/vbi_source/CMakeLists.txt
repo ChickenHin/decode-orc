@@ -3,9 +3,10 @@
 # Ingests third-party raw VBI teletext captures (bt8x8 and family card dumps,
 # cropped .tbc VBI files) and presents them to the teletext decoders as CVBS.
 #
-# The container model, transports, reader and validation build as a plugin-side
-# static library so they can be unit tested directly. It compiles against the
-# public SDK headers only and is linked privately into the stage plugin.
+# The container model, transports, reader, calibration and frame builder build
+# as a plugin-side static library so they can be unit tested directly. It
+# compiles against the public SDK headers only and is linked privately into the
+# stage plugin.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Simon Inns
@@ -16,21 +17,15 @@ add_library(orc-vbi-source STATIC
     vbi_source_validation.cpp
     vbi_transport.cpp
     vbi_teletext_service.cpp
-    vbi_frame_geometry.cpp
+    vbi_output_frame.cpp
     vbi_line_mapping.cpp
-    vbi_output_levels.cpp
     vbi_level_mapper.cpp
-    vbi_resampler.cpp
     vbi_line_placement.cpp
+    vbi_resampler.cpp
     vbi_cri_template.cpp
     vbi_cri_correlator.cpp
     vbi_offset_calibration.cpp
-    vbi_timing_cross_checks.cpp
-    vbi_vertical_interval.cpp
-    vbi_line_synthesis.cpp
-    vbi_burst_synthesis.cpp
-    vbi_frame_synthesis.cpp
-    vbi_frame_sequence.cpp
+    vbi_frame_builder.cpp
     vbi_frame_index.cpp
 )
 

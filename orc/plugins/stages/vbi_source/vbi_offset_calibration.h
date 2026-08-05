@@ -135,13 +135,6 @@ struct VBICalibrationConfig {
   uint32_t sample_frames = 16;
 
   VBICRITemplateConfig template_config{};
-
-  // A measured run-in and framing code waveform to correlate against instead
-  // of a generated one, in its own sampling coordinates (design §5.3.6).
-  // Empty means the ideal pattern is generated for the source's rate.
-  std::vector<double> measured_template;
-  double measured_template_samples_per_bit = 0.0;
-  double measured_template_anchor_samples = 0.0;
 };
 
 // Run the whole procedure against a capture: sample frames across the file,

@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-#include "vbi_output_levels.h"
+#include "vbi_output_frame.h"
 #include "vbi_source_format.h"
 #include "vbi_teletext_service.h"
 
@@ -43,10 +43,10 @@ VBITeletextService wst_service() {
 }
 
 VBIOutputLevels pal_output_levels() {
-  VBIOutputLevels levels;
+  VBIOutputFrame frame;
   std::string error;
-  EXPECT_TRUE(vbi_output_levels(VBITVSystem::kPAL, levels, error)) << error;
-  return levels;
+  EXPECT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, frame, error)) << error;
+  return frame.levels;
 }
 
 // Description of a synthetic WST line in source-domain counts.  The clock
@@ -124,13 +124,16 @@ std::vector<double> make_synthetic_line(const VBISourceFormat& format,
   return samples;
 }
 
-// Mean of the samples the mapper produced over a half-open window.
-double window_mean(const std::vector<double>& samples, uint32_t begin,
-                   uint32_t end) {
+// Mean of a half-open window of a record after the mapper's levels are applied
+// to it, which is what the frame builder does with them.
+double mapped_window_mean(const std::vector<double>& samples,
+                          const VBILineLevels& levels, uint32_t begin,
+                          uint32_t end) {
+  const VBISampleMap map = make_vbi_sample_map(levels, pal_output_levels());
   double total = 0.0;
   uint32_t count = 0;
   for (uint32_t index = begin; index < end && index < samples.size(); ++index) {
-    total += samples[index];
+    total += map.apply(samples[index]);
     ++count;
   }
   return (count > 0) ? (total / count) : 0.0;
@@ -260,12 +263,6 @@ TEST(VBILevelMapper, CleanLineLevelsAreReadFromTheRunInAndTheFramingCode) {
   EXPECT_TRUE(levels.usable);
   EXPECT_NEAR(levels.logic0, 32.0, 0.5);
   EXPECT_NEAR(levels.logic1, 180.0, 0.5);
-  EXPECT_NEAR(levels.cri_logic1, 180.0, 0.5);
-  EXPECT_NEAR(levels.frc_logic1, 180.0, 0.5);
-
-  // A clean run-in swings the full data amplitude, so the bandwidth metric
-  // sits at unity.
-  EXPECT_NEAR(levels.cri_frc_ratio, 1.0, 0.02);
 }
 
 TEST(VBILevelMapper, ALineWithNoDataServiceIsNotUsable) {
@@ -291,33 +288,32 @@ TEST(VBILevelMapper, ALineWithNoDataServiceIsNotUsable) {
 TEST(VBILevelMapper, CleanLineMapsOntoTheDerivedPALLogicLevels) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIOutputLevels output = pal_output_levels();
   const VBIRecordWindows windows = vbi_record_windows(format, service, 3.0);
 
   SyntheticLineSpec spec;
   const std::vector<std::vector<double>> lines(
       2, make_synthetic_line(format, service, spec));
 
-  VBILevelMapper mapper(format, service, output, VBILevelMapperConfig{});
-  std::vector<VBIMappedLine> mapped;
+  VBILevelMapper mapper(format, service, VBILevelMapperConfig{});
+  std::vector<VBILineLevels> mapped;
   mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 2u);
-  ASSERT_TRUE(mapped[0].levels_established);
-  EXPECT_TRUE(mapped[0].used_own_estimate);
+  ASSERT_TRUE(mapped[0].usable);
 
   // Logic 0 is read from the back porch and logic 1 from the framing code's
   // leading run of ones.
-  EXPECT_NEAR(window_mean(mapped[0].samples, 0, windows.quiet_end), 256.0, 2.0);
-  EXPECT_NEAR(window_mean(mapped[0].samples, windows.frc_reference_begin,
-                          windows.frc_reference_end),
-              644.0, 2.0);
+  EXPECT_NEAR(mapped_window_mean(lines[0], mapped[0], 0, windows.quiet_end),
+              256.0, 2.0);
+  EXPECT_NEAR(
+      mapped_window_mean(lines[0], mapped[0], windows.frc_reference_begin,
+                         windows.frc_reference_end),
+      644.0, 2.0);
 }
 
 TEST(VBILevelMapper, MildCaptureNoiseDoesNotShiftTheMappedLogicLevels) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIOutputLevels output = pal_output_levels();
   const VBIRecordWindows windows = vbi_record_windows(format, service, 3.0);
 
   SyntheticLineSpec spec;
@@ -325,15 +321,17 @@ TEST(VBILevelMapper, MildCaptureNoiseDoesNotShiftTheMappedLogicLevels) {
   const std::vector<std::vector<double>> lines(
       2, make_synthetic_line(format, service, spec));
 
-  VBILevelMapper mapper(format, service, output, VBILevelMapperConfig{});
-  std::vector<VBIMappedLine> mapped;
+  VBILevelMapper mapper(format, service, VBILevelMapperConfig{});
+  std::vector<VBILineLevels> mapped;
   mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 2u);
-  EXPECT_NEAR(window_mean(mapped[0].samples, 0, windows.quiet_end), 256.0, 5.0);
-  EXPECT_NEAR(window_mean(mapped[0].samples, windows.frc_reference_begin,
-                          windows.frc_reference_end),
-              644.0, 5.0);
+  EXPECT_NEAR(mapped_window_mean(lines[0], mapped[0], 0, windows.quiet_end),
+              256.0, 5.0);
+  EXPECT_NEAR(
+      mapped_window_mean(lines[0], mapped[0], windows.frc_reference_begin,
+                         windows.frc_reference_end),
+      644.0, 5.0);
 }
 
 // The regression test for the under-scale failure mode: on the VHS waveform
@@ -344,7 +342,6 @@ TEST(VBILevelMapper, MildCaptureNoiseDoesNotShiftTheMappedLogicLevels) {
 TEST(VBILevelMapper, BandLimitedRunInLosesToTheFramingCodeAndKeepsFullScale) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIOutputLevels output = pal_output_levels();
   const VBIRecordWindows windows = vbi_record_windows(format, service, 3.0);
 
   SyntheticLineSpec spec;
@@ -359,25 +356,22 @@ TEST(VBILevelMapper, BandLimitedRunInLosesToTheFramingCodeAndKeepsFullScale) {
 
   ASSERT_TRUE(levels.usable);
   EXPECT_NEAR(levels.logic0, 57.0, 0.5);
-  EXPECT_NEAR(levels.frc_logic1, 184.0, 0.5);
-  EXPECT_NEAR(levels.cri_logic1, 122.6, 0.5);
-  EXPECT_DOUBLE_EQ(levels.logic1, levels.frc_logic1);
 
-  // The run-in's swing as a fraction of the full data amplitude is the
-  // bandwidth metric: 7 / 127 on this waveform.
-  EXPECT_NEAR(levels.cri_frc_ratio, 7.0 / 127.0, 0.01);
+  // The framing code reaches 184 while the run-in has collapsed to 122.6; the
+  // larger of the two is what logic 1 is read from.
+  EXPECT_NEAR(levels.logic1, 184.0, 0.5);
 
   const std::vector<std::vector<double>> lines(2, samples);
-  VBILevelMapper mapper(format, service, output, VBILevelMapperConfig{});
-  std::vector<VBIMappedLine> mapped;
+  VBILevelMapper mapper(format, service, VBILevelMapperConfig{});
+  std::vector<VBILineLevels> mapped;
   mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 2u);
   const double mapped_logic0 =
-      window_mean(mapped[0].samples, 0, windows.quiet_end);
+      mapped_window_mean(samples, mapped[0], 0, windows.quiet_end);
   const double mapped_logic1 =
-      window_mean(mapped[0].samples, windows.frc_reference_begin,
-                  windows.frc_reference_end);
+      mapped_window_mean(samples, mapped[0], windows.frc_reference_begin,
+                         windows.frc_reference_end);
 
   EXPECT_NEAR(mapped_logic0, 256.0, 2.0);
   EXPECT_NEAR(mapped_logic1, 644.0, 2.0);
@@ -391,21 +385,31 @@ TEST(VBILevelMapper, BandLimitedRunInLosesToTheFramingCodeAndKeepsFullScale) {
 // arrive downstream still blurred, because the deconvolving slicer recovers
 // data by matching it (design §5.3.6).
 TEST(VBILevelMapper, MappingIsLinearAndPreservesTheWaveformShape) {
-  const VBIOutputLevels output = pal_output_levels();
-
   VBILineLevels levels;
   levels.logic0 = 40.0;
   levels.logic1 = 160.0;
   levels.usable = true;
 
-  EXPECT_NEAR(map_vbi_sample(40.0, levels, output), 256.0, 1e-9);
-  EXPECT_NEAR(map_vbi_sample(160.0, levels, output), 644.0, 1e-9);
+  const VBISampleMap map = make_vbi_sample_map(levels, pal_output_levels());
+
+  EXPECT_NEAR(map.apply(40.0), 256.0, 1e-9);
+  EXPECT_NEAR(map.apply(160.0), 644.0, 1e-9);
 
   // Midpoints stay midpoints and the map extends outside the logic levels
   // without any knee: overshoot is dealt with by the output clamp, not here.
-  EXPECT_NEAR(map_vbi_sample(100.0, levels, output), 450.0, 1e-9);
-  EXPECT_NEAR(map_vbi_sample(220.0, levels, output), 838.0, 1e-9);
-  EXPECT_NEAR(map_vbi_sample(-20.0, levels, output), 62.0, 1e-9);
+  EXPECT_NEAR(map.apply(100.0), 450.0, 1e-9);
+  EXPECT_NEAR(map.apply(220.0), 838.0, 1e-9);
+  EXPECT_NEAR(map.apply(-20.0), 62.0, 1e-9);
+}
+
+// A line with no level reference has no honest scale, so its map produces
+// blanking whatever it is given (design §5.3.4).
+TEST(VBILevelMapper, AnUnusableMeasurementMapsEverythingToBlanking) {
+  const VBIOutputLevels output = pal_output_levels();
+  const VBISampleMap map = make_vbi_sample_map(VBILineLevels{}, output);
+
+  EXPECT_DOUBLE_EQ(map.apply(0.0), output.blanking);
+  EXPECT_DOUBLE_EQ(map.apply(255.0), output.blanking);
 }
 
 // ---------------------------------------------------------------------------
@@ -439,20 +443,21 @@ TEST(VBILevelMapper, PerLineModeNormalisesEachLineByItsOwnEstimate) {
   VBILevelMapperConfig config;
   config.mode = VBILevelMode::kPerLine;
 
-  VBILevelMapper mapper(format, service, output, config);
-  std::vector<VBIMappedLine> mapped;
-  mapper.map_frame(
-      make_frame_records(frame_with_gain_outlier(format, service, 7, 188.0)),
-      mapped);
+  const std::vector<std::vector<double>> lines =
+      frame_with_gain_outlier(format, service, 7, 188.0);
+
+  VBILevelMapper mapper(format, service, config);
+  std::vector<VBILineLevels> mapped;
+  mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 32u);
-  EXPECT_TRUE(mapped[7].used_own_estimate);
-  EXPECT_NEAR(mapped[7].applied_levels.logic1, 188.0, 0.5);
+  EXPECT_NEAR(mapped[7].logic1, 188.0, 0.5);
 
   // The line's own gain takes it back to the nominal logic 1.
-  EXPECT_NEAR(window_mean(mapped[7].samples, windows.frc_reference_begin,
-                          windows.frc_reference_end),
-              644.0, 2.0);
+  EXPECT_NEAR(
+      mapped_window_mean(lines[7], mapped[7], windows.frc_reference_begin,
+                         windows.frc_reference_end),
+      644.0, 2.0);
 }
 
 // Rolling mode holds a line at the frame's median levels, so a single line's
@@ -466,28 +471,30 @@ TEST(VBILevelMapper, RollingModeDoesNotPropagateSingleLineGainNoise) {
   VBILevelMapperConfig config;
   config.mode = VBILevelMode::kRolling;
 
-  VBILevelMapper mapper(format, service, output, config);
-  std::vector<VBIMappedLine> mapped;
-  mapper.map_frame(
-      make_frame_records(frame_with_gain_outlier(format, service, 7, 188.0)),
-      mapped);
+  const std::vector<std::vector<double>> lines =
+      frame_with_gain_outlier(format, service, 7, 188.0);
+  const VBIRecordWindows measured_windows =
+      vbi_record_windows(format, service, 3.0);
+
+  // The outlier really is at 188 when it is measured on its own.
+  EXPECT_NEAR(estimate_vbi_line_levels(lines[7], measured_windows, 8.0).logic1,
+              188.0, 0.5);
+
+  VBILevelMapper mapper(format, service, config);
+  std::vector<VBILineLevels> mapped;
+  mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 32u);
 
-  // The outlier is measured but not applied.
-  EXPECT_NEAR(mapped[7].measured_levels.logic1, 188.0, 0.5);
-  EXPECT_FALSE(mapped[7].used_own_estimate);
-  EXPECT_NEAR(mapped[7].applied_levels.logic1, 180.0, 0.5);
-
   // Every line in the frame is mapped through the same gain, so the outlier
   // remains visible as signal rather than being normalised away.
-  for (const VBIMappedLine& line : mapped) {
-    EXPECT_FALSE(line.used_own_estimate);
-    EXPECT_NEAR(line.applied_levels.logic1, mapped[0].applied_levels.logic1,
-                1e-9);
+  EXPECT_NEAR(mapped[7].logic1, 180.0, 0.5);
+  for (const VBILineLevels& line : mapped) {
+    EXPECT_NEAR(line.logic1, mapped[0].logic1, 1e-9);
+    EXPECT_NEAR(line.logic0, mapped[0].logic0, 1e-9);
   }
-  EXPECT_GT(window_mean(mapped[7].samples, windows.frc_reference_begin,
-                        windows.frc_reference_end),
+  EXPECT_GT(mapped_window_mean(lines[7], mapped[7], windows.frc_reference_begin,
+                               windows.frc_reference_end),
             644.0);
 }
 
@@ -501,17 +508,19 @@ TEST(VBILevelMapper, RollingModeCorrectsALineThatDeviatesSignificantly) {
   VBILevelMapperConfig config;
   config.mode = VBILevelMode::kRolling;
 
-  VBILevelMapper mapper(format, service, output, config);
-  std::vector<VBIMappedLine> mapped;
-  mapper.map_frame(
-      make_frame_records(frame_with_gain_outlier(format, service, 7, 260.0)),
-      mapped);
+  const std::vector<std::vector<double>> lines =
+      frame_with_gain_outlier(format, service, 7, 260.0);
+
+  VBILevelMapper mapper(format, service, config);
+  std::vector<VBILineLevels> mapped;
+  mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 32u);
-  EXPECT_TRUE(mapped[7].used_own_estimate);
-  EXPECT_NEAR(window_mean(mapped[7].samples, windows.frc_reference_begin,
-                          windows.frc_reference_end),
-              644.0, 2.0);
+  EXPECT_NEAR(mapped[7].logic1, 260.0, 0.5);
+  EXPECT_NEAR(
+      mapped_window_mean(lines[7], mapped[7], windows.frc_reference_begin,
+                         windows.frc_reference_end),
+      644.0, 2.0);
 }
 
 // A weak line inside a good frame carries no data service; its own estimate
@@ -531,15 +540,13 @@ TEST(VBILevelMapper, AWeakLineIsMappedThroughTheFrameLevels) {
     lines.push_back(make_synthetic_line(format, service, spec));
   }
 
-  VBILevelMapper mapper(format, service, output, VBILevelMapperConfig{});
-  std::vector<VBIMappedLine> mapped;
+  VBILevelMapper mapper(format, service, VBILevelMapperConfig{});
+  std::vector<VBILineLevels> mapped;
   mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 32u);
-  EXPECT_TRUE(mapped[3].measured_levels.usable);
-  EXPECT_FALSE(mapped[3].used_own_estimate);
-  EXPECT_TRUE(mapped[3].levels_established);
-  EXPECT_NEAR(mapped[3].applied_levels.logic1, 180.0, 0.5);
+  EXPECT_TRUE(mapped[3].usable);
+  EXPECT_NEAR(mapped[3].logic1, 180.0, 0.5);
 }
 
 // With no level reference anywhere in the frame there is no honest scale to
@@ -555,17 +562,16 @@ TEST(VBILevelMapper, AFrameWithNoDataServiceIsEmittedAsBlanking) {
   const std::vector<std::vector<double>> lines(
       4, make_synthetic_line(format, service, spec));
 
-  VBILevelMapper mapper(format, service, output, VBILevelMapperConfig{});
-  std::vector<VBIMappedLine> mapped;
+  VBILevelMapper mapper(format, service, VBILevelMapperConfig{});
+  std::vector<VBILineLevels> mapped;
   mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 4u);
-  for (const VBIMappedLine& line : mapped) {
-    EXPECT_FALSE(line.levels_established);
-    EXPECT_FALSE(line.used_own_estimate);
-    ASSERT_EQ(line.samples.size(), format.valid_samples);
-    for (const double sample : line.samples) {
-      EXPECT_DOUBLE_EQ(sample, 256.0);
+  for (const VBILineLevels& line : mapped) {
+    EXPECT_FALSE(line.usable);
+    const VBISampleMap map = make_vbi_sample_map(line, pal_output_levels());
+    for (const double sample : lines[0]) {
+      EXPECT_DOUBLE_EQ(map.apply(sample), 256.0);
     }
   }
 }
@@ -590,39 +596,39 @@ TEST(VBILevelMapper, FixedModeAppliesTheConfiguredLevelsToEveryLine) {
     lines.push_back(make_synthetic_line(format, service, spec));
   }
 
-  VBILevelMapper mapper(format, service, output, config);
-  std::vector<VBIMappedLine> mapped;
+  VBILevelMapper mapper(format, service, config);
+  std::vector<VBILineLevels> mapped;
   mapper.map_frame(make_frame_records(lines), mapped);
 
   ASSERT_EQ(mapped.size(), 4u);
-  for (const VBIMappedLine& line : mapped) {
-    EXPECT_TRUE(line.levels_established);
-    EXPECT_FALSE(line.used_own_estimate);
-    EXPECT_DOUBLE_EQ(line.applied_levels.logic0, 32.0);
-    EXPECT_DOUBLE_EQ(line.applied_levels.logic1, 180.0);
+  for (const VBILineLevels& line : mapped) {
+    EXPECT_TRUE(line.usable);
+    EXPECT_DOUBLE_EQ(line.logic0, 32.0);
+    EXPECT_DOUBLE_EQ(line.logic1, 180.0);
   }
 
-  EXPECT_NEAR(window_mean(mapped[0].samples, windows.frc_reference_begin,
-                          windows.frc_reference_end),
-              644.0, 2.0);
+  EXPECT_NEAR(
+      mapped_window_mean(lines[0], mapped[0], windows.frc_reference_begin,
+                         windows.frc_reference_end),
+      644.0, 2.0);
   // A blank line stays at blanking rather than being stretched to fill the
   // data amplitude.
-  EXPECT_NEAR(window_mean(mapped[1].samples, windows.frc_reference_begin,
-                          windows.frc_reference_end),
-              256.0, 2.0);
+  EXPECT_NEAR(
+      mapped_window_mean(lines[1], mapped[1], windows.frc_reference_begin,
+                         windows.frc_reference_end),
+      256.0, 2.0);
 }
 
 // The mapper holds configuration only, so the same frame maps identically
-// whatever order frames are asked for — the property that lets frames be
-// synthesised lazily.
+// whatever order frames are asked for — the property that lets frames be built
+// lazily.
 TEST(VBILevelMapper, MappingAFrameIsIndependentOfWhatWasMappedBefore) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
-  const VBIOutputLevels output = pal_output_levels();
 
   VBILevelMapperConfig config;
   config.mode = VBILevelMode::kRolling;
-  VBILevelMapper mapper(format, service, output, config);
+  VBILevelMapper mapper(format, service, config);
 
   SyntheticLineSpec quiet_spec;
   quiet_spec.carries_teletext = false;
@@ -632,19 +638,22 @@ TEST(VBILevelMapper, MappingAFrameIsIndependentOfWhatWasMappedBefore) {
   const std::vector<VBILineRecord> data_frame =
       make_frame_records(frame_with_gain_outlier(format, service, 7, 188.0));
 
-  std::vector<VBIMappedLine> first;
+  std::vector<VBILineLevels> first;
   mapper.map_frame(data_frame, first);
 
-  std::vector<VBIMappedLine> discarded;
+  std::vector<VBILineLevels> discarded;
   mapper.map_frame(quiet_frame, discarded);
 
-  std::vector<VBIMappedLine> second;
+  std::vector<VBILineLevels> second;
   mapper.map_frame(data_frame, second);
 
   ASSERT_EQ(first.size(), second.size());
   for (size_t index = 0; index < first.size(); ++index) {
-    ASSERT_EQ(first[index].samples, second[index].samples) << "line " << index;
-    EXPECT_EQ(first[index].used_own_estimate, second[index].used_own_estimate);
+    EXPECT_DOUBLE_EQ(first[index].logic0, second[index].logic0)
+        << "line " << index;
+    EXPECT_DOUBLE_EQ(first[index].logic1, second[index].logic1)
+        << "line " << index;
+    EXPECT_EQ(first[index].usable, second[index].usable) << "line " << index;
   }
 }
 

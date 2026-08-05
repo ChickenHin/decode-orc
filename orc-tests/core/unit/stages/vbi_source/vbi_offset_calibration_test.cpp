@@ -20,6 +20,7 @@
 
 #include "vbi_byte_source.h"
 #include "vbi_line_placement.h"
+#include "vbi_output_frame.h"
 #include "vbi_source_format.h"
 #include "vbi_synthetic_line.h"
 #include "vbi_teletext_service.h"
@@ -309,9 +310,9 @@ TEST(VBIOffsetCalibration, LowAcceptanceIsReportedWithItsFraction) {
       << calibration.diagnostics.front();
 }
 
-// The offset is applied globally and never per line: a record that carried no
-// teletext is placed by exactly the same map as one that did, and becomes
-// ordinary blanking (design §5.3.4).
+// The offset is applied globally and never per line: every record of every
+// frame is placed by exactly the same map, and a record that carried no
+// teletext becomes ordinary blanking (design §5.3.4).
 TEST(VBIOffsetCalibration, EveryRecordIsPlacedByTheOneGlobalOffset) {
   const VBISourceFormat format = bt8x8_pal_format();
   const VBITeletextService service = wst_service();
@@ -323,31 +324,25 @@ TEST(VBIOffsetCalibration, EveryRecordIsPlacedByTheOneGlobalOffset) {
       observations_at(scattered_positions(truth_position, 0.2, 64)), 256);
   ASSERT_TRUE(calibration.converged) << calibration.summary;
 
-  VBIFrameGeometry geometry;
+  VBIOutputFrame output;
   std::string error;
-  ASSERT_TRUE(make_vbi_frame_geometry(format.tv_system, geometry, error))
+  ASSERT_TRUE(make_vbi_output_frame(format.tv_system, output, error)) << error;
+
+  VBIDataPlacement placement;
+  ASSERT_TRUE(make_vbi_data_placement(format, service, output,
+                                      calibration.capture_offset_samples,
+                                      placement, error))
       << error;
 
-  // Frame line 6 carried teletext and frame line 21 did not; both are placed
-  // by the same fitted offset, so their maps differ only by the geometry.
-  VBILinePlacement located;
-  VBILinePlacement blank;
-  ASSERT_TRUE(make_vbi_line_placement(format, service, geometry,
-                                      calibration.capture_offset_samples, 6,
-                                      located, error))
-      << error;
-  ASSERT_TRUE(make_vbi_line_placement(format, service, geometry,
-                                      calibration.capture_offset_samples, 21,
-                                      blank, error))
-      << error;
-
-  EXPECT_DOUBLE_EQ(located.source_samples_per_output_sample,
-                   blank.source_samples_per_output_sample);
-  EXPECT_NEAR(located.source_position_at_output_zero -
-                  blank.source_position_at_output_zero,
-              located.source_samples_per_output_sample *
-                  (geometry.line_phase(6) - geometry.line_phase(21)),
-              1e-9);
+  // The fitted offset is what sample zero of every record is placed at, so the
+  // run-in lands at the service's own anchor on the output lattice.
+  EXPECT_NEAR(placement.source_position_at_output_zero,
+              -calibration.capture_offset_samples, 1e-9);
+  const double run_in_output_index =
+      (calibration.anchor_position_samples -
+       placement.source_position_at_output_zero) /
+      placement.source_samples_per_output_sample;
+  EXPECT_NEAR(run_in_output_index, placement.data_start_samples, 0.5);
 }
 
 // ---------------------------------------------------------------------------

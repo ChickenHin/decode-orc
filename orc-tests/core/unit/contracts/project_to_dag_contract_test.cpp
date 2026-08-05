@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -308,4 +309,66 @@ TEST(ProjectToDagFormatDefaultsTest,
     }
   }
 }
+// ---------------------------------------------------------------------------
+// Path parameter resolution
+//
+// Project files store paths as the user gave them, so anything that hands a
+// node's stored parameters to a stage — execution and the status dot alike —
+// has to resolve them against the project root first.
+// ---------------------------------------------------------------------------
+
+TEST(ProjectPathParameterTest, ResolvesARelativePathAgainstTheProjectRoot) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"input_path", std::string("captures/take1.tbc")}};
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")),
+            "/projects/demo/captures/take1.tbc");
+}
+
+TEST(ProjectPathParameterTest, ExpandsTheProjectRootVariable) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"output_path", std::string("${PROJECT_ROOT}/out/frames.mkv")}};
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("output_path")),
+            "/projects/demo/out/frames.mkv");
+}
+
+TEST(ProjectPathParameterTest, LeavesAnAbsolutePathAlone) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"y_path", std::string("/captures/take1.tbcy")}};
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("y_path")),
+            "/captures/take1.tbcy");
+}
+
+TEST(ProjectPathParameterTest, LeavesNonPathAndEmptyParametersUntouched) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"format", std::string("bt8x8-pal")},
+      {"input_path", std::string("")},
+      {"first_field", uint32_t{1}},
+  };
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("format")), "bt8x8-pal");
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")), "");
+  EXPECT_EQ(std::get<uint32_t>(parameters.at("first_field")), 1u);
+}
+
+TEST(ProjectPathParameterTest, IsANoOpWithoutAProjectRoot) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"input_path", std::string("captures/take1.tbc")}};
+
+  orc::resolve_path_parameters(parameters, "");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")),
+            "captures/take1.tbc");
+}
+
 }  // namespace orc_unit_test

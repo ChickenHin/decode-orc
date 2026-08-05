@@ -12,7 +12,6 @@
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 #include "vbi_source_format.h"
 
@@ -71,38 +70,6 @@ struct VBITeletextService {
 bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
                           VBITeletextService& out_service,
                           std::string& error_message);
-
-// A data service the stage does not place, but whose own run-in and framing
-// code give an offset estimate that owes nothing to teletext being present
-// (design §5.3.5).
-//
-// A bt8x8 PAL capture covers broadcast lines 7 to 22, which carries the video
-// programme system on line 16 and closed captions on line 22, so a capture
-// with sparse teletext can still be corroborated.
-struct VBIReferenceService {
-  std::string name;
-
-  // Broadcast frame line the service occupies, 1-based, counting line 1 as the
-  // first line of field 1.
-  uint32_t broadcast_line = 0;
-
-  // Time from 0H to the leading edge of the pattern's first one bit, in
-  // nanoseconds, on libzvbi's convention.
-  double t_offset_ns = 0.0;
-
-  double bit_rate_hz = 0.0;
-
-  // Run-in and framing code in transmission order, most significant bit first
-  // over pattern_bits bits.  For the biphase services the pattern is already
-  // in channel-bit form, so rendering it as non-return-to-zero at the channel
-  // rate reproduces the transmitted waveform.
-  uint32_t pattern = 0;
-  uint32_t pattern_bits = 0;
-};
-
-// Services usable as independent timing references on a television system, in
-// broadcast line order.  Empty for systems the stage has no table for.
-std::vector<VBIReferenceService> vbi_reference_services(VBITVSystem tv_system);
 
 }  // namespace orc
 

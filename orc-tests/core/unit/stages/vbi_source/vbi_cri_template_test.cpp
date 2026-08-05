@@ -63,7 +63,6 @@ TEST(VBICRITemplate, SpansTheRunInAndFramingCodeAtTheSourceRate) {
   EXPECT_EQ(
       cri_template.size(),
       static_cast<size_t>(std::ceil(25.0 * cri_template.samples_per_bit)));
-  EXPECT_FALSE(cri_template.measured);
 }
 
 TEST(VBICRITemplate, IsHeldAtZeroMeanAndUnitNorm) {
@@ -170,61 +169,6 @@ TEST(VBICRITemplate, RejectsConfigurationsThatCannotProduceAPattern) {
                                          VBICRITemplateConfig{}, result,
                                          error));
   EXPECT_NE(error.find("transitions"), std::string::npos) << error;
-}
-
-// The seam for degraded sources: a template measured once at any convenient
-// rate has to resample onto the source's own rate (design §5.3.6).
-TEST(VBICRITemplate, MeasuredWaveformsResampleOntoTheSourceSamplingRate) {
-  // Stand-in for vhs-teletext's observed run-in and framing code: the ideal
-  // pattern generated at eight samples per bit.
-  VBICRITemplate measured_source;
-  std::string error;
-  const double measured_rate_hz = 8.0 * 6937500.0;
-  ASSERT_TRUE(make_vbi_cri_frc_template(wst_service(), measured_rate_hz,
-                                        VBICRITemplateConfig{}, measured_source,
-                                        error))
-      << error;
-
-  VBICRITemplate resampled;
-  ASSERT_TRUE(make_vbi_measured_template(
-      measured_source.samples, measured_source.samples_per_bit,
-      measured_source.anchor_samples, 24u, 6937500.0, kCardSampleRateHz,
-      resampled, error))
-      << error;
-
-  EXPECT_TRUE(resampled.measured);
-  EXPECT_NEAR(resampled.samples_per_bit, 5.1126, 1e-4);
-  EXPECT_NEAR(resampled.anchor_samples, resampled.samples_per_bit, 0.05);
-
-  double energy = 0.0;
-  for (const double value : resampled.samples) {
-    energy += value * value;
-  }
-  EXPECT_NEAR(energy, 1.0, 1e-9);
-
-  // Resampling the same shape must not have moved it: the two templates
-  // correlate against each other at essentially unity.
-  const VBICRITemplate generated = build(kCardSampleRateHz);
-  double product = 0.0;
-  const size_t overlap = std::min(generated.size(), resampled.size());
-  for (size_t index = 0; index < overlap; ++index) {
-    product += generated.samples[index] * resampled.samples[index];
-  }
-  EXPECT_GT(product, 0.95);
-}
-
-TEST(VBICRITemplate, MeasuredWaveformsAreValidated) {
-  VBICRITemplate result;
-  std::string error;
-
-  EXPECT_FALSE(make_vbi_measured_template({1.0}, 8.0, 0.0, 24u, 6937500.0,
-                                          kCardSampleRateHz, result, error));
-  EXPECT_NE(error.find("two samples"), std::string::npos) << error;
-
-  const std::vector<double> constant(200, 1.0);
-  EXPECT_FALSE(make_vbi_measured_template(constant, 8.0, 0.0, 24u, 6937500.0,
-                                          kCardSampleRateHz, result, error));
-  EXPECT_NE(error.find("constant"), std::string::npos) << error;
 }
 
 }  // namespace

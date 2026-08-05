@@ -16,8 +16,8 @@ namespace orc {
 
 namespace {
 
-// Clamp a fractional output index onto the frame line and return it as a
-// whole sample index.
+// Clamp a fractional output index onto the frame line and return it as a whole
+// sample index.
 uint32_t clamp_output_index(double index, uint32_t line_length) {
   if (!std::isfinite(index) || index <= 0.0) {
     return 0;
@@ -30,30 +30,25 @@ uint32_t clamp_output_index(double index, uint32_t line_length) {
 
 }  // namespace
 
-bool make_vbi_line_placement(const VBISourceFormat& format,
+bool make_vbi_data_placement(const VBISourceFormat& format,
                              const VBITeletextService& service,
-                             const VBIFrameGeometry& geometry,
-                             double capture_offset_samples, uint32_t frame_line,
-                             VBILinePlacement& out_placement,
+                             const VBIOutputFrame& output_frame,
+                             double capture_offset_samples,
+                             VBIDataPlacement& out_placement,
                              std::string& error_message) {
-  out_placement = VBILinePlacement();
+  out_placement = VBIDataPlacement();
 
-  if (frame_line >= geometry.lines_per_frame()) {
-    error_message = "Frame line " + std::to_string(frame_line) +
-                    " is outside the frame geometry, which holds " +
-                    std::to_string(geometry.lines_per_frame()) + " lines.";
-    return false;
-  }
-
-  double output_sample_rate_hz = 0.0;
-  if (!vbi_output_sample_rate_hz(format.tv_system, output_sample_rate_hz,
-                                 error_message)) {
+  const double output_rate_hz = output_frame.sample_rate_hz;
+  if (!(output_rate_hz > 0.0)) {
+    error_message =
+        "The output lattice has no sampling rate, so nothing can be placed on "
+        "it.";
     return false;
   }
 
   if (!(format.sample_rate_hz > 0.0) || !std::isfinite(format.sample_rate_hz)) {
     error_message =
-        "The source sampling rate must be a positive number of hertz.";
+        "The capture's sampling rate must be a positive number of hertz.";
     return false;
   }
 
@@ -69,22 +64,15 @@ bool make_vbi_line_placement(const VBISourceFormat& format,
     return false;
   }
 
-  const double ratio = format.sample_rate_hz / output_sample_rate_hz;
-  const double line_phase = geometry.line_phase(frame_line);
-  const uint32_t line_length = geometry.line_length(frame_line);
-
+  const double ratio = format.sample_rate_hz / output_rate_hz;
   out_placement.source_samples_per_output_sample = ratio;
 
-  // Output sample j of this line is at (phase + j) / fs_out after 0H, and
-  // record sample n is at (capture_offset + n) / fs_in after the same 0H.
-  out_placement.source_position_at_output_zero =
-      ratio * line_phase - capture_offset_samples;
+  // Output sample j is at j / fs_out after 0H, and record sample n is at
+  // (capture_offset + n) / fs_in after the same 0H.
+  out_placement.source_position_at_output_zero = -capture_offset_samples;
 
-  // The service's anchor is defined from 0H, so the line's lattice phase is
-  // subtracted rather than added: a line that starts late in its own sampling
-  // instant reaches a given time in fewer samples.
   out_placement.data_start_samples =
-      service.t_offset_ns * 1e-9 * output_sample_rate_hz - line_phase;
+      service.t_offset_ns * 1e-9 * output_rate_hz;
 
   const double transmitted_bits =
       static_cast<double>(service.cri_bits) +
@@ -93,7 +81,7 @@ bool make_vbi_line_placement(const VBISourceFormat& format,
   out_placement.data_end_samples =
       (service.bit_rate_hz > 0.0)
           ? out_placement.data_start_samples +
-                (transmitted_bits / service.bit_rate_hz) * output_sample_rate_hz
+                (transmitted_bits / service.bit_rate_hz) * output_rate_hz
           : out_placement.data_start_samples;
 
   // Output samples whose source coordinate falls inside the record's valid
@@ -106,43 +94,25 @@ bool make_vbi_line_placement(const VBISourceFormat& format,
                   out_placement.source_position_at_output_zero) /
                  ratio);
 
-  out_placement.output_begin = clamp_output_index(first_covered, line_length);
-  out_placement.output_end =
-      clamp_output_index(last_covered + 1.0, line_length);
-  out_placement.output_end =
-      std::max(out_placement.output_end, out_placement.output_begin);
+  // Guard held either side of the data region: one transmitted bit period.
+  const double guard = service.samples_per_bit(output_rate_hz);
+  const double region_begin =
+      std::floor(out_placement.data_start_samples - guard);
+  const double region_end = std::ceil(out_placement.data_end_samples + guard);
 
+  // Every data line is at least the nominal length, and the two longer PAL
+  // lines are at the foot of each field where no data service sits, so the
+  // nominal length is the bound that applies to all of them.
+  const uint32_t line_length = output_frame.samples_per_line_nominal;
+
+  const uint32_t begin =
+      clamp_output_index(std::max(first_covered, region_begin), line_length);
+  const uint32_t end =
+      clamp_output_index(std::min(last_covered + 1.0, region_end), line_length);
+
+  out_placement.output_begin = begin;
+  out_placement.output_end = std::max(begin, end);
   return true;
-}
-
-void resample_vbi_line(const IVBIResampler& resampler,
-                       const std::vector<double>& record_samples,
-                       const VBILinePlacement& placement,
-                       std::vector<double>& out_samples) {
-  const uint32_t count = placement.output_count();
-  out_samples.assign(count, 0.0);
-  if (count == 0 || record_samples.empty()) {
-    return;
-  }
-
-  const double first_position =
-      placement.source_position(static_cast<double>(placement.output_begin));
-
-  // The placement is the authority on where every output sample reads from.
-  // A resampler built for a different ratio would walk a different stride, so
-  // its own regular-stride path is only used when the two agree.
-  const double stride = placement.source_samples_per_output_sample;
-  const double stride_difference = std::abs(resampler.ratio() - stride);
-  if (stride_difference <= std::abs(stride) * 1e-12) {
-    resampler.resample(record_samples, first_position, count, out_samples);
-    return;
-  }
-
-  for (uint32_t index = 0; index < count; ++index) {
-    out_samples[index] = resampler.sample_at(
-        record_samples, placement.source_position(static_cast<double>(
-                            placement.output_begin + index)));
-  }
 }
 
 }  // namespace orc

@@ -23,8 +23,8 @@ namespace orc {
 //
 // The defaults describe a clean source: broadcast, off-air or LaserDisc
 // material, where an ideal band-limited pattern matches the recorded waveform
-// closely.  A tape-sourced capture wants a measured template instead
-// (design §5.3.6), which is what make_vbi_measured_template() is for.
+// closely.  The blur is the one setting a degraded source needs to raise
+// (design §5.3.6).
 struct VBICRITemplateConfig {
   // Channel blur applied to the ideal pattern, as the standard deviation of a
   // Gaussian impulse response in bit periods.  A little blur is not optional:
@@ -65,10 +65,6 @@ struct VBICRITemplate {
 
   uint32_t bit_count = 0;
 
-  // True when the template was measured from a real waveform rather than
-  // generated from the ideal pattern.
-  bool measured = false;
-
   size_t size() const { return samples.size(); }
 
   bool empty() const { return samples.empty(); }
@@ -100,26 +96,6 @@ bool make_vbi_cri_frc_template(const VBITeletextService& service,
                                const VBICRITemplateConfig& config,
                                VBICRITemplate& out_template,
                                std::string& error_message);
-
-// Build a template from a measured run-in and framing code waveform.
-//
-// This is the seam for sources whose channel has departed too far from an
-// ideal one for a generated pattern to match — a VHS capture blurred to
-// sigma of about 0.8 bit periods has a run-in at five per cent of the data
-// amplitude, and its correlation peak against a square template is both weak
-// and biased (design §5.3.6).  The waveform is resampled from its own
-// sampling rate onto this source's, so a template measured once at any
-// convenient rate serves every format.
-//
-// waveform_anchor_samples locates the leading edge of the first one bit in the
-// measured waveform's own coordinates.
-bool make_vbi_measured_template(const std::vector<double>& waveform,
-                                double waveform_samples_per_bit,
-                                double waveform_anchor_samples,
-                                uint32_t bit_count, double bit_rate_hz,
-                                double sample_rate_hz,
-                                VBICRITemplate& out_template,
-                                std::string& error_message);
 
 // Normalised autocorrelation of a template at a lag in samples.
 //

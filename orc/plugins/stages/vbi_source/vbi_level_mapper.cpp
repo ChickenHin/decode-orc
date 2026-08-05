@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
 
 namespace orc {
 
@@ -21,7 +20,6 @@ namespace {
 // an even alternation of ones and zeros, so its upper decile sits inside the
 // one bits while staying clear of any single noisy peak.
 constexpr double kCRIPeakQuantile = 0.9;
-constexpr double kCRITroughQuantile = 0.1;
 
 // Linear-interpolated quantile of an already sorted, non-empty sample set.
 double sorted_quantile(const std::vector<double>& sorted, double quantile) {
@@ -73,6 +71,27 @@ double mean_of(const std::vector<double>& values) {
 }
 
 }  // namespace
+
+VBISampleMap make_vbi_sample_map(const VBILineLevels& levels,
+                                 const VBIOutputLevels& output_levels) {
+  VBISampleMap map;
+  map.output_logic0 = static_cast<double>(output_levels.logic0);
+
+  const double source_amplitude = levels.amplitude();
+  if (!levels.usable || !(source_amplitude > 0.0)) {
+    // Nothing gave a level reference, so there is no honest scale to apply.
+    // A zero gain holds the whole record at blanking rather than amplifying
+    // noise by a fabricated one (design §5.3.4).
+    map.output_logic0 = static_cast<double>(output_levels.blanking);
+    map.gain = 0.0;
+    return map;
+  }
+
+  map.source_logic0 = levels.logic0;
+  map.gain =
+      static_cast<double>(output_levels.data_amplitude()) / source_amplitude;
+  return map;
+}
 
 VBIRecordWindows vbi_record_windows(const VBISourceFormat& format,
                                     const VBITeletextService& service,
@@ -144,56 +163,31 @@ VBILineLevels estimate_vbi_line_levels(const std::vector<double>& samples,
 
   std::vector<double> cri =
       window_samples(samples, windows.cri_begin, windows.cri_end);
+  double cri_logic1 = 0.0;
   if (!cri.empty()) {
     std::sort(cri.begin(), cri.end());
-    levels.cri_logic1 = sorted_quantile(cri, kCRIPeakQuantile);
-    levels.cri_peak_to_peak =
-        levels.cri_logic1 - sorted_quantile(cri, kCRITroughQuantile);
+    cri_logic1 = sorted_quantile(cri, kCRIPeakQuantile);
   }
 
   const std::vector<double> frc = window_samples(
       samples, windows.frc_reference_begin, windows.frc_reference_end);
-  if (!frc.empty()) {
-    levels.frc_logic1 = mean_of(frc);
-  }
+  const double frc_logic1 = frc.empty() ? 0.0 : mean_of(frc);
 
   // The larger of the two candidates wins.  On a clean line they agree; on a
   // band-limited one the run-in has collapsed towards the data midpoint and
   // only the framing code still reaches logic 1 (design §5.4).
-  levels.logic1 = std::max(levels.cri_logic1, levels.frc_logic1);
-
-  const double frc_amplitude = levels.frc_logic1 - levels.logic0;
-  if (frc_amplitude > 0.0) {
-    levels.cri_frc_ratio = levels.cri_peak_to_peak / frc_amplitude;
-  }
+  levels.logic1 = std::max(cri_logic1, frc_logic1);
 
   levels.usable = levels.amplitude() >= minimum_amplitude_counts;
   return levels;
 }
 
-double map_vbi_sample(double sample, const VBILineLevels& levels,
-                      const VBIOutputLevels& output_levels) {
-  const double source_amplitude = levels.amplitude();
-  if (!(source_amplitude > 0.0)) {
-    return static_cast<double>(output_levels.blanking);
-  }
-
-  const double scale =
-      static_cast<double>(output_levels.data_amplitude()) / source_amplitude;
-  return static_cast<double>(output_levels.logic0) +
-         (sample - levels.logic0) * scale;
-}
-
-VBILevelMapper::VBILevelMapper(VBISourceFormat format,
-                               VBITeletextService service,
-                               VBIOutputLevels output_levels,
+VBILevelMapper::VBILevelMapper(const VBISourceFormat& format,
+                               const VBITeletextService& service,
                                VBILevelMapperConfig config)
-    : format_(std::move(format)),
-      service_(std::move(service)),
-      output_levels_(output_levels),
-      config_(config),
+    : config_(config),
       windows_(
-          vbi_record_windows(format_, service_, config_.quiet_guard_samples)) {}
+          vbi_record_windows(format, service, config.quiet_guard_samples)) {}
 
 VBILineLevels VBILevelMapper::frame_levels(
     const std::vector<VBILineLevels>& measured) const {
@@ -221,21 +215,16 @@ VBILineLevels VBILevelMapper::frame_levels(
 }
 
 void VBILevelMapper::map_frame(const std::vector<VBILineRecord>& records,
-                               std::vector<VBIMappedLine>& out_lines) const {
-  out_lines.clear();
-  out_lines.reserve(records.size());
-
+                               std::vector<VBILineLevels>& out_levels) const {
   const bool fixed = config_.mode == VBILevelMode::kFixed;
 
-  std::vector<VBILineLevels> measured;
-  measured.reserve(records.size());
+  out_levels.clear();
+  out_levels.reserve(records.size());
   for (const VBILineRecord& record : records) {
-    if (fixed) {
-      measured.push_back(VBILineLevels{});
-      continue;
-    }
-    measured.push_back(estimate_vbi_line_levels(
-        record.samples, windows_, config_.minimum_amplitude_counts));
+    out_levels.push_back(
+        fixed ? VBILineLevels{}
+              : estimate_vbi_line_levels(record.samples, windows_,
+                                         config_.minimum_amplitude_counts));
   }
 
   VBILineLevels common;
@@ -244,64 +233,41 @@ void VBILevelMapper::map_frame(const std::vector<VBILineRecord>& records,
     common.logic1 = config_.fixed_logic1;
     common.usable = common.amplitude() >= config_.minimum_amplitude_counts;
   } else {
-    common = frame_levels(measured);
+    common = frame_levels(out_levels);
   }
 
-  for (size_t index = 0; index < records.size(); ++index) {
-    const VBILineRecord& record = records[index];
-    const VBILineLevels& own = measured[index];
+  const double amplitude_floor =
+      common.amplitude() * config_.minimum_amplitude_fraction;
 
-    VBIMappedLine line;
-    line.frame_index = record.frame_index;
-    line.field_index = record.field_index;
-    line.record_index = record.record_index;
-    line.measured_levels = own;
-
+  for (VBILineLevels& levels : out_levels) {
     if (!common.usable) {
-      // Nothing in the frame gave a level reference, so there is no honest
-      // scale to apply.  The record becomes ordinary blanking rather than
-      // noise amplified by a fabricated gain (design §5.3.4).
-      line.levels_established = false;
-      line.samples.assign(record.samples.size(),
-                          static_cast<double>(output_levels_.blanking));
-      out_lines.push_back(std::move(line));
+      // Nothing in the frame gave a level reference, so every line of it is
+      // emitted as blanking.
+      levels = VBILineLevels{};
       continue;
     }
 
-    line.levels_established = true;
-    line.applied_levels = common;
-
-    if (!fixed && own.usable) {
-      // A line far below the frame's amplitude carries no data service, so
-      // its own estimate is noise and the frame's levels are used instead.
-      const double amplitude_floor =
-          common.amplitude() * config_.minimum_amplitude_fraction;
-      const bool carries_data = own.amplitude() >= amplitude_floor;
-
-      bool apply_own = carries_data;
-      if (carries_data && config_.mode == VBILevelMode::kRolling) {
-        // Hold the line at the frame's median unless it departs from it by
-        // more than estimation noise, so that per-line gain noise is not
-        // propagated into the output while a real gain change still is.
-        const double deviation =
-            std::fabs(own.amplitude() - common.amplitude());
-        apply_own =
-            deviation > common.amplitude() * config_.rolling_deviation_fraction;
-      }
-
-      if (apply_own) {
-        line.applied_levels = own;
-        line.used_own_estimate = true;
-      }
+    if (fixed) {
+      levels = common;
+      continue;
     }
 
-    line.samples.reserve(record.samples.size());
-    for (const double sample : record.samples) {
-      line.samples.push_back(
-          map_vbi_sample(sample, line.applied_levels, output_levels_));
+    // A line far below the frame's amplitude carries no data service, so its
+    // own estimate is noise and the frame's levels are used instead.
+    bool apply_own = levels.usable && levels.amplitude() >= amplitude_floor;
+    if (apply_own && config_.mode == VBILevelMode::kRolling) {
+      // Hold the line at the frame's median unless it departs from it by more
+      // than estimation noise, so that per-line gain noise is not propagated
+      // into the output while a real gain change still is.
+      const double deviation =
+          std::fabs(levels.amplitude() - common.amplitude());
+      apply_own =
+          deviation > common.amplitude() * config_.rolling_deviation_fraction;
     }
 
-    out_lines.push_back(std::move(line));
+    if (!apply_own) {
+      levels = common;
+    }
   }
 }
 

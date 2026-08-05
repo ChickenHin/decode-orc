@@ -1,7 +1,8 @@
 /*
  * File:        vbi_source_stage.cpp
  * Module:      orc-stage-plugin-vbi_source
- * Purpose:     Raw VBI capture source stage: synthesises CVBS from VBI records
+ * Purpose:     Raw VBI capture source stage: places VBI records into CVBS
+ * frames
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -21,16 +22,13 @@
 #include <stdexcept>
 #include <utility>
 
+#include "vbi_frame_builder.h"
 #include "vbi_frame_index.h"
-#include "vbi_frame_synthesis.h"
 #include "vbi_level_mapper.h"
 #include "vbi_line_reader.h"
 #include "vbi_offset_calibration.h"
-#include "vbi_output_levels.h"
-#include "vbi_resampler.h"
 #include "vbi_source_validation.h"
 #include "vbi_teletext_service.h"
-#include "vbi_timing_cross_checks.h"
 #include "vbi_transport.h"
 
 namespace orc {
@@ -44,8 +42,8 @@ namespace {
 constexpr const char* kStageName = "vbi_source";
 constexpr const char* kDisplayName = "VBI Capture Source";
 constexpr const char* kDescription =
-    "Raw VBI capture source - synthesises CVBS frames around teletext line "
-    "records from card and TBC VBI captures";
+    "Raw VBI capture source - places the teletext line records of card and TBC "
+    "VBI captures onto CVBS frames";
 
 // The namespace every observation this stage writes belongs to.
 constexpr const char* kObservationNamespace = "vbi_source";
@@ -66,7 +64,6 @@ constexpr const char* kParamLastRecord = "container_last_record";
 constexpr const char* kParamFrameTrailerBytes = "container_frame_trailer_bytes";
 constexpr const char* kParamContainerTvSystem = "container_tv_system";
 constexpr const char* kParamTeletextSystem = "teletext_system";
-constexpr const char* kParamSynthesiseBurst = "synthesise_burst";
 constexpr const char* kParamCaptureOffsetMode = "capture_offset_mode";
 constexpr const char* kParamCaptureOffsetSamples = "capture_offset_samples";
 constexpr const char* kParamLevels = "levels";
@@ -98,20 +95,19 @@ constexpr const char* kTeletextWST = "WST";
 constexpr const char* kTeletextNABTS = "NABTS";
 constexpr const char* kTvSystemPAL = "PAL";
 
-// Synthesised frames held against a repeat request.  Each PAL frame is 1,4 MB,
-// and synthesis is a resampling pass over the frame's data lines rather than a
-// disk read, so a bounded window is the right trade: it covers a preview
-// scrubbing back and forth and the observers that re-read a frame they have
-// just been handed, without holding a decode's worth of frames resident.
+// Built frames held against a repeat request.  Each PAL frame is 1,4 MB, so the
+// window is a memory-against-rework trade: it covers a preview scrubbing back
+// and forth and the observers that re-read a frame they have just been handed,
+// without holding a decode's worth of frames resident.
 //
-// It has to be comfortably larger than the number of readers, though. The
-// background observation pool runs one worker per two cores and the preview
-// render is another reader on top, so a window the size of the pool is
-// evicted before its frames are used: every reader then misses, re-synthesises
-// what another reader just built, and evicts a third reader's frame doing it.
-// Sixty-four frames is 90 MB, and covers the pool on any machine this runs on
-// with room for the prefetch window either side of the preview.
-constexpr size_t kFrameCacheSize = 64;
+// It has to be comfortably larger than the number of readers, or a window the
+// size of the reader pool is evicted before its frames are used: every reader
+// then misses, rebuilds what another reader just built, and evicts a third
+// reader's frame doing it. The background observation pool runs one worker per
+// two cores and the preview render is another reader on top, so thirty-two
+// frames (45 MB) covers the pool on any machine this runs on with room for the
+// prefetch window either side of the preview.
+constexpr size_t kFrameCacheSize = 32;
 
 // Stored frames calibration samples across the capture.
 constexpr uint32_t kCalibrationSampleFrames = 16;
@@ -125,14 +121,6 @@ std::string string_param(const std::map<std::string, ParameterValue>& params,
   const auto it = params.find(key);
   if (it == params.end()) return fallback;
   const auto* value = std::get_if<std::string>(&it->second);
-  return value ? *value : fallback;
-}
-
-bool bool_param(const std::map<std::string, ParameterValue>& params,
-                const char* key, bool fallback) {
-  const auto it = params.find(key);
-  if (it == params.end()) return fallback;
-  const auto* value = std::get_if<bool>(&it->second);
   return value ? *value : fallback;
 }
 
@@ -190,46 +178,43 @@ class VBISourceStageDeps final : public IVBISourceStageDeps {
 };
 
 // ---------------------------------------------------------------------------
-// VBISynthesisedFrameRepresentation
+// VBIFrameRepresentation
 // ---------------------------------------------------------------------------
 
-// The stage's output: CVBS frames synthesised on the frame a consumer asks
-// for, from the line records of the capture that frame came from.
+// The stage's output: CVBS frames built on the frame a consumer asks for, from
+// the line records of the capture that frame came from.
 //
 // Inherits VideoFrameRepresentation (the read contract every downstream stage
-// uses) and Artifact (so it can be returned from execute()), and implements
-// the frame index's counter source over its own reader.
+// uses) and Artifact (so it can be returned from execute()), and implements the
+// frame index's counter source over its own reader.
 //
 // Thread safety: two locks, deliberately narrow.  io_mutex_ covers reads
 // through the byte source (which holds one stream position, so they are
-// strictly serial) and cache_mutex_ covers the frame cache.  Synthesising the
-// frame from the records that read produced holds neither: the level mapper,
-// the synthesiser and the resampler are const and carry only configuration, so
-// synthesis is reentrant, and it is by far the expensive part — a frame costs
-// tens of milliseconds to synthesise against a fraction of a millisecond to
-// read.  Holding one lock across all of it made every reader in the process
-// queue behind every other, and because std::mutex is not fair, a pool of
-// background observation workers could starve the interactive preview render
-// for a minute at a time.  Nothing that is not stream state is locked here.
-class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
-                                                public Artifact,
-                                                private IVBIFrameCounterSource {
+// strictly serial) and cache_mutex_ covers the frame cache.  Building the frame
+// from the records that read produced holds neither: the builder is const and
+// carries only configuration, so building is reentrant.  Holding one lock
+// across all of it made every reader in the process queue behind every other,
+// and because std::mutex is not fair, a pool of background observation workers
+// could starve the interactive preview render.  Nothing that is not stream
+// state is locked here.
+class VBIFrameRepresentation final : public VideoFrameRepresentation,
+                                     public Artifact,
+                                     private IVBIFrameCounterSource {
  public:
   // Everything a run is configured by, gathered so the factory signature does
   // not run to a dozen positional arguments.
   struct Setup {
     VBISourceFormat format;
     VBILevelMapperConfig levels;
-    VBIFrameSynthesisConfig synthesis;
     VBIFrameSequenceConfig sequence;
     double capture_offset_samples = 0.0;
     std::string input_path;
   };
 
   // Build the representation over an opened capture.  Returns nullptr with an
-  // error message for any part of the configuration the stage cannot
-  // synthesise, or when the capture's frame counter could not be read.
-  static std::shared_ptr<VBISynthesisedFrameRepresentation> create(
+  // error message for any part of the configuration the stage cannot place, or
+  // when the capture's frame counter could not be read.
+  static std::shared_ptr<VBIFrameRepresentation> create(
       std::unique_ptr<IVBIByteSource> byte_source, Setup setup,
       ArtifactID artifact_id, Provenance provenance,
       std::string& error_message) {
@@ -238,8 +223,8 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
       return nullptr;
     }
 
-    auto representation = std::shared_ptr<VBISynthesisedFrameRepresentation>(
-        new VBISynthesisedFrameRepresentation(
+    auto representation =
+        std::shared_ptr<VBIFrameRepresentation>(new VBIFrameRepresentation(
             std::move(byte_source), std::move(setup), std::move(artifact_id),
             std::move(provenance)));
 
@@ -252,9 +237,7 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   // --------------------------------------------------------------------------
   // Artifact
   // --------------------------------------------------------------------------
-  std::string type_name() const override {
-    return "VBISynthesisedFrameRepresentation";
-  }
+  std::string type_name() const override { return "VBIFrameRepresentation"; }
 
   // --------------------------------------------------------------------------
   // What the run made of the capture
@@ -278,23 +261,28 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   std::optional<FrameDescriptor> get_frame_descriptor(
       FrameID id) const override {
     if (!has_frame(id)) return std::nullopt;
+    const VBIOutputFrame& output = builder_.output_frame();
     FrameDescriptor desc;
     desc.frame_id = id;
-    desc.system = VideoSystem::PAL;
-    desc.height = static_cast<size_t>(geometry().lines_per_frame());
-    desc.samples_total = static_cast<size_t>(geometry().samples_per_frame());
+    desc.system = output.system;
+    desc.height = static_cast<size_t>(output.lines_per_frame);
+    desc.samples_total = static_cast<size_t>(output.samples_per_frame);
     desc.samples_per_line_nominal =
-        static_cast<size_t>(video_params_.frame_width_nominal);
+        static_cast<size_t>(output.samples_per_line_nominal);
     return desc;
   }
 
   // --------------------------------------------------------------------------
   // Flat sample access
   // --------------------------------------------------------------------------
+  //
+  // Line access is left to the base class, which reads the flat frame through
+  // frame_line_util.h — the same lattice the frames are written on, so a caller
+  // asking for a line gets the line the builder wrote.
   const sample_type* get_frame(FrameID id) const override {
     if (!has_frame(id)) return nullptr;
-    const DecodedFrame* frame = ensure_frame_cached(id);
-    return frame ? frame->samples.data() : nullptr;
+    const std::vector<sample_type>* frame = ensure_frame_cached(id);
+    return frame ? frame->data() : nullptr;
   }
 
   std::vector<sample_type> get_frame_copy(FrameID id) const override {
@@ -303,33 +291,8 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
     // Copied with the cache lock held so an eviction on another thread cannot
     // free the entry mid-copy.
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    const DecodedFrame* frame = frame_cache_.get_ptr(id);
-    return frame != nullptr ? frame->samples : std::vector<sample_type>{};
-  }
-
-  // Line access goes through the stage's own frame geometry rather than the
-  // frame-flat helpers, because the two divide the same 709 379 samples
-  // slightly differently: the helpers put the four extra PAL samples on the
-  // last line of each field, while this stage places every line at its true
-  // 0H, which is what its sync pulses were synthesised against (design §2.3).
-  // Reading a line by the stage's own lattice therefore returns the line the
-  // stage actually wrote.
-  const sample_type* get_line(FrameID id, size_t line) const override {
-    if (line >= static_cast<size_t>(geometry().lines_per_frame())) {
-      return nullptr;
-    }
-    const sample_type* frame = get_frame(id);
-    if (frame == nullptr) return nullptr;
-    return frame + geometry().line_start(static_cast<uint32_t>(line));
-  }
-
-  std::vector<sample_type> get_line_samples(FrameID id,
-                                            size_t line) const override {
-    if (line >= static_cast<size_t>(geometry().lines_per_frame())) return {};
-    const sample_type* start = get_line(id, line);
-    if (start == nullptr) return {};
-    return std::vector<sample_type>(
-        start, start + geometry().line_length(static_cast<uint32_t>(line)));
+    const std::vector<sample_type>* frame = frame_cache_.get_ptr(id);
+    return frame != nullptr ? *frame : std::vector<sample_type>{};
   }
 
   // --------------------------------------------------------------------------
@@ -340,53 +303,21 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   }
 
  private:
-  struct DecodedFrame {
-    std::vector<sample_type> samples;
-  };
-
-  VBISynthesisedFrameRepresentation(std::unique_ptr<IVBIByteSource> byte_source,
-                                    Setup setup, ArtifactID artifact_id,
-                                    Provenance provenance)
+  VBIFrameRepresentation(std::unique_ptr<IVBIByteSource> byte_source,
+                         Setup setup, ArtifactID artifact_id,
+                         Provenance provenance)
       : Artifact(std::move(artifact_id), std::move(provenance)),
         byte_source_(std::move(byte_source)),
         setup_(std::move(setup)) {}
 
-  const VBIFrameGeometry& geometry() const { return synthesiser_.geometry(); }
-
   bool initialise(std::string& error_message) {
     reader_ = std::make_unique<VBILineReader>(setup_.format, *byte_source_);
 
-    if (!make_vbi_frame_synthesiser(setup_.format, setup_.synthesis,
-                                    synthesiser_, error_message)) {
+    if (!make_vbi_frame_builder(setup_.format, setup_.levels,
+                                setup_.capture_offset_samples, builder_,
+                                error_message)) {
       return false;
     }
-
-    VBITeletextService service;
-    if (!vbi_teletext_service(setup_.format.tv_system, setup_.format.tt_system,
-                              service, error_message)) {
-      return false;
-    }
-
-    VBIOutputLevels levels;
-    if (!vbi_output_levels(setup_.format.tv_system, levels, error_message)) {
-      return false;
-    }
-    level_mapper_ = std::make_unique<VBILevelMapper>(setup_.format, service,
-                                                     levels, setup_.levels);
-
-    double output_rate_hz = 0.0;
-    if (!vbi_output_sample_rate_hz(setup_.format.tv_system, output_rate_hz,
-                                   error_message)) {
-      return false;
-    }
-    if (setup_.format.sample_rate_hz <= 0.0 || output_rate_hz <= 0.0) {
-      error_message =
-          "The capture's sampling rate is unset, so its records cannot be "
-          "resampled onto the output lattice.";
-      return false;
-    }
-    resampler_ = std::make_unique<VBIBandLimitedResampler>(
-        setup_.format.sample_rate_hz / output_rate_hz);
 
     const std::optional<uint64_t> stored_frames = reader_->frame_count();
     if (!stored_frames.has_value()) {
@@ -406,7 +337,10 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
     return true;
   }
 
-  // EBU Tech. 3280-E level and geometry constants for the synthesised output.
+  // EBU Tech. 3280-E level and geometry constants for the emitted frames.  The
+  // active picture bounds are the standard's, so that a consumer reading them
+  // sees the frame the stage claims to produce rather than the empty raster it
+  // happens to hold.
   void build_video_parameters() {
     video_params_ = SourceParameters{};
     video_params_.system = VideoSystem::PAL;
@@ -435,7 +369,7 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   }
 
   // Caller holds no lock.
-  const DecodedFrame* ensure_frame_cached(FrameID id) const {
+  const std::vector<sample_type>* ensure_frame_cached(FrameID id) const {
     {
       std::lock_guard<std::mutex> lock(cache_mutex_);
       if (frame_cache_.contains(id)) {
@@ -443,24 +377,24 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
       }
     }
 
-    // Synthesised with no lock held. Two threads racing the same frame
-    // synthesise it twice and the loser's copy is dropped, which costs one
-    // frame of duplicated work — far less than the alternative of holding
-    // every other reader off for the duration (see the class comment).
-    DecodedFrame decoded = synthesise_frame(id);
+    // Built with no lock held. Two threads racing the same frame build it twice
+    // and the loser's copy is dropped, which costs one frame of duplicated work
+    // — far less than the alternative of holding every other reader off for the
+    // duration (see the class comment).
+    std::vector<sample_type> built = build_frame(id);
 
     std::lock_guard<std::mutex> lock(cache_mutex_);
     if (!frame_cache_.contains(id)) {
-      frame_cache_.put(id, std::move(decoded));
+      frame_cache_.put(id, std::move(built));
     }
     return frame_cache_.get_ptr(id);
   }
 
   // Caller holds no lock: this takes io_mutex_ for the parts that read the
   // capture and holds nothing for the rest.  Throws when the frame cannot be
-  // synthesised: a frame that cannot be built is a broken configuration or a
-  // broken capture, and returning blanking for it would hide both.
-  DecodedFrame synthesise_frame(FrameID id) const {
+  // built: a frame that cannot be built is a broken configuration or a broken
+  // capture, and returning blanking for it would hide both.
+  std::vector<sample_type> build_frame(FrameID id) const {
     std::string error;
 
     VBIOutputFramePlan plan;
@@ -482,43 +416,28 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
       }
     }
 
-    VBISynthesisedFrame frame;
+    std::vector<sample_type> samples;
     if (plan.padding) {
-      if (!synthesiser_.synthesise_blank_frame(plan.output_frame_index, frame,
-                                               error)) {
-        throw std::runtime_error("VBI source '" + setup_.input_path +
-                                 "': " + error);
-      }
-    } else {
-      std::vector<VBIMappedLine> mapped_lines;
-      level_mapper_->map_frame(records.lines, mapped_lines);
-
-      if (!synthesiser_.synthesise_frame(
-              plan.output_frame_index, mapped_lines, *resampler_,
-              setup_.capture_offset_samples, frame, error)) {
-        throw std::runtime_error("VBI source '" + setup_.input_path +
-                                 "': " + error);
-      }
+      builder_.build_blank_frame(samples);
+      return samples;
     }
 
-    DecodedFrame decoded;
-    decoded.samples.reserve(frame.samples.size());
-    for (const uint16_t sample : frame.samples) {
-      decoded.samples.push_back(static_cast<sample_type>(sample));
+    uint32_t data_lines = 0;
+    if (!builder_.build_frame(records.lines, samples, data_lines, error)) {
+      throw std::runtime_error("VBI source '" + setup_.input_path +
+                               "': " + error);
     }
-    return decoded;
+    return samples;
   }
 
   std::unique_ptr<IVBIByteSource> byte_source_;
   Setup setup_;
 
-  // Held by pointer rather than by value because none of the three can be
-  // built until the capture is open and its format expanded, and none of them
-  // is default-constructible.
+  // Held by pointer because it cannot be built until the capture is open and
+  // it is not default-constructible.
   std::unique_ptr<VBILineReader> reader_;
-  VBIFrameSynthesiser synthesiser_;
-  std::unique_ptr<VBILevelMapper> level_mapper_;
-  std::unique_ptr<VBIBandLimitedResampler> resampler_;
+
+  VBIFrameBuilder builder_;
   VBIFrameIndex index_;
 
   size_t frame_count_ = 0;
@@ -527,10 +446,11 @@ class VBISynthesisedFrameRepresentation final : public VideoFrameRepresentation,
   // The capture: one stream position, so every read through it is serial.
   mutable std::mutex io_mutex_;
 
-  // The cache, held only across a lookup or an insertion — never across
-  // synthesis, and never across a read of the capture.
+  // The cache, held only across a lookup or an insertion — never across a
+  // build, and never across a read of the capture.
   mutable std::mutex cache_mutex_;
-  mutable LRUCache<FrameID, DecodedFrame> frame_cache_{kFrameCacheSize};
+  mutable LRUCache<FrameID, std::vector<sample_type>> frame_cache_{
+      kFrameCacheSize};
 };
 
 // ---------------------------------------------------------------------------
@@ -558,57 +478,13 @@ std::string join_messages(const std::vector<std::string>& messages) {
   return joined;
 }
 
-// Corroborate the fitted timing against references that owe nothing to
-// teletext being present.  None of these ever stops the run: the teletext lock
-// is the primary measurement and these are checks on it (design §5.3.5).
-void run_cross_checks(const VBILineReader& reader,
-                      const VBITeletextService& service,
-                      const VBISourceFormat& format,
-                      double capture_offset_samples,
-                      ObservationContext& observation_context) {
-  const std::optional<uint64_t> stored_frames = reader.frame_count();
-  if (!stored_frames.has_value()) return;
-
-  std::vector<VBILineRecord> records;
-  std::string error;
-  for (const uint64_t frame_index : vbi_calibration_frame_indices(
-           *stored_frames, kCalibrationSampleFrames)) {
-    VBIFrameRecords frame_records;
-    if (!reader.read_frame(frame_index, frame_records, error)) {
-      ORC_LOG_WARN("{}: timing cross-checks skipped: {}", kStageName, error);
-      return;
-    }
-    for (VBILineRecord& record : frame_records.lines) {
-      records.push_back(std::move(record));
-    }
-  }
-
-  const std::vector<VBITimingCrossCheck> checks = run_vbi_timing_cross_checks(
-      format, service, capture_offset_samples, records, VBICrossCheckConfig{});
-
-  size_t index = 0;
-  for (const VBITimingCrossCheck& check : checks) {
-    if (check.outcome == VBICrossCheckOutcome::kNotApplicable) continue;
-    observation_context.set(FieldID(0), kObservationNamespace,
-                            "cross_check_" + std::to_string(index),
-                            check.message);
-    ++index;
-    if (check.outcome == VBICrossCheckOutcome::kDisagreed) {
-      ORC_LOG_WARN("{}: {}", kStageName, check.message);
-    } else {
-      ORC_LOG_INFO("{}: {}", kStageName, check.message);
-    }
-  }
-}
-
-// Fit the capture offset from the clock run-in, and corroborate it.
+// Fit the capture offset from the clock run-in.
 //
 // The stage does not proceed with a bad fit: the offset is applied globally to
 // a capture that may run for hours, so a wrong one silently mis-places every
 // line of it (design §5.3.4).
 double calibrate_capture_offset(const VBILineReader& reader,
                                 const VBITeletextService& service,
-                                const VBISourceFormat& format,
                                 const std::string& input_path,
                                 ObservationContext& observation_context) {
   VBICalibrationConfig calibration_config;
@@ -643,9 +519,6 @@ double calibrate_capture_offset(const VBILineReader& reader,
     ORC_LOG_WARN("{}: {}", kStageName, warning);
   }
 
-  run_cross_checks(reader, service, format, calibration.capture_offset_samples,
-                   observation_context);
-
   return calibration.capture_offset_samples;
 }
 
@@ -668,7 +541,6 @@ std::string VBISourceStage::Configuration::cache_key() const {
   key += "|" + std::to_string(container_frame_trailer_bytes);
   key += "|" + container_tv_system;
   key += "|" + teletext_system;
-  key += "|" + std::string(synthesise_burst ? "burst" : "no-burst");
   key += "|" + capture_offset_mode;
   key += "|" + std::to_string(capture_offset_samples);
   key += "|" + levels;
@@ -786,8 +658,6 @@ VBISourceStage::Configuration VBISourceStage::configuration_from(
       parameters, kParamContainerTvSystem, configuration.container_tv_system);
   configuration.teletext_system = string_param(parameters, kParamTeletextSystem,
                                                configuration.teletext_system);
-  configuration.synthesise_burst = bool_param(parameters, kParamSynthesiseBurst,
-                                              configuration.synthesise_burst);
   configuration.capture_offset_mode = string_param(
       parameters, kParamCaptureOffsetMode, configuration.capture_offset_mode);
   configuration.capture_offset_samples =
@@ -894,7 +764,7 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   double capture_offset_samples = format.capture_offset_samples;
   if (format.capture_offset_is_auto) {
     capture_offset_samples = calibrate_capture_offset(
-        reader, service, format, configuration.input_path, observation_context);
+        reader, service, configuration.input_path, observation_context);
   } else {
     ORC_LOG_INFO(
         "{}: capture offset held at the configured {:.2f} samples; no "
@@ -910,14 +780,12 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   format.capture_offset_is_auto = false;
 
   // --- Output representation ---
-  VBISynthesisedFrameRepresentation::Setup setup;
+  VBIFrameRepresentation::Setup setup;
   setup.format = format;
   setup.levels.mode = parse_level_mode(configuration.levels);
   setup.levels.fixed_logic0 = configuration.fixed_logic0;
   setup.levels.fixed_logic1 = configuration.fixed_logic1;
-  setup.synthesis.synthesise_burst = configuration.synthesise_burst;
   setup.sequence.drops = parse_drop_policy(configuration.drops);
-  setup.sequence.burst_synthesised = configuration.synthesise_burst;
   setup.capture_offset_samples = capture_offset_samples;
   setup.input_path = configuration.input_path;
 
@@ -933,12 +801,10 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
       {"video_system", "PAL"},
       {"sample_encoding", "CVBS_U10_4FSC"},
       {kParamCaptureOffsetSamples, std::to_string(capture_offset_samples)},
-      {kParamSynthesiseBurst,
-       configuration.synthesise_burst ? "true" : "false"},
       {kParamDrops, configuration.drops},
   };
 
-  auto representation = VBISynthesisedFrameRepresentation::create(
+  auto representation = VBIFrameRepresentation::create(
       std::move(byte_source), std::move(setup),
       ArtifactID(std::string(kStageName) + ":" + cache_key),
       std::move(provenance), error);
@@ -950,8 +816,6 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   const std::string sequence_summary = index.summary();
   observation_context.set(FieldID(0), kObservationNamespace, "frame_sequence",
                           sequence_summary);
-  observation_context.set(FieldID(0), kObservationNamespace, "signal_state",
-                          to_string(index.signal_state()));
   observation_context.set(FieldID(0), kObservationNamespace, "teletext_system",
                           configuration.teletext_system);
 
@@ -1135,19 +999,6 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor pd;
-    pd.name = kParamSynthesiseBurst;
-    pd.display_name = "Synthesise Colour Burst";
-    pd.description =
-        "Write a coherent colour burst on every synthesised line. On by "
-        "default: real broadcast teletext lines carry burst, and a coherent "
-        "burst sequence is what lets the output claim a locked signal state.";
-    pd.type = ParameterType::BOOL;
-    pd.constraints.default_value = true;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
     pd.name = kParamCaptureOffsetMode;
     pd.display_name = "Capture Offset";
     pd.description =
@@ -1262,7 +1113,6 @@ std::map<std::string, ParameterValue> VBISourceStage::get_parameters() const {
       {kParamFrameTrailerBytes, configuration_.container_frame_trailer_bytes},
       {kParamContainerTvSystem, configuration_.container_tv_system},
       {kParamTeletextSystem, configuration_.teletext_system},
-      {kParamSynthesiseBurst, configuration_.synthesise_burst},
       {kParamCaptureOffsetMode, configuration_.capture_offset_mode},
       {kParamCaptureOffsetSamples, configuration_.capture_offset_samples},
       {kParamLevels, configuration_.levels},
@@ -1288,11 +1138,6 @@ bool VBISourceStage::set_parameters(
                key == kParamFixedLogic0 || key == kParamFixedLogic1) {
       if (!std::holds_alternative<double>(value)) {
         ORC_LOG_WARN("{}: parameter '{}' expects a number", kStageName, key);
-        return false;
-      }
-    } else if (key == kParamSynthesiseBurst) {
-      if (!std::holds_alternative<bool>(value)) {
-        ORC_LOG_WARN("{}: parameter '{}' expects a boolean", kStageName, key);
         return false;
       }
     } else if (key == kParamLineLength || key == kParamValidSamples ||

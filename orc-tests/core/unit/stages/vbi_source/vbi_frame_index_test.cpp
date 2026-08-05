@@ -168,7 +168,6 @@ TEST(VBIFrameIndex, PreserveEmitsOnlyTheFramesPresentAndReportsTheBreak) {
   EXPECT_EQ(index.dropped_frame_count(), 3u);
   EXPECT_EQ(index.output_frame_count(), counters.size());
   EXPECT_TRUE(index.timeline_broken());
-  EXPECT_EQ(index.signal_state(), VBISignalState::kStandardTbcUnlocked);
 
   VBIOutputFramePlan plan;
   std::string error;
@@ -190,7 +189,6 @@ TEST(VBIFrameIndex, PadKeepsOutputFramesAlignedWithTheSourcesOwnNumbering) {
   EXPECT_EQ(index.dropped_frame_count(), 3u);
   EXPECT_EQ(index.output_frame_count(), counters.size() + 3u);
   EXPECT_FALSE(index.timeline_broken());
-  EXPECT_EQ(index.signal_state(), VBISignalState::kStandardTbcLocked);
 
   // Output frame n carries the frame whose counter is n frames after the
   // first, and the gap becomes padding rather than a shift.
@@ -271,24 +269,11 @@ TEST(VBIFrameIndex, ACounterThatDoesNotAdvanceBreaksTheTimeline) {
 
   EXPECT_TRUE(index.timeline_broken());
   EXPECT_EQ(index.output_frame_count(), 4u);
-  EXPECT_EQ(index.signal_state(), VBISignalState::kStandardTbcUnlocked);
 }
 
 // ---------------------------------------------------------------------------
-// Signal state and what the summary says
+// What the summary says
 // ---------------------------------------------------------------------------
-
-TEST(VBIFrameIndex, OmittingTheBurstForcesTheUnlockedState) {
-  const FakeCounterSource source(continuous_counters(0u, 4u));
-
-  VBIFrameSequenceConfig config;
-  config.burst_synthesised = false;
-
-  const VBIFrameIndex index =
-      build_index(bt8x8_pal_format(), config, 4u, source);
-
-  EXPECT_EQ(index.signal_state(), VBISignalState::kStandardTbcUnlocked);
-}
 
 // A format with no counter cannot report drops, and the summary must say that
 // rather than implying continuity (design §6.3).
@@ -309,14 +294,15 @@ TEST(VBIFrameIndex, ASourceWithoutACounterSaysDropsCannotBeDetected) {
   EXPECT_EQ(source.reads, 0u);
 }
 
-TEST(VBIFrameIndex, SummaryRecordsTheFieldOrderAssumptionAndSignalState) {
+TEST(VBIFrameIndex, SummaryRecordsTheFieldOrderAssumptionAndTheCounter) {
   const FakeCounterSource source(continuous_counters(0u, 4u));
   const VBIFrameIndex index =
       build_index(bt8x8_pal_format(), VBIFrameSequenceConfig{}, 4u, source);
 
   const std::string summary = index.summary();
   EXPECT_NE(summary.find("television field 1"), std::string::npos) << summary;
-  EXPECT_NE(summary.find("STANDARD_TBC_LOCKED"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("follows the capture's own"), std::string::npos)
+      << summary;
   EXPECT_NE(summary.find("continuous"), std::string::npos) << summary;
 }
 

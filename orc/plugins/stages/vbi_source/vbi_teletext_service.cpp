@@ -9,8 +9,6 @@
 
 #include "vbi_teletext_service.h"
 
-#include <utility>
-
 namespace orc {
 
 namespace {
@@ -37,31 +35,6 @@ constexpr uint32_t kWSTFRCLeadingOnes = 3;
 constexpr uint32_t kWSTCRIFRCPattern = 0xAAAAE4u;
 
 constexpr uint32_t kWSTPayloadBytes = 42;
-
-// ---------------------------------------------------------------------------
-// Independent timing references (design §5.3.5).
-//
-// The figures are libzvbi's service table entries for the services that share
-// the 625-line teletext range.  They are used only to corroborate a fitted
-// capture offset, never to place anything, which is why a coarse channel-bit
-// rendering of each run-in is sufficient.
-// ---------------------------------------------------------------------------
-
-// ETSI EN 300 231: video programme system, broadcast line 16 of field 1.
-constexpr uint32_t kVPSLine = 16;
-constexpr double kVPSOffsetNs = 12500.0;
-constexpr double kVPSBitRateHz = 2500000.0;
-constexpr uint32_t kVPSPattern = 0xAAAA8A99u;
-constexpr uint32_t kVPSPatternBits = 32;
-
-// ITU-R BT.1119 / EIA-608 style captioning on 625 lines, broadcast lines 22
-// and 335.
-constexpr uint32_t kCaptionField1Line = 22;
-constexpr uint32_t kCaptionField2Line = 335;
-constexpr double kCaptionOffsetNs = 10500.0;
-constexpr double kCaptionBitRateHz = 500000.0;
-constexpr uint32_t kCaptionPattern = 0x5551u;
-constexpr uint32_t kCaptionPatternBits = 16;
 
 }  // namespace
 
@@ -97,39 +70,6 @@ bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
       "The configured teletext system is not defined on the configured "
       "television system; WST is defined on PAL and NABTS on NTSC/PAL_M.";
   return false;
-}
-
-std::vector<VBIReferenceService> vbi_reference_services(VBITVSystem tv_system) {
-  if (tv_system != VBITVSystem::kPAL) {
-    // The 525-line references arrive with the 525-line placement they would
-    // be checked against; claiming none is honest, and the cross-checks are
-    // reported as inapplicable rather than as agreement.
-    return {};
-  }
-
-  std::vector<VBIReferenceService> services;
-
-  VBIReferenceService vps;
-  vps.name = "VPS";
-  vps.broadcast_line = kVPSLine;
-  vps.t_offset_ns = kVPSOffsetNs;
-  vps.bit_rate_hz = kVPSBitRateHz;
-  vps.pattern = kVPSPattern;
-  vps.pattern_bits = kVPSPatternBits;
-  services.push_back(std::move(vps));
-
-  for (const uint32_t line : {kCaptionField1Line, kCaptionField2Line}) {
-    VBIReferenceService caption;
-    caption.name = "Closed Caption 625";
-    caption.broadcast_line = line;
-    caption.t_offset_ns = kCaptionOffsetNs;
-    caption.bit_rate_hz = kCaptionBitRateHz;
-    caption.pattern = kCaptionPattern;
-    caption.pattern_bits = kCaptionPatternBits;
-    services.push_back(std::move(caption));
-  }
-
-  return services;
 }
 
 }  // namespace orc
