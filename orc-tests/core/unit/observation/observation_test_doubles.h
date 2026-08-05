@@ -31,6 +31,14 @@ class FakeVideoFrameRepresentation final : public VideoFrameRepresentation {
   // Returned for every frame when set (e.g. to mark the content as padding).
   std::optional<FrameDescriptor> descriptor;
 
+  // Returned from get_video_parameters() when set; unset means "no video
+  // parameters", which makes observer applicability filtering fail open.
+  std::optional<SourceParameters> video_parameters;
+
+  std::optional<SourceParameters> get_video_parameters() const override {
+    return video_parameters;
+  }
+
   FrameIDRange frame_range() const override { return {0, 0}; }
   size_t frame_count() const override { return 1; }
   bool has_frame(FrameID id) const override { return id == 0; }

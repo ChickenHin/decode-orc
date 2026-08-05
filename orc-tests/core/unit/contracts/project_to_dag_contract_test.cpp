@@ -125,7 +125,7 @@ TEST(ProjectToDagContractTest,
       orc::project_io::add_node(project, "PAL_CVBS_Source", 0.0, 0.0);
 
   std::map<std::string, orc::ParameterValue> params = {
-      {"input_path", std::string("fixtures/test.composite")},
+      {"input_path", std::string("fixtures/test.cvbs")},
       {"use_metadata", false},
       {"sample_encoding", std::string("CVBS_TPG21_4FSC")}};
 

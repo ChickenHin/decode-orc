@@ -344,13 +344,10 @@ std::vector<PreviewOutputInfo> PreviewRenderer::get_available_outputs(
             return get_capability_preview_outputs(capability);
           }
 
-          // Signal-domain: render from the VFR produced by the DAG executor.
-          if (has_signal_domain_type(capability) && frame_renderer_) {
-            auto vfr_result = frame_renderer_->render_frame_at_node(
-                node_id, static_cast<FrameID>(0));
-            if (vfr_result.is_valid && vfr_result.representation) {
-              auto options = PreviewHelpers::get_standard_preview_options(
-                  vfr_result.representation);
+          // Signal-domain: describe the VFR produced by the DAG executor.
+          if (has_signal_domain_type(capability)) {
+            if (auto repr = representation_at(node_id)) {
+              auto options = PreviewHelpers::get_standard_preview_options(repr);
               return build_outputs_from_options(node_id, *node_it, options);
             }
           }
@@ -367,17 +364,12 @@ std::vector<PreviewOutputInfo> PreviewRenderer::get_available_outputs(
 
       // Fallback: stages that do not expose their own preview functionality
       // (or whose capability is not yet valid) default to the SDK preview
-      // helper.  Render a pass-through preview from the VFR available at this
-      // node — for sink nodes the frame renderer transparently substitutes the
-      // upstream node's output, so no per-plugin boilerplate is required.
-      if (frame_renderer_) {
-        auto vfr_result = frame_renderer_->render_frame_at_node(
-            node_id, static_cast<FrameID>(0));
-        if (vfr_result.is_valid && vfr_result.representation) {
-          auto options = PreviewHelpers::get_standard_preview_options(
-              vfr_result.representation);
-          return build_outputs_from_options(node_id, *node_it, options);
-        }
+      // helper, described from the VFR available at this node — for sink nodes
+      // resolution transparently substitutes the upstream node's output, so no
+      // per-plugin boilerplate is required.
+      if (auto repr = representation_at(node_id)) {
+        auto options = PreviewHelpers::get_standard_preview_options(repr);
+        return build_outputs_from_options(node_id, *node_it, options);
       }
 
       if (node_type == NodeType::SINK) {
@@ -437,7 +429,7 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
     if (node_it != dag_nodes.end() && node_it->stage) {
       if (auto* capability_stage = dynamic_cast<const IStagePreviewCapability*>(
               node_it->stage.get())) {
-        ensure_node_executed(node_id, true);
+        const auto node_outputs = ensure_node_executed(node_id, true);
         const StagePreviewCapability capability =
             capability_stage->get_preview_capability();
 
@@ -453,13 +445,15 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
             }
           }
 
-          // Signal-domain stages: render directly from the DAG VFR output.
-          if (has_signal_domain_type(capability) && frame_renderer_) {
-            auto vfr_result = frame_renderer_->render_frame_at_node(
-                node_id, static_cast<FrameID>(0));
-            if (vfr_result.is_valid && vfr_result.representation) {
+          // Signal-domain stages: render directly from the DAG VFR output. The
+          // representation comes from the execution above — the frame actually
+          // displayed is addressed by |index| inside render_standard_preview,
+          // so rendering frame 0 here only ever served to fetch this handle.
+          if (has_signal_domain_type(capability)) {
+            auto resolved = resolve_node_vfr(*dag_, node_outputs, node_id);
+            if (resolved.representation) {
               result.image = PreviewHelpers::render_standard_preview(
-                  vfr_result.representation, option_id, index, hint,
+                  resolved.representation, option_id, index, hint,
                   capability.geometry.mask_inactive_area);
               result.success = result.image.is_valid();
               if (result.success) render_dropouts(result.image);
@@ -481,18 +475,14 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
 
       // Fallback: stages without their own preview functionality default to the
       // SDK preview helper.  Render a pass-through preview from the VFR
-      // available at this node (for sink nodes the frame renderer substitutes
-      // the upstream node's output).
-      if (frame_renderer_) {
-        auto vfr_result = frame_renderer_->render_frame_at_node(
-            node_id, static_cast<FrameID>(0));
-        if (vfr_result.is_valid && vfr_result.representation) {
-          result.image = PreviewHelpers::render_standard_preview(
-              vfr_result.representation, option_id, index, hint);
-          result.success = result.image.is_valid();
-          if (result.success) render_dropouts(result.image);
-          return result;
-        }
+      // available at this node (for sink nodes resolution substitutes the
+      // upstream node's output).
+      if (auto repr = representation_at(node_id)) {
+        result.image = PreviewHelpers::render_standard_preview(repr, option_id,
+                                                               index, hint);
+        result.success = result.image.is_valid();
+        if (result.success) render_dropouts(result.image);
+        return result;
       }
     }
   }
@@ -638,7 +628,8 @@ void PreviewRenderer::set_execution_progress_callback(
 
 VideoFrameRepresentationPtr PreviewRenderer::get_representation_at_node(
     const NodeID& node_id) const {
-  if (!dag_ || !frame_renderer_) {
+  // No frame_renderer_ check: resolution goes through the executor now.
+  if (!dag_) {
     return nullptr;
   }
 
@@ -665,18 +656,18 @@ VideoFrameRepresentationPtr PreviewRenderer::get_representation_at_node(
       continue;
     }
 
-    ensure_node_executed(current);
-
-    auto result =
-        frame_renderer_->render_frame_at_node(current, static_cast<FrameID>(0));
-    if (result.is_valid && result.representation) {
+    // Resolve the node's artifact straight from the executor. Rendering a frame
+    // to get at it cost a second DAG execution plus a full observer pass over
+    // frame 0 whose results nobody reads — this renderer has no observation
+    // store, so that pass could neither be served from nor written to it.
+    if (auto repr = representation_at(current)) {
       if (current != node_id) {
         ORC_LOG_DEBUG(
             "get_representation_at_node: falling back from '{}' to upstream "
             "node '{}'",
             node_id.to_string(), current.to_string());
       }
-      return result.representation;
+      return repr;
     }
 
     for (const auto& input_node_id : node_it->second->input_node_ids) {
@@ -971,10 +962,11 @@ FrameFieldsResult PreviewRenderer::get_frame_fields(
 // Stage preview support
 // ============================================================================
 
-void PreviewRenderer::ensure_node_executed(const NodeID& node_id,
-                                           bool disable_cache) const {
+std::map<NodeID, std::vector<ArtifactPtr>>
+PreviewRenderer::ensure_node_executed(const NodeID& node_id,
+                                      bool disable_cache) const {
   if (!dag_) {
-    return;
+    return {};
   }
 
   // For sink nodes, we need to execute their inputs to populate cached_input_
@@ -986,7 +978,7 @@ void PreviewRenderer::ensure_node_executed(const NodeID& node_id,
 
   if (node_it == dag_nodes.end()) {
     ORC_LOG_ERROR("Node '{}' not found in DAG", node_id.to_string());
-    return;
+    return {};
   }
 
   bool is_sink = (node_it->stage &&
@@ -1004,7 +996,8 @@ void PreviewRenderer::ensure_node_executed(const NodeID& node_id,
     const_cast<DAGExecutor&>(dag_executor_).set_cache_enabled(false);
   }
 
-  const_cast<DAGExecutor&>(dag_executor_).execute_to_node(*dag_, node_id);
+  auto node_outputs =
+      const_cast<DAGExecutor&>(dag_executor_).execute_to_node(*dag_, node_id);
 
   // Restore previous cache state if it was changed
   if (disable_cache) {
@@ -1022,6 +1015,22 @@ void PreviewRenderer::ensure_node_executed(const NodeID& node_id,
         "cached_output_ set",
         node_id.to_string());
   }
+
+  return node_outputs;
+}
+
+VideoFrameRepresentationPtr PreviewRenderer::representation_at(
+    const NodeID& node_id) const {
+  if (!dag_) {
+    return nullptr;
+  }
+  const auto node_outputs = ensure_node_executed(node_id);
+  auto resolved = resolve_node_vfr(*dag_, node_outputs, node_id);
+  if (!resolved.representation ||
+      !resolved.representation->has_frame(static_cast<FrameID>(0))) {
+    return nullptr;
+  }
+  return resolved.representation;
 }
 
 std::vector<PreviewOutputInfo> PreviewRenderer::get_capability_preview_outputs(
@@ -1128,12 +1137,8 @@ std::vector<PreviewOutputInfo> PreviewRenderer::build_outputs_from_options(
   }
 
   bool has_separate_channels = false;
-  if (frame_renderer_) {
-    auto vfr_probe = frame_renderer_->render_frame_at_node(
-        stage_node_id, static_cast<FrameID>(0));
-    if (vfr_probe.is_valid && vfr_probe.representation) {
-      has_separate_channels = vfr_probe.representation->has_separate_channels();
-    }
+  if (auto repr = representation_at(stage_node_id)) {
+    has_separate_channels = repr->has_separate_channels();
   }
 
   const std::string stage_name =

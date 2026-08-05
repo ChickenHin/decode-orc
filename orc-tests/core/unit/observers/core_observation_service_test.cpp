@@ -144,6 +144,99 @@ TEST(CoreObservationService, CreateObserver_HandleForwardsToObserver) {
   handle->process_frame(vfr, FrameID(0), context);
 }
 
+// ---------------------------------------------------------------------------
+// Applicability (standard_observer_applies / filter_applicable_observers)
+// ---------------------------------------------------------------------------
+
+SourceParameters params_for(VideoSystem system) {
+  SourceParameters params;
+  params.system = system;
+  return params;
+}
+
+// Independent restatement of the applicability contract (Observer::applies_to
+// per observer): teletext is PAL-only, fm_code/white_flag are NTSC-only,
+// everything else applies to every system. A drift in either direction fails
+// this test.
+const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
+    {"white_snr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"black_psnr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"burst_level", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"closed_caption",
+     {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"biphase", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"colour_frame_phase",
+     {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"disc_quality", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"fm_code", {VideoSystem::NTSC}},
+    {"white_flag", {VideoSystem::NTSC}},
+    {"teletext", {VideoSystem::PAL}},
+};
+
+TEST(StandardObserverApplies, MatchesApplicabilityContract) {
+  for (const auto& [id, systems] : kExpectedApplicability) {
+    for (const VideoSystem system :
+         {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}) {
+      EXPECT_EQ(standard_observer_applies(id, params_for(system)),
+                systems.count(system) != 0)
+          << "id=" << id << " system=" << static_cast<int>(system);
+    }
+  }
+}
+
+TEST(StandardObserverApplies, UnknownIdIsAlwaysApplicable) {
+  // Observers injected by a test service must never be filtered.
+  EXPECT_TRUE(standard_observer_applies("not_a_registry_id",
+                                        params_for(VideoSystem::PAL)));
+  EXPECT_TRUE(standard_observer_applies("", params_for(VideoSystem::NTSC)));
+}
+
+TEST(FilterApplicableObservers, DropsInapplicableObserversPerSystem) {
+  CoreObservationService service;
+  const auto all = service.available_observers();
+
+  const auto id_set = [](const std::vector<ObserverInfo>& infos) {
+    std::set<std::string> ids;
+    for (const auto& info : infos) {
+      ids.insert(info.id);
+    }
+    return ids;
+  };
+
+  auto pal_expected = kExpectedObserverIds;
+  pal_expected.erase("fm_code");
+  pal_expected.erase("white_flag");
+  EXPECT_EQ(
+      id_set(filter_applicable_observers(all, params_for(VideoSystem::PAL))),
+      pal_expected);
+
+  auto ntsc_expected = kExpectedObserverIds;
+  ntsc_expected.erase("teletext");
+  EXPECT_EQ(
+      id_set(filter_applicable_observers(all, params_for(VideoSystem::NTSC))),
+      ntsc_expected);
+}
+
+TEST(FilterApplicableObservers, FailsOpenWithoutVideoParameters) {
+  CoreObservationService service;
+  const auto all = service.available_observers();
+  const auto filtered = filter_applicable_observers(all, std::nullopt);
+  ASSERT_EQ(filtered.size(), all.size());
+  for (size_t i = 0; i < all.size(); ++i) {
+    EXPECT_EQ(filtered[i].id, all[i].id);
+  }
+}
+
+TEST(FilterApplicableObservers, KeepsUnknownObserverIds) {
+  ObserverInfo custom;
+  custom.id = "test_only_observer";
+  custom.version = "1.0.0";
+  const auto filtered =
+      filter_applicable_observers({custom}, params_for(VideoSystem::NTSC));
+  ASSERT_EQ(filtered.size(), 1u);
+  EXPECT_EQ(filtered[0].id, "test_only_observer");
+}
+
 }  // namespace
 }  // namespace tests
 }  // namespace orc

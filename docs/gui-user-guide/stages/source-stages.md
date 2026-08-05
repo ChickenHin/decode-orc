@@ -81,11 +81,11 @@ Associated audio (analogue `.pcm`), EFM disc data (`.efm`), and AC3 RF symbols (
 
 **Use this stage when:**
 
-* Your source is a CVBS file (`.composite`, or a `.y`/`.c` pair for Y/C projects) rather than a TBC capture
+* Your source is a CVBS file (`.cvbs`, or a `.cvbsy`/`.cvbsc` pair for Y/C projects) rather than a TBC capture
 
 **What it does**
 
-This stage reads CVBS payloads from `.composite` files (or `.y`/`.c` pairs) and normalises them to the CVBS_U10_4FSC 10-bit domain. By default the video system, sample encoding, and signal state are read from the `.meta` SQLite sidecar; because the CVBS file format declares metadata optional, the sample encoding can also be selected manually so that sources without a sidecar can be used.
+This stage reads CVBS payloads from `.cvbs` files (or `.cvbsy`/`.cvbsc` pairs) and normalises them to the CVBS_U10_4FSC 10-bit domain. By default the video system, sample encoding, and signal state are read from the `.meta` SQLite sidecar; because the CVBS file format declares metadata optional, the sample encoding can also be selected manually so that sources without a sidecar can be used.
 
 Only the `STANDARD_TBC_LOCKED` signal-state preset is accepted. Files with any other signal state are rejected with a clear error before any frame data is returned. When a sample encoding is selected manually the sidecar is ignored: the signal is assumed to be TBC-locked and the frame count is measured from the file size.
 
@@ -105,10 +105,10 @@ Associated dropout, audio, EFM, and AC3 sidecars are loaded automatically if pre
 The file-path parameters offered match the project's source type: a composite project shows only the CVBS file path, while a Y/C project shows only the Y (luma) and C (chroma) paths.
 
 * `input_path` (file path)
-    - Path to the composite data file (`.composite`). Composite projects only.
+    - Path to the composite data file (`.cvbs`). Composite projects only.
 
 * `y_path` / `c_path` (file paths)
-    - Paths to the luma (`.y`) and chroma (`.c`) channel files. Y/C projects only; set together.
+    - Paths to the luma (`.cvbsy`) and chroma (`.cvbsc`) channel files. Y/C projects only; set together.
 
 * `sample_encoding` (string)
     - `From metadata` (default) reads the encoding from the `.meta` sidecar.

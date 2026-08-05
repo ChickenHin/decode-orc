@@ -375,7 +375,7 @@ TEST(FiltergraphImportTest, FormatIsSetBeforeParameterDescriptorsAreFetched) {
   }
 
   const auto result = import_filtergraph_into_project(
-      presenter, "NTSC_CVBS_Source=input_path=a.composite, video_sink");
+      presenter, "NTSC_CVBS_Source=input_path=a.cvbs, video_sink");
 
   EXPECT_TRUE(result.ok);
 }
@@ -505,8 +505,8 @@ TEST(FiltergraphImportTest, ConflictingVideoFormatsFailWithoutMutation) {
 
   const auto result = import_filtergraph_into_project(
       presenter,
-      "NTSC_CVBS_Source=input_path=a.composite[x]; "
-      "PAL_CVBS_Source=input_path=b.composite[y]; [x][y] video_sink");
+      "NTSC_CVBS_Source=input_path=a.cvbs[x]; "
+      "PAL_CVBS_Source=input_path=b.cvbs[y]; [x][y] video_sink");
 
   EXPECT_FALSE(result.ok);
 }

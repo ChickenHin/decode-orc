@@ -206,7 +206,7 @@ void run_roundtrip(orc::VideoSystem system, size_t frame_count,
   ASSERT_TRUE(write_result.success) << write_result.status_message;
   EXPECT_EQ(write_result.frames_written, frame_count);
 
-  EXPECT_TRUE(std::filesystem::exists(base + ".composite"));
+  EXPECT_TRUE(std::filesystem::exists(base + ".cvbs"));
   ASSERT_TRUE(std::filesystem::exists(base + ".meta"));
   // Single-digit channel pair naming (CVBS spec v1.4.0); the legacy
   // two-digit names must not appear.
@@ -227,7 +227,7 @@ void run_roundtrip(orc::VideoSystem system, size_t frame_count,
 
   // --- Read back with the real cvbs_source stage ---
   const std::map<std::string, orc::ParameterValue> parameters{
-      {"input_path", base + ".composite"}};
+      {"input_path", base + ".cvbs"}};
   ASSERT_TRUE(source.set_parameters(parameters));
 
   orc::ObservationContext observation_context;

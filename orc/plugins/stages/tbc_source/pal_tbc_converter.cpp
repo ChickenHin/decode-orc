@@ -19,31 +19,21 @@ namespace orc {
 // Level mapping
 // ---------------------------------------------------------------------------
 
-int16_t PalTBCConverter::tbc_to_cvbs(uint16_t tbc_sample, int32_t tbc_blanking,
-                                     int32_t tbc_white) {
-  // EBU Tech. 3280-E: linear mapping from TBC 16-bit domain to CVBS_U10_4FSC.
-  // No output clamping — headroom outside [kPalSyncTip, kPalPeak] is preserved.
-  const double n =
-      static_cast<double>(static_cast<int32_t>(tbc_sample) - tbc_blanking) /
-      static_cast<double>(tbc_white - tbc_blanking);
-  const double cvbs =
-      n * static_cast<double>(kPalWhite - kPalBlanking) + kPalBlanking;
-  return static_cast<int16_t>(std::lround(cvbs));
-}
+// tbc_to_cvbs lives in the header — see the note there on why.
 
 // ---------------------------------------------------------------------------
 // Private helpers: linear interpolation of extra PAL samples
 // ---------------------------------------------------------------------------
 
-// Append 2 linearly-interpolated bridge samples at t=1/3 and t=2/3.
+// Write 2 linearly-interpolated bridge samples at t=1/3 and t=2/3 to |dst|.
 // EBU Tech. 3280-E §1.3.1: the two extra samples on lines 312 and 624 bridge
 // the signal from the last nominal sample to the first sample of the next line.
-static void append_two_extra_samples(std::vector<int16_t>& buf, int16_t last,
-                                     int16_t first_next) {
+static void write_two_extra_samples(int16_t* dst, int16_t last,
+                                    int16_t first_next) {
   const int32_t a = static_cast<int32_t>(last);
   const int32_t b = static_cast<int32_t>(first_next);
-  buf.push_back(static_cast<int16_t>((2 * a + b) / 3));
-  buf.push_back(static_cast<int16_t>((a + 2 * b) / 3));
+  dst[0] = static_cast<int16_t>((2 * a + b) / 3);
+  dst[1] = static_cast<int16_t>((a + 2 * b) / 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -75,60 +65,44 @@ std::vector<int16_t> PalTBCConverter::assemble_frame(
         "PalTBCConverter::assemble_frame: unexpected field sample counts");
   }
 
-  // Pre-convert all field samples to CVBS domain.
-  std::vector<int16_t> cvbs1(expected_field1);
-  std::vector<int16_t> cvbs2(expected_field2);
+  // Flat frame buffer: [CVBS field 1 (313 lines)] [CVBS field 2 (312 lines)]
+  // with 2 extra interpolated samples appended to the last line of each field
+  // (frame-flat lines 312 and 624) per EBU Tech. 3280-E §1.3.1.
+  //
+  // Each field is converted straight into this buffer through a cursor.
+  // Converting into a per-field buffer first and copying it in line by line
+  // cost a value-initialising memset of both (~1.4 MB, overwritten
+  // immediately) plus a second full pass over the frame through 625 range
+  // inserts, and the line loops did no reordering that would have justified
+  // it. The output length is fixed, so a cursor also avoids push_back's
+  // per-sample capacity check.
+  std::vector<int16_t> frame(static_cast<size_t>(kPalFrameSamples));
+  int16_t* dst = frame.data();
 
-  for (size_t i = 0; i < expected_field1; ++i) {
-    cvbs1[i] = tbc_to_cvbs(tbc_field1[i], tbc_blanking, tbc_white);
-  }
-  for (size_t i = 0; i < expected_field2; ++i) {
-    cvbs2[i] = tbc_to_cvbs(tbc_field2[i], tbc_blanking, tbc_white);
-  }
-
-  // Build flat frame buffer: [CVBS field 1 (313 lines)] [CVBS field 2 (312
-  // lines)] with 2 extra interpolated samples appended to the last line of
-  // each field (frame-flat lines 312 and 624) per EBU Tech. 3280-E §1.3.1.
-  std::vector<int16_t> frame;
-  frame.reserve(static_cast<size_t>(kPalFrameSamples));
+  // Level map built once for the whole frame — the source levels are constant
+  // across it, so the division belongs here and not in the sample loops.
+  const TbcLevelScale levels = level_scale(tbc_blanking, tbc_white);
 
   // ---- CVBS field 1: sourced from TBC field 1 (313 lines, odd-scan) ----
-  for (int32_t line = 0; line < kField1Lines; ++line) {
-    const size_t src_start =
-        static_cast<size_t>(line) * static_cast<size_t>(kLineWidth);
-
-    frame.insert(
-        frame.end(), cvbs1.begin() + static_cast<ptrdiff_t>(src_start),
-        cvbs1.begin() + static_cast<ptrdiff_t>(
-                            src_start + static_cast<size_t>(kLineWidth)));
-
-    // Frame-flat line 312 (last of field 1) gets 2 extra bridge samples.
-    if (line == kField1Lines - 1) {
-      const int16_t last_this =
-          cvbs1[src_start + static_cast<size_t>(kLineWidth) - 1];
-      const int16_t first_next = cvbs2[0];  // first sample of CVBS field 2
-      append_two_extra_samples(frame, last_this, first_next);
-    }
+  for (size_t i = 0; i < expected_field1; ++i) {
+    dst[i] = levels.map(tbc_field1[i]);
   }
+  dst += expected_field1;
+
+  // Frame-flat line 312 (last of field 1) gets 2 bridge samples toward the
+  // first sample of field 2.
+  write_two_extra_samples(dst, dst[-1], levels.map(tbc_field2[0]));
+  dst += 2;
 
   // ---- CVBS field 2: sourced from TBC field 2 (312 lines, even-scan) ----
-  for (int32_t line = 0; line < kField2Lines; ++line) {
-    const size_t src_start =
-        static_cast<size_t>(line) * static_cast<size_t>(kLineWidth);
-
-    frame.insert(
-        frame.end(), cvbs2.begin() + static_cast<ptrdiff_t>(src_start),
-        cvbs2.begin() + static_cast<ptrdiff_t>(
-                            src_start + static_cast<size_t>(kLineWidth)));
-
-    // Frame-flat line 624 (last of field 2) gets 2 extra bridge samples.
-    // No following line in this frame; bridge toward the last sample itself.
-    if (line == kField2Lines - 1) {
-      const int16_t last_this =
-          cvbs2[src_start + static_cast<size_t>(kLineWidth) - 1];
-      append_two_extra_samples(frame, last_this, last_this);
-    }
+  for (size_t i = 0; i < expected_field2; ++i) {
+    dst[i] = levels.map(tbc_field2[i]);
   }
+  dst += expected_field2;
+
+  // Frame-flat line 624 (last of field 2) gets 2 extra bridge samples. No
+  // following line in this frame; bridge toward the last sample itself.
+  write_two_extra_samples(dst, dst[-1], dst[-1]);
 
   return frame;
 }

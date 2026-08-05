@@ -450,7 +450,7 @@ dag:
       parameters:
         input_path:
           type: string
-          value: "/path/to/file.composite"
+          value: "/path/to/file.cvbs"
   edges: []
 )yaml";
 
@@ -491,7 +491,7 @@ dag:
       parameters:
         input_path:
           type: string
-          value: "/path/to/file.composite"
+          value: "/path/to/file.cvbs"
   edges: []
 )yaml";
 
@@ -643,7 +643,7 @@ dag:
       parameters:
         input_path:
           type: string
-          value: "/path/to/file.composite"
+          value: "/path/to/file.cvbs"
   edges: []
 )yaml";
 

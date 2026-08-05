@@ -10,7 +10,7 @@ The Quick Project feature provides the fastest way to get started with decoding 
 
 - Open **File** → **Quick Project...**
 - A file dialog will open asking you to select a video file
-- Choose a `.tbc`, `.tbcc`, or `.tbcy` file (TBC captures), or a `.composite`, `.y`, or `.c` file (CVBS captures) from your system
+- Choose a `.tbc`, `.tbcc`, or `.tbcy` file (TBC captures), or a `.cvbs`, `.cvbsy`, or `.cvbsc` file (CVBS captures) from your system
 - The application will automatically:
     - Detect the video format based on the file metadata (`.tbc.db` for TBC, `.meta` for CVBS)
     - Create a new project
@@ -49,8 +49,8 @@ The application supports the following video file formats:
 
 - `.tbc` - Composite TBC video files
 - `.tbcy` / `.tbcc` - Y/C TBC video files (luma and chroma; both files required as a pair)
-- `.composite` - Composite CVBS video files
-- `.y` / `.c` - Y/C CVBS video files (both files required as a pair)
+- `.cvbs` - Composite CVBS video files
+- `.cvbsy` / `.cvbsc` - Y/C CVBS video files (both files required as a pair)
 
 ### Tips
 

@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -156,8 +157,10 @@ class IObservationTaskRunner {
    * @param fingerprint  Provenance used to key stored records.
    * @param frame_id     Frame to observe.
    * @param observer_ids Requested observer set. Advisory: an implementation
-   *                     may observe the full standard set and rely on the
-   *                     store's read-through to skip already-present records.
+   *                     may observe the full standard set (less observers
+   *                     inapplicable to the node's video system, per
+   *                     standard_observer_applies) and rely on the store's
+   *                     read-through to skip already-present records.
    * @return True when the frame was actually computed (rendered/observed);
    *         false when every requested record was already stored and the call
    *         was a no-op. Drives the workload's computed-vs-checked split so
@@ -243,6 +246,11 @@ class IObservationSchedulingPolicy {
  * work preempts prefetch preempts sweep; within a class, FIFO. Stateful items
  * are observed in ascending frame order.
  *
+ * Enqueued work is deduplicated against what is already queued or in flight for
+ * the same node + fingerprint, so overlapping plans (a prefetch window
+ * re-planned on every preview move) cannot make several workers render the same
+ * frame.
+ *
  * DAG changes: on_dag_changed() atomically adopts the new fingerprint map,
  * drops every queued item whose node fingerprint no longer matches, and aborts
  * the in-flight item if it became stale. Requeuing new work against the new map
@@ -324,9 +332,12 @@ class ObservationScheduler {
   // ---- Direct submission ---------------------------------------------------
 
   /// Enqueue one work item. Ignored (dropped) if the scheduler is stopping.
+  /// Frames already queued or in flight for the same node + fingerprint at an
+  /// equal or higher priority are dropped from the item first; an item every
+  /// frame of which is already pending enqueues nothing.
   void submit(ObservationWorkItem item);
 
-  /// Enqueue a batch of work items in order.
+  /// Enqueue a batch of work items in order, each deduplicated as in submit().
   void submit_batch(std::vector<ObservationWorkItem> items);
 
   // ---- Policy-driven events ------------------------------------------------
@@ -410,6 +421,10 @@ class ObservationScheduler {
     bool has_in_flight = false;
     NodeID in_flight_node;
     NodeFingerprint in_flight_fingerprint;
+    // Frame range and priority of the in-flight item, so enqueue-time
+    // deduplication can see work a worker has already taken off the queue.
+    FrameIDRange in_flight_frames;
+    ObservationPriority in_flight_priority = ObservationPriority::kSweep;
     // DAG generation this worker's runner has adopted; lags dag_generation_
     // until the worker applies the pending update before its next item.
     std::uint64_t applied_generation = 0;
@@ -447,6 +462,30 @@ class ObservationScheduler {
 
   void enqueue_locked(ObservationWorkItem item);
   void purge_stale_locked();
+
+  /**
+   * @brief Sub-ranges of @p item's frames that no pending work already covers.
+   *
+   * Overlapping plans are the norm: a playing preview re-plans its prefetch
+   * window on every frame advance, so the same not-yet-observed frames would
+   * otherwise be enqueued again on each move and rendered several times over by
+   * different workers. Coverage is counted from queued items and from items a
+   * worker has already taken in flight, matched on node + fingerprint (a
+   * different fingerprint is different content, never a duplicate).
+   *
+   * Only work at an equal or higher priority suppresses: a queued sweep must
+   * never swallow a prefetch or interactive request for the same frame, or that
+   * frame would inherit the sweep's latency.
+   *
+   * Returns the whole range when nothing overlaps, and an empty vector when the
+   * item is fully covered. Caller holds mutex_.
+   */
+  std::vector<FrameIDRange> uncovered_ranges_locked(
+      const ObservationWorkItem& item) const;
+
+  // Drop frames already pending, then chunk and enqueue what remains. Caller
+  // holds mutex_.
+  void submit_item_locked(const ObservationWorkItem& item);
 
   ProgressCallback progress_callback() const;
   CompletionCallback completion_callback() const;
@@ -558,6 +597,17 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
   // pre-check the store and skip rendering a frame whose observations are all
   // already present (e.g. computed by a parallel chunk covering the same node).
   std::vector<std::pair<std::string, std::string>> observer_keys_;
+  // Per-node subsets of observer_keys_ applicable to the node's video system
+  // (standard_observer_applies), computed on first use — the observer pass
+  // writes no records for inapplicable observers, so the fast path must not
+  // demand their keys. Single worker thread by contract (no locking); cleared
+  // on update_dag().
+  std::unordered_map<NodeID, std::vector<std::pair<std::string, std::string>>>
+      node_observer_keys_;
+
+  // Cached lookup into node_observer_keys_, filtering on first use.
+  const std::vector<std::pair<std::string, std::string>>& observer_keys_for(
+      NodeID node_id);
 };
 
 /**
@@ -565,8 +615,9 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
  *        changed-node re-observation.
  *
  * Emits ONE work item per (node, range) covering the full observer set. The
- * production runner observes the complete standard set per frame regardless of
- * a work item's observer_ids (each observer is constructed fresh per frame, so
+ * production runner observes the complete standard set applicable to the
+ * node's video system per frame regardless of a work item's observer_ids
+ * (each observer is constructed fresh per frame, so
  * stored records never depend on processing order); a separate ascending-order
  * item for the stateful observers would double the enqueued workload and race
  * the chunked items into rendering the same frames twice.

@@ -27,6 +27,11 @@ class WhiteFlagObserver : public Observer {
   std::string observer_name() const override { return "WhiteFlagObserver"; }
   std::string observer_version() const override { return "1.0.0"; }
 
+  // LaserDisc white flag lives on NTSC line 11 only.
+  bool applies_to(const SourceParameters& params) const override {
+    return params.system == VideoSystem::NTSC;
+  }
+
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
 

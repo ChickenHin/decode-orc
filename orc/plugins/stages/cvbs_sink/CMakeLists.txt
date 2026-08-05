@@ -1,6 +1,6 @@
 # CVBS Sink Stage Plugin
 #
-# Writes CVBS file-format family output (.composite or .y/.c payload, .meta
+# Writes CVBS file-format family output (.cvbs or .cvbsy/.cvbsc payload, .meta
 # sidecar, and dropout/audio/EFM/AC3 extension sidecars).
 #
 # SPDX-License-Identifier: GPL-3.0-or-later

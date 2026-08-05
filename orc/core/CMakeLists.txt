@@ -80,6 +80,10 @@ add_library(orc-core SHARED
     # Provenance-keyed observation store (survives DAG rebuilds)
     observation_store.cpp
 
+    # Read-through context over the store (per-field lazy loading for
+    # triggered sinks)
+    store_backed_observation_context.cpp
+
     # SQLite-backed observation sidecar (survives application restarts)
     sqlite_observation_persistence.cpp
 

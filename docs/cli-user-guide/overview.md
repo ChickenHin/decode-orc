@@ -171,7 +171,7 @@ orc-cli \
 The same thing with short options and a CVBS source:
 
 ```bash
-orc-cli -i "NTSC_CVBS_Source=input_path=capture.composite" -o "video_sink=output_path=capture.mp4"
+orc-cli -i "NTSC_CVBS_Source=input_path=capture.cvbs" -o "video_sink=output_path=capture.mp4"
 ```
 
 Any of the three may be omitted, but at least one must be non-empty.

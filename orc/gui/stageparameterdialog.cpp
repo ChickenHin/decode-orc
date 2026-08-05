@@ -426,7 +426,8 @@ void StageParameterDialog::build_ui(
                 if (current_path.isEmpty()) return;
 
                 // Determine the extension pair and strip it to get the base
-                // path. tbc_source uses .tbcy/.tbcc; CVBS source uses .y/.c.
+                // path. tbc_source uses .tbcy/.tbcc; CVBS source uses
+                // .cvbsy/.cvbsc.
                 QString base_path = current_path;
                 QString y_ext, c_ext;
                 if (base_path.endsWith(".tbcy", Qt::CaseInsensitive) ||
@@ -434,11 +435,11 @@ void StageParameterDialog::build_ui(
                   base_path = base_path.left(base_path.length() - 5);
                   y_ext = ".tbcy";
                   c_ext = ".tbcc";
-                } else if (base_path.endsWith(".y", Qt::CaseInsensitive) ||
-                           base_path.endsWith(".c", Qt::CaseInsensitive)) {
-                  base_path = base_path.left(base_path.length() - 2);
-                  y_ext = ".y";
-                  c_ext = ".c";
+                } else if (base_path.endsWith(".cvbsy", Qt::CaseInsensitive) ||
+                           base_path.endsWith(".cvbsc", Qt::CaseInsensitive)) {
+                  base_path = base_path.left(base_path.length() - 6);
+                  y_ext = ".cvbsy";
+                  c_ext = ".cvbsc";
                 } else {
                   y_ext = ".tbcy";
                   c_ext = ".tbcc";

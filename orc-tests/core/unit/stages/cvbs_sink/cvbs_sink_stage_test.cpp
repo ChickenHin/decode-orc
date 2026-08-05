@@ -89,7 +89,7 @@ TEST(CVBSSinkStageTest, Descriptor_OutputPathIsCompositeFile) {
   const auto* desc = find_descriptor(descriptors, "output_path");
   ASSERT_NE(desc, nullptr);
   EXPECT_EQ(desc->type, orc::ParameterType::FILE_PATH);
-  EXPECT_EQ(desc->file_extension_hint, ".composite");
+  EXPECT_EQ(desc->file_extension_hint, ".cvbs");
   EXPECT_TRUE(desc->constraints.required);
   ASSERT_TRUE(desc->constraints.default_value.has_value());
   EXPECT_EQ(std::get<std::string>(*desc->constraints.default_value), "");
@@ -126,13 +126,13 @@ TEST(CVBSSinkStageTest, Descriptor_OutputPathHintFollowsProjectType) {
   const auto* composite_desc =
       find_descriptor(composite_descriptors, "output_path");
   ASSERT_NE(composite_desc, nullptr);
-  EXPECT_EQ(composite_desc->file_extension_hint, ".composite");
+  EXPECT_EQ(composite_desc->file_extension_hint, ".cvbs");
 
   const auto yc_descriptors = stage.get_parameter_descriptors(
       orc::VideoSystem::PAL, orc::SourceType::YC);
   const auto* yc_desc = find_descriptor(yc_descriptors, "output_path");
   ASSERT_NE(yc_desc, nullptr);
-  EXPECT_EQ(yc_desc->file_extension_hint, ".y");
+  EXPECT_EQ(yc_desc->file_extension_hint, ".cvbsy");
 }
 
 TEST(CVBSSinkStageTest, Descriptor_CaptureNotesIsOptionalString) {
@@ -168,7 +168,7 @@ TEST(CVBSSinkStageTest, Trigger_FailsWhenInputIsNotVideoFrameRepresentation) {
   MockObservationContext observation_context;
 
   const bool result =
-      stage.trigger({nullptr}, {{"output_path", std::string("out.composite")}},
+      stage.trigger({nullptr}, {{"output_path", std::string("out.cvbs")}},
                     observation_context);
 
   EXPECT_FALSE(result);
@@ -200,7 +200,7 @@ TEST(CVBSSinkStageTest, Trigger_FailsWithoutCallingDepsOnUnknownEncoding) {
 
   const bool result =
       stage.trigger({vfr},
-                    {{"output_path", std::string("out.composite")},
+                    {{"output_path", std::string("out.cvbs")},
                      {"sample_encoding", std::string("RAW_S16_40M")}},
                     observation_context);
 
@@ -229,13 +229,12 @@ TEST(CVBSSinkStageTest, Trigger_PassesDefaultConfigToDeps) {
         return orc::CVBSSinkWriteResult{true, 42, "Success: 42 frames written"};
       });
 
-  const bool result =
-      stage.trigger({vfr}, {{"output_path", std::string("out.composite")}},
-                    observation_context);
+  const bool result = stage.trigger(
+      {vfr}, {{"output_path", std::string("out.cvbs")}}, observation_context);
 
   EXPECT_TRUE(result);
   EXPECT_EQ(stage.get_trigger_status(), "Success: 42 frames written");
-  EXPECT_EQ(seen.output_base_path, "out.composite");
+  EXPECT_EQ(seen.output_base_path, "out.cvbs");
   EXPECT_EQ(seen.sample_encoding, orc::CVBSSampleEncoding::U10_4FSC);
   EXPECT_EQ(seen.signal_type, "composite");
   EXPECT_EQ(seen.capture_notes, "");
@@ -314,9 +313,8 @@ TEST(CVBSSinkStageTest, Trigger_UsesDepsSeamAndPropagatesFailure) {
       .WillOnce(
           Return(orc::CVBSSinkWriteResult{false, 0, "Cancelled by user"}));
 
-  const bool result =
-      stage.trigger({vfr}, {{"output_path", std::string("out.composite")}},
-                    observation_context);
+  const bool result = stage.trigger(
+      {vfr}, {{"output_path", std::string("out.cvbs")}}, observation_context);
 
   EXPECT_FALSE(result);
   EXPECT_EQ(stage.get_trigger_status(), "Cancelled by user");
@@ -421,12 +419,17 @@ TEST(CVBSSinkEncodeTest, EncodeS164FSC_UsesBlankingOffsetAndScalesBy32) {
 }
 
 TEST(CVBSSinkEncodeTest, DeriveOutputBase_StripsKnownPayloadExtensions) {
-  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.composite"), "/tmp/out");
-  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.y"), "/tmp/out");
-  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.c"), "/tmp/out");
   EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.cvbs"), "/tmp/out");
+  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.cvbsy"), "/tmp/out");
+  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.cvbsc"), "/tmp/out");
   EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out"), "/tmp/out");
   EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.meta"), "/tmp/out.meta");
+  // Only the current payload extensions are stripped; the superseded ones are
+  // left in place as an ordinary part of the base name.
+  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.composite"),
+            "/tmp/out.composite");
+  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.y"), "/tmp/out.y");
+  EXPECT_EQ(orc::derive_cvbs_output_base("/tmp/out.c"), "/tmp/out.c");
 }
 
 // ---------------------------------------------------------------------------

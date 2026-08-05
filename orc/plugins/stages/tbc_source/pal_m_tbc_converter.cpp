@@ -18,18 +18,7 @@ namespace orc {
 // Level mapping
 // ---------------------------------------------------------------------------
 
-int16_t PalMTBCConverter::tbc_to_cvbs(uint16_t tbc_sample, int32_t tbc_blanking,
-                                      int32_t tbc_white) {
-  // ITU-R BT.1700-1 Annex 1 Part B: PAL_M uses NTSC signal levels.
-  // Linear mapping: no output clamping — headroom is preserved.
-  const double n =
-      static_cast<double>(static_cast<int32_t>(tbc_sample) - tbc_blanking) /
-      static_cast<double>(tbc_white - tbc_blanking);
-  // kNtscWhite and kNtscBlanking apply to PAL_M (identical numeric values).
-  const double cvbs =
-      n * static_cast<double>(kNtscWhite - kNtscBlanking) + kNtscBlanking;
-  return static_cast<int16_t>(std::lround(cvbs));
-}
+// tbc_to_cvbs lives in the header — see the note there on why.
 
 // ---------------------------------------------------------------------------
 // Frame assembly
@@ -61,16 +50,25 @@ std::vector<int16_t> PalMTBCConverter::assemble_frame(
         "PalMTBCConverter::assemble_frame: unexpected field sample counts");
   }
 
-  std::vector<int16_t> frame;
-  frame.reserve(static_cast<size_t>(kPalMFrameSamples));
+  // Sized up front and written through a cursor rather than push_back: the
+  // output length is fixed, so the per-sample capacity check buys nothing.
+  std::vector<int16_t> frame(static_cast<size_t>(kPalMFrameSamples));
+  int16_t* dst = frame.data();
+
+  // Level map built once for the whole frame — the source levels are
+  // constant across it, so the division belongs here and not in the
+  // sample loops.
+  const TbcLevelScale levels = level_scale(tbc_blanking, tbc_white);
 
   // VFR field 1 (top, 263 lines) ← TBC field 1 (odd-scan, first temporal)
-  for (const uint16_t s : tbc_field1) {
-    frame.push_back(tbc_to_cvbs(s, tbc_blanking, tbc_white));
+  for (size_t i = 0; i < exp_f1; ++i) {
+    dst[i] = levels.map(tbc_field1[i]);
   }
+  dst += exp_f1;
+
   // VFR field 2 (bottom, 262 lines) ← TBC field 2 (even-scan, second temporal)
-  for (const uint16_t s : tbc_field2) {
-    frame.push_back(tbc_to_cvbs(s, tbc_blanking, tbc_white));
+  for (size_t i = 0; i < exp_f2; ++i) {
+    dst[i] = levels.map(tbc_field2[i]);
   }
 
   return frame;
