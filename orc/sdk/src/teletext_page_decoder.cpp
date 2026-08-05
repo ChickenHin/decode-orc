@@ -348,6 +348,20 @@ void TeletextPageDecoder::terminate_page(int transmission_magazine,
   }
   state.page_open = false;
 
+  // Rendering the snapshot is the expensive part of closing a page — with a
+  // squasher attached it votes over every stored copy of all 24 rows — and a
+  // header packet closes a page every few dozen packets for the whole of a
+  // recording. Skip it when nothing will consume it: no page callback, and
+  // the closed page is not the watched subtitle page (the only page
+  // subtitle_page_completed() acts on).
+  const bool watched_subtitle_page =
+      subtitle_filter_.has_value() &&
+      displayed_magazine(transmission_magazine) == subtitle_filter_->first &&
+      state.page_number == subtitle_filter_->second;
+  if (page_callback_ == nullptr && !watched_subtitle_page) {
+    return;
+  }
+
   TeletextPageSnapshot snapshot = render_snapshot(transmission_magazine, state);
   snapshot.transmission_complete = transmission_complete;
   if (page_callback_) {

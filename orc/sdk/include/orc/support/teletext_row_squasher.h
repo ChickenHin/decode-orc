@@ -173,6 +173,13 @@ class TeletextRowSquasher {
     std::vector<TeletextRowBytes> copies;
     std::vector<TeletextRowConfidence> confidences;
     std::vector<int64_t> sources;
+    // Insertion order of each slot. Once the copy bound is reached the oldest
+    // slot is overwritten in place (erasing the front of the parallel vectors
+    // would move every later element on every saturated add), so slot order no
+    // longer says which copy is newest — this does. A replaced copy keeps its
+    // sequence number: re-reading a line is not a new transmission.
+    std::vector<uint64_t> seq;
+    uint64_t next_seq = 0;
   };
   struct PageRows {
     // Index 0 is unused: display rows are numbered from 1 (§9.3.2).

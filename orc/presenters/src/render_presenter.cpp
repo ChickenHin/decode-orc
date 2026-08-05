@@ -48,6 +48,7 @@
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
 #include "../core/include/sqlite_observation_persistence.h"
+#include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
 #include "project_presenter.h"
@@ -1148,74 +1149,32 @@ class RenderPresenter::Impl {
     }
   }
 
-  // Phase 5.3: pre-load a triggered sink's ObservationContext with observations
-  // already held in the provenance-keyed store, so the sink can skip
-  // re-observing covered frames. @p input_node is the node whose output VFR the
-  // sink observes (its content keys the stored records). Stateless observers
-  // are pre-loaded per frame; stateful observers all-or-nothing, so a sink's
-  // per-frame skip can never break a cross-frame stream's continuity.
-  void preloadStoredObservations(NodeID input_node,
-                                 const orc::VideoFrameRepresentation* vfr,
-                                 orc::ObservationContext& ctx) const {
+  // Phase 5.3 (lazy read-through): wrap a triggered sink's ObservationContext
+  // in a store-backed context that materialises each field's stored records on
+  // the first access, so the sink can skip re-observing covered frames without
+  // the whole recording being loaded into memory up front (the eager pre-load
+  // this replaces peaked at GBs on a 600k-frame source). @p input_node is the
+  // node whose output VFR the sink observes (its content keys the stored
+  // records). Stateless observers load per field; stateful observers
+  // all-or-nothing, so a sink's per-frame skip can never break a cross-frame
+  // stream's continuity. Returns nullopt when there is nothing to read
+  // through, in which case the caller passes the inner context unchanged.
+  std::optional<orc::StoreBackedObservationContext> makeStoreBackedContext(
+      NodeID input_node, const orc::VideoFrameRepresentation* vfr,
+      orc::ObservationContext& inner) const {
     if (!obs_store_ || vfr == nullptr) {
-      return;
+      return std::nullopt;
     }
     const orc::NodeFingerprint fingerprint = fingerprintOf(input_node);
     if (fingerprint.value.empty()) {
-      return;
+      return std::nullopt;
     }
     const orc::FrameIDRange range = vfr->frame_range();
     if (range.empty()) {
-      return;
+      return std::nullopt;
     }
-
-    const auto load_frame = [&](const orc::ObserverInfo& observer,
-                                orc::FrameID frame) {
-      const orc::FieldID top(frame * kFieldsPerFrame);
-      const orc::FieldID bottom(frame * kFieldsPerFrame + 1);
-      obs_store_->load_into({fingerprint, top, observer.id, observer.version},
-                            ctx);
-      obs_store_->load_into(
-          {fingerprint, bottom, observer.id, observer.version}, ctx);
-    };
-
-    for (const auto& observer : observers_) {
-      if (observer.stateless) {
-        for (orc::FrameID frame = range.first;; ++frame) {
-          load_frame(observer, frame);
-          if (frame == range.last) {
-            break;
-          }
-        }
-        continue;
-      }
-
-      // Stateful: only pre-load when every frame is covered.
-      bool fully_covered = true;
-      for (orc::FrameID frame = range.first;; ++frame) {
-        const orc::FieldID top(frame * kFieldsPerFrame);
-        const orc::FieldID bottom(frame * kFieldsPerFrame + 1);
-        if (!obs_store_->has(
-                {fingerprint, top, observer.id, observer.version}) ||
-            !obs_store_->has(
-                {fingerprint, bottom, observer.id, observer.version})) {
-          fully_covered = false;
-          break;
-        }
-        if (frame == range.last) {
-          break;
-        }
-      }
-      if (!fully_covered) {
-        continue;
-      }
-      for (orc::FrameID frame = range.first;; ++frame) {
-        load_frame(observer, frame);
-        if (frame == range.last) {
-          break;
-        }
-      }
-    }
+    return std::optional<orc::StoreBackedObservationContext>(
+        std::in_place, inner, *obs_store_, fingerprint, observers_, range);
   }
 
   // Phase 5.3 (write-back): after a sink trigger computes observations, persist
@@ -1887,8 +1846,11 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
     // execute_to_node
     orc::ObservationContext& obs_context = executor->get_observation_context();
     // Fill the store in parallel with every observation the sink will read
-    // (skipping frames the background already covered), then seed the context
-    // from the store so the sink's own loop computes nothing.
+    // (skipping frames the background already covered); the sink then reads
+    // through a store-backed context that loads each field on first access,
+    // so its own loop computes nothing and peak memory follows the sink's
+    // working set rather than the recording length.
+    std::optional<orc::StoreBackedObservationContext> store_context;
     if (!target_node->input_node_ids.empty() && !inputs.empty()) {
       auto vfr =
           std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(inputs[0]);
@@ -1896,17 +1858,15 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
                                                 vfr.get(), callback)) {
         throw std::runtime_error("Trigger failed: Cancelled by user");
       }
-      // Seeding the sink's context from the store touches ~1M records on a
-      // long source; tell the progress dialog what is happening instead of
-      // sitting silent between the precompute and the sink's own reporting.
-      if (callback) {
-        callback(0, 1, "Loading cached observations…");
-      }
-      impl_->preloadStoredObservations(target_node->input_node_ids[0],
-                                       vfr.get(), obs_context);
+      store_context = impl_->makeStoreBackedContext(
+          target_node->input_node_ids[0], vfr.get(), obs_context);
     }
-    bool success =
-        trigger_stage->trigger(inputs, target_node->parameters, obs_context);
+    orc::IObservationContext& trigger_context =
+        store_context.has_value()
+            ? static_cast<orc::IObservationContext&>(*store_context)
+            : obs_context;
+    bool success = trigger_stage->trigger(inputs, target_node->parameters,
+                                          trigger_context);
 
     // Clear current trigger stage pointer
     impl_->current_trigger_stage_.store(nullptr);
@@ -2006,8 +1966,9 @@ uint64_t RenderPresenter::triggerStage(
     }
 
     orc::ObservationContext& obs_context = executor->get_observation_context();
-    // Phase 5.3: seed the context with cached observations (see the primary
-    // triggerStage overload).
+    // Phase 5.3: read cached observations through a store-backed context (see
+    // the primary triggerStage overload).
+    std::optional<orc::StoreBackedObservationContext> store_context;
     if (!target_node->input_node_ids.empty() && !inputs.empty()) {
       auto vfr =
           std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(inputs[0]);
@@ -2015,16 +1976,15 @@ uint64_t RenderPresenter::triggerStage(
                                                 vfr.get(), callback)) {
         throw std::runtime_error("Trigger failed: Cancelled by user");
       }
-      // Seeding the sink's context from the store touches ~1M records on a
-      // long source; tell the progress dialog what is happening instead of
-      // sitting silent between the precompute and the sink's own reporting.
-      if (callback) {
-        callback(0, 1, "Loading cached observations…");
-      }
-      impl_->preloadStoredObservations(target_node->input_node_ids[0],
-                                       vfr.get(), obs_context);
+      store_context = impl_->makeStoreBackedContext(
+          target_node->input_node_ids[0], vfr.get(), obs_context);
     }
-    bool success = trigger_stage->trigger(inputs, merged_params, obs_context);
+    orc::IObservationContext& trigger_context =
+        store_context.has_value()
+            ? static_cast<orc::IObservationContext&>(*store_context)
+            : obs_context;
+    bool success =
+        trigger_stage->trigger(inputs, merged_params, trigger_context);
 
     impl_->current_trigger_stage_.store(nullptr);
     impl_->trigger_active_.store(false);

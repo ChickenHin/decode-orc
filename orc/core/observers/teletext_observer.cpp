@@ -16,6 +16,7 @@
 #include <orc/support/teletext_slicer.h>
 #include <teletext_observer.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -30,9 +31,20 @@ namespace {
 constexpr size_t kFirstCandidateFieldLine = 5;
 constexpr size_t kLastCandidateFieldLine = 21;
 
-// Observation key for a candidate field line's recovered packet.
-std::string t42_key(size_t field_line) {
-  return "t42_" + std::to_string(field_line);
+// Observation key for a candidate field line's recovered packet. Built once:
+// process_frame() asks per recovered line of every field it observes.
+const std::string& t42_key(size_t field_line) {
+  static const auto keys = [] {
+    std::array<std::string,
+               kLastCandidateFieldLine - kFirstCandidateFieldLine + 1>
+        built;
+    for (size_t line = kFirstCandidateFieldLine;
+         line <= kLastCandidateFieldLine; ++line) {
+      built[line - kFirstCandidateFieldLine] = "t42_" + std::to_string(line);
+    }
+    return built;
+  }();
+  return keys[field_line - kFirstCandidateFieldLine];
 }
 
 // Observers take no configuration, so the one slicer setup here has to serve
