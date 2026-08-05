@@ -23,14 +23,14 @@ namespace orc {
 // Validated write request built by CVBSSinkStage from its parameters.
 struct CVBSSinkWriteConfig {
   // Base path for all output files (payload extension already stripped);
-  // the writer appends .composite/.y/.c, .meta, and sidecar extensions.
+  // the writer appends .cvbs/.cvbsy/.cvbsc, .meta, and sidecar extensions.
   std::string output_base_path;
 
   // Output sample encoding; recorded as sample_encoding_preset in the .meta.
   CVBSSampleEncoding sample_encoding{CVBSSampleEncoding::U10_4FSC};
 
   // Derived from the input representation (never user-selected):
-  // "composite" writes <base>.composite; "yc" writes <base>.y + <base>.c.
+  // "composite" writes <base>.cvbs; "yc" writes <base>.cvbsy + <base>.cvbsc.
   std::string signal_type{"composite"};
 
   // Free-text capture_notes for the .meta; omitted when empty.

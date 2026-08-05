@@ -269,7 +269,7 @@ void expect_user_data_error(DAGStage& stage,
 }
 
 const std::map<std::string, ParameterValue> kDefaultParams{
-    {"input_path", std::string("/fake/video.composite")}};
+    {"input_path", std::string("/fake/video.cvbs")}};
 
 }  // namespace
 
@@ -385,10 +385,10 @@ TEST(CVBSSourceStageParamTest, SetGet_InputPath_RoundTrips) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/test/video.composite")}};
+      {"input_path", std::string("/test/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   auto got = stage.get_parameters();
-  EXPECT_EQ(std::get<std::string>(got["input_path"]), "/test/video.composite");
+  EXPECT_EQ(std::get<std::string>(got["input_path"]), "/test/video.cvbs");
 }
 
 TEST(CVBSSourceStageParamTest, SetParameters_RejectsUnknownKey) {
@@ -415,7 +415,7 @@ TEST(CVBSSourceStageStatusTest, SetParameters_ShowsRed_WhenFileNotAccessible) {
   deps->input_file_valid = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")}};
+      {"input_path", std::string("/fake/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
 }
@@ -426,7 +426,7 @@ TEST(CVBSSourceStageStatusTest,
   deps->metadata_available = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")}};
+      {"input_path", std::string("/fake/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Yellow);
 }
@@ -436,7 +436,7 @@ TEST(CVBSSourceStageStatusTest,
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   NTSCCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")}};
+      {"input_path", std::string("/fake/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
 }
@@ -446,7 +446,7 @@ TEST(CVBSSourceStageStatusTest,
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("NTSC");
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")}};
+      {"input_path", std::string("/fake/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
 }
@@ -456,7 +456,7 @@ TEST(CVBSSourceStageStatusTest,
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")}};
+      {"input_path", std::string("/fake/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Green);
 }
@@ -466,7 +466,7 @@ TEST(CVBSSourceStageStatusTest,
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("NTSC");
   NTSCCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")}};
+      {"input_path", std::string("/fake/video.cvbs")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Green);
 }
@@ -477,7 +477,7 @@ TEST(CVBSSourceStageStatusTest,
   deps->metadata_available = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Green);
@@ -489,7 +489,7 @@ TEST(CVBSSourceStageStatusTest,
   deps->metadata_available = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("From metadata")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Yellow);
@@ -501,7 +501,7 @@ TEST(CVBSSourceStageStatusTest,
   deps->input_file_valid = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   ASSERT_TRUE(stage.set_parameters(p));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
@@ -583,7 +583,7 @@ TEST(CVBSSourceManualEncodingTest, LoadsWithoutMetadata) {
   deps->metadata_available = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   auto vfr = execute_and_get_vfr(stage, p);
   ASSERT_NE(vfr, nullptr);
@@ -597,7 +597,7 @@ TEST(CVBSSourceManualEncodingTest, FrameCountMeasuredFromPayloadSize) {
       static_cast<size_t>(kPalFrameSamples) * 3, kPalBlanking);
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   auto vfr = execute_and_get_vfr(stage, p);
   ASSERT_NE(vfr, nullptr);
@@ -611,7 +611,7 @@ TEST(CVBSSourceManualEncodingTest, MetadataIsIgnoredWhenManualEncodingSet) {
   deps->metadata_record.signal_state_preset = "STANDARD_RAW";
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   auto vfr = execute_and_get_vfr(stage, p);
   ASSERT_NE(vfr, nullptr);
@@ -625,7 +625,7 @@ TEST(CVBSSourceManualEncodingTest, NormalisesSelectedEncoding) {
   deps->payload_words.assign(static_cast<size_t>(kPalFrameSamples), 0u);
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_S16_4FSC")}};
   auto vfr = execute_and_get_vfr(stage, p);
   ASSERT_NE(vfr, nullptr);
@@ -638,7 +638,7 @@ TEST(CVBSSourceManualEncodingTest, RejectsUnknownManualEncoding) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("RAW_S16_40M")}};
   expect_user_data_error(stage, p, "RAW_S16_40M");
 }
@@ -648,7 +648,7 @@ TEST(CVBSSourceManualEncodingTest, FromMetadataValue_StillRequiresMetadata) {
   deps->metadata_available = false;
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("From metadata")}};
   expect_user_data_error(stage, p, "metadata");
 }
@@ -662,7 +662,7 @@ TEST(CVBSSourceManualEncodingTest, AudioWithoutMetadata_GetsDerivedName) {
       std::vector<int32_t>(1920 * 2, int32_t{0});
   PALCVBSSourceStage stage(deps);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   auto vfr = execute_and_get_vfr(stage, p);
   ASSERT_NE(vfr, nullptr);
@@ -680,7 +680,7 @@ TEST(CVBSSourceManualEncodingTest, EncodingChangeInvalidatesCache) {
   ObservationContext obs;
   auto r1 = stage.execute(inputs, kDefaultParams, obs);
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   auto r2 = stage.execute(inputs, p, obs);
   ASSERT_EQ(r1.size(), 1u);
@@ -1404,7 +1404,7 @@ TEST(CVBSSidecarAudioTest, ManualEncodingMode_DoesNotWarnAboutMissingRows) {
   std::vector<ArtifactPtr> inputs;
   ObservationContext obs;
   std::map<std::string, ParameterValue> p{
-      {"input_path", std::string("/fake/video.composite")},
+      {"input_path", std::string("/fake/video.cvbs")},
       {"sample_encoding", std::string("CVBS_U16_4FSC")}};
   auto results = stage.execute(inputs, p, obs);
   ASSERT_EQ(results.size(), 1u);

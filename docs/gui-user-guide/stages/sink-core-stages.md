@@ -131,12 +131,12 @@ For each field the stage reads the two caption bytes embedded in VBI Line 21, ac
 **Use this stage when:**
 
 * You want to archive or exchange a processed CVBS signal in the standard CVBS file format.
-* You want to produce a `.composite` or `.y`/`.c` output that can be re-opened by the CVBS Source stage.
+* You want to produce a `.cvbs` or `.cvbsy`/`.cvbsc` output that can be re-opened by the CVBS Source stage.
 * You need to write associated dropout, audio, EFM, or AC3 sidecars alongside the video.
 
 **What it does**
 
-This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.composite` file and a Y/C project as a `.y`/`.c` pair (per the CVBS file format naming convention) — Y/C cannot be derived from a composite signal, so this is not a choice. The `.meta` file records the signal type and the selected `sample_encoding_preset`, and always carries `signal_state_preset = 'STANDARD_TBC_LOCKED'`. The signal state is not user-configurable — it reflects the pipeline invariant that only locked, standard-state signals appear at this point.
+This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention) — Y/C cannot be derived from a composite signal, so this is not a choice. The `.meta` file records the signal type and the selected `sample_encoding_preset`, and always carries `signal_state_preset = 'STANDARD_TBC_LOCKED'`. The signal state is not user-configurable — it reflects the pipeline invariant that only locked, standard-state signals appear at this point.
 
 Associated sidecars are written automatically when the upstream source provides them:
 
@@ -150,7 +150,7 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 **Parameters**
 
 * `output_path` (string)
-    - Base path for output files. A trailing `.composite`, `.y`, or `.c` extension is stripped when present.
+    - Base path for output files. A trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present.
     - Required.
 
 * `sample_encoding` (string)

@@ -426,6 +426,12 @@ int main(int argc, char* argv[]) {
           ORC_LOG_INFO("Creating quick project from TBC file: {}",
                        filePath.toStdString());
           load_startup_file(filePath, true);
+        } else if (filePath.endsWith(".cvbs", Qt::CaseInsensitive) ||
+                   filePath.endsWith(".cvbsy", Qt::CaseInsensitive) ||
+                   filePath.endsWith(".cvbsc", Qt::CaseInsensitive)) {
+          ORC_LOG_INFO("Creating quick project from CVBS file: {}",
+                       filePath.toStdString());
+          load_startup_file(filePath, true);
         } else if (filePath.endsWith(".orcprj", Qt::CaseInsensitive)) {
           ORC_LOG_INFO("Opening project from command line: {}",
                        filePath.toStdString());

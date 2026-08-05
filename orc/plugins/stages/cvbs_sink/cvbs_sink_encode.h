@@ -90,12 +90,11 @@ inline uint16_t encode_cvbs_u10_sample(int16_t value,
 }
 
 // Derive the CVBS output base path (no extension) from a user-supplied
-// output path: one trailing payload extension (.composite, .y, .c) or the
-// legacy .cvbs extension is stripped when present. The sink appends
-// .composite/.y/.c and the sidecar extensions to this base.
+// output path: one trailing payload extension (.cvbs, .cvbsy, .cvbsc — CVBS
+// file format spec, File Naming Convention) is stripped when present. The
+// sink appends .cvbs/.cvbsy/.cvbsc and the sidecar extensions to this base.
 inline std::string derive_cvbs_output_base(const std::string& output_path) {
-  static const char* kStrippableExtensions[] = {".composite", ".cvbs", ".y",
-                                                ".c"};
+  static const char* kStrippableExtensions[] = {".cvbs", ".cvbsy", ".cvbsc"};
   for (const char* ext : kStrippableExtensions) {
     const std::string suffix(ext);
     if (output_path.size() > suffix.size() &&

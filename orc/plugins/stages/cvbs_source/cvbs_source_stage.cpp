@@ -1368,13 +1368,13 @@ FixedFormatCVBSSourceStage::get_parameter_descriptors(
     pd.name = "input_path";
     pd.display_name = "CVBS File Path";
     pd.description =
-        "Path to the CVBS composite data file (.composite). "
+        "Path to the CVBS composite data file (.cvbs). "
         "A <basename>.meta sidecar is required unless a sample encoding is "
         "selected manually.";
     pd.type = ParameterType::FILE_PATH;
     pd.constraints.required = false;
     pd.constraints.default_value = std::string("");
-    pd.file_extension_hint = ".composite";
+    pd.file_extension_hint = ".cvbs";
     desc.push_back(pd);
   }
 
@@ -1384,13 +1384,13 @@ FixedFormatCVBSSourceStage::get_parameter_descriptors(
       pd.name = "y_path";
       pd.display_name = "CVBS Y (Luma) File Path";
       pd.description =
-          "Path to the CVBS luma channel file (.y) for YC sources. "
+          "Path to the CVBS luma channel file (.cvbsy) for YC sources. "
           "Set together with c_path; a shared <basename>.meta sidecar is "
           "required unless a sample encoding is selected manually.";
       pd.type = ParameterType::FILE_PATH;
       pd.constraints.required = false;
       pd.constraints.default_value = std::string("");
-      pd.file_extension_hint = ".y";
+      pd.file_extension_hint = ".cvbsy";
       desc.push_back(pd);
     }
 
@@ -1399,12 +1399,12 @@ FixedFormatCVBSSourceStage::get_parameter_descriptors(
       pd.name = "c_path";
       pd.display_name = "CVBS C (Chroma) File Path";
       pd.description =
-          "Path to the CVBS chroma channel file (.c) for YC sources. "
+          "Path to the CVBS chroma channel file (.cvbsc) for YC sources. "
           "Set together with y_path.";
       pd.type = ParameterType::FILE_PATH;
       pd.constraints.required = false;
       pd.constraints.default_value = std::string("");
-      pd.file_extension_hint = ".c";
+      pd.file_extension_hint = ".cvbsc";
       desc.push_back(pd);
     }
   }
