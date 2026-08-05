@@ -441,6 +441,7 @@ orc_add_core_unit_tests(
 
         observation/observation_store_test.cpp
         observation/observation_store_persistence_test.cpp
+        observation/store_backed_observation_context_test.cpp
         observation/observation_invalidation_test.cpp
         observation/observer_pass_test.cpp
         observation/observation_scheduler_test.cpp
@@ -457,4 +458,5 @@ orc_add_core_unit_tests(
                 preview_types/preview_helpers_test.cpp
                 preview_types/preview_navigation_hint_test.cpp
                 preview_types/preview_view_registry_test.cpp
+                preview_types/node_representation_resolution_test.cpp
         )

@@ -15,6 +15,8 @@
 #include <optional>
 #include <vector>
 
+#include "tbc_level_scale.h"
+
 namespace orc {
 
 // ---------------------------------------------------------------------------
@@ -41,14 +43,30 @@ class NtscTBCConverter {
   // Level mapping
   // -------------------------------------------------------------------------
 
-  // SMPTE 244M-2003: map one TBC 16-bit unsigned sample to CVBS_U10_4FSC.
+  // SMPTE 244M-2003: the linear TBC → CVBS_U10_4FSC level map for NTSC.
   //
   // tbc_blanking / tbc_white are the 16-bit TBC-domain level values from
-  // `.tbc.json.db` (blanking_16b_ire, white_16b_ire).  No output clamping:
-  // headroom below sync tip and above peak white is preserved in the int16_t
-  // result.
+  // `.tbc.json.db` (blanking_16b_ire, white_16b_ire).  Build this once per
+  // frame and map samples through it; see tbc_level_scale.h for why the
+  // division cannot stay in the per-sample path.
+  static TbcLevelScale level_scale(int32_t tbc_blanking, int32_t tbc_white) {
+    return make_tbc_level_scale(tbc_blanking, tbc_white, kNtscBlanking,
+                                kNtscWhite);
+  }
+
+  // Map one TBC 16-bit unsigned sample to CVBS_U10_4FSC.  No output clamping:
+  // headroom below sync tip and above peak white is preserved.
+  //
+  // Convenience overload for single samples — it rebuilds the level map on
+  // every call, so never use it in a loop.
+  //
+  // Defined here, not in the .cpp: the plugins build with default symbol
+  // visibility, so an out-of-line definition is interposable and the compiler
+  // must emit a PLT call per sample — even from its own translation unit.
   static int16_t tbc_to_cvbs(uint16_t tbc_sample, int32_t tbc_blanking,
-                             int32_t tbc_white);
+                             int32_t tbc_white) {
+    return level_scale(tbc_blanking, tbc_white).map(tbc_sample);
+  }
 
   // -------------------------------------------------------------------------
   // Frame assembly

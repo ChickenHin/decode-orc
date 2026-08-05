@@ -158,9 +158,9 @@ class ICVBSSourceStageDeps {
 // without output clamping so that headroom is preserved.
 //
 // Parameters:
-//   input_path       – path to the CVBS composite data file (.composite)
-//   y_path           – path to the luma channel file (.y) for YC mode
-//   c_path           – path to the chroma channel file (.c) for YC mode
+//   input_path       – path to the CVBS composite data file (.cvbs)
+//   y_path           – path to the luma channel file (.cvbsy) for YC mode
+//   c_path           – path to the chroma channel file (.cvbsc) for YC mode
 //   sample_encoding  – "From metadata" (default) or an explicit encoding
 //
 // Audio: every <basename>_audio_0.wav … _audio_7.wav sidecar (single-digit

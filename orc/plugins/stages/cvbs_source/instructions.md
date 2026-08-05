@@ -1,6 +1,6 @@
 # CVBS Source
 
-Reads composite video from a `.composite` file (or a `.y` / `.c` pair for Y/C captures) and presents the decoded frames as a VideoFrameRepresentation for downstream stages. By default the stage detects the sample encoding and other capture details from the `.meta` SQLite sidecar; because the CVBS file format declares metadata optional, the sample encoding can also be selected manually so that sources without a sidecar can be used. All sample values are normalised to the internal 10-bit CVBS domain before passing data downstream.
+Reads composite video from a `.cvbs` file (or a `.cvbsy` / `.cvbsc` pair for Y/C captures) and presents the decoded frames as a VideoFrameRepresentation for downstream stages. By default the stage detects the sample encoding and other capture details from the `.meta` SQLite sidecar; because the CVBS file format declares metadata optional, the sample encoding can also be selected manually so that sources without a sidecar can be used. All sample values are normalised to the internal 10-bit CVBS domain before passing data downstream.
 
 ## When to use
 
@@ -12,9 +12,9 @@ The file-path parameters offered match the project's source type: a composite pr
 
 | Parameter | Meaning |
 |-----------|---------|
-| CVBS File Path (`input_path`) | Path to the composite data file (`.composite`). Composite projects only. |
-| CVBS Y (Luma) File Path (`y_path`) | Path to the luma channel file (`.y`). Y/C projects only; set together with `c_path`. |
-| CVBS C (Chroma) File Path (`c_path`) | Path to the chroma channel file (`.c`). Y/C projects only; set together with `y_path`. |
+| CVBS File Path (`input_path`) | Path to the composite data file (`.cvbs`). Composite projects only. |
+| CVBS Y (Luma) File Path (`y_path`) | Path to the luma channel file (`.cvbsy`). Y/C projects only; set together with `c_path`. |
+| CVBS C (Chroma) File Path (`c_path`) | Path to the chroma channel file (`.cvbsc`). Y/C projects only; set together with `y_path`. |
 | Sample Encoding (`sample_encoding`) | `From metadata` (default) reads the encoding from the `.meta` sidecar. Selecting `CVBS_U10_4FSC`, `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC` manually makes the sidecar optional. |
 
 The `lock_audio` parameter has been removed: the pipeline no longer has a free-running audio regime. All audio is carried as 48 kHz synchronous (frame-locked) 24-bit stereo channel pairs — the only audio format the CVBS file format specification (v1.4.0) permits.

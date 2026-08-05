@@ -1,6 +1,6 @@
 # CVBS Sink
 
-Writes processed CVBS video data to the CVBS file format for archival, interchange, or round-trip testing. The output consists of a `.composite` binary file (or `.y`/`.c` pair) and a `.meta` SQLite sidecar, and can be re-opened by the CVBS Source stage.
+Writes processed CVBS video data to the CVBS file format for archival, interchange, or round-trip testing. The output consists of a `.cvbs` binary file (or `.cvbsy`/`.cvbsc` pair) and a `.meta` SQLite sidecar, and can be re-opened by the CVBS Source stage.
 
 ## When to use
 
@@ -8,7 +8,7 @@ Use this sink at the end of a CVBS processing pipeline when you want to save the
 
 ## What it does
 
-Writes the incoming video stream using the selected sample encoding, plus a `.meta` SQLite sidecar database. The output signal type follows the project type automatically and is not user-selectable: a composite project is written as a single `.composite` file, and a Y/C project is written as a `.y`/`.c` pair (per the CVBS file format naming convention). The sidecar records the video standard preset, the selected `sample_encoding_preset`, the signal type, the frame count, and `signal_state_preset = STANDARD_TBC_LOCKED` (the signal state is fixed: only locked, standard-state signals reach a sink).
+Writes the incoming video stream using the selected sample encoding, plus a `.meta` SQLite sidecar database. The output signal type follows the project type automatically and is not user-selectable: a composite project is written as a single `.cvbs` file, and a Y/C project is written as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). The sidecar records the video standard preset, the selected `sample_encoding_preset`, the signal type, the frame count, and `signal_state_preset = STANDARD_TBC_LOCKED` (the signal state is fixed: only locked, standard-state signals reach a sink).
 
 Associated data are written automatically as sidecar files when present in the incoming stream:
 
@@ -20,7 +20,7 @@ Associated data are written automatically as sidecar files when present in the i
 ## Parameters
 
 ### output_path (file path)
-Base path for output files. The stage appends the payload extension (`.composite` for a composite project, `.y`/`.c` for a Y/C project) and `.meta` automatically; a trailing `.composite`, `.y`, or `.c` extension is stripped when present. Required.
+Base path for output files. The stage appends the payload extension (`.cvbs` for a composite project, `.cvbsy`/`.cvbsc` for a Y/C project) and `.meta` automatically; a trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present. Required.
 
 ### sample_encoding (string)
 Sample encoding of the output data, recorded as `sample_encoding_preset` in the `.meta` file. One of `CVBS_U10_4FSC` (default), `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. `CVBS_U10_4FSC` preserves the internal 10-bit domain losslessly, including headroom values outside 0–1023; the other encodings clamp to their representable domain before scaling, as required by the CVBS file format specification.

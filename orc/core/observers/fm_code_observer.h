@@ -29,6 +29,11 @@ class FmCodeObserver : public Observer {
   std::string observer_name() const override { return "FmCodeObserver"; }
   std::string observer_version() const override { return "1.0.0"; }
 
+  // LaserDisc FM code lives on NTSC line 10 only.
+  bool applies_to(const SourceParameters& params) const override {
+    return params.system == VideoSystem::NTSC;
+  }
+
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
 

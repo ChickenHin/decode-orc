@@ -153,7 +153,7 @@ void print_usage(const char* program_name) {
   std::cerr << "      --filters dropout_correct --sink "
                "video_sink=output_path=a.mp4\n";
   std::cerr << "  " << program_name
-            << " -i \"NTSC_CVBS_Source=input_path=a.composite\" -o video_sink"
+            << " -i \"NTSC_CVBS_Source=input_path=a.cvbs\" -o video_sink"
                "=output_path=a.mp4\n";
   std::cerr << "  " << program_name
             << " --source tbc_source=input_path=a.tbc --sink video_sink "

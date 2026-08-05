@@ -12,6 +12,7 @@
 #include <orc/stage/frame_id.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/observation/observation_schema.h>
+#include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <string>
@@ -72,6 +73,28 @@ class Observer {
    * @return Version string (e.g., "1.0.0")
    */
   virtual std::string observer_version() const = 0;
+
+  /**
+   * @brief Whether this observer can ever produce observations for a source
+   *
+   * Applicability is a pure function of the source's video parameters (e.g.
+   * teletext is PAL-only, FM code is NTSC-only); it must not depend on frame
+   * content. The observer pass and every coverage probe use this predicate to
+   * skip both the observer run and its per-field store records, so an
+   * observer returning false here must also produce no observations from
+   * process_frame() for the same parameters (the internal early-return stays
+   * as defence in depth).
+   *
+   * Thread-safety: must be const, side-effect free, and safe to call
+   * concurrently on a shared instance.
+   *
+   * @param params Source video parameters
+   * @return true when the observer applies to the source (the default)
+   */
+  virtual bool applies_to(const SourceParameters& params) const {
+    (void)params;
+    return true;
+  }
 
   /**
    * @brief Process a single frame and populate observation context

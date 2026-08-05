@@ -331,9 +331,20 @@ class PreviewRenderer {
   /// concurrently.
   mutable std::map<NodeID, uint64_t> first_field_offset_cache_;
 
-  /// Ensure node has been executed (execute on-demand if needed)
-  void ensure_node_executed(const NodeID& node_id,
-                            bool disable_cache = false) const;
+  /// Ensure node has been executed (execute on-demand if needed). Returns the
+  /// executor's node -> outputs map so callers that need the node's artifact
+  /// can take it from here rather than rendering a frame to get at it.
+  std::map<NodeID, std::vector<ArtifactPtr>> ensure_node_executed(
+      const NodeID& node_id, bool disable_cache = false) const;
+
+  /// The VideoFrameRepresentation at @p node_id, obtained by executing the DAG
+  /// to that node and resolving its output artifact — no frame is rendered and
+  /// no observer pass runs, because none of the callers need either. Sinks
+  /// resolve to the upstream output their edge names (see resolve_node_vfr).
+  /// Returns nullptr when the node has no representation, or when it has one
+  /// with no frame 0 (which is what the previous render-based probe reported,
+  /// and what makes get_representation_at_node() fall back upstream).
+  VideoFrameRepresentationPtr representation_at(const NodeID& node_id) const;
 
   /// Field line counts of the frame being previewed at a node, or nullopt when
   /// the node has no representation to measure.

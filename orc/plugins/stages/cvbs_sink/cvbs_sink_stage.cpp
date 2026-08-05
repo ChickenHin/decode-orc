@@ -50,7 +50,7 @@ NodeTypeInfo CVBSSinkStage::get_node_type_info() const {
       NodeType::SINK,
       "CVBSSink",
       "CVBS Sink",
-      "Writes frames to the CVBS file format (.composite or .y/.c payload, "
+      "Writes frames to the CVBS file format (.cvbs or .cvbsy/.cvbsc payload, "
       ".meta sidecar, and dropout/audio/EFM/AC3 sidecars when present)",
       1,
       1,
@@ -75,8 +75,9 @@ std::vector<ParameterDescriptor> CVBSSinkStage::get_parameter_descriptors(
   std::vector<ParameterDescriptor> descriptors;
 
   // The output signal type is not a choice: it follows the project type.
-  // A composite project writes <base>.composite; a Y/C project writes
-  // <base>.y + <base>.c (CVBS file format spec, File Naming Convention).
+  // A composite project writes <base>.cvbs; a Y/C project writes
+  // <base>.cvbsy + <base>.cvbsc (CVBS file format spec, File Naming
+  // Convention).
   const bool yc_project = (source_type == SourceType::YC);
 
   {
@@ -87,13 +88,13 @@ std::vector<ParameterDescriptor> CVBSSinkStage::get_parameter_descriptors(
         std::string(
             "Base path for the output files. The stage appends the payload "
             "extension and .meta automatically based on the project type (") +
-        (yc_project ? ".y/.c for this Y/C project"
-                    : ".composite for this composite project") +
-        "); a trailing .composite/.y/.c extension is stripped when present.";
+        (yc_project ? ".cvbsy/.cvbsc for this Y/C project"
+                    : ".cvbs for this composite project") +
+        "); a trailing .cvbs/.cvbsy/.cvbsc extension is stripped when present.";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = true;
     desc.constraints.default_value = std::string("");
-    desc.file_extension_hint = yc_project ? ".y" : ".composite";
+    desc.file_extension_hint = yc_project ? ".cvbsy" : ".cvbs";
     descriptors.push_back(desc);
   }
 
@@ -188,7 +189,7 @@ bool CVBSSinkStage::trigger(
 
     // The signal type is not user-selectable: it follows the input. A Y/C
     // project produces representations with separate channels and is written
-    // as .y/.c; a composite project is written as .composite.
+    // as .cvbsy/.cvbsc; a composite project is written as .cvbs.
     config.signal_type =
         vfr->has_separate_channels() ? kSignalTypeYC : kSignalTypeComposite;
 

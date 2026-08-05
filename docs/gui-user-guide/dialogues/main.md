@@ -54,8 +54,8 @@ When you choose **File → Quick Project…**, Orc-GUI asks you to select a vide
 
 * `.tbc` (composite TBC)
 * `.tbcc` / `.tbcy` (YC TBC; requires both files as a pair)
-* `.composite` (composite CVBS)
-* `.y` / `.c` (YC CVBS; requires both files as a pair)
+* `.cvbs` (composite CVBS)
+* `.cvbsy` / `.cvbsc` (YC CVBS; requires both files as a pair)
 
 Orc-GUI then looks for the associated metadata alongside the file:
 

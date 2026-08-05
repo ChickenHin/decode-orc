@@ -560,6 +560,175 @@ TEST(ObservationScheduler, PoolDoesNotChunkStatefulItems) {
 }
 
 // ---------------------------------------------------------------------------
+// Enqueue-time deduplication
+//
+// A playing preview re-plans its prefetch window on every frame advance, so
+// overlapping plans are routine. Without dedup the same not-yet-observed frame
+// is enqueued on each move and rendered several times over by different
+// workers.
+// ---------------------------------------------------------------------------
+
+// Frames observed, in call order.
+std::vector<FrameID> observed_frames(const MockTaskRunner& runner) {
+  std::vector<FrameID> out;
+  for (const auto& call : runner.calls()) {
+    out.push_back(call.frame);
+  }
+  return out;
+}
+
+// Contiguous-range item helper.
+ObservationWorkItem range_item(NodeID node, NodeFingerprint fingerprint,
+                               FrameID first, FrameID last,
+                               ObservationPriority priority) {
+  ObservationWorkItem item;
+  item.node_id = node;
+  item.fingerprint = std::move(fingerprint);
+  item.frames = FrameIDRange{first, last};
+  item.priority = priority;
+  return item;
+}
+
+TEST(ObservationScheduler, DropsFramesAlreadyQueuedAtTheSamePriority) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 9, ObservationPriority::kPrefetch));
+  // Overlapping window: only the leading edge (10-14) is new work.
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 5, 14, ObservationPriority::kPrefetch));
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  const auto frames = observed_frames(*runner);
+  ASSERT_EQ(frames.size(), 15u);  // 15 frames, each exactly once
+  for (FrameID f = 0; f < 15; ++f) {
+    EXPECT_EQ(frames[f], f);
+  }
+}
+
+TEST(ObservationScheduler, EnqueuesOnlyTheGapsAroundPendingWork) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  // A pending item in the middle of a later, wider request.
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 5, 6, ObservationPriority::kPrefetch));
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 9, ObservationPriority::kPrefetch));
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  auto frames = observed_frames(*runner);
+  ASSERT_EQ(frames.size(), 10u);
+  std::sort(frames.begin(), frames.end());
+  for (FrameID f = 0; f < 10; ++f) {
+    EXPECT_EQ(frames[f], f);
+  }
+}
+
+TEST(ObservationScheduler, FullyCoveredItemEnqueuesNothing) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 9, ObservationPriority::kPrefetch));
+  const std::size_t queued = scheduler->queued_count();
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 2, 5, ObservationPriority::kPrefetch));
+
+  EXPECT_EQ(scheduler->queued_count(), queued);
+
+  while (scheduler->process_one_for_testing()) {
+  }
+  EXPECT_EQ(runner->call_count(), 10u);
+}
+
+TEST(ObservationScheduler, LowerPriorityWorkNeverSuppressesUrgentWork) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  // A queued sweep must not swallow an interactive request for the same frame:
+  // that frame would inherit the sweep's latency.
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 9, ObservationPriority::kSweep));
+  scheduler->submit(
+      frame_item(NodeID(1), fp("v1"), 5, ObservationPriority::kInteractive));
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  const auto frames = observed_frames(*runner);
+  ASSERT_EQ(frames.size(), 11u);
+  EXPECT_EQ(frames.front(), 5u);  // interactive ran first
+  EXPECT_EQ(std::count(frames.begin(), frames.end(), 5u), 2);
+}
+
+TEST(ObservationScheduler, SweepIsSuppressedByPendingPrefetchOfSameFrames) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 4, 6, ObservationPriority::kPrefetch));
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 9, ObservationPriority::kSweep));
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  auto frames = observed_frames(*runner);
+  ASSERT_EQ(frames.size(), 10u);
+  std::sort(frames.begin(), frames.end());
+  for (FrameID f = 0; f < 10; ++f) {
+    EXPECT_EQ(frames[f], f);
+  }
+}
+
+TEST(ObservationScheduler, DifferentFingerprintIsNotADuplicate) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  // Same node and frames, different content identity: both must run.
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 3, ObservationPriority::kPrefetch));
+  scheduler->submit(
+      range_item(NodeID(1), fp("v2"), 0, 3, ObservationPriority::kPrefetch));
+
+  while (scheduler->process_one_for_testing()) {
+  }
+  EXPECT_EQ(runner->call_count(), 8u);
+}
+
+TEST(ObservationScheduler, DropsFramesAlreadyInFlight) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+  runner->arm_gate();  // block inside the first observe_frame
+
+  scheduler->start();
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 0, 9, ObservationPriority::kPrefetch));
+  runner->wait_until_entered(1);  // 0-9 is off the queue and in flight
+
+  // The overlapping window must still see 0-9 as pending, not as free work.
+  scheduler->submit(
+      range_item(NodeID(1), fp("v1"), 5, 14, ObservationPriority::kPrefetch));
+
+  runner->release();
+  runner->wait_until_entered(15);  // let both items drain before stopping
+  scheduler->stop();
+
+  auto frames = observed_frames(*runner);
+  ASSERT_EQ(frames.size(), 15u);
+  std::sort(frames.begin(), frames.end());
+  for (FrameID f = 0; f < 15; ++f) {
+    EXPECT_EQ(frames[f], f);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Task 4.3 — scheduling policy (scripted + default)
 // ---------------------------------------------------------------------------
 

@@ -21,9 +21,11 @@
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
 
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace orc_unit_test {
@@ -86,6 +88,55 @@ TEST(PalTBCConverterTest,
   const int16_t result = orc::PalTBCConverter::tbc_to_cvbs(
       static_cast<uint16_t>(kRefBlanking - 1000), kRefBlanking, kRefWhite);
   EXPECT_LT(result, static_cast<int16_t>(orc::kPalBlanking));
+}
+
+// The level map folds the frame-constant division into a single scale factor
+// so the per-sample path is one multiply-add (see tbc_level_scale.h). That is
+// deliberately not bit-identical to dividing per sample, so the contract the
+// implementation owes callers is an accuracy bound, not an exact value: every
+// sample must land within 1 LSB of the exact rational mapping.
+TEST(PalTBCConverterTest, LevelMapping_WithinOneLsbOfExactRational) {
+  // Nominal ld-decode levels plus off-nominal pairs, since these come from
+  // per-capture metadata and vary.
+  const std::pair<int32_t, int32_t> level_pairs[] = {{kRefBlanking, kRefWhite},
+                                                     {16384, 54016},
+                                                     {16000, 53000},
+                                                     {17200, 55000},
+                                                     {15000, 60000},
+                                                     {20000, 50000}};
+
+  for (const auto& [blanking, white] : level_pairs) {
+    const orc::TbcLevelScale levels =
+        orc::PalTBCConverter::level_scale(blanking, white);
+    const int32_t span = orc::kPalWhite - orc::kPalBlanking;
+    const int32_t den = white - blanking;
+
+    // Whole 16-bit input domain, so no sample value can hide a larger error.
+    for (int32_t sample = 0; sample <= 0xFFFF; ++sample) {
+      // Exact rational mapping, rounded half away from zero, in integers.
+      const int64_t num = static_cast<int64_t>(sample - blanking) * span;
+      const int64_t exact = (num >= 0 ? (2 * num + den) / (2 * den)
+                                      : -((-2 * num + den) / (2 * den))) +
+                            orc::kPalBlanking;
+      const int32_t mapped = levels.map(static_cast<uint16_t>(sample));
+      ASSERT_LE(std::abs(mapped - static_cast<int32_t>(exact)), 1)
+          << "sample " << sample << " with blanking=" << blanking
+          << " white=" << white << ": mapped " << mapped << ", exact " << exact;
+    }
+  }
+}
+
+// The single-sample convenience overload and the map used for whole frames
+// must agree, or a spot check would disagree with the frame it came from.
+TEST(PalTBCConverterTest, LevelMapping_SingleSampleOverloadMatchesLevelScale) {
+  const orc::TbcLevelScale levels =
+      orc::PalTBCConverter::level_scale(kRefBlanking, kRefWhite);
+  for (int32_t sample = 0; sample <= 0xFFFF; sample += 7) {
+    EXPECT_EQ(orc::PalTBCConverter::tbc_to_cvbs(static_cast<uint16_t>(sample),
+                                                kRefBlanking, kRefWhite),
+              levels.map(static_cast<uint16_t>(sample)))
+        << "sample " << sample;
+  }
 }
 
 // ============================================================================

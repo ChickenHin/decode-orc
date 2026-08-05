@@ -26,8 +26,9 @@ void FmCodeObserver::process_frame(
   }
   const auto& vp = vp_opt.value();
 
-  // FM code is NTSC-only
-  if (vp.system != VideoSystem::NTSC) {
+  // FM code is NTSC-only (see applies_to()); callers normally skip the
+  // observer entirely, this early-return is defence in depth.
+  if (!applies_to(vp)) {
     return;
   }
 

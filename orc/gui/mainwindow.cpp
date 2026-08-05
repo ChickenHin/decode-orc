@@ -1255,10 +1255,10 @@ void MainWindow::onQuickProject() {
   // Open file dialog to select TBC, TBCC, TBCY, or CVBS file
   QString filename = QFileDialog::getOpenFileName(
       this, "Quick Project - Select Video File", getLastSourceDirectory(),
-      "Video Files (*.tbc *.tbcc *.tbcy *.composite *.y *.c);;"
+      "Video Files (*.tbc *.tbcc *.tbcy *.cvbs *.cvbsy *.cvbsc);;"
       "TBC Files (*.tbc);;TBCC Files (*.tbcc);;TBCY Files (*.tbcy);;"
-      "CVBS Composite Files (*.composite);;"
-      "CVBS YC Files (*.y *.c);;All Files (*)");
+      "CVBS Composite Files (*.cvbs);;"
+      "CVBS YC Files (*.cvbsy *.cvbsc);;All Files (*)");
 
   if (filename.isEmpty()) {
     ORC_LOG_DEBUG("Quick project creation cancelled");
@@ -1665,37 +1665,28 @@ void MainWindow::quickProject(const QString& filename) {
       return;
     }
     secondary_file = tbcc_path.toStdString();
-  } else if (ext == "composite") {
+  } else if (ext == "cvbs") {
     is_cvbs = true;
     source_type = orc::SourceType::Composite;
-  } else if (ext == "y") {
+  } else if (ext == "cvbsy" || ext == "cvbsc") {
+    // Dual-file YC CVBS pair (CVBS file format spec, File Naming Convention).
     is_cvbs = true;
     source_type = orc::SourceType::YC;
-    QString c_path = base_path + ".c";
-    if (!QFileInfo::exists(c_path)) {
+    const bool selected_luma = (ext == "cvbsy");
+    const QString companion_path =
+        base_path + (selected_luma ? ".cvbsc" : ".cvbsy");
+    if (!QFileInfo::exists(companion_path)) {
       QMessageBox::warning(
           this, "Missing File",
-          QString("Could not find corresponding C (chroma) file: %1")
-              .arg(c_path));
+          QString("Could not find corresponding %1 file: %2")
+              .arg(selected_luma ? "C (chroma)" : "Y (luma)", companion_path));
       return;
     }
-    secondary_file = c_path.toStdString();
-  } else if (ext == "c") {
-    is_cvbs = true;
-    source_type = orc::SourceType::YC;
-    QString y_path = base_path + ".y";
-    if (!QFileInfo::exists(y_path)) {
-      QMessageBox::warning(
-          this, "Missing File",
-          QString("Could not find corresponding Y (luma) file: %1")
-              .arg(y_path));
-      return;
-    }
-    secondary_file = y_path.toStdString();
+    secondary_file = companion_path.toStdString();
   } else {
     QMessageBox::warning(
         this, "Invalid File",
-        QString("Please provide a .tbc, .tbcc, .tbcy, .composite, .y, or .c "
+        QString("Please provide a .tbc, .tbcc, .tbcy, .cvbs, .cvbsy, or .cvbsc "
                 "file. Got: %1")
             .arg(ext));
     return;
@@ -2030,9 +2021,12 @@ void MainWindow::quickProject(const QString& filename) {
         return;
       }
     } else {
-      // CVBS YC: single source stage with both y_path and c_path, wired to sink
-      const std::string y_file = (ext == "y") ? primary_file : secondary_file;
-      const std::string c_file = (ext == "c") ? primary_file : secondary_file;
+      // CVBS YC: single source stage with both y_path and c_path, wired to
+      // sink. A .cvbsy selection makes the chosen file the luma one; a .cvbsc
+      // selection makes it the chroma one and the companion the luma.
+      const bool selected_luma = (ext == "cvbsy");
+      const std::string y_file = selected_luma ? primary_file : secondary_file;
+      const std::string c_file = selected_luma ? secondary_file : primary_file;
 
       ORC_LOG_INFO("Adding CVBS YC source stage: {}", source_stage_name);
       orc::NodeID source_node_id;

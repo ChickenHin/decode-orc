@@ -26,8 +26,9 @@ void WhiteFlagObserver::process_frame(
   }
   const auto& vp = vp_opt.value();
 
-  // White flag is NTSC-only
-  if (vp.system != VideoSystem::NTSC) {
+  // White flag is NTSC-only (see applies_to()); callers normally skip the
+  // observer entirely, this early-return is defence in depth.
+  if (!applies_to(vp)) {
     return;
   }
 

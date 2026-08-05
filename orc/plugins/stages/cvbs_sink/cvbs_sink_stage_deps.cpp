@@ -322,30 +322,18 @@ bool write_extension_sidecar(const std::string& path,
 // Stale output removal
 // ---------------------------------------------------------------------------
 
-// Highest legacy (CVBS spec v1.2.0) container track number swept when
-// removing stale outputs.  The legacy container allowed 16 two-digit track
-// files (_audio_00 … _audio_15), so a previous run of an older writer may
-// have left up to 16.
-constexpr size_t kStaleLegacyAudioFileSweep = 16;
-
 // Remove any output files from a previous run so a re-run never leaves a
 // stale sidecar describing data that is no longer being written.
 void remove_stale_outputs(const std::string& base) {
   static const char* kExtensions[] = {
-      ".composite", ".y",        ".c",   ".meta",    ".dropouts.meta",
-      ".efm",       ".efm.meta", ".ac3", ".ac3.meta"};
+      ".cvbs", ".cvbsy",    ".cvbsc", ".meta",    ".dropouts.meta",
+      ".efm",  ".efm.meta", ".ac3",   ".ac3.meta"};
   std::error_code ec;
   for (const char* ext : kExtensions) {
     std::filesystem::remove(base + ext, ec);
   }
   for (size_t pair = 0; pair < kMaxAudioChannelPairs; ++pair) {
     std::filesystem::remove(cvbs_audio_pair_path(base, pair), ec);
-  }
-  // Legacy v1.2.0 two-digit track files from a previous writer version.
-  for (size_t track = 0; track < kStaleLegacyAudioFileSweep; ++track) {
-    char suffix[16];
-    snprintf(suffix, sizeof(suffix), "_audio_%02zu.wav", track);
-    std::filesystem::remove(base + suffix, ec);
   }
 }
 
@@ -417,14 +405,14 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
   remove_stale_outputs(base);
 
   // --- Open payload stream(s) ---
-  const std::string primary_path = base + (yc ? ".y" : ".composite");
+  const std::string primary_path = base + (yc ? ".cvbsy" : ".cvbs");
   std::ofstream primary(primary_path, std::ios::binary | std::ios::trunc);
   if (!primary) {
     return {false, 0, "Failed to open output file: " + primary_path};
   }
 
   std::ofstream chroma;
-  const std::string chroma_path = base + ".c";
+  const std::string chroma_path = base + ".cvbsc";
   if (yc) {
     chroma.open(chroma_path, std::ios::binary | std::ios::trunc);
     if (!chroma) {

@@ -158,10 +158,7 @@ void ObservationScheduler::submit(ObservationWorkItem item) {
     if (stop_requested_) {
       return;
     }
-    for (auto& chunk :
-         chunk_item(item, static_cast<unsigned>(workers_.size()))) {
-      enqueue_locked(std::move(chunk));
-    }
+    submit_item_locked(item);
   }
   cv_.notify_all();
   emit_workload();
@@ -174,15 +171,89 @@ void ObservationScheduler::submit_batch(
     if (stop_requested_) {
       return;
     }
-    for (auto& item : items) {
-      for (auto& chunk :
-           chunk_item(item, static_cast<unsigned>(workers_.size()))) {
-        enqueue_locked(std::move(chunk));
-      }
+    // Enqueued as we go, so a later item in the same batch is deduplicated
+    // against the earlier ones too.
+    for (const auto& item : items) {
+      submit_item_locked(item);
     }
   }
   cv_.notify_all();
   emit_workload();
+}
+
+std::vector<FrameIDRange> ObservationScheduler::uncovered_ranges_locked(
+    const ObservationWorkItem& item) const {
+  if (item.frames.empty()) {
+    return {};
+  }
+
+  // Collect the pending ranges that overlap this item at an equal or higher
+  // priority (numerically <=, see ObservationPriority).
+  const int limit = static_cast<int>(item.priority);
+  std::vector<FrameIDRange> covering;
+  const auto note = [&](const FrameIDRange& range) {
+    if (range.empty() || range.last < item.frames.first ||
+        range.first > item.frames.last) {
+      return;  // disjoint
+    }
+    covering.push_back(range);
+  };
+
+  for (int p = 0; p <= limit && p < kPriorityClasses; ++p) {
+    for (const auto& queued : queues_[p]) {
+      if (queued.node_id != item.node_id ||
+          queued.fingerprint != item.fingerprint) {
+        continue;
+      }
+      note(queued.frames);
+    }
+  }
+  for (const auto& worker : workers_) {
+    if (!worker->has_in_flight ||
+        static_cast<int>(worker->in_flight_priority) > limit ||
+        worker->in_flight_node != item.node_id ||
+        worker->in_flight_fingerprint != item.fingerprint) {
+      continue;
+    }
+    // The whole in-flight range counts: frames it has already observed are
+    // done, and the rest this worker will reach without being re-enqueued.
+    note(worker->in_flight_frames);
+  }
+
+  if (covering.empty()) {
+    return {item.frames};
+  }
+
+  std::sort(covering.begin(), covering.end(),
+            [](const FrameIDRange& a, const FrameIDRange& b) {
+              return a.first < b.first;
+            });
+
+  // Walk the sorted cover and emit the gaps left inside the item's range.
+  std::vector<FrameIDRange> gaps;
+  FrameID cursor = item.frames.first;
+  for (const auto& range : covering) {
+    if (range.first > cursor) {
+      gaps.push_back(FrameIDRange{cursor, range.first - 1});
+    }
+    if (range.last >= item.frames.last) {
+      return gaps;  // covered to the end; no wrap-around on range.last + 1
+    }
+    cursor = std::max(cursor, range.last + 1);
+  }
+  gaps.push_back(FrameIDRange{cursor, item.frames.last});
+  return gaps;
+}
+
+void ObservationScheduler::submit_item_locked(const ObservationWorkItem& item) {
+  for (const FrameIDRange& range : uncovered_ranges_locked(item)) {
+    ObservationWorkItem part = item;
+    part.frames = range;
+    for (auto& chunk :
+         chunk_item(part, static_cast<unsigned>(workers_.size()))) {
+      enqueue_locked(std::move(chunk));
+    }
+  }
 }
 
 void ObservationScheduler::enqueue_locked(ObservationWorkItem item) {
@@ -464,6 +535,8 @@ ObservationScheduler::NextAction ObservationScheduler::take_next(
         worker->has_in_flight = true;
         worker->in_flight_node = action.item.node_id;
         worker->in_flight_fingerprint = action.item.fingerprint;
+        worker->in_flight_frames = action.item.frames;
+        worker->in_flight_priority = action.item.priority;
         worker->cancel.store(false);
         ++in_flight_count_;
         return action;
@@ -639,17 +712,21 @@ RendererObservationTaskRunner::~RendererObservationTaskRunner() = default;
 bool RendererObservationTaskRunner::observe_frame(
     NodeID node_id, const NodeFingerprint& fingerprint, FrameID frame_id,
     const std::vector<std::string>& /*observer_ids*/) {
-  // Fast path: if every observer's records for both fields of this frame are
-  // already stored, there is nothing to compute — skip the expensive render.
-  // Observation is per-frame independent (a fresh observer runs each frame), so
-  // a store hit is authoritative regardless of which chunk/worker produced it.
-  // has_stored() is presence-only: probing a warm sweep must not drag every
-  // record through the sidecar into the memory LRU just to prove it exists.
+  // Fast path: if every applicable observer's records for both fields of this
+  // frame are already stored, there is nothing to compute — skip the expensive
+  // render. Observation is per-frame independent (a fresh observer runs each
+  // frame), so a store hit is authoritative regardless of which chunk/worker
+  // produced it. has_stored() is presence-only: probing a warm sweep must not
+  // drag every record through the sidecar into the memory LRU just to prove it
+  // exists. The key set is filtered to the node's video system because the
+  // renderer's observer pass writes no records for inapplicable observers
+  // (standard_observer_applies) — demanding those keys here would defeat the
+  // fast path on every frame.
   if (store_ && !fingerprint.value.empty() && !observer_keys_.empty()) {
     const FieldID field_top(frame_id * 2);
     const FieldID field_bottom(frame_id * 2 + 1);
     bool all_present = true;
-    for (const auto& [id, version] : observer_keys_) {
+    for (const auto& [id, version] : observer_keys_for(node_id)) {
       if (!store_->has_stored({fingerprint, field_top, id, version}) ||
           !store_->has_stored({fingerprint, field_bottom, id, version})) {
         all_present = false;
@@ -673,11 +750,32 @@ bool RendererObservationTaskRunner::observe_frame(
   return true;
 }
 
+const std::vector<std::pair<std::string, std::string>>&
+RendererObservationTaskRunner::observer_keys_for(NodeID node_id) {
+  const auto it = node_observer_keys_.find(node_id);
+  if (it != node_observer_keys_.end()) {
+    return it->second;
+  }
+  auto keys = observer_keys_;
+  // Applicability fails open: without video parameters the full set is kept,
+  // matching the observer pass's own fallback.
+  if (const auto params = renderer_->get_video_parameters_at_node(node_id)) {
+    keys.erase(std::remove_if(keys.begin(), keys.end(),
+                              [&params](const auto& key) {
+                                return !standard_observer_applies(key.first,
+                                                                  *params);
+                              }),
+               keys.end());
+  }
+  return node_observer_keys_.emplace(node_id, std::move(keys)).first->second;
+}
+
 void RendererObservationTaskRunner::update_dag(
     std::shared_ptr<const DAG> dag,
     std::shared_ptr<const NodeFingerprintMap> fingerprints) {
   renderer_->update_dag(std::move(dag));
   renderer_->set_observation_store(store_, std::move(fingerprints));
+  node_observer_keys_.clear();
 }
 
 // ---------------------------------------------------------------------------

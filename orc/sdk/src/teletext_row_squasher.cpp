@@ -16,74 +16,9 @@
 #include <orc/support/teletext_row_squasher.h>
 
 #include <algorithm>
+#include <array>
 
 namespace orc {
-
-namespace {
-
-// Pick the winning value for one byte position across |copies|.
-//
-// Odd parity (ETSI EN 300 706 §8.1) detects every single-bit error, so a byte
-// that fails it is known to be corrupt: the vote is held among the
-// parity-clean candidates whenever there are any, and only falls back to all
-// candidates when every copy of this position is damaged. Within that, each
-// copy contributes how sure the recovery chain was of the byte (1 where it
-// cannot say), so a value read cleanly outweighs the same number of copies of
-// one the detector nearly decided the other way. Ties go to the value from the
-// most recently added copy: with only two differing copies there is no majority
-// to find, and the newer transmission is what a plain Level 1 decoder would be
-// showing.
-uint8_t vote(const std::vector<TeletextRowBytes>& copies,
-             const std::vector<TeletextRowConfidence>& confidences,
-             size_t position) {
-  const auto tally = [&](bool parity_clean_only) -> std::optional<uint8_t> {
-    // The candidates are the copies themselves — at most max_copies_per_row of
-    // them — so the vote is counted over those rather than over all 256 byte
-    // values. This runs for every byte of every row of every page rendered,
-    // which a previewer does on each frame it steps, so the difference is not
-    // academic.
-    uint8_t best = 0;
-    double best_weight = 0.0;
-    size_t best_last = 0;
-    bool found = false;
-    for (size_t i = 0; i < copies.size(); ++i) {
-      const uint8_t value = copies[i][position];
-      if (parity_clean_only && !teletext_odd_parity_valid(value)) {
-        continue;
-      }
-      // Every copy holding this same value votes for it, by its confidence in
-      // it; the outer guard already established that the value passes the
-      // parity filter.
-      double weight = 0.0;
-      size_t last_seen = 0;
-      for (size_t j = 0; j < copies.size(); ++j) {
-        if (copies[j][position] != value) {
-          continue;
-        }
-        weight += static_cast<double>(confidences[j][position]);
-        last_seen = j;
-      }
-      if (!found || weight > best_weight ||
-          (weight == best_weight && last_seen > best_last)) {
-        found = true;
-        best = value;
-        best_weight = weight;
-        best_last = last_seen;
-      }
-    }
-    if (!found) {
-      return std::nullopt;
-    }
-    return best;
-  };
-
-  if (const auto clean = tally(/*parity_clean_only=*/true)) {
-    return *clean;
-  }
-  return tally(/*parity_clean_only=*/false).value_or(copies[0][position]);
-}
-
-}  // namespace
 
 void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
                                   const TeletextRowBytes& bytes, int64_t source,
@@ -119,17 +54,28 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
         static_cast<size_t>(std::distance(copies.sources.begin(), existing));
     copies.copies[index] = bytes;
     copies.confidences[index] = weights;
-    return;
+    return;  // recency deliberately unchanged: a re-read, not a transmission
   }
 
-  if (copies.sources.size() >= options_.max_copies_per_row) {
-    copies.sources.erase(copies.sources.begin());
-    copies.copies.erase(copies.copies.begin());
-    copies.confidences.erase(copies.confidences.begin());
+  if (copies.sources.size() >= options_.max_copies_per_row &&
+      !copies.sources.empty()) {
+    // Overwrite the oldest slot in place (see RowCopies::seq).
+    size_t oldest = 0;
+    for (size_t i = 1; i < copies.seq.size(); ++i) {
+      if (copies.seq[i] < copies.seq[oldest]) {
+        oldest = i;
+      }
+    }
+    copies.sources[oldest] = source;
+    copies.copies[oldest] = bytes;
+    copies.confidences[oldest] = weights;
+    copies.seq[oldest] = copies.next_seq++;
+    return;
   }
   copies.sources.push_back(source);
   copies.copies.push_back(bytes);
   copies.confidences.push_back(weights);
+  copies.seq.push_back(copies.next_seq++);
 }
 
 std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
@@ -148,9 +94,71 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
     return copies.copies.front();  // a vote of one is the copy itself
   }
 
+  // Pick the winning value at each byte position across the copies.
+  //
+  // Odd parity (ETSI EN 300 706 §8.1) detects every single-bit error, so a
+  // byte that fails it is known to be corrupt: the vote is held among the
+  // parity-clean candidates whenever there are any, and only falls back to all
+  // candidates when every copy of this position is damaged. Within that, each
+  // copy contributes how sure the recovery chain was of the byte (1 where it
+  // cannot say), so a value read cleanly outweighs the same number of copies of
+  // one the detector nearly decided the other way. Ties go to the value from
+  // the most recently added copy: with only two differing copies there is no
+  // majority to find, and the newer transmission is what a plain Level 1
+  // decoder would be showing.
+  //
+  // This runs for every byte of every row of every page rendered — a previewer
+  // renders per frame stepped, and the sink's rewrite pass asks once per
+  // packet of the whole recording — so the tally is one pass over the copies
+  // per position. The accumulators are per byte value, epoch-marked by
+  // position so nothing is cleared between positions.
+  const size_t copy_count = copies.copies.size();
+  std::array<double, 256> weight_of;
+  std::array<uint64_t, 256> newest_of;
+  std::array<uint8_t, 256> seen_at{};  // epoch marks: position + 1, 0 = never
+  std::array<uint8_t, 256> distinct;   // values seen at this position
+
   TeletextRowBytes result{};
   for (size_t position = 0; position < kTeletextRowBytes; ++position) {
-    result[position] = vote(copies.copies, copies.confidences, position);
+    const uint8_t epoch = static_cast<uint8_t>(position + 1);
+    size_t distinct_count = 0;
+    for (size_t j = 0; j < copy_count; ++j) {
+      const uint8_t value = copies.copies[j][position];
+      if (seen_at[value] != epoch) {
+        seen_at[value] = epoch;
+        weight_of[value] = 0.0;
+        newest_of[value] = 0;
+        distinct[distinct_count++] = value;
+      }
+      weight_of[value] += static_cast<double>(copies.confidences[j][position]);
+      newest_of[value] = std::max(newest_of[value], copies.seq[j]);
+    }
+
+    bool found = false;
+    bool best_clean = false;
+    uint8_t best = 0;
+    double best_weight = 0.0;
+    uint64_t best_newest = 0;
+    for (size_t k = 0; k < distinct_count; ++k) {
+      const uint8_t value = distinct[k];
+      const bool clean = teletext_odd_parity_valid(value);
+      if (found) {
+        if (best_clean && !clean) {
+          continue;  // a value known corrupt never beats a parity-clean one
+        }
+        if (clean == best_clean && !(weight_of[value] > best_weight ||
+                                     (weight_of[value] == best_weight &&
+                                      newest_of[value] > best_newest))) {
+          continue;
+        }
+      }
+      found = true;
+      best = value;
+      best_clean = clean;
+      best_weight = weight_of[value];
+      best_newest = newest_of[value];
+    }
+    result[position] = best;
   }
   return result;
 }

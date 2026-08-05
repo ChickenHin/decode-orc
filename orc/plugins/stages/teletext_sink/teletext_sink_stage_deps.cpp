@@ -72,6 +72,12 @@ std::string srt_timestamp(int64_t field_index) {
 
 // One emitted packet, held so squashing can rewrite it once every copy of
 // every row has been seen. |empty| marks a keep_empty_packets placeholder.
+//
+// The recovered stream of a long source is tens of millions of these (600k
+// frames × up to 34 candidate lines), so the entry is kept lean: the per-byte
+// confidence — absent entirely for threshold-detected packets, which is every
+// packet of a disc or direct capture — lives in a side pool rather than as a
+// 168-byte float array inside every entry.
 struct StreamEntry {
   std::array<uint8_t, kTeletextPacketBytes> bytes;
   int64_t field_index;
@@ -79,10 +85,17 @@ struct StreamEntry {
   // How sure the recovery chain was of each byte, and whether it could say.
   // Held with the packet because the rewrite pass re-feeds every copy under
   // its original identity: a re-feed that dropped the confidence would replace
-  // a weighted copy with an unweighted one.
+  // a weighted copy with an unweighted one. |confidence_slot| indexes the
+  // confidence pool when |has_confidence| is set.
   bool has_confidence;
-  TeletextPacketConfidence confidence;
+  uint32_t confidence_slot;
 };
+
+// Pooled per-byte confidence, quantised to 8 bits (value × 255). Lossless for
+// the observer path, whose stored observations already quantise to 16 levels
+// (level/15 × 255 = 17 × level exactly); the direct-slicer path loses at most
+// 1/255 of a vote weight per byte.
+using QuantizedPacketConfidence = std::array<uint8_t, kTeletextPacketBytes>;
 
 // Display row a packet is addressed to (X/1 to X/24, ETSI EN 300 706 §9.3.2),
 // or 0 when the MRAG does not decode or the packet is not a displayable row.
@@ -317,6 +330,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
   squasher_options.max_pages = kSquashPageRunBound;
   TeletextRowSquasher squasher(squasher_options);
   std::vector<StreamEntry> stream;
+  std::vector<QuantizedPacketConfidence> confidence_pool;
   std::optional<TeletextPageDecoder> squash_pass;
   if (squash) {
     squash_pass.emplace();
@@ -338,6 +352,21 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     }
     if (squash) {
       page_decoder->set_row_squasher(&squasher);
+    }
+  }
+
+  // Observation namespace and per-line keys, built once: the loop below runs
+  // per candidate line of every field of the recording, and building the key
+  // strings there would be tens of millions of small allocations.
+  const std::string teletext_namespace = "teletext";
+  std::vector<std::string> t42_keys;
+  if (!slicer) {
+    t42_keys.reserve(static_cast<size_t>(options.last_field_line -
+                                         options.first_field_line) +
+                     1);
+    for (int32_t field_line = options.first_field_line;
+         field_line <= options.last_field_line; ++field_line) {
+      t42_keys.push_back("t42_" + std::to_string(field_line));
     }
   }
 
@@ -448,7 +477,9 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             }
           } else {
             const auto obs = observation_context.get(
-                field_id, "teletext", "t42_" + std::to_string(field_line));
+                field_id, teletext_namespace,
+                t42_keys[static_cast<size_t>(field_line -
+                                             options.first_field_line)]);
             if (obs && std::holds_alternative<std::string>(*obs)) {
               const auto observed =
                   teletext_hex_to_observed_packet(std::get<std::string>(*obs));
@@ -471,17 +502,33 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
           if (packet.has_value()) {
             ++result.packets_written;
             field_has_data = true;
-            const TeletextPacketConfidence* weights =
-                has_confidence ? &confidence : nullptr;
             if (squash) {
+              // Quantise the confidence for the pool, then vote on the
+              // dequantised values in both passes so the rewrite re-feeds
+              // exactly the weights this pass used.
+              uint32_t confidence_slot = 0;
+              if (has_confidence) {
+                QuantizedPacketConfidence quantized;
+                for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+                  quantized[i] = static_cast<uint8_t>(std::lround(
+                      std::clamp(confidence[i], 0.0F, 1.0F) * 255.0F));
+                  confidence[i] =
+                      static_cast<float>(quantized[i]) * (1.0F / 255.0F);
+                }
+                confidence_slot = static_cast<uint32_t>(confidence_pool.size());
+                confidence_pool.push_back(quantized);
+              }
               // The stream index is the copy's identity for the squasher, so
               // the rewrite pass can re-feed it without counting it twice.
-              squash_pass->process_packet(*packet, relative_field_index,
-                                          static_cast<int64_t>(stream.size()),
-                                          weights);
+              squash_pass->process_packet(
+                  *packet, relative_field_index,
+                  static_cast<int64_t>(stream.size()),
+                  has_confidence ? &confidence : nullptr);
               stream.push_back(StreamEntry{*packet, relative_field_index, false,
-                                           has_confidence, confidence});
+                                           has_confidence, confidence_slot});
             } else {
+              const TeletextPacketConfidence* weights =
+                  has_confidence ? &confidence : nullptr;
               writer->write(packet->data(), packet->size());
               if (display_row_of(*packet) != 0) {
                 squash_stats.add_written_row(display_bytes_of(*packet));
@@ -496,8 +543,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             ++result.packets_written;
             if (squash) {
               stream.push_back(StreamEntry{kEmptyPacket, relative_field_index,
-                                           true, false,
-                                           TeletextPacketConfidence{}});
+                                           true, false, 0});
             } else {
               writer->write(kEmptyPacket.data(), kEmptyPacket.size());
             }
@@ -558,9 +604,18 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
         }
 
         auto out = entry.bytes;
+        TeletextPacketConfidence entry_confidence{};
+        if (entry.has_confidence) {
+          const QuantizedPacketConfidence& quantized =
+              confidence_pool[entry.confidence_slot];
+          for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+            entry_confidence[i] =
+                static_cast<float>(quantized[i]) * (1.0F / 255.0F);
+          }
+        }
         attributor->process_packet(
             entry.bytes, entry.field_index, static_cast<int64_t>(index),
-            entry.has_confidence ? &entry.confidence : nullptr);
+            entry.has_confidence ? &entry_confidence : nullptr);
         const auto& attribution = attributor->last_row_attribution();
         if (attribution.has_value()) {
           const int row = attributor->last_row_number();
