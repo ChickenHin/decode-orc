@@ -424,6 +424,18 @@ class RenderPresenter::Impl {
   orc::CoreObservationService obs_service_;
   std::vector<orc::ObserverInfo> observers_;
 
+  // Per-fingerprint subsets of observers_ applicable to the node's video
+  // system (standard_observer_applies): the observer pass writes no records
+  // for inapplicable observers, so every coverage probe must demand the same
+  // filtered set or frames would look permanently uncovered. A fingerprint
+  // covers the source's identity and parameters, so an entry can never go
+  // stale; the map is cleared on rebuild only to drop unreachable keys.
+  // Touched only on the coordinator worker thread (like sched_swept_);
+  // other threads receive snapshots (PendingObservationRequest::observers,
+  // the makeSchedContext capture).
+  std::unordered_map<std::string, std::vector<orc::ObserverInfo>>
+      applicable_observers_by_fp_;
+
   // Background scheduler with a dedicated renderer/store on its own worker
   // thread; created on the first DAG build and re-pointed on each rebuild. The
   // shared fingerprint map keys interactive work items and store lookups.
@@ -467,6 +479,10 @@ class RenderPresenter::Impl {
     NodeID node_id{0};
     orc::FrameID frame_id = 0;
     orc::NodeFingerprint fingerprint;
+    // Applicable observer set snapshotted at request time, so the
+    // scheduler-thread resolution probes the same coverage the observer pass
+    // writes without touching the coordinator-thread applicability cache.
+    std::vector<orc::ObserverInfo> observers;
     orc::presenters::ObservationDataReadyCallback callback;
   };
   std::mutex pending_mutex_;
@@ -495,6 +511,33 @@ class RenderPresenter::Impl {
     const auto it = fingerprints_shared_->find(node);
     return it != fingerprints_shared_->end() ? it->second
                                              : orc::NodeFingerprint{};
+  }
+
+  // The subset of observers_ applicable to @p node_id's video parameters,
+  // cached in applicable_observers_by_fp_ (see the member comment for the
+  // consistency and threading contract). Applicability fails open: without a
+  // renderer or video parameters the full set is returned, matching the
+  // observer pass's own fallback.
+  const std::vector<orc::ObserverInfo>& observersForNode(
+      NodeID node_id, const orc::NodeFingerprint& fp) {
+    const auto it = applicable_observers_by_fp_.find(fp.value);
+    if (it != applicable_observers_by_fp_.end()) {
+      return it->second;
+    }
+    std::optional<orc::SourceParameters> params;
+    if (preview_renderer_) {
+      try {
+        if (const auto repr =
+                preview_renderer_->get_representation_at_node(node_id)) {
+          params = repr->get_video_parameters();
+        }
+      } catch (const std::exception&) {
+        params.reset();  // fail open: the full observer set stays in force
+      }
+    }
+    return applicable_observers_by_fp_
+        .emplace(fp.value, orc::filter_applicable_observers(observers_, params))
+        .first->second;
   }
 
   // Point the current renderer's executor at execution_progress_ (or clear it
@@ -551,12 +594,32 @@ class RenderPresenter::Impl {
     // Coverage probe for small plans (prefetch): presence-only, so probing a
     // warm window costs hash lookups / sidecar EXISTS queries, not record
     // loads. The context is consumed synchronously inside the scheduler's
-    // policy call on this thread, so capturing `this` is safe.
+    // policy call on this thread, so capturing `this` is safe; the per-node
+    // applicable observer sets are still snapshotted so the lambda never
+    // touches the coordinator-thread applicability cache.
     if (obs_store_) {
       auto store = obs_store_;
       auto fingerprints = fingerprints_shared_;
+      // Applicable observer set per node the policy may probe. The probe must
+      // demand exactly the records the observer pass writes (inapplicable
+      // observers store nothing), or covered frames would look uncovered.
+      std::unordered_map<NodeID, std::vector<orc::ObserverInfo>> node_observers;
+      const auto collect = [this,
+                            &node_observers](const std::vector<NodeID>& nodes) {
+        for (const NodeID node : nodes) {
+          if (node_observers.count(node) != 0) {
+            continue;
+          }
+          const orc::NodeFingerprint fp = fingerprintOf(node);
+          if (!fp.value.empty()) {
+            node_observers.emplace(node, observersForNode(node, fp));
+          }
+        }
+      };
+      collect(ctx.nodes_of_interest);
+      collect(ctx.changed_nodes);
       auto observers = observers_;
-      ctx.frame_observed = [store, fingerprints, observers](
+      ctx.frame_observed = [store, fingerprints, observers, node_observers](
                                NodeID node, orc::FrameID frame) {
         if (!fingerprints) {
           return false;
@@ -565,7 +628,10 @@ class RenderPresenter::Impl {
         if (it == fingerprints->end() || it->second.value.empty()) {
           return false;
         }
-        return store_frame_is_stored(*store, observers, it->second, frame);
+        const auto obs_it = node_observers.find(node);
+        const auto& node_obs =
+            obs_it != node_observers.end() ? obs_it->second : observers;
+        return store_frame_is_stored(*store, node_obs, it->second, frame);
       };
     }
     return ctx;
@@ -605,8 +671,12 @@ class RenderPresenter::Impl {
   // marker's observer-version stamp matches the current inventory AND a spot
   // probe of the first and last frames still finds records (detects a sidecar
   // GC that removed the fingerprint's records after the marker was written; GC
-  // removes whole fingerprints, so any frame probe suffices).
-  bool sweepMarkerValid(const orc::NodeFingerprint& fp, std::uint64_t total) {
+  // removes whole fingerprints, so any frame probe suffices). @p observers is
+  // the node's applicable set — the sweep stored exactly those records, so the
+  // probe must demand no more (and a probe against a sidecar swept by an older
+  // build, which stored the full set, still hits on the subset).
+  bool sweepMarkerValid(const orc::NodeFingerprint& fp, std::uint64_t total,
+                        const std::vector<orc::ObserverInfo>& observers) {
     if (!obs_persistence_ || !obs_store_ || total == 0) {
       return false;
     }
@@ -614,8 +684,8 @@ class RenderPresenter::Impl {
         observer_versions_stamp_) {
       return false;
     }
-    return store_frame_is_stored(*obs_store_, observers_, fp, 0) &&
-           store_frame_is_stored(*obs_store_, observers_, fp, total - 1);
+    return store_frame_is_stored(*obs_store_, observers, fp, 0) &&
+           store_frame_is_stored(*obs_store_, observers, fp, total - 1);
   }
 
   // Register a whole-node sweep of @p total frames at @p fp so its completions
@@ -689,7 +759,7 @@ class RenderPresenter::Impl {
     if (total == 0) {
       return;
     }
-    if (sweepMarkerValid(fp, total)) {
+    if (sweepMarkerValid(fp, total, observersForNode(node_id, fp))) {
       sched_swept_[node_id] = fp;  // completed in an earlier session
       return;
     }
@@ -711,6 +781,7 @@ class RenderPresenter::Impl {
       bool available;
       orc::NodeFingerprint fingerprint;
       orc::FrameID frame_id;
+      std::vector<orc::ObserverInfo> observers;
     };
     std::vector<Delivery> deliveries;
     {
@@ -723,18 +794,23 @@ class RenderPresenter::Impl {
           ++it;
           continue;
         }
+        // Probe against the request's applicable observer snapshot: the
+        // observer pass stores nothing for inapplicable observers, so
+        // demanding the full set would leave the request waiting forever.
         const bool present =
-            obs_store_ && store_has_frame(*obs_store_, observers_,
+            obs_store_ && store_has_frame(*obs_store_, it->observers,
                                           it->fingerprint, it->frame_id);
         if (present) {
           deliveries.push_back({std::move(it->callback), it->request_id, true,
-                                it->fingerprint, it->frame_id});
+                                it->fingerprint, it->frame_id,
+                                std::move(it->observers)});
           it = pending_requests_.erase(it);
         } else if (!completion.succeeded) {
           // The observation attempt for this target ended (failed/cancelled)
           // without records: report the miss so the caller stops waiting.
           deliveries.push_back({std::move(it->callback), it->request_id, false,
-                                it->fingerprint, it->frame_id});
+                                it->fingerprint, it->frame_id,
+                                std::move(it->observers)});
           it = pending_requests_.erase(it);
         } else {
           // A successful completion for a different frame of the same node:
@@ -749,7 +825,7 @@ class RenderPresenter::Impl {
       }
       if (d.available && obs_store_) {
         orc::ObservationContext ctx;
-        load_frame_from_store(*obs_store_, observers_, d.fingerprint,
+        load_frame_from_store(*obs_store_, d.observers, d.fingerprint,
                               d.frame_id, ctx);
         d.callback(d.request_id, true, &ctx);
       } else {
@@ -996,6 +1072,11 @@ class RenderPresenter::Impl {
     field_renderer_ = std::make_unique<orc::DAGFrameRenderer>(dag);
     field_renderer_->set_observation_store(obs_store_, fingerprints);
 
+    // A fingerprint's applicable observer set can never go stale (provenance
+    // covers the source parameters), but unreachable fingerprints would
+    // accumulate — drop them with the rebuild.
+    applicable_observers_by_fp_.clear();
+
     preview_view_registry_ = orc::PreviewViewRegistry{};
     orc::PreviewViewRegistry::register_default_views(
         preview_view_registry_, dag, preview_renderer_.get());
@@ -1161,7 +1242,7 @@ class RenderPresenter::Impl {
   // through, in which case the caller passes the inner context unchanged.
   std::optional<orc::StoreBackedObservationContext> makeStoreBackedContext(
       NodeID input_node, const orc::VideoFrameRepresentation* vfr,
-      orc::ObservationContext& inner) const {
+      orc::ObservationContext& inner) {
     if (!obs_store_ || vfr == nullptr) {
       return std::nullopt;
     }
@@ -1174,7 +1255,8 @@ class RenderPresenter::Impl {
       return std::nullopt;
     }
     return std::optional<orc::StoreBackedObservationContext>(
-        std::in_place, inner, *obs_store_, fingerprint, observers_, range);
+        std::in_place, inner, *obs_store_, fingerprint,
+        observersForNode(input_node, fingerprint), range);
   }
 
   // Phase 5.3 (write-back): after a sink trigger computes observations, persist
@@ -1200,12 +1282,16 @@ class RenderPresenter::Impl {
       return;
     }
 
+    // Iterate the node's applicable set only: an inapplicable observer never
+    // produces data here, and its records must stay absent so coverage
+    // probes (filtered by the same predicate) stay coherent.
+    const auto& observers = observersForNode(input_node, fingerprint);
     const auto persist_field = [&](orc::FieldID field) {
       const auto all_obs = ctx.get_all_observations(field);
       if (all_obs.empty()) {
         return;
       }
-      for (const auto& observer : observers_) {
+      for (const auto& observer : observers) {
         const orc::ObservationRecordKey key{fingerprint, field, observer.id,
                                             observer.version};
         if (obs_store_->has(key)) {
@@ -1275,10 +1361,12 @@ class RenderPresenter::Impl {
     }
     obs_store_->warm_start({fingerprint});
 
-    // Frames the store does not fully cover yet.
+    // Frames the store does not fully cover yet, judged against the node's
+    // applicable observer set (inapplicable observers store no records).
+    const auto& observers = observersForNode(input_node, fingerprint);
     std::vector<orc::FrameID> missing;
     for (orc::FrameID frame = range.first;; ++frame) {
-      if (!store_has_frame(*obs_store_, observers_, fingerprint, frame)) {
+      if (!store_has_frame(*obs_store_, observers, fingerprint, frame)) {
         missing.push_back(frame);
       }
       if (frame == range.last) {
@@ -1452,12 +1540,14 @@ uint64_t RenderPresenter::requestObservations(
   // here, so clicking through stages does not trigger whole-node sweeps.
   impl_->sweepNodeForObservation(node_id);
 
+  const std::vector<orc::ObserverInfo>& observers =
+      impl_->observersForNode(node_id, fingerprint);
+
   // Store hit: answer synchronously, no render.
-  if (store_has_frame(*impl_->obs_store_, impl_->observers_, fingerprint,
-                      frame_id)) {
+  if (store_has_frame(*impl_->obs_store_, observers, fingerprint, frame_id)) {
     orc::ObservationContext ctx;
-    load_frame_from_store(*impl_->obs_store_, impl_->observers_, fingerprint,
-                          frame_id, ctx);
+    load_frame_from_store(*impl_->obs_store_, observers, fingerprint, frame_id,
+                          ctx);
     if (callback) {
       callback(request_id, true, &ctx);
     }
@@ -1472,6 +1562,7 @@ uint64_t RenderPresenter::requestObservations(
     pending.node_id = node_id;
     pending.frame_id = frame_id;
     pending.fingerprint = fingerprint;
+    pending.observers = observers;
     pending.callback = std::move(callback);
     impl_->pending_requests_.push_back(std::move(pending));
   }

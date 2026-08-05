@@ -712,17 +712,21 @@ RendererObservationTaskRunner::~RendererObservationTaskRunner() = default;
 bool RendererObservationTaskRunner::observe_frame(
     NodeID node_id, const NodeFingerprint& fingerprint, FrameID frame_id,
     const std::vector<std::string>& /*observer_ids*/) {
-  // Fast path: if every observer's records for both fields of this frame are
-  // already stored, there is nothing to compute — skip the expensive render.
-  // Observation is per-frame independent (a fresh observer runs each frame), so
-  // a store hit is authoritative regardless of which chunk/worker produced it.
-  // has_stored() is presence-only: probing a warm sweep must not drag every
-  // record through the sidecar into the memory LRU just to prove it exists.
+  // Fast path: if every applicable observer's records for both fields of this
+  // frame are already stored, there is nothing to compute — skip the expensive
+  // render. Observation is per-frame independent (a fresh observer runs each
+  // frame), so a store hit is authoritative regardless of which chunk/worker
+  // produced it. has_stored() is presence-only: probing a warm sweep must not
+  // drag every record through the sidecar into the memory LRU just to prove it
+  // exists. The key set is filtered to the node's video system because the
+  // renderer's observer pass writes no records for inapplicable observers
+  // (standard_observer_applies) — demanding those keys here would defeat the
+  // fast path on every frame.
   if (store_ && !fingerprint.value.empty() && !observer_keys_.empty()) {
     const FieldID field_top(frame_id * 2);
     const FieldID field_bottom(frame_id * 2 + 1);
     bool all_present = true;
-    for (const auto& [id, version] : observer_keys_) {
+    for (const auto& [id, version] : observer_keys_for(node_id)) {
       if (!store_->has_stored({fingerprint, field_top, id, version}) ||
           !store_->has_stored({fingerprint, field_bottom, id, version})) {
         all_present = false;
@@ -746,11 +750,32 @@ bool RendererObservationTaskRunner::observe_frame(
   return true;
 }
 
+const std::vector<std::pair<std::string, std::string>>&
+RendererObservationTaskRunner::observer_keys_for(NodeID node_id) {
+  const auto it = node_observer_keys_.find(node_id);
+  if (it != node_observer_keys_.end()) {
+    return it->second;
+  }
+  auto keys = observer_keys_;
+  // Applicability fails open: without video parameters the full set is kept,
+  // matching the observer pass's own fallback.
+  if (const auto params = renderer_->get_video_parameters_at_node(node_id)) {
+    keys.erase(std::remove_if(keys.begin(), keys.end(),
+                              [&params](const auto& key) {
+                                return !standard_observer_applies(key.first,
+                                                                  *params);
+                              }),
+               keys.end());
+  }
+  return node_observer_keys_.emplace(node_id, std::move(keys)).first->second;
+}
+
 void RendererObservationTaskRunner::update_dag(
     std::shared_ptr<const DAG> dag,
     std::shared_ptr<const NodeFingerprintMap> fingerprints) {
   renderer_->update_dag(std::move(dag));
   renderer_->set_observation_store(store_, std::move(fingerprints));
+  node_observer_keys_.clear();
 }
 
 // ---------------------------------------------------------------------------

@@ -56,6 +56,12 @@ inline constexpr char kPaddingObservationKey[] = "is_pad";
 // kPaddingObservationKey = true) for every observer, replacing any stale
 // record that measured the synthetic padding content.
 //
+// Observers structurally inapplicable to the source's video system (per
+// standard_observer_applies(), e.g. teletext outside PAL) are skipped
+// outright — no run, no store probes and no records, padding markers
+// included. Coverage probes must filter by the same predicate; see
+// filter_applicable_observers().
+//
 // When either @p fingerprint or @p store is null the observers always run and
 // nothing is stored — behaviour identical to the pre-store renderer.
 //
@@ -195,6 +201,13 @@ class DAGFrameRenderer {
 
   // True if node_id exists in the current DAG.
   bool has_node(NodeID node_id) const;
+
+  // Video parameters of the representation produced at @p node_id. Executes
+  // the DAG structurally (artifact graph only — representations are lazy): no
+  // frame samples are decoded and no observers run. Returns nullopt when the
+  // node does not exist, produces no video representation, or execution
+  // fails. Used to decide observer applicability before any render.
+  std::optional<SourceParameters> get_video_parameters_at_node(NodeID node_id);
 
   // -------------------------------------------------------------------------
   // DAG Change Tracking

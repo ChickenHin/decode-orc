@@ -140,4 +140,43 @@ bool CoreObservationService::run_observer(
   return true;
 }
 
+bool standard_observer_applies(const std::string& observer_id,
+                               const SourceParameters& params) {
+  // One shared instance per registry entry, created on first use (magic
+  // statics make the initialisation thread-safe). applies_to() is const, pure
+  // and thread-safe by contract, so sharing is safe; process_frame() is never
+  // called on these instances.
+  static const auto& instances = *[] {
+    auto* arr =
+        new std::array<std::unique_ptr<Observer>, kObserverRegistry.size()>();
+    for (std::size_t i = 0; i < kObserverRegistry.size(); ++i) {
+      (*arr)[i] = kObserverRegistry[i].factory();
+    }
+    return arr;
+  }();
+  for (std::size_t i = 0; i < kObserverRegistry.size(); ++i) {
+    if (observer_id == kObserverRegistry[i].id) {
+      return instances[i]->applies_to(params);
+    }
+  }
+  // Unknown (e.g. test-injected) observers are never filtered.
+  return true;
+}
+
+std::vector<ObserverInfo> filter_applicable_observers(
+    const std::vector<ObserverInfo>& observers,
+    const std::optional<SourceParameters>& params) {
+  if (!params.has_value()) {
+    return observers;  // fail open — see the header contract
+  }
+  std::vector<ObserverInfo> applicable;
+  applicable.reserve(observers.size());
+  for (const auto& observer : observers) {
+    if (standard_observer_applies(observer.id, *params)) {
+      applicable.push_back(observer);
+    }
+  }
+  return applicable;
+}
+
 }  // namespace orc

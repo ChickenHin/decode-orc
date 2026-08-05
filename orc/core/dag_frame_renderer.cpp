@@ -62,6 +62,18 @@ void run_frame_observer_pass(const IObservationService& service,
   const FieldID field_top(frame_id * kFieldsPerFrame);
   const FieldID field_bottom(frame_id * kFieldsPerFrame + 1);
 
+  // Observers structurally inapplicable to this source (e.g. teletext on
+  // NTSC, fm_code/white_flag on PAL) are skipped outright: no run, no store
+  // probes, no records. Every coverage probe (runner fast path, presenter
+  // store_has_frame/sweep markers) filters by the same predicate, so the
+  // absent records never read as missing coverage. Applicability fails open
+  // when the representation carries no video parameters.
+  const auto video_params = representation.get_video_parameters();
+  const auto observer_applies = [&video_params](const ObserverInfo& observer) {
+    return !video_params.has_value() ||
+           standard_observer_applies(observer.id, *video_params);
+  };
+
   // Padding frames (frame_map / source_align gap fill, or source fields the
   // TBC metadata marks as pad) carry no measurable signal, so running the
   // observers over their synthetic content would store spurious measurements
@@ -81,6 +93,9 @@ void run_frame_observer_pass(const IObservationService& service,
       ObservationRecord pad_record;
       pad_record[kPaddingObservationNamespace][kPaddingObservationKey] = true;
       for (const auto& observer : observers) {
+        if (!observer_applies(observer)) {
+          continue;
+        }
         for (const auto& fingerprint : fingerprints) {
           for (const FieldID field : {field_top, field_bottom}) {
             const ObservationRecordKey key{fingerprint, field, observer.id,
@@ -97,6 +112,9 @@ void run_frame_observer_pass(const IObservationService& service,
   }
 
   for (const auto& observer : observers) {
+    if (!observer_applies(observer)) {
+      continue;
+    }
     if (!caching) {
       // No provenance available: run directly into the target context, exactly
       // as the renderer did before the store existed.
@@ -220,6 +238,24 @@ void DAGFrameRenderer::ensure_node_index() const {
 bool DAGFrameRenderer::has_node(NodeID node_id) const {
   ensure_node_index();
   return node_index_.find(node_id) != node_index_.end();
+}
+
+std::optional<SourceParameters> DAGFrameRenderer::get_video_parameters_at_node(
+    NodeID node_id) {
+  if (!has_node(node_id)) {
+    return std::nullopt;
+  }
+  try {
+    auto node_outputs = executor_->execute_to_node(*dag_, node_id);
+    const ResolvedNodeVfr resolved =
+        resolve_node_vfr(*dag_, node_outputs, node_id);
+    if (resolved.status != NodeVfrResolution::kOk) {
+      return std::nullopt;
+    }
+    return resolved.representation->get_video_parameters();
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
 }
 
 void DAGFrameRenderer::update_dag(std::shared_ptr<const DAG> new_dag) {

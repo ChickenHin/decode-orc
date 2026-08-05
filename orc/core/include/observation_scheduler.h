@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -156,8 +157,10 @@ class IObservationTaskRunner {
    * @param fingerprint  Provenance used to key stored records.
    * @param frame_id     Frame to observe.
    * @param observer_ids Requested observer set. Advisory: an implementation
-   *                     may observe the full standard set and rely on the
-   *                     store's read-through to skip already-present records.
+   *                     may observe the full standard set (less observers
+   *                     inapplicable to the node's video system, per
+   *                     standard_observer_applies) and rely on the store's
+   *                     read-through to skip already-present records.
    * @return True when the frame was actually computed (rendered/observed);
    *         false when every requested record was already stored and the call
    *         was a no-op. Drives the workload's computed-vs-checked split so
@@ -594,6 +597,17 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
   // pre-check the store and skip rendering a frame whose observations are all
   // already present (e.g. computed by a parallel chunk covering the same node).
   std::vector<std::pair<std::string, std::string>> observer_keys_;
+  // Per-node subsets of observer_keys_ applicable to the node's video system
+  // (standard_observer_applies), computed on first use — the observer pass
+  // writes no records for inapplicable observers, so the fast path must not
+  // demand their keys. Single worker thread by contract (no locking); cleared
+  // on update_dag().
+  std::unordered_map<NodeID, std::vector<std::pair<std::string, std::string>>>
+      node_observer_keys_;
+
+  // Cached lookup into node_observer_keys_, filtering on first use.
+  const std::vector<std::pair<std::string, std::string>>& observer_keys_for(
+      NodeID node_id);
 };
 
 /**
@@ -601,8 +615,9 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
  *        changed-node re-observation.
  *
  * Emits ONE work item per (node, range) covering the full observer set. The
- * production runner observes the complete standard set per frame regardless of
- * a work item's observer_ids (each observer is constructed fresh per frame, so
+ * production runner observes the complete standard set applicable to the
+ * node's video system per frame regardless of a work item's observer_ids
+ * (each observer is constructed fresh per frame, so
  * stored records never depend on processing order); a separate ascending-order
  * item for the stateful observers would double the enqueued workload and race
  * the chunked items into rendering the same frames twice.

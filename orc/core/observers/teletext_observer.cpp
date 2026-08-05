@@ -88,9 +88,10 @@ void TeletextObserver::process_frame(
   }
   const auto& vp = vp_opt.value();
 
-  // ETSI EN 300 706 System B on 625-line PAL is the only supported system
-  // (design scope); other systems produce no observations.
-  if (vp.system != VideoSystem::PAL) {
+  // Non-PAL systems produce no observations (see applies_to()); callers
+  // normally skip the observer entirely, this early-return is defence in
+  // depth.
+  if (!applies_to(vp)) {
     return;
   }
 

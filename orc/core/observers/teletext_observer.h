@@ -53,6 +53,12 @@ class TeletextObserver : public Observer {
   // Mixing the two would let the older, unweighted copies win.
   std::string observer_version() const override { return "1.2.0"; }
 
+  // ETSI EN 300 706 System B on 625-line PAL is the only supported system
+  // (design scope).
+  bool applies_to(const SourceParameters& params) const override {
+    return params.system == VideoSystem::PAL;
+  }
+
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
 
