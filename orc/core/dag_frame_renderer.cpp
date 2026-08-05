@@ -295,6 +295,75 @@ FrameRenderResult DAGFrameRenderer::render_frame_at_node(NodeID node_id,
   return result;
 }
 
+ResolvedNodeVfr resolve_node_vfr(
+    const DAG& dag,
+    const std::map<NodeID, std::vector<ArtifactPtr>>& node_outputs,
+    NodeID node_id) {
+  ResolvedNodeVfr resolved;
+  resolved.source_node = node_id;
+
+  auto it = node_outputs.find(node_id);
+  std::size_t output_index = 0;
+
+  if (it == node_outputs.end() || it->second.empty()) {
+    const auto& dag_nodes = dag.nodes();
+    auto dag_it = std::find_if(
+        dag_nodes.begin(), dag_nodes.end(),
+        [&node_id](const auto& n) { return n.node_id == node_id; });
+
+    bool is_sink = false;
+    if (dag_it != dag_nodes.end() && dag_it->stage) {
+      const auto ntype = dag_it->stage->get_node_type_info().type;
+      is_sink = (ntype == NodeType::SINK || ntype == NodeType::ANALYSIS_SINK);
+    }
+    if (!is_sink) {
+      resolved.status = NodeVfrResolution::kNoOutput;
+      return resolved;
+    }
+
+    // Sink stages produce no output by design. Fall back to the upstream node
+    // its edge names so the host can show a pass-through preview (and answer
+    // metadata queries) without any boilerplate in the plugin.
+    if (dag_it != dag_nodes.end() && !dag_it->input_node_ids.empty()) {
+      const NodeID upstream_id = dag_it->input_node_ids[0];
+      // The edge's output index, not output 0: a multi-output stage's output 0
+      // is not necessarily the one the sink consumes, and substituting it would
+      // resolve a different branch than the sink is actually fed.
+      const std::size_t upstream_output =
+          dag_it->input_indices.empty() ? 0 : dag_it->input_indices[0];
+      auto up_it = node_outputs.find(upstream_id);
+      if (up_it != node_outputs.end() &&
+          upstream_output < up_it->second.size()) {
+        auto up_vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(
+            up_it->second[upstream_output]);
+        if (up_vfr) {
+          it = up_it;
+          output_index = upstream_output;
+          resolved.source_node = upstream_id;
+          resolved.substituted_upstream = true;
+        }
+      }
+    }
+
+    if (it == node_outputs.end() || it->second.size() <= output_index) {
+      resolved.status = NodeVfrResolution::kSinkWithoutUpstream;
+      return resolved;
+    }
+  }
+
+  auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(
+      it->second[output_index]);
+  if (!vfr) {
+    resolved.status = NodeVfrResolution::kNotRepresentation;
+    return resolved;
+  }
+
+  resolved.status = NodeVfrResolution::kOk;
+  resolved.representation = std::move(vfr);
+  resolved.output_index = output_index;
+  return resolved;
+}
+
 FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
                                                     FrameID frame_id) {
   FrameRenderResult result;
@@ -308,84 +377,45 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
   try {
     auto node_outputs = executor_->execute_to_node(*dag_, node_id);
 
-    auto it = node_outputs.find(node_id);
-    // Which of the located node's outputs carries this node's frames. Always 0
-    // for the node's own output; a sink substituting its input's output (below)
-    // takes the one the edge actually connects to.
-    size_t output_index = 0;
-    if (it == node_outputs.end() || it->second.empty()) {
-      // Check whether this is a sink (which produces no output by design).
-      bool is_sink = false;
-      const auto& dag_nodes = dag_->nodes();
-      auto dag_it = std::find_if(
-          dag_nodes.begin(), dag_nodes.end(),
-          [&node_id](const auto& n) { return n.node_id == node_id; });
-      if (dag_it != dag_nodes.end() && dag_it->stage) {
-        auto ntype = dag_it->stage->get_node_type_info().type;
-        is_sink = (ntype == NodeType::SINK || ntype == NodeType::ANALYSIS_SINK);
-      }
-
-      if (is_sink) {
-        // Sink stages produce no output by design. Fall back to the nearest
-        // upstream node that does produce a VFR so the host can show a
-        // pass-through preview without requiring any boilerplate in the plugin.
-        if (dag_it != dag_nodes.end() && !dag_it->input_node_ids.empty()) {
-          const NodeID& upstream_id = dag_it->input_node_ids[0];
-          // The edge feeding this sink names an output of the upstream node;
-          // a multi-output stage's output 0 is not necessarily the one the
-          // sink consumes, and substituting it would observe (and preview) a
-          // different branch than the sink is actually fed.
-          const size_t upstream_output =
-              dag_it->input_indices.empty() ? 0 : dag_it->input_indices[0];
-          auto up_it = node_outputs.find(upstream_id);
-          if (up_it != node_outputs.end() &&
-              upstream_output < up_it->second.size()) {
-            auto up_vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(
-                up_it->second[upstream_output]);
-            if (up_vfr) {
-              ORC_LOG_DEBUG(
-                  "DAGFrameRenderer: sink node '{}' — using upstream node "
-                  "'{}' output {} for preview",
-                  node_id.to_string(), upstream_id.to_string(),
-                  upstream_output);
-              it = up_it;
-              output_index = upstream_output;
-            }
-          }
-        }
-
-        if (it == node_outputs.end() || it->second.size() <= output_index) {
-          ORC_LOG_DEBUG(
-              "DAGFrameRenderer: sink node '{}' has no upstream VFR for "
-              "preview",
-              node_id.to_string());
-          result.is_valid = false;
-          result.error_message =
-              fmt::format("Node '{}' produced no output", node_id);
-          return result;
-        }
-      } else {
+    const ResolvedNodeVfr resolved =
+        resolve_node_vfr(*dag_, node_outputs, node_id);
+    switch (resolved.status) {
+      case NodeVfrResolution::kNoOutput:
         ORC_LOG_ERROR("DAGFrameRenderer: node '{}' produced no output",
                       node_id.to_string());
         result.is_valid = false;
         result.error_message =
             fmt::format("Node '{}' produced no output", node_id);
         return result;
-      }
+      case NodeVfrResolution::kSinkWithoutUpstream:
+        ORC_LOG_DEBUG(
+            "DAGFrameRenderer: sink node '{}' has no upstream VFR for preview",
+            node_id.to_string());
+        result.is_valid = false;
+        result.error_message =
+            fmt::format("Node '{}' produced no output", node_id);
+        return result;
+      case NodeVfrResolution::kNotRepresentation:
+        ORC_LOG_ERROR(
+            "DAGFrameRenderer: node '{}' output is not a "
+            "VideoFrameRepresentation",
+            node_id.to_string());
+        result.is_valid = false;
+        result.error_message = "Node '" + node_id.to_string() +
+                               "' did not produce a VideoFrameRepresentation";
+        return result;
+      case NodeVfrResolution::kOk:
+        break;
     }
 
-    auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(
-        it->second[output_index]);
-    if (!vfr) {
-      ORC_LOG_ERROR(
-          "DAGFrameRenderer: node '{}' output is not a "
-          "VideoFrameRepresentation",
-          node_id.to_string());
-      result.is_valid = false;
-      result.error_message = "Node '" + node_id.to_string() +
-                             "' did not produce a VideoFrameRepresentation";
-      return result;
+    if (resolved.substituted_upstream) {
+      ORC_LOG_DEBUG(
+          "DAGFrameRenderer: sink node '{}' — using upstream node '{}' output "
+          "{} for preview",
+          node_id.to_string(), resolved.source_node.to_string(),
+          resolved.output_index);
     }
+    const VideoFrameRepresentationPtr& vfr = resolved.representation;
 
     if (!vfr->has_frame(frame_id)) {
       ORC_LOG_WARN(

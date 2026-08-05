@@ -90,6 +90,43 @@ void run_frame_observer_pass(const IObservationService& service,
                              ObservationStore* store,
                              IObservationContext& context);
 
+// ---------------------------------------------------------------------------
+// Node output resolution
+// ---------------------------------------------------------------------------
+
+// Why resolve_node_vfr() did or did not find a representation.
+enum class NodeVfrResolution {
+  kOk,                   // representation is set
+  kNoOutput,             // a non-sink node produced no output at all
+  kSinkWithoutUpstream,  // a sink whose edge names no usable upstream VFR
+  kNotRepresentation,    // the located artifact is not a VFR
+};
+
+struct ResolvedNodeVfr {
+  NodeVfrResolution status = NodeVfrResolution::kNoOutput;
+  VideoFrameRepresentationPtr representation;
+  // The node the artifact actually came from — the queried node, unless a sink
+  // substitution took the upstream one.
+  NodeID source_node;
+  std::size_t output_index = 0;
+  bool substituted_upstream = false;
+};
+
+// Locates the VideoFrameRepresentation carrying @p node_id's frames within
+// @p node_outputs (as returned by DAGExecutor::execute_to_node).
+//
+// A sink stage produces no output by design, so this substitutes the upstream
+// output the sink's edge actually names — output 0 is not necessarily the one
+// the sink consumes, and substituting it would resolve a different branch than
+// the sink is fed. Every caller that needs a node's representation goes through
+// here, so a metadata query and a preview can never resolve different
+// artifacts. Resolution is pure map lookup: it renders no frame and runs no
+// observers.
+ResolvedNodeVfr resolve_node_vfr(
+    const DAG& dag,
+    const std::map<NodeID, std::vector<ArtifactPtr>>& node_outputs,
+    NodeID node_id);
+
 // Exception thrown during DAG frame rendering.
 class DAGFrameRenderError : public std::runtime_error {
  public:

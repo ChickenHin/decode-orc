@@ -158,10 +158,7 @@ void ObservationScheduler::submit(ObservationWorkItem item) {
     if (stop_requested_) {
       return;
     }
-    for (auto& chunk :
-         chunk_item(item, static_cast<unsigned>(workers_.size()))) {
-      enqueue_locked(std::move(chunk));
-    }
+    submit_item_locked(item);
   }
   cv_.notify_all();
   emit_workload();
@@ -174,15 +171,89 @@ void ObservationScheduler::submit_batch(
     if (stop_requested_) {
       return;
     }
-    for (auto& item : items) {
-      for (auto& chunk :
-           chunk_item(item, static_cast<unsigned>(workers_.size()))) {
-        enqueue_locked(std::move(chunk));
-      }
+    // Enqueued as we go, so a later item in the same batch is deduplicated
+    // against the earlier ones too.
+    for (const auto& item : items) {
+      submit_item_locked(item);
     }
   }
   cv_.notify_all();
   emit_workload();
+}
+
+std::vector<FrameIDRange> ObservationScheduler::uncovered_ranges_locked(
+    const ObservationWorkItem& item) const {
+  if (item.frames.empty()) {
+    return {};
+  }
+
+  // Collect the pending ranges that overlap this item at an equal or higher
+  // priority (numerically <=, see ObservationPriority).
+  const int limit = static_cast<int>(item.priority);
+  std::vector<FrameIDRange> covering;
+  const auto note = [&](const FrameIDRange& range) {
+    if (range.empty() || range.last < item.frames.first ||
+        range.first > item.frames.last) {
+      return;  // disjoint
+    }
+    covering.push_back(range);
+  };
+
+  for (int p = 0; p <= limit && p < kPriorityClasses; ++p) {
+    for (const auto& queued : queues_[p]) {
+      if (queued.node_id != item.node_id ||
+          queued.fingerprint != item.fingerprint) {
+        continue;
+      }
+      note(queued.frames);
+    }
+  }
+  for (const auto& worker : workers_) {
+    if (!worker->has_in_flight ||
+        static_cast<int>(worker->in_flight_priority) > limit ||
+        worker->in_flight_node != item.node_id ||
+        worker->in_flight_fingerprint != item.fingerprint) {
+      continue;
+    }
+    // The whole in-flight range counts: frames it has already observed are
+    // done, and the rest this worker will reach without being re-enqueued.
+    note(worker->in_flight_frames);
+  }
+
+  if (covering.empty()) {
+    return {item.frames};
+  }
+
+  std::sort(covering.begin(), covering.end(),
+            [](const FrameIDRange& a, const FrameIDRange& b) {
+              return a.first < b.first;
+            });
+
+  // Walk the sorted cover and emit the gaps left inside the item's range.
+  std::vector<FrameIDRange> gaps;
+  FrameID cursor = item.frames.first;
+  for (const auto& range : covering) {
+    if (range.first > cursor) {
+      gaps.push_back(FrameIDRange{cursor, range.first - 1});
+    }
+    if (range.last >= item.frames.last) {
+      return gaps;  // covered to the end; no wrap-around on range.last + 1
+    }
+    cursor = std::max(cursor, range.last + 1);
+  }
+  gaps.push_back(FrameIDRange{cursor, item.frames.last});
+  return gaps;
+}
+
+void ObservationScheduler::submit_item_locked(const ObservationWorkItem& item) {
+  for (const FrameIDRange& range : uncovered_ranges_locked(item)) {
+    ObservationWorkItem part = item;
+    part.frames = range;
+    for (auto& chunk :
+         chunk_item(part, static_cast<unsigned>(workers_.size()))) {
+      enqueue_locked(std::move(chunk));
+    }
+  }
 }
 
 void ObservationScheduler::enqueue_locked(ObservationWorkItem item) {
@@ -464,6 +535,8 @@ ObservationScheduler::NextAction ObservationScheduler::take_next(
         worker->has_in_flight = true;
         worker->in_flight_node = action.item.node_id;
         worker->in_flight_fingerprint = action.item.fingerprint;
+        worker->in_flight_frames = action.item.frames;
+        worker->in_flight_priority = action.item.priority;
         worker->cancel.store(false);
         ++in_flight_count_;
         return action;

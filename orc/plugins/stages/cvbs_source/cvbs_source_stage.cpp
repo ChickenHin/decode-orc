@@ -445,14 +445,19 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
     std::vector<sample_type> samples;
   };
 
+  // put_if_absent (not put): one representation is shared by every DAG
+  // consumer, so several observation workers can race past the contains()
+  // check and all decode the same frame. Replacing the cached entry would
+  // free the buffer that an earlier thread's get_frame() pointer still refers
+  // to — a 1.4 MB mmap'd block, so the fault is immediate and hard.
   void ensure_frame_cached(FrameID id) const {
     if (frame_cache_.contains(id)) return;
-    frame_cache_.put(id, decode_channel_frame(input_path_, id));
+    frame_cache_.put_if_absent(id, decode_channel_frame(input_path_, id));
   }
 
   void ensure_c_frame_cached(FrameID id) const {
     if (c_frame_cache_.contains(id)) return;
-    c_frame_cache_.put(id, decode_channel_frame(c_path_, id));
+    c_frame_cache_.put_if_absent(id, decode_channel_frame(c_path_, id));
   }
 
   DecodedFrame decode_channel_frame(const std::string& path, FrameID id) const {
