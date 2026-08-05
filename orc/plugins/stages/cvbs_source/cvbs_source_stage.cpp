@@ -90,33 +90,86 @@ constexpr uint64_t kAudioBytesPerPair = 6;
 // Sample encoding normalisation
 // ---------------------------------------------------------------------------
 
+// The four sample encodings the CVBS container can declare (file format spec
+// §3.1), resolved from the encoding name once so the per-sample conversion
+// never touches a string. Matching the name inside the sample loop cost a
+// reload of the string's size and data pointer plus up to four literal
+// comparisons for every sample — the compiler cannot hoist them, because the
+// output writes may alias the object holding the name.
+enum class SampleEncoding { kU10, kU16, kTPG21, kS16 };
+
+inline SampleEncoding sample_encoding_from_name(const std::string& encoding) {
+  if (encoding == "CVBS_U10_4FSC") return SampleEncoding::kU10;
+  if (encoding == "CVBS_TPG21_4FSC") return SampleEncoding::kTPG21;
+  if (encoding == "CVBS_S16_4FSC") return SampleEncoding::kS16;
+  // "CVBS_U16_4FSC", and any unknown encoding, which it stands in for.
+  return SampleEncoding::kU16;
+}
+
 // CVBS file format spec §3.1: normalise a raw 16-bit word from any of the
 // four declared sample encodings to the CVBS_U10_4FSC domain (int16_t).
 // No output clamping — headroom values outside [0, 1023] are preserved.
-inline int16_t normalize_to_cvbs_u10(uint16_t raw, const std::string& encoding,
+//
+// Converting a whole run of samples goes through normalize_samples() below,
+// not this directly: the encoding has to be a compile-time constant for the
+// loop to vectorise.
+inline int16_t normalize_to_cvbs_u10(uint16_t raw, SampleEncoding encoding,
                                      int32_t blanking_10bit) {
-  if (encoding == "CVBS_U10_4FSC") {
-    // CVBS file format spec §3.1: int16_t stored bitwise as uint16_t.
-    return static_cast<int16_t>(raw);
+  switch (encoding) {
+    case SampleEncoding::kU10:
+      // CVBS file format spec §3.1: int16_t stored bitwise as uint16_t.
+      return static_cast<int16_t>(raw);
+    case SampleEncoding::kTPG21:
+      // CVBS file format spec §3.1: signed, device offset 508, ×64 scale.
+      return static_cast<int16_t>(
+          static_cast<int32_t>(static_cast<int16_t>(raw)) / 64 + 508);
+    case SampleEncoding::kS16:
+      // CVBS file format spec §3.1: signed, blanking-centred, ×32 scale.
+      return static_cast<int16_t>(
+          static_cast<int32_t>(static_cast<int16_t>(raw)) / 32 +
+          blanking_10bit);
+    case SampleEncoding::kU16:
+      break;
   }
-  if (encoding == "CVBS_U16_4FSC") {
-    // CVBS file format spec §3.1: unsigned value = 10-bit × 64.
-    return static_cast<int16_t>(static_cast<int32_t>(raw) / 64);
-  }
-  if (encoding == "CVBS_TPG21_4FSC") {
-    // CVBS file format spec §3.1: signed, device offset 508, ×64 scale.
-    const int32_t decoded =
-        static_cast<int32_t>(static_cast<int16_t>(raw)) / 64 + 508;
-    return static_cast<int16_t>(decoded);
-  }
-  if (encoding == "CVBS_S16_4FSC") {
-    // CVBS file format spec §3.1: signed, blanking-centred, ×32 scale.
-    const int32_t decoded =
-        static_cast<int32_t>(static_cast<int16_t>(raw)) / 32 + blanking_10bit;
-    return static_cast<int16_t>(decoded);
-  }
-  // Fallback — treat unknown encoding as CVBS_U16_4FSC.
+  // CVBS file format spec §3.1: unsigned value = 10-bit × 64.
   return static_cast<int16_t>(static_cast<int32_t>(raw) / 64);
+}
+
+// Convert |count| raw words into the CVBS_U10_4FSC domain.
+//
+// The encoding is a template parameter so the switch above folds away and each
+// instantiation is a flat loop the vectoriser can take — 16 samples per
+// instruction rather than a per-sample branch. Selecting the instantiation
+// once per call is what makes that possible; dispatching per sample (whether on
+// the encoding name or on the enum) leaves the branch inside the loop.
+template <SampleEncoding kEncoding>
+void normalize_samples_as(const uint16_t* src, size_t count,
+                          int32_t blanking_10bit, int16_t* dst) {
+  for (size_t i = 0; i < count; ++i) {
+    dst[i] = normalize_to_cvbs_u10(src[i], kEncoding, blanking_10bit);
+  }
+}
+
+inline void normalize_samples(const uint16_t* src, size_t count,
+                              SampleEncoding encoding, int32_t blanking_10bit,
+                              int16_t* dst) {
+  switch (encoding) {
+    case SampleEncoding::kU10:
+      normalize_samples_as<SampleEncoding::kU10>(src, count, blanking_10bit,
+                                                 dst);
+      return;
+    case SampleEncoding::kTPG21:
+      normalize_samples_as<SampleEncoding::kTPG21>(src, count, blanking_10bit,
+                                                   dst);
+      return;
+    case SampleEncoding::kS16:
+      normalize_samples_as<SampleEncoding::kS16>(src, count, blanking_10bit,
+                                                 dst);
+      return;
+    case SampleEncoding::kU16:
+      break;
+  }
+  normalize_samples_as<SampleEncoding::kU16>(src, count, blanking_10bit, dst);
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +275,7 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
         deps_(std::move(deps)),
         input_path_(std::move(input_path)),
         sample_encoding_(std::move(sample_encoding)),
+        encoding_(sample_encoding_from_name(sample_encoding_)),
         video_params_(std::move(video_params)),
         ntsc_j_black_level_(ntsc_j_black_level),
         blanking_level_(video_params_.blanking_level),
@@ -403,12 +457,9 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
     }
     if (raw_words.size() < line_count) return {};
 
-    std::vector<sample_type> result;
-    result.reserve(line_count);
-    for (const uint16_t raw : raw_words) {
-      result.push_back(
-          normalize_to_cvbs_u10(raw, sample_encoding_, blanking_level_));
-    }
+    std::vector<sample_type> result(line_count);
+    normalize_samples(raw_words.data(), line_count, encoding_, blanking_level_,
+                      result.data());
     return result;
   }
 
@@ -475,11 +526,9 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
                                std::to_string(id) + " in '" + path + "'");
     }
     DecodedFrame result;
-    result.samples.reserve(frame_samples_);
-    for (size_t i = 0; i < frame_samples_; ++i) {
-      result.samples.push_back(normalize_to_cvbs_u10(
-          raw_words[i], sample_encoding_, blanking_level_));
-    }
+    result.samples.resize(frame_samples_);
+    normalize_samples(raw_words.data(), frame_samples_, encoding_,
+                      blanking_level_, result.samples.data());
     return result;
   }
 
@@ -492,6 +541,9 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
   std::shared_ptr<ICVBSSourceStageDeps> deps_;
   std::string input_path_;
   std::string sample_encoding_;
+  // sample_encoding_ resolved once at construction; the sample loops read this
+  // instead of matching the name per sample.
+  SampleEncoding encoding_;
   SourceParameters video_params_;
   std::optional<int32_t> ntsc_j_black_level_;
   int32_t blanking_level_;
