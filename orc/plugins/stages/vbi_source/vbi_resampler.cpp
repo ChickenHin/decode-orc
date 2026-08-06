@@ -62,13 +62,35 @@ VBIRecordResampler::VBIRecordResampler(const VBIDataPlacement& placement,
     return;
   }
 
+  output_count_ = placement.output_count();
+
+  // A capture already on the output's own lattice: the same rate, and a whole
+  // number of samples between the two origins.  There is nothing to
+  // interpolate and nothing that could alias, so the record is copied.
+  // Filtering it would attenuate the top of the data band to no purpose, and
+  // cost a hundred and twenty-eight taps a sample doing it.  This is every
+  // TBC-derived capture, whose 4 x fsc rate is the output's by construction
+  // (design §5.5).
+  const double origin = placement.source_position_at_output_zero;
+  if (ratio == 1.0 && origin == std::floor(origin)) {
+    cutoff_normalised_ = 0.5;
+    taps_ = 1;
+    bank_.assign(1, 1.0);
+    first_tap_.resize(output_count_);
+    row_.assign(output_count_, 0);
+    for (uint32_t sample = 0; sample < output_count_; ++sample) {
+      first_tap_[sample] = static_cast<int32_t>(
+          placement.source_position(placement.output_begin + sample));
+    }
+    return;
+  }
+
   // The passband that must survive is the narrower of the two Nyquist limits.
   // Decimation is bounded by the output rate; anything at or below 1:1 is
   // bounded by the source rate, since there is no more bandwidth to keep.
   const double limiting_ratio = std::max(1.0, ratio);
   cutoff_normalised_ = config_.cutoff_fraction * 0.5 / limiting_ratio;
 
-  output_count_ = placement.output_count();
   taps_ = config_.half_width_samples * 2u;
 
   first_tap_.resize(output_count_);

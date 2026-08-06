@@ -107,7 +107,8 @@ std::vector<std::string> validate_vbi_source_config(
     errors.push_back("teletext.system " + tt_system_name(format.tt_system) +
                      " has no defined line list on " +
                      tv_system_name(format.tv_system) +
-                     "; WST is defined on PAL and NABTS on NTSC/PAL_M.");
+                     "; WST is defined on PAL and on 525-line systems, and "
+                     "NABTS on NTSC/PAL_M.");
   } else if (format.field_range.count() > standard_lines) {
     errors.push_back(
         "container.field_range selects " +
@@ -146,24 +147,22 @@ std::vector<std::string> validate_vbi_source_config(
 
   // ------------------------------------------------------------------
   // Capture offset.  For TBC-derived sources sample 0 of every record is
-  // 0H by construction, so the offset is known exactly and calibrating it
-  // would invent a value that is already known (design §5.3.3).
+  // 0H by construction, so fitting the offset would measure a quantity that
+  // is already known — and would do it against a record whose head is the
+  // line's sync pulse rather than the back porch a card capture opens in
+  // (design §5.3.3).
+  //
+  // A configured figure is a different matter and is allowed: a crop may
+  // start a sample or two either side of 0H, and the user is the only one who
+  // can say so.  The preset's own value stays 0.
   // ------------------------------------------------------------------
-  if (format.family == VBISourceFamily::kTBCDerived) {
-    if (format.capture_offset_is_auto) {
-      errors.push_back(
-          "calibration.capture_offset must not be 'auto' for a TBC-derived "
-          "source: sample 0 of every record is already 0H, so the offset is "
-          "exactly 0 and there is nothing to calibrate.");
-    }
-    if (format.capture_offset_samples != 0.0) {
-      errors.push_back(
-          "calibration.capture_offset must be 0 for a TBC-derived source "
-          "(configured " +
-          std::to_string(format.capture_offset_samples) +
-          " samples): the upstream time-base correction already places "
-          "sample 0 at 0H.");
-    }
+  if (format.family == VBISourceFamily::kTBCDerived &&
+      format.capture_offset_is_auto) {
+    errors.push_back(
+        "calibration.capture_offset must not be 'auto' for a TBC-derived "
+        "source: sample 0 of every record is already 0H, so there is nothing "
+        "to calibrate. Configure a figure manually if the crop does not start "
+        "exactly there.");
   }
 
   // ------------------------------------------------------------------
@@ -184,25 +183,40 @@ std::vector<std::string> validate_vbi_source_config(
   }
 
   // ------------------------------------------------------------------
-  // Stream length.  The capture must factorise into whole frames; a
+  // Stream length.  The capture must factorise into whole fields; a
   // remainder means the format is wrong or the file has trailing garbage
   // (design §8).
+  //
+  // Fields rather than frames, because a capture stops when it stops: the
+  // circulating VBI-only .tbc crops end on an odd field about as often as not,
+  // and there is nothing wrong with such a file.  The trailing field is one
+  // short of a frame, so it is not emitted — which the stage reports rather
+  // than hides.  Half a field is a different matter and stays an error: no
+  // container produces one, so it means the geometry is wrong.
   // ------------------------------------------------------------------
   const uint64_t frame_bytes = format.bytes_per_frame();
+  const uint64_t field_bytes = format.bytes_per_field();
   if (decoded_stream_bytes.has_value() && frame_bytes > 0) {
     const uint64_t stream_bytes = *decoded_stream_bytes;
+    const uint64_t remainder = stream_bytes % frame_bytes;
     if (stream_bytes == 0) {
       errors.push_back("The capture is empty (0 bytes after decoding).");
-    } else if (stream_bytes % frame_bytes != 0) {
+    } else if (stream_bytes < frame_bytes) {
+      errors.push_back(
+          "The capture is " + std::to_string(stream_bytes) +
+          " bytes, which is less than the configured frame size of " +
+          std::to_string(frame_bytes) +
+          " bytes, so it does not hold one complete frame.");
+    } else if (remainder != 0 && remainder != field_bytes) {
       errors.push_back(
           "The capture is " + std::to_string(stream_bytes) +
           " bytes, which is not an exact multiple of the configured frame "
           "size of " +
           std::to_string(frame_bytes) + " bytes (" +
           std::to_string(stream_bytes / frame_bytes) + " whole frames plus " +
-          std::to_string(stream_bytes % frame_bytes) +
-          " bytes). The container format is wrong, or the file has trailing "
-          "data.");
+          std::to_string(remainder) +
+          " bytes, which is not a whole field either). The container format is "
+          "wrong, or the file has trailing data.");
     }
   }
 

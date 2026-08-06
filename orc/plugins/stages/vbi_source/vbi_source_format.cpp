@@ -9,6 +9,8 @@
 
 #include "vbi_source_format.h"
 
+#include <orc/stage/cvbs_signal_constants.h>
+
 namespace orc {
 
 namespace {
@@ -97,24 +99,75 @@ VBISourceFormat make_bt8x8_pal() {
   return format;
 }
 
-// The "custom" expansion is deliberately unconfigured: every container field
-// comes from the project instead.  Leaving the geometry at zero means an
-// incompletely specified custom format is rejected by validation rather than
-// silently behaving like some other format.
-VBISourceFormat make_custom() {
+// Cropped VBI-only .tbc captures: the first sixteen line records of each field
+// of a decoded luma .tbc, at the decoder's own 4 x fsc rate.  The rate is taken
+// from the CVBS constants rather than written out, so that it is bit-identical
+// to the output lattice's and the resampling ratio is exactly one.
+constexpr double kTBCVBINTSCSampleRateHz = kNtscSampleRate;
+
+// A .tbc line is the whole line: 910 samples with no padding.
+constexpr uint32_t kTBCVBINTSCRecordStride = 910;
+
+// Record 0 of the sixteen is broadcast field line 9 — the last post-equalising
+// line, which carries no data service — so the standard's twelve teletext lines
+// (field lines 10-21 of each field) are records 1 to 12, and records 13-15 are
+// active picture.
+//
+// Measured on the circulating captures rather than assumed: record 0 carries a
+// 2.3 us equalising pulse where every other record carries a 4.7 us line sync,
+// and record 12 carries the line 21 closed caption run-in at its standard
+// 10.5 us from 0H.
+constexpr uint32_t kTBCVBINTSCFirstDataRecord = 1;
+constexpr uint32_t kTBCVBINTSCLastDataRecord = 12;
+
+// The first stored field of every circulating capture is television field 1,
+// measured two ways on all five of them: record 0 carries two equalising pulses
+// on field 1 against one on field 2, and on a captioned recording record 12 is
+// line 21, so the field carrying the caption run-in is field 1.  A crop whose
+// producer started on the other field would need its own preset.
+constexpr uint32_t kFirstStoredField = 1;
+
+VBISourceFormat make_tbc_vbi_ntsc(VBITeletextSystem tt_system) {
   VBISourceFormat format;
-  format.sample_format = VBISampleFormat::kU8;
-  format.first_field = 1;
-  format.tv_system = VBITVSystem::kPAL;
-  format.tt_system = VBITeletextSystem::kWST;
-  format.family = VBISourceFamily::kCardCapture;
+  format.sample_rate_hz = kTBCVBINTSCSampleRateHz;
+  format.line_length = kTBCVBINTSCRecordStride;
+  format.valid_samples = kTBCVBINTSCRecordStride;
+  format.sample_format = VBISampleFormat::kU16LE;
+  format.field_lines = 16;
+  format.field_range =
+      VBIFieldRange{kTBCVBINTSCFirstDataRecord, kTBCVBINTSCLastDataRecord};
+  format.frame_trailer_bytes = 0;
+  format.frame_trailer_is_counter = false;
+
+  // Family B: the upstream time-base correction already put sample 0 of every
+  // record at that line's 0H, so the offset is known to be zero and must never
+  // be fitted (design §5.3.3).  Validation enforces that.
+  format.capture_offset_samples = 0.0;
+  format.capture_offset_is_auto = false;
+
+  format.first_field = kFirstStoredField;
+  format.tv_system = VBITVSystem::kNTSC;
+  format.tt_system = tt_system;
+  format.family = VBISourceFamily::kTBCDerived;
   return format;
 }
 
 const std::vector<PresetEntry>& presets() {
+  // Every preset is a complete configuration: the container, the data service
+  // it carries and the policies that follow from both.  There is nothing left
+  // for the user to fill in, which is why there is no "custom" entry — a format
+  // nobody has measured cannot be described correctly by guessing at fields,
+  // and adding one that has been measured is a single entry here.
+  //
+  // The names are what the user reads and what the project file stores, so they
+  // say where the capture came from, what its samples are, and which service it
+  // carries; the geometry behind each is in the parameter description.
   static const std::vector<PresetEntry> kPresets = {
-      {"bt8x8-pal", make_bt8x8_pal()},
-      {"custom", make_custom()},
+      {"bt8x8 card dump, 8-bit (WST)", make_bt8x8_pal()},
+      {".tbc VBI crop, 16-bit (WST)",
+       make_tbc_vbi_ntsc(VBITeletextSystem::kWST)},
+      {".tbc VBI crop, 16-bit (NABTS)",
+       make_tbc_vbi_ntsc(VBITeletextSystem::kNABTS)},
   };
   return kPresets;
 }
@@ -129,10 +182,11 @@ uint32_t standard_teletext_lines_per_field(VBITVSystem tv_system,
     return 16;
   }
 
-  // ITU-R BT.653 System C: NABTS occupies broadcast frame lines 10-21 and
-  // 273-284 on 525-line systems — twelve records per field.
-  if ((tv_system == VBITVSystem::kNTSC || tv_system == VBITVSystem::kPALM) &&
-      tt_system == VBITeletextSystem::kNABTS) {
+  // ITU-R BT.653 §2: both 525-line teletext systems in scope — System B, the
+  // 525-line variant of WST, and System C (NABTS) — occupy broadcast frame
+  // lines 10-21 and 273-284, twelve records per field.  The systems differ in
+  // framing code and packet length, not in which lines they sit on.
+  if (tv_system == VBITVSystem::kNTSC || tv_system == VBITVSystem::kPALM) {
     return 12;
   }
 
@@ -146,6 +200,17 @@ std::vector<std::string> vbi_source_preset_names() {
   names.reserve(presets().size());
   for (const auto& entry : presets()) {
     names.emplace_back(entry.name);
+  }
+  return names;
+}
+
+std::vector<std::string> vbi_source_preset_names(VBITVSystem tv_system) {
+  std::vector<std::string> names;
+  names.reserve(presets().size());
+  for (const auto& entry : presets()) {
+    if (entry.format.tv_system == tv_system) {
+      names.emplace_back(entry.name);
+    }
   }
   return names;
 }
@@ -182,23 +247,6 @@ std::string to_string(VBISampleFormat sample_format) {
       return "s16le";
   }
   return "u8";
-}
-
-bool parse_vbi_sample_format(const std::string& name,
-                             VBISampleFormat& out_format) {
-  if (name == "u8") {
-    out_format = VBISampleFormat::kU8;
-    return true;
-  }
-  if (name == "u16le") {
-    out_format = VBISampleFormat::kU16LE;
-    return true;
-  }
-  if (name == "s16le") {
-    out_format = VBISampleFormat::kS16LE;
-    return true;
-  }
-  return false;
 }
 
 }  // namespace orc

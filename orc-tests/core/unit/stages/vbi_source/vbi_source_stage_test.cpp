@@ -52,7 +52,9 @@ constexpr const char* kCapturePath = "/captures/synthetic.vbi";
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   return format;
 }
 
@@ -174,11 +176,15 @@ class FakeDeps final : public IVBISourceStageDeps {
       return nullptr;
     }
     ++opens;
-    return std::make_unique<FakeByteSource>(bytes_);
+    auto source = std::make_unique<FakeByteSource>(bytes_);
+    source->declared_bits = declared_bits;
+    return source;
   }
 
   bool file_valid = true;
   bool open_succeeds = true;
+  // What the transport declares: the one FLAC header field that is meaningful.
+  uint32_t declared_bits = 8u;
   mutable uint32_t opens = 0;
 
  private:
@@ -211,13 +217,13 @@ std::shared_ptr<VideoFrameRepresentation> representation_of(
 // Identity and contract
 // ---------------------------------------------------------------------------
 
-TEST(VBISourceStageIdentity, IsAPALSourceWithNoInputsAndOneOutput) {
+TEST(VBISourceStageIdentity, IsASourceForEitherSystemWithNoInputsAndOneOutput) {
   VBISourceStage stage;
   const NodeTypeInfo info = stage.get_node_type_info();
 
   EXPECT_EQ(info.stage_name, "vbi_source");
   EXPECT_EQ(info.type, NodeType::SOURCE);
-  EXPECT_EQ(info.compatible_formats, VideoFormatCompatibility::PAL_ONLY);
+  EXPECT_EQ(info.compatible_formats, VideoFormatCompatibility::ALL);
   EXPECT_EQ(stage.required_input_count(), 0u);
   EXPECT_EQ(stage.output_count(), 1u);
 }
@@ -284,17 +290,49 @@ TEST(VBISourceStageParameters, OffersEveryKnownContainerPreset) {
   EXPECT_EQ(it->constraints.allowed_strings, vbi_source_preset_names());
 }
 
-TEST(VBISourceStageParameters, ContainerFieldsDependOnTheCustomPreset) {
+// A capture's television system fixes the geometry of the frames it is placed
+// on, so a project is offered the formats of its own system and nothing else.
+// That is the whole of the choice: a PAL project has one, an NTSC project two.
+TEST(VBISourceStageParameters, TheFormatsOfferedFollowTheProjectSystem) {
   VBISourceStage stage;
-  for (const ParameterDescriptor& descriptor :
-       stage.get_parameter_descriptors()) {
-    if (descriptor.name.rfind("container_", 0) != 0) continue;
-    ASSERT_TRUE(descriptor.constraints.depends_on.has_value())
+
+  const auto format_descriptor = [&stage](VideoSystem system) {
+    const auto descriptors =
+        stage.get_parameter_descriptors(system, SourceType::Unknown);
+    const auto it = std::find_if(
+        descriptors.begin(), descriptors.end(),
+        [](const ParameterDescriptor& d) { return d.name == "format"; });
+    EXPECT_NE(it, descriptors.end());
+    return *it;
+  };
+
+  const ParameterDescriptor pal = format_descriptor(VideoSystem::PAL);
+  EXPECT_EQ(pal.constraints.allowed_strings,
+            vbi_source_preset_names(VBITVSystem::kPAL));
+  EXPECT_EQ(pal.constraints.default_value,
+            ParameterValue(std::string("bt8x8 card dump, 8-bit (WST)")));
+
+  const ParameterDescriptor ntsc = format_descriptor(VideoSystem::NTSC);
+  EXPECT_EQ(ntsc.constraints.allowed_strings,
+            vbi_source_preset_names(VBITVSystem::kNTSC));
+  EXPECT_EQ(ntsc.constraints.default_value,
+            ParameterValue(std::string(".tbc VBI crop, 16-bit (WST)")));
+}
+
+// The preset carries the whole configuration, so there is nothing else for the
+// surface to offer: the file, the format and one policy about dropped frames.
+TEST(VBISourceStageParameters, TheSurfaceIsThreeParameters) {
+  VBISourceStage stage;
+  const auto descriptors = stage.get_parameter_descriptors();
+
+  std::vector<std::string> names;
+  for (const ParameterDescriptor& descriptor : descriptors) {
+    names.push_back(descriptor.name);
+    // Nothing is conditional on anything else any more.
+    EXPECT_FALSE(descriptor.constraints.depends_on.has_value())
         << descriptor.name;
-    EXPECT_EQ(descriptor.constraints.depends_on->parameter_name, "format");
-    EXPECT_EQ(descriptor.constraints.depends_on->required_values,
-              std::vector<std::string>{"custom"});
   }
+  EXPECT_EQ(names, (std::vector<std::string>{"input_path", "format", "drops"}));
 }
 
 TEST(VBISourceStageParameters, RejectsAnUnknownParameter) {
@@ -306,13 +344,22 @@ TEST(VBISourceStageParameters, RoundTripsTheParametersItIsGiven) {
   VBISourceStage stage;
   ASSERT_TRUE(stage.set_parameters({
       {"input_path", std::string(kCapturePath)},
+      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")},
       {"drops", std::string("pad")},
-      {"first_field", uint32_t{2}},
   }));
 
   const auto parameters = stage.get_parameters();
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")), kCapturePath);
+  EXPECT_EQ(std::get<std::string>(parameters.at("format")),
+            ".tbc VBI crop, 16-bit (NABTS)");
   EXPECT_EQ(std::get<std::string>(parameters.at("drops")), "pad");
-  EXPECT_EQ(std::get<uint32_t>(parameters.at("first_field")), 2u);
+}
+
+// Every parameter is a string now, so a caller handing over a number is
+// handing over the wrong thing and is told rather than quietly ignored.
+TEST(VBISourceStageParameters, RejectsAParameterOfTheWrongType) {
+  VBISourceStage stage;
+  EXPECT_FALSE(stage.set_parameters({{"format", uint32_t{2}}}));
 }
 
 // ---------------------------------------------------------------------------
@@ -339,30 +386,6 @@ TEST(VBISourceStageStatus, IsRedWhenTheCaptureIsNotAccessible) {
   VBISourceStage stage(deps);
 
   ASSERT_TRUE(stage.set_parameters(default_parameters()));
-  EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
-}
-
-TEST(VBISourceStageStatus, IsRedForAnIncompletelySpelledCustomContainer) {
-  auto deps =
-      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 2));
-  VBISourceStage stage(deps);
-
-  ASSERT_TRUE(stage.set_parameters({
-      {"input_path", std::string(kCapturePath)},
-      {"format", std::string("custom")},
-  }));
-  EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
-}
-
-TEST(VBISourceStageStatus, IsRedForADataServiceThatCannotBePlaced) {
-  auto deps =
-      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 2));
-  VBISourceStage stage(deps);
-
-  ASSERT_TRUE(stage.set_parameters({
-      {"input_path", std::string(kCapturePath)},
-      {"teletext_system", std::string("NABTS")},
-  }));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
 }
 
@@ -445,7 +468,9 @@ TEST(VBISourceStageExecution, DataLandsOnTheTeletextLinesAndNowhereElse) {
 
   VBIOutputFrame output;
   std::string error;
-  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, output, error)) << error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, VBITeletextSystem::kWST,
+                                    output, error))
+      << error;
   const VBIOutputLevels& levels = output.levels;
 
   // How far above blanking a line's data region rises: a teletext line swings
@@ -485,7 +510,9 @@ TEST(VBISourceStageExecution, EverythingOutsideTheDataRegionIsBlanking) {
 
   VBIOutputFrame output;
   std::string error;
-  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, output, error)) << error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, VBITeletextSystem::kWST,
+                                    output, error))
+      << error;
   const auto blanking = static_cast<int16_t>(output.levels.blanking);
 
   const std::vector<int16_t> frame = representation->get_frame_copy(0);
@@ -654,23 +681,6 @@ TEST(VBISourceStageCalibration, FitsTheCapturesOwnOffsetAndReportsIt) {
   EXPECT_NEAR(std::get<double>(*offset), kTruthOffsetSamples, 0.5);
 }
 
-TEST(VBISourceStageCalibration, AConfiguredOffsetIsAppliedUnchanged) {
-  auto deps =
-      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 2));
-  VBISourceStage stage(deps);
-
-  auto parameters = default_parameters();
-  parameters["capture_offset_mode"] = std::string("manual");
-  parameters["capture_offset_samples"] = kTruthOffsetSamples;
-
-  ObservationContext observations;
-  ASSERT_FALSE(stage.execute({}, parameters, observations).empty());
-
-  // Nothing was measured, so nothing is reported.
-  EXPECT_FALSE(
-      observations.get(FieldID(0), "vbi_source", "capture_offset").has_value());
-}
-
 // A capture whose teletext cannot be located is not decoded with a guessed
 // offset: it is refused (design §5.3.4).
 TEST(VBISourceStageCalibration, RefusesACaptureItCannotLockTo) {
@@ -753,24 +763,6 @@ TEST(VBISourceStageSequence, PaddingKeepsTheOutputAlignedWithTheSource) {
 // Rejected configurations
 // ---------------------------------------------------------------------------
 
-TEST(VBISourceStageValidation, RefusesADataServiceItCannotPlace) {
-  auto deps =
-      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 1));
-  VBISourceStage stage(deps);
-
-  auto parameters = default_parameters();
-  parameters["teletext_system"] = std::string("NABTS");
-
-  ObservationContext observations;
-  try {
-    stage.execute({}, parameters, observations);
-    FAIL() << "NABTS was accepted";
-  } catch (const UserDataError& error) {
-    EXPECT_NE(std::string(error.what()).find("WST"), std::string::npos)
-        << error.what();
-  }
-}
-
 TEST(VBISourceStageValidation, RefusesACaptureThatIsNotAWholeNumberOfFrames) {
   const VBISourceFormat format = bt8x8_pal_format();
   std::vector<uint8_t> capture = make_synthetic_capture(format, 2);
@@ -798,10 +790,217 @@ TEST(VBISourceStageValidation, RefusesAnUnknownFormatPreset) {
   VBISourceStage stage(deps);
 
   auto parameters = default_parameters();
-  parameters["format"] = std::string("bt8x8-ntsc");
+  parameters["format"] = std::string("bt8x8-secam");
 
   ObservationContext observations;
   EXPECT_THROW(stage.execute({}, parameters, observations), UserDataError);
+}
+
+// ---------------------------------------------------------------------------
+// 525-line captures
+// ---------------------------------------------------------------------------
+
+VBISourceFormat tbc_vbi_ntsc_format() {
+  VBISourceFormat format;
+  std::string error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+  return format;
+}
+
+// A capture in the shape of the circulating NTSC VBI-only crops: 16-bit
+// little-endian words in the decoder's amplitude domain, sixteen whole .tbc
+// lines per field, records starting at 0H so the offset is zero.
+std::vector<uint8_t> make_synthetic_ntsc_capture(const VBISourceFormat& format,
+                                                 uint64_t frame_count) {
+  VBITeletextService service;
+  std::string error;
+  EXPECT_TRUE(vbi_teletext_service(VBITVSystem::kNTSC, VBITeletextSystem::kWST,
+                                   service, error))
+      << error;
+
+  std::vector<uint8_t> bytes(
+      static_cast<size_t>(format.bytes_per_frame() * frame_count), 0);
+  const double position = service.cri_start_samples(format.sample_rate_hz, 0.0);
+
+  for (uint64_t frame = 0; frame < frame_count; ++frame) {
+    for (uint32_t field = 0; field < 2u; ++field) {
+      for (uint32_t index = 0; index < format.field_lines; ++index) {
+        SyntheticVBILine line;
+        line.sample_rate_hz = format.sample_rate_hz;
+        line.valid_samples = format.valid_samples;
+        line.bit_rate_hz = service.bit_rate_hz;
+        line.payload_bits = service.payload_bytes * 8u;
+        line.anchor_position_samples = position;
+        line.logic0 = static_cast<double>(kNtscBlack) * 64.0;
+        line.logic1 = 624.0 * 64.0;
+        line.noise_amplitude = 32.0;
+        line.seed =
+            static_cast<uint32_t>(frame * 64u + field * 32u + index + 1u);
+        // Records outside the data range are the equalising line and the
+        // active picture, neither of which carries a data service.
+        line.carries_data = index >= format.field_range.start &&
+                            index <= format.field_range.end;
+
+        const std::vector<double> samples = render_synthetic_vbi_line(line);
+        const uint64_t offset = frame * format.bytes_per_frame() +
+                                field * format.bytes_per_field() +
+                                index * format.bytes_per_record();
+        for (uint32_t sample = 0; sample < format.valid_samples; ++sample) {
+          const auto value = static_cast<uint32_t>(
+              std::clamp(std::round(samples[sample]), 0.0, 65535.0));
+          const size_t at = static_cast<size_t>(offset) + sample * 2u;
+          bytes[at] = static_cast<uint8_t>(value & 0xFFu);
+          bytes[at + 1u] = static_cast<uint8_t>((value >> 8u) & 0xFFu);
+        }
+      }
+    }
+  }
+  return bytes;
+}
+
+std::map<std::string, ParameterValue> ntsc_parameters() {
+  auto parameters = default_parameters();
+  parameters["format"] = std::string(".tbc VBI crop, 16-bit (WST)");
+  return parameters;
+}
+
+TEST(VBISourceStageNTSC, FramesAreNormativelySizedNTSCCVBS) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_ntsc_capture(format, 3));
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+  EXPECT_EQ(representation->frame_count(), 3u);
+
+  const auto params = representation->get_video_parameters();
+  ASSERT_TRUE(params.has_value());
+  EXPECT_EQ(params->system, VideoSystem::NTSC);
+  EXPECT_EQ(params->frame_width_nominal, kNtscSamplesPerLine);
+  EXPECT_EQ(params->frame_height, kNtscFrameLines);
+  EXPECT_EQ(params->blanking_level, kNtscBlanking);
+
+  const auto descriptor = representation->get_frame_descriptor(0);
+  ASSERT_TRUE(descriptor.has_value());
+  EXPECT_EQ(descriptor->system, VideoSystem::NTSC);
+  EXPECT_EQ(descriptor->samples_total, static_cast<size_t>(kNtscFrameSamples));
+  EXPECT_EQ(descriptor->samples_per_line_nominal, 910u);
+}
+
+// The whole 525-line path: data on broadcast lines 10-21 and 273-284 and
+// blanking everywhere else, with every sample inside the legal range.
+TEST(VBISourceStageNTSC, DataLandsOnTheStandardLinesAndNowhereElse) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_ntsc_capture(format, 2));
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+
+  VBIOutputFrame output;
+  std::string error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kNTSC, VBITeletextSystem::kWST,
+                                    output, error))
+      << error;
+
+  const int16_t* frame = representation->get_frame(0);
+  ASSERT_NE(frame, nullptr);
+
+  for (uint32_t line = 0; line < output.lines_per_frame; ++line) {
+    const bool data =
+        (line >= 9u && line <= 20u) || (line >= 272u && line <= 283u);
+    const int16_t* samples = frame + output.line_offset(line);
+    bool anything_written = false;
+    for (size_t sample = 0; sample < output.line_length(line); ++sample) {
+      EXPECT_GE(samples[sample], kVBIOutputSampleMin);
+      EXPECT_LE(samples[sample], kVBIOutputSampleMax);
+      if (samples[sample] != static_cast<int16_t>(output.levels.blanking)) {
+        anything_written = true;
+      }
+    }
+    EXPECT_EQ(anything_written, data) << "line " << line;
+  }
+}
+
+// Nothing in a capture records which of the two 525-line services it carries,
+// so the service is configuration — and choosing it changes the framing code
+// that is placed, the packet length, and the amplitude the data sits at.
+TEST(VBISourceStageNTSC, NABTSIsPlacedAsItsOwnService) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_ntsc_capture(format, 2));
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+
+  auto parameters = ntsc_parameters();
+  parameters["format"] = std::string(".tbc VBI crop, 16-bit (NABTS)");
+
+  ObservationContext observations;
+  const std::vector<ArtifactPtr> outputs =
+      stage.execute({}, parameters, observations);
+  ASSERT_FALSE(outputs.empty());
+  const auto representation = representation_of(outputs.front());
+  ASSERT_NE(representation, nullptr);
+  EXPECT_EQ(representation->frame_count(), 2u);
+
+  // The configured service reaches the output, so a downstream decoder sees
+  // which one it is being handed rather than assuming.
+  const auto system =
+      observations.get(FieldID(0), "vbi_source", "teletext_system");
+  ASSERT_TRUE(system.has_value());
+  EXPECT_EQ(std::get<std::string>(*system), "NABTS");
+
+  // NABTS puts logic 0 at blanking where WST puts it at black, so the two
+  // place the same records at measurably different amplitudes.
+  VBIOutputFrame nabts_frame;
+  VBIOutputFrame wst_frame;
+  std::string error;
+  ASSERT_TRUE(make_vbi_output_frame(
+      VBITVSystem::kNTSC, VBITeletextSystem::kNABTS, nabts_frame, error))
+      << error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kNTSC, VBITeletextSystem::kWST,
+                                    wst_frame, error))
+      << error;
+  EXPECT_NE(nabts_frame.levels.logic0, wst_frame.levels.logic0);
+
+  // And the data still lands on the twelve lines the standard gives it.
+  const int16_t* frame = representation->get_frame(0);
+  ASSERT_NE(frame, nullptr);
+  for (uint32_t line = 0; line < nabts_frame.lines_per_frame; ++line) {
+    const bool data =
+        (line >= 9u && line <= 20u) || (line >= 272u && line <= 283u);
+    const int16_t* samples = frame + nabts_frame.line_offset(line);
+    const auto bounds =
+        std::minmax_element(samples, samples + nabts_frame.line_length(line));
+    const bool written = *bounds.second != nabts_frame.levels.blanking ||
+                         *bounds.first != nabts_frame.levels.blanking;
+    EXPECT_EQ(written, data) << "line " << line;
+  }
+}
+
+// A capture ending on an odd field is ordinary; the trailing field is one
+// short of a frame and is simply not emitted.
+TEST(VBISourceStageNTSC, ACaptureEndingOnAnOddFieldLoadsAndDropsThatField) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  std::vector<uint8_t> capture = make_synthetic_ntsc_capture(format, 3);
+  capture.resize(capture.size() -
+                 static_cast<size_t>(format.bytes_per_field()));
+
+  auto deps = std::make_shared<FakeDeps>(capture);
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+  EXPECT_EQ(representation->frame_count(), 2u);
 }
 
 // ---------------------------------------------------------------------------

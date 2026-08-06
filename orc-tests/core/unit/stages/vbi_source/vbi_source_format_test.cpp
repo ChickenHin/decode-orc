@@ -10,8 +10,12 @@
 #include "vbi_source_format.h"
 
 #include <gtest/gtest.h>
+#include <orc/stage/cvbs_signal_constants.h>
 
 #include <algorithm>
+#include <optional>
+
+#include "vbi_source_validation.h"
 
 namespace orc {
 namespace {
@@ -23,7 +27,9 @@ TEST(VBISourceFormat, Bt8x8PALPresetExpandsToTheDocumentedContainer) {
   VBISourceFormat format;
   std::string error;
 
-  ASSERT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   EXPECT_TRUE(error.empty());
 
   EXPECT_DOUBLE_EQ(format.sample_rate_hz, 35468950.0);
@@ -48,7 +54,9 @@ TEST(VBISourceFormat, Bt8x8PALPresetCalibratesItsCaptureOffset) {
   VBISourceFormat format;
   std::string error;
 
-  ASSERT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
 
   EXPECT_TRUE(format.capture_offset_is_auto);
   EXPECT_DOUBLE_EQ(format.capture_offset_samples, 244.0);
@@ -62,7 +70,9 @@ TEST(VBISourceFormat, Bt8x8PALPresetCarriesCleanSourceCalibrationThresholds) {
   VBISourceFormat format;
   std::string error;
 
-  ASSERT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
 
   EXPECT_DOUBLE_EQ(format.calibration.tight_spread_samples, 0.5);
 
@@ -86,7 +96,9 @@ TEST(VBISourceFormat, Bt8x8PALPresetCarriesCleanSourceCalibrationThresholds) {
 TEST(VBISourceFormat, Bt8x8PALFrameGeometryDerivesTheDocumentedByteCounts) {
   VBISourceFormat format;
   std::string error;
-  ASSERT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
 
   EXPECT_EQ(format.bytes_per_sample(), 1u);
   EXPECT_EQ(format.bytes_per_record(), 2048u);
@@ -101,27 +113,13 @@ TEST(VBISourceFormat, Bt8x8PALFrameGeometryDerivesTheDocumentedByteCounts) {
 TEST(VBISourceFormat, Bt8x8PALFrameSizeFactorisesTheReferenceCaptureLength) {
   VBISourceFormat format;
   std::string error;
-  ASSERT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
 
   constexpr uint64_t kReferenceRawBytes = 24117706752ull;
   EXPECT_EQ(kReferenceRawBytes % format.bytes_per_frame(), 0u);
   EXPECT_EQ(kReferenceRawBytes / format.bytes_per_frame(), 368007u);
-}
-
-// "custom" leaves the geometry unset so an incompletely specified container
-// is rejected by validation instead of quietly behaving like some other
-// format.
-TEST(VBISourceFormat, CustomPresetExpandsToAnUnconfiguredContainer) {
-  VBISourceFormat format;
-  std::string error;
-
-  ASSERT_TRUE(expand_vbi_source_preset("custom", format, error)) << error;
-
-  EXPECT_EQ(format.line_length, 0u);
-  EXPECT_EQ(format.field_lines, 0u);
-  EXPECT_EQ(format.valid_samples, 0u);
-  EXPECT_DOUBLE_EQ(format.sample_rate_hz, 0.0);
-  EXPECT_EQ(format.bytes_per_frame(), 0u);
 }
 
 TEST(VBISourceFormat, UnknownPresetIsRejectedAndListsTheKnownNames) {
@@ -130,22 +128,92 @@ TEST(VBISourceFormat, UnknownPresetIsRejectedAndListsTheKnownNames) {
 
   EXPECT_FALSE(expand_vbi_source_preset("bt8x8-secam", format, error));
   EXPECT_NE(error.find("bt8x8-secam"), std::string::npos);
-  EXPECT_NE(error.find("bt8x8-pal"), std::string::npos);
+  EXPECT_NE(error.find("bt8x8 card dump, 8-bit (WST)"), std::string::npos);
 }
 
-TEST(VBISourceFormat, PresetNamesCoverEveryImplementedPresetAndCustom) {
+// Just enough presets to cover the captures that exist, and every one of them
+// a complete configuration: there is no "custom" entry to leave half filled in.
+TEST(VBISourceFormat, PresetNamesAreTheWholeChoiceAndAllExpand) {
   const std::vector<std::string> names = vbi_source_preset_names();
 
-  EXPECT_NE(std::find(names.begin(), names.end(), "bt8x8-pal"), names.end());
-  ASSERT_FALSE(names.empty());
-  EXPECT_EQ(names.back(), "custom");
+  EXPECT_EQ(names, (std::vector<std::string>{"bt8x8 card dump, 8-bit (WST)",
+                                             ".tbc VBI crop, 16-bit (WST)",
+                                             ".tbc VBI crop, 16-bit (NABTS)"}));
 
-  // Every advertised name must expand.
   for (const std::string& name : names) {
     VBISourceFormat format;
     std::string error;
-    EXPECT_TRUE(expand_vbi_source_preset(name, format, error)) << name;
+    ASSERT_TRUE(expand_vbi_source_preset(name, format, error)) << name;
+    // Complete means complete: nothing is left at an unusable default.
+    EXPECT_GT(format.sample_rate_hz, 0.0) << name;
+    EXPECT_GT(format.line_length, 0u) << name;
+    EXPECT_GT(format.valid_samples, 0u) << name;
+    EXPECT_GT(format.field_lines, 0u) << name;
+    EXPECT_GT(format.field_range.count(), 0u) << name;
+    EXPECT_TRUE(format.first_field == 1u || format.first_field == 2u) << name;
+    EXPECT_TRUE(validate_vbi_source_config(format, std::nullopt).empty())
+        << name;
   }
+}
+
+// A capture's television system fixes the geometry of the frames it can be
+// placed on, so a project is only offered the presets of its own system.
+TEST(VBISourceFormat, PresetNamesAreFilteredByTelevisionSystem) {
+  const std::vector<std::string> pal =
+      vbi_source_preset_names(VBITVSystem::kPAL);
+  const std::vector<std::string> ntsc =
+      vbi_source_preset_names(VBITVSystem::kNTSC);
+
+  // A PAL project is offered one format; an NTSC project is offered the choice
+  // between the two services its captures might carry.
+  EXPECT_EQ(pal, (std::vector<std::string>{"bt8x8 card dump, 8-bit (WST)"}));
+  EXPECT_EQ(ntsc, (std::vector<std::string>{".tbc VBI crop, 16-bit (WST)",
+                                            ".tbc VBI crop, 16-bit (NABTS)"}));
+
+  // Between them the two lists are the whole table: no preset is unreachable.
+  EXPECT_EQ(pal.size() + ntsc.size(), vbi_source_preset_names().size());
+}
+
+// The circulating NTSC VBI-only crops: sixteen whole 4 x fsc .tbc lines per
+// field with no padding, of which records 1 to 12 are broadcast lines 10-21.
+TEST(VBISourceFormat, TBCVBINTSCPresetExpandsToTheMeasuredContainer) {
+  VBISourceFormat format;
+  std::string error;
+
+  ASSERT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+
+  EXPECT_DOUBLE_EQ(format.sample_rate_hz, kNtscSampleRate);
+  EXPECT_EQ(format.line_length, 910u);
+  EXPECT_EQ(format.valid_samples, 910u);
+  EXPECT_EQ(format.sample_format, VBISampleFormat::kU16LE);
+  EXPECT_EQ(format.field_lines, 16u);
+  EXPECT_EQ(format.field_range.start, 1u);
+  EXPECT_EQ(format.field_range.end, 12u);
+  EXPECT_EQ(format.field_range.count(), 12u);
+  EXPECT_EQ(format.frame_trailer_bytes, 0u);
+  EXPECT_FALSE(format.frame_trailer_is_counter);
+  EXPECT_EQ(format.record_padding_bytes(), 0u);
+  EXPECT_EQ(format.bytes_per_field(), 29120u);
+  EXPECT_EQ(format.bytes_per_frame(), 58240u);
+  EXPECT_EQ(format.tv_system, VBITVSystem::kNTSC);
+  EXPECT_EQ(format.tt_system, VBITeletextSystem::kWST);
+  EXPECT_EQ(format.family, VBISourceFamily::kTBCDerived);
+}
+
+// A time-base corrected capture already has sample 0 of every record at 0H, so
+// its offset is known exactly and must never be fitted (design §5.3.3).
+TEST(VBISourceFormat, TBCVBINTSCPresetNeverCalibratesItsCaptureOffset) {
+  VBISourceFormat format;
+  std::string error;
+
+  ASSERT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+
+  EXPECT_FALSE(format.capture_offset_is_auto);
+  EXPECT_DOUBLE_EQ(format.capture_offset_samples, 0.0);
 }
 
 // The standard's teletext line lists (design §5.1) bound how many records a
@@ -154,6 +222,12 @@ TEST(VBISourceFormat, StandardTeletextLineCountsMatchTheSystemDefinitions) {
   EXPECT_EQ(standard_teletext_lines_per_field(VBITVSystem::kPAL,
                                               VBITeletextSystem::kWST),
             16u);
+
+  // Both 525-line services sit on the same twelve lines per field; they differ
+  // in framing code and packet length, not in vertical placement.
+  EXPECT_EQ(standard_teletext_lines_per_field(VBITVSystem::kNTSC,
+                                              VBITeletextSystem::kWST),
+            12u);
   EXPECT_EQ(standard_teletext_lines_per_field(VBITVSystem::kNTSC,
                                               VBITeletextSystem::kNABTS),
             12u);
@@ -164,25 +238,16 @@ TEST(VBISourceFormat, StandardTeletextLineCountsMatchTheSystemDefinitions) {
 
 // A pairing with no defined line list reports zero rather than guessing one.
 TEST(VBISourceFormat, MismatchedSystemPairingHasNoDefinedLineList) {
-  EXPECT_EQ(standard_teletext_lines_per_field(VBITVSystem::kNTSC,
-                                              VBITeletextSystem::kWST),
-            0u);
   EXPECT_EQ(standard_teletext_lines_per_field(VBITVSystem::kPAL,
                                               VBITeletextSystem::kNABTS),
             0u);
 }
 
-TEST(VBISourceFormat, SampleFormatNamesRoundTrip) {
-  for (const VBISampleFormat sample_format :
-       {VBISampleFormat::kU8, VBISampleFormat::kU16LE,
-        VBISampleFormat::kS16LE}) {
-    VBISampleFormat parsed = VBISampleFormat::kU8;
-    ASSERT_TRUE(parse_vbi_sample_format(to_string(sample_format), parsed));
-    EXPECT_EQ(parsed, sample_format);
-  }
-
-  VBISampleFormat unused = VBISampleFormat::kU8;
-  EXPECT_FALSE(parse_vbi_sample_format("f32", unused));
+// The spelling still appears in error messages, so it still has to be right.
+TEST(VBISourceFormat, SampleFormatsHaveTheirDocumentedSpellings) {
+  EXPECT_EQ(to_string(VBISampleFormat::kU8), "u8");
+  EXPECT_EQ(to_string(VBISampleFormat::kU16LE), "u16le");
+  EXPECT_EQ(to_string(VBISampleFormat::kS16LE), "s16le");
 }
 
 TEST(VBISourceFormat, SixteenBitContainersMeasureTwoBytesPerSample) {

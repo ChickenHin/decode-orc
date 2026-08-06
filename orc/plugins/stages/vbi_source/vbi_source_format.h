@@ -179,9 +179,16 @@ uint32_t standard_teletext_lines_per_field(VBITVSystem tv_system,
                                            VBITeletextSystem tt_system);
 
 // Names of every container preset the stage understands, in presentation
-// order.  "custom" is always last and expands to an unconfigured descriptor
-// the caller fills in from the project's container fields.
+// order.  A preset is a complete configuration, so the name is the whole of
+// the user's choice; it is also what the project file stores.
 std::vector<std::string> vbi_source_preset_names();
+
+// The same list, restricted to the presets whose captures were made from one
+// television system.  A capture's system fixes the output frame geometry, so a
+// preset for the wrong system could never produce frames a project of that
+// system can hold; offering it and then refusing it would be a worse parameter
+// surface than not offering it at all.
+std::vector<std::string> vbi_source_preset_names(VBITVSystem tv_system);
 
 // Expand a named preset (design §3.2) into the descriptor above.  Returns
 // false with an error message when the name is not a known preset.
@@ -192,11 +199,6 @@ bool expand_vbi_source_preset(const std::string& preset_name,
 // Human-readable spelling of a sample format, as used in project files and
 // error messages ("u8", "u16le", "s16le").
 std::string to_string(VBISampleFormat sample_format);
-
-// Parse the spellings produced by to_string().  Returns false on an
-// unrecognised name.
-bool parse_vbi_sample_format(const std::string& name,
-                             VBISampleFormat& out_format);
 
 }  // namespace orc
 

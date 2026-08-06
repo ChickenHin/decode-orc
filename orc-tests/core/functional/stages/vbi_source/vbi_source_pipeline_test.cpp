@@ -69,7 +69,7 @@ bool reference_capture_available() {
 std::map<std::string, ParameterValue> reference_parameters() {
   return {
       {"input_path", std::string(kReferenceCapture)},
-      {"format", std::string("bt8x8-pal")},
+      {"format", std::string("bt8x8 card dump, 8-bit (WST)")},
   };
 }
 

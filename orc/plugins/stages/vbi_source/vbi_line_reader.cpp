@@ -49,14 +49,29 @@ bool decode_vbi_samples(VBISampleFormat sample_format,
       return true;
 
     case VBISampleFormat::kU16LE:
+      // The TBC-derived family: 16-bit words, little-endian, unsigned — the
+      // amplitude domain ld-decode and vhs-decode write, in which 0 IRE and
+      // 100 IRE sit at fixed values.  Nothing is scaled here; the level mapper
+      // owns the amplitude domain.
+      out_samples.reserve(sample_count);
+      for (uint32_t index = 0; index < sample_count; ++index) {
+        const size_t word = static_cast<size_t>(index) * 2u;
+        const uint32_t low = record_bytes[word];
+        const uint32_t high = record_bytes[word + 1u];
+        out_samples.push_back(static_cast<double>(low | (high << 8u)));
+      }
+      return true;
+
     case VBISampleFormat::kS16LE:
-      // The 16-bit decode path belongs with the TBC-derived source family,
-      // which is not yet wired through the rest of the stage.  Failing here
-      // is deliberate: a half-supported format would produce plausible but
-      // wrong output.
+      // No capture in circulation stores signed words, and the FLAC transport
+      // — which is how these files are actually shipped — carries no
+      // signedness in its header, so it always unwraps to the unsigned
+      // convention the community encoder writes.  Reading a signed container
+      // would need that convention to be configuration on both sides of the
+      // transport, which is more machinery than a format nobody has justifies.
       error_message = "Sample format '" + to_string(sample_format) +
-                      "' is not implemented yet; only 'u8' captures can "
-                      "currently be read.";
+                      "' is not implemented; captures are stored as 'u8' or "
+                      "'u16le'.";
       return false;
   }
 

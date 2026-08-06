@@ -137,6 +137,7 @@ if(TARGET orc-vbi-source)
         stages/vbi_source/vbi_flac_transport_test.cpp
         stages/vbi_source/vbi_calibration_test.cpp
         stages/vbi_source/vbi_source_pipeline_test.cpp
+        stages/vbi_source/vbi_ntsc_source_test.cpp
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source

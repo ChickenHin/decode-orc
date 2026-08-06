@@ -22,7 +22,9 @@ namespace {
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   return format;
 }
 
@@ -64,6 +66,59 @@ TEST(VBISourceValidation, StreamLengthMustFactoriseIntoWholeFrames) {
   EXPECT_TRUE(mentions(errors, "not an exact multiple")) << joined(errors);
   EXPECT_TRUE(mentions(errors, "65536")) << joined(errors);
   EXPECT_TRUE(mentions(errors, "7 bytes")) << joined(errors);
+}
+
+// A capture stops when it stops, and the circulating VBI-only .tbc crops end
+// on an odd field about as often as not.  Such a file is not misconfigured:
+// the trailing field is one short of a frame and is simply not emitted.
+TEST(VBISourceValidation, ATrailingWholeFieldIsAccepted) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+
+  const uint64_t frame_bytes = format.bytes_per_frame();
+  const uint64_t field_bytes = format.bytes_per_field();
+
+  const std::vector<std::string> errors =
+      validate_vbi_source_config(format, frame_bytes * 100 + field_bytes);
+
+  EXPECT_TRUE(errors.empty()) << joined(errors);
+}
+
+// Half a field is a different matter: no container produces one, so it means
+// the geometry is wrong.
+TEST(VBISourceValidation, ATrailingPartialFieldIsRejected) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+
+  const uint64_t frame_bytes = format.bytes_per_frame();
+  const uint64_t field_bytes = format.bytes_per_field();
+
+  const std::vector<std::string> errors =
+      validate_vbi_source_config(format, frame_bytes * 100 + field_bytes / 2);
+
+  EXPECT_TRUE(mentions(errors, "not an exact multiple")) << joined(errors);
+  EXPECT_TRUE(mentions(errors, "not a whole field either")) << joined(errors);
+}
+
+// A stream too short to hold a frame at all says so, rather than reporting a
+// factorisation remainder the user cannot act on.
+TEST(VBISourceValidation, ACaptureShorterThanOneFrameIsRejected) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+
+  const std::vector<std::string> errors =
+      validate_vbi_source_config(format, format.bytes_per_field());
+
+  EXPECT_TRUE(mentions(errors, "one complete frame")) << joined(errors);
 }
 
 TEST(VBISourceValidation, EmptyCaptureIsRejected) {
@@ -168,6 +223,22 @@ TEST(VBISourceValidation, TBCDerivedSourceMustNotCalibrateItsCaptureOffset) {
   EXPECT_TRUE(mentions(errors, "0H")) << joined(errors);
 }
 
+// A crop may start a sample or two either side of 0H, and the user is the only
+// one who can say so, so a configured figure is allowed even though a fitted
+// one is not.
+TEST(VBISourceValidation, TBCDerivedSourceMayBeGivenAManualOffset) {
+  VBISourceFormat format = bt8x8_pal_format();
+  format.family = VBISourceFamily::kTBCDerived;
+  format.capture_offset_is_auto = false;
+  format.capture_offset_samples = -1.5;
+
+  const std::vector<std::string> errors =
+      validate_vbi_source_config(format, std::nullopt);
+
+  EXPECT_FALSE(mentions(errors, "calibration.capture_offset"))
+      << joined(errors);
+}
+
 TEST(VBISourceValidation, TBCDerivedSourceWithAZeroOffsetIsAccepted) {
   VBISourceFormat format = bt8x8_pal_format();
   format.family = VBISourceFamily::kTBCDerived;
@@ -204,12 +275,11 @@ TEST(VBISourceValidation, UnsupportedSystemPairingIsRejected) {
   EXPECT_TRUE(mentions(errors, "NABTS")) << joined(errors);
 }
 
-// An unconfigured "custom" container must name every field the user has to
-// fill in, not just the first one.
-TEST(VBISourceValidation, UnconfiguredCustomContainerNamesEveryMissingField) {
-  VBISourceFormat format;
-  std::string error;
-  ASSERT_TRUE(expand_vbi_source_preset("custom", format, error)) << error;
+// No preset expands to an empty descriptor, but validation is what would catch
+// a preset entry that forgot a field, so it must name every one of them rather
+// than stopping at the first.
+TEST(VBISourceValidation, AnEmptyContainerNamesEveryMissingField) {
+  const VBISourceFormat format;
 
   const std::vector<std::string> errors =
       validate_vbi_source_config(format, std::nullopt);

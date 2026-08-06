@@ -71,10 +71,28 @@ class IVBISourceStageDeps {
 // four-hour capture is 24 GB of records and 522 GB of frames; materialising it
 // is not an option (design §5.7).
 //
-// What the stage is currently able to place is one path end to end: the bt8x8
-// PAL preset, world system teletext, FLAC-wrapped or raw.  Every other format
-// in the design's table fails at configuration with a message saying so rather
-// than producing plausible but wrong output.
+// The user's whole choice is one named preset per capture format, and the list
+// is filtered to the project's own television system: a PAL project is offered
+// one and an NTSC project two.  A preset is a complete configuration — the
+// container geometry, the data service the capture carries, the level policy,
+// the capture offset and the field order — because every one of those is a
+// property of the format rather than something a user could be expected to
+// know.  There is no "custom" preset: a format nobody has measured cannot be
+// described by guessing at its fields, and one that has been measured is a
+// single data entry in the preset table.
+//
+// The data service is part of the preset rather than an axis of its own,
+// because nothing in a capture records which of the two 525-line services it
+// carries — they share their lines and their bit rate and differ in framing
+// code and packet length — and because what it decides is less than its name
+// suggests.  It supplies the data region the record is clipped to, the pattern
+// the capture offset is fitted against, the windows the logic levels are read
+// from, and the amplitude those levels map onto.  On a card capture all four
+// matter.  On a TBC-derived capture the record is copied index for index and
+// its levels are absolute, so only the first survives: the service decides how
+// much of the line is copied and nothing else.  It is carried onto the output
+// either way, so a decoder is told rather than left to assume — and whether the
+// host can decode what was placed is the slicer's business, not this stage's.
 class VBISourceStage : public DAGStage,
                        public ParameterizedStage,
                        public IStagePreviewCapability {
@@ -115,37 +133,26 @@ class VBISourceStage : public DAGStage,
  private:
   // Every configured value the stage holds, in the spelling the project file
   // and the parameter surface use.
+  //
+  // There are three, because a preset is a complete configuration: the
+  // container geometry, the data service the capture carries, and the level,
+  // offset and field-order policies that follow from both are all properties
+  // of the format rather than choices the user has to make.  What is left is
+  // the file, which format it is, and one policy about dropped frames.
   struct Configuration {
     std::string input_path;
-    std::string format_preset = "bt8x8-pal";
-
-    // Container fields, used only when the preset is "custom".
-    double container_sample_rate_hz = 0.0;
-    uint32_t container_line_length = 0;
-    uint32_t container_valid_samples = 0;
-    std::string container_sample_format = "u8";
-    uint32_t container_field_lines = 0;
-    uint32_t container_first_record = 0;
-    uint32_t container_last_record = 0;
-    uint32_t container_frame_trailer_bytes = 0;
-    std::string container_tv_system = "PAL";
-
-    std::string teletext_system = "WST";
-    std::string capture_offset_mode = "auto";
-    double capture_offset_samples = 0.0;
-    std::string levels = "per-line";
-    double fixed_logic0 = 0.0;
-    double fixed_logic1 = 255.0;
-    uint32_t first_field = 1;
+    // A freshly constructed stage is a 625-line one until told otherwise; the
+    // descriptor's own default replaces this with the project's system's
+    // format as soon as one is known.
+    std::string format_preset = "bt8x8 card dump, 8-bit (WST)";
     std::string drops = "preserve";
 
     // Identity of the configuration, for the frame cache and the artifact ID.
     std::string cache_key() const;
   };
 
-  // Expand the configuration into a container descriptor.  Returns false with
-  // an error message for a preset that does not exist, a data service the
-  // stage cannot place, or a container field that cannot be parsed.
+  // The container descriptor a configuration names.  Returns false with an
+  // error message for a preset that does not exist.
   static bool make_source_format(const Configuration& configuration,
                                  VBISourceFormat& out_format,
                                  std::string& error_message);

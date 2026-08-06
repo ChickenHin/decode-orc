@@ -115,7 +115,8 @@ bool make_vbi_frame_builder(const VBISourceFormat& format,
   out_builder = VBIFrameBuilder();
 
   VBIOutputFrame output_frame;
-  if (!make_vbi_output_frame(format.tv_system, output_frame, error_message)) {
+  if (!make_vbi_output_frame(format.tv_system, format.tt_system, output_frame,
+                             error_message)) {
     return false;
   }
 
@@ -177,8 +178,16 @@ bool make_vbi_frame_builder(const VBISourceFormat& format,
     }
   }
 
+  // A time-base corrected capture arrives with its levels already fixed, so the
+  // level policy is not the caller's to choose: there is nothing to estimate
+  // and the estimate would be wrong if it were made (vbi_level_mapper.h).
+  const VBILevelMapperConfig levels =
+      (format.family == VBISourceFamily::kTBCDerived)
+          ? vbi_absolute_level_config(output_frame.levels)
+          : level_config;
+
   VBIRecordResampler resampler(placement, format.valid_samples);
-  VBILevelMapper level_mapper(format, service, level_config);
+  VBILevelMapper level_mapper(format, service, levels);
 
   out_builder =
       VBIFrameBuilder(format, output_frame, placement, std::move(resampler),

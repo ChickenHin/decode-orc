@@ -63,7 +63,9 @@ class FakeByteSource : public IVBIByteSource {
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   return format;
 }
 
@@ -363,9 +365,10 @@ TEST(VBILineReader, FrameIsFetchedInASingleRead) {
 }
 
 TEST(VBILineReader, UnsetGeometryIsRejected) {
-  VBISourceFormat format;
+  // No preset expands to this — every one of them is complete — but the reader
+  // is generic over the descriptor and must still refuse an empty one.
+  const VBISourceFormat format;
   std::string error;
-  ASSERT_TRUE(expand_vbi_source_preset("custom", format, error)) << error;
 
   FakeByteSource source(std::vector<uint8_t>(1024, 0));
   VBILineReader reader(format, source);
@@ -391,18 +394,35 @@ TEST(VBILineReader, UnsignedEightBitSamplesDecodeToTheirRawValues) {
   }
 }
 
-// The 16-bit path belongs to the TBC-derived family and is not wired through
-// the stage yet; failing loudly beats producing plausible but wrong output.
-TEST(VBILineReader, SixteenBitSampleFormatsReportThatTheyAreNotImplemented) {
+// The TBC-derived family's words: 16-bit, little-endian, unsigned, and passed
+// through with no scaling — the level mapper owns the amplitude domain.
+TEST(VBILineReader, U16LERecordsDecodeToTheirUnsignedLittleEndianValues) {
+  // 0, 1, 255, 256, 32768, 65535.
+  const std::vector<uint8_t> record = {0x00, 0x00, 0x01, 0x00, 0xFF, 0x00,
+                                       0x00, 0x01, 0x00, 0x80, 0xFF, 0xFF};
+  const std::vector<double> expected = {0.0,   1.0,     255.0,
+                                        256.0, 32768.0, 65535.0};
+  std::vector<double> samples;
+  std::string error;
+
+  ASSERT_TRUE(decode_vbi_samples(VBISampleFormat::kU16LE, record.data(),
+                                 static_cast<uint32_t>(expected.size()),
+                                 samples, error))
+      << error;
+  ASSERT_EQ(samples.size(), expected.size());
+  for (size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_DOUBLE_EQ(samples[index], expected[index]) << "sample " << index;
+  }
+}
+
+// No capture in circulation stores signed words, and the FLAC transport that
+// carries these files has no signedness in its header to distinguish them, so
+// the format is refused rather than guessed at.
+TEST(VBILineReader, S16LEReportsThatItIsNotImplemented) {
   std::vector<uint8_t> record(8, 0);
   std::vector<double> samples;
   std::string error;
 
-  EXPECT_FALSE(decode_vbi_samples(VBISampleFormat::kU16LE, record.data(), 4,
-                                  samples, error));
-  EXPECT_NE(error.find("u16le"), std::string::npos) << error;
-
-  error.clear();
   EXPECT_FALSE(decode_vbi_samples(VBISampleFormat::kS16LE, record.data(), 4,
                                   samples, error));
   EXPECT_NE(error.find("s16le"), std::string::npos) << error;

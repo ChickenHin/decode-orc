@@ -236,16 +236,51 @@ TEST(VBIResampler, AWholeNumberRatioResolvesToASinglePhaseRow) {
   EXPECT_LE(fractional.phase_row_count(), 1024u);
 }
 
-// A source at or below the output lattice rate has no bandwidth to discard,
-// so the cutoff follows the source's own Nyquist instead of the output's.
-TEST(VBIResampler, AUnityRatioKeepsTheFullSourceBandwidth) {
-  const VBIRecordResampler passthrough(window_at(1.0, 100.0, 64), 2044);
-  const VBIRecordResampler decimator(window_at(kDecimationRatio, 100.0, 64),
+// A capture already on the output's own lattice — the same rate, and a whole
+// number of samples between the two origins — is copied.  There is nothing to
+// interpolate and nothing that could alias, so filtering it would attenuate
+// the top of the data band to no purpose.
+TEST(VBIResampler, ARecordAlreadyOnTheOutputLatticeIsCopied) {
+  // What a TBC-derived capture gives: the same rate, an offset of zero, and a
+  // data window that opens part-way along the line.
+  VBIDataPlacement placement;
+  placement.source_samples_per_output_sample = 1.0;
+  placement.source_position_at_output_zero = 0.0;
+  placement.output_begin = 147;
+  placement.output_end = 892;
+
+  const VBIRecordResampler passthrough(placement, 910);
+
+  EXPECT_EQ(passthrough.taps(), 1u);
+  EXPECT_EQ(passthrough.phase_row_count(), 1u);
+  EXPECT_DOUBLE_EQ(passthrough.cutoff_fraction_of_source_rate(), 0.5);
+
+  std::vector<double> record(910, 0.0);
+  for (size_t index = 0; index < record.size(); ++index) {
+    record[index] = static_cast<double>(index) * 3.0 + 7.0;
+  }
+
+  std::vector<double> output;
+  passthrough.resample(record, output);
+  ASSERT_EQ(output.size(), 745u);
+  for (size_t index = 0; index < output.size(); ++index) {
+    EXPECT_DOUBLE_EQ(output[index], record[index + 147u]) << "sample " << index;
+  }
+}
+
+// A unity ratio at a fractional offset is still a filter: the requested
+// positions fall between stored samples, so the waveform has to be
+// interpolated.  Its cutoff follows the source's own Nyquist, there being no
+// bandwidth to discard.
+TEST(VBIResampler, AUnityRatioAtAFractionalOffsetStillInterpolates) {
+  const VBIRecordResampler interpolator(window_at(1.0, -100.5, 64), 2044);
+  const VBIRecordResampler decimator(window_at(kDecimationRatio, -100.0, 64),
                                      2044);
 
-  EXPECT_GT(passthrough.cutoff_fraction_of_source_rate(),
+  EXPECT_GT(interpolator.taps(), 1u);
+  EXPECT_GT(interpolator.cutoff_fraction_of_source_rate(),
             decimator.cutoff_fraction_of_source_rate());
-  EXPECT_LT(passthrough.cutoff_fraction_of_source_rate(), 0.5);
+  EXPECT_LT(interpolator.cutoff_fraction_of_source_rate(), 0.5);
 }
 
 // A ratio that is not a usable number must not produce a kernel that silently

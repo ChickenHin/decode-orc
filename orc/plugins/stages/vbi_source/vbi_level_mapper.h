@@ -61,6 +61,30 @@ struct VBILevelMapperConfig {
   double fixed_logic1 = 0.0;
 };
 
+// The factor between the 16-bit domain ld-decode and vhs-decode write and the
+// 10-bit CVBS_U10_4FSC domain the stage emits.  Both are anchored to the same
+// physical levels — PAL blanking is 256 in one and 16 384 in the other, NTSC
+// white 800 and 51 200 — so the whole mapping is this one scale.
+constexpr double kTBCSampleScale = 64.0;
+
+// Levels for a source whose samples are already in the output's amplitude
+// domain, scaled by the factor above.
+//
+// A time-base corrected capture has absolute levels: the decoder that produced
+// it has already normalised blanking and white to fixed values, so estimating
+// them again from the record's own structure would replace a known quantity
+// with a measured one.  It would also be actively wrong on these captures,
+// because a .tbc record starts at 0H and so opens with the line's sync pulse
+// and colour burst, neither of which is the blanking the quiet-region estimate
+// assumes it is reading.
+//
+// Expressed as fixed levels rather than as a mode of its own, because that is
+// exactly what it is: the two logic levels are known, so nothing is measured.
+// The pair chosen does not matter as long as both come from the same domain —
+// any pair gives the same affine map, which is a division by the scale.
+VBILevelMapperConfig vbi_absolute_level_config(
+    const VBIOutputLevels& output_levels);
+
 // Sample windows within a stored line record from which levels are read.
 // Ranges are half-open, in samples from the start of the record.
 struct VBIRecordWindows {

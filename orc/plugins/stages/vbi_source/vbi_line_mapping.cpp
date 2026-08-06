@@ -66,20 +66,23 @@ bool make_vbi_teletext_line_map(VBITVSystem tv_system,
     return true;
   }
 
-  if ((tv_system == VBITVSystem::kNTSC || tv_system == VBITVSystem::kPALM) &&
-      tt_system == VBITeletextSystem::kNABTS) {
-    // ITU-R BT.653 System C places NABTS on broadcast frame lines 10-21 and
-    // 273-284.  Placement for 525-line systems is not implemented yet, so
-    // the table is withheld rather than half-supported.
-    error_message =
-        "Vertical placement for NABTS on 525-line systems is not implemented "
-        "yet; only WST on PAL can currently be placed.";
-    return false;
+  if (tv_system == VBITVSystem::kNTSC || tv_system == VBITVSystem::kPALM) {
+    // ITU-R BT.653 §2: on 525-line systems both teletext services occupy
+    // broadcast frame lines 10-21 in field 1 and 273-284 in field 2 — field
+    // line 10 to 21 of each, field 2 starting at broadcast frame line 264.
+    // Stored frame lines are those numbers less one.  Written out entry by
+    // entry rather than derived, so that the table is the thing being reviewed
+    // against the standard.
+    out_line_map.field1 = {9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+    out_line_map.field2 = {272, 273, 274, 275, 276, 277,
+                           278, 279, 280, 281, 282, 283};
+    return true;
   }
 
   error_message = "teletext.system " + tt_system_name(tt_system) +
                   " has no defined line list on " + tv_system_name(tv_system) +
-                  "; WST is defined on PAL and NABTS on NTSC/PAL_M.";
+                  "; WST is defined on PAL and on 525-line systems, and NABTS "
+                  "on NTSC/PAL_M.";
   return false;
 }
 

@@ -79,9 +79,15 @@ struct VBIOutputFrame {
   }
 };
 
-// Describe the output frames of a television system.  Returns false with an
-// error message for systems the stage does not yet emit.
-bool make_vbi_output_frame(VBITVSystem tv_system, VBIOutputFrame& out_frame,
+// Describe the output frames a system pairing is placed on.  Returns false with
+// an error message for systems the stage does not yet emit.
+//
+// The data service enters because the two services do not define their logic
+// levels against the same reference: WST measures from black on a black-to-
+// white scale, NABTS from blanking on an IRE one.  The two coincide on PAL,
+// where black is blanking, and differ by the 7,5 IRE setup on NTSC.
+bool make_vbi_output_frame(VBITVSystem tv_system, VBITeletextSystem tt_system,
+                           VBIOutputFrame& out_frame,
                            std::string& error_message);
 
 // Round a placed sample to the stored 10-bit word and hold it inside the legal

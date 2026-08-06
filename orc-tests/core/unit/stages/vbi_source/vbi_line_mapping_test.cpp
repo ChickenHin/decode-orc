@@ -29,7 +29,9 @@ VBITeletextLineMap pal_wst_line_map() {
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   return format;
 }
 
@@ -182,21 +184,92 @@ TEST(VBILineMapping, OnlyTwoStoredFieldsExistPerFrame) {
   EXPECT_FALSE(error.empty());
 }
 
-// Placement for systems the stage does not synthesise is withheld rather than
-// half-supported.
-TEST(VBILineMapping, UnavailableAndUndefinedSystemPairingsAreRefused) {
+// NABTS is a 525-line service, so a 625-line project has no line list to place
+// it on at all.
+TEST(VBILineMapping, UndefinedSystemPairingsAreRefused) {
   VBITeletextLineMap line_map;
   std::string error;
 
   EXPECT_FALSE(make_vbi_teletext_line_map(
-      VBITVSystem::kNTSC, VBITeletextSystem::kNABTS, line_map, error));
-  EXPECT_NE(error.find("NABTS"), std::string::npos);
-
-  error.clear();
-  EXPECT_FALSE(make_vbi_teletext_line_map(
       VBITVSystem::kPAL, VBITeletextSystem::kNABTS, line_map, error));
   EXPECT_NE(error.find("PAL"), std::string::npos);
   EXPECT_TRUE(line_map.field1.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 525-line systems
+// ---------------------------------------------------------------------------
+
+VBITeletextLineMap ntsc_wst_line_map() {
+  VBITeletextLineMap line_map;
+  std::string error;
+  EXPECT_TRUE(make_vbi_teletext_line_map(
+      VBITVSystem::kNTSC, VBITeletextSystem::kWST, line_map, error))
+      << error;
+  return line_map;
+}
+
+VBISourceFormat tbc_vbi_ntsc_format() {
+  VBISourceFormat format;
+  std::string error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+  return format;
+}
+
+// Both 525-line teletext services occupy broadcast frame lines 10-21 and
+// 273-284, which are stored frame lines 9-20 and 272-283.  Field 2 begins at
+// broadcast frame line 264, so its line 10 is frame line 273.
+TEST(VBILineMapping, NTSCLineTableMatchesTheStandardForBothFields) {
+  const VBITeletextLineMap line_map = ntsc_wst_line_map();
+
+  ASSERT_EQ(line_map.field1.size(), 12u);
+  ASSERT_EQ(line_map.field2.size(), 12u);
+
+  EXPECT_EQ(line_map.field1, (std::vector<uint32_t>{9, 10, 11, 12, 13, 14, 15,
+                                                    16, 17, 18, 19, 20}));
+  EXPECT_EQ(line_map.field2,
+            (std::vector<uint32_t>{272, 273, 274, 275, 276, 277, 278, 279, 280,
+                                   281, 282, 283}));
+
+  // The two fields are 263 lines apart on a 525-line frame, which a constant
+  // offset from the PAL table would not give.
+  for (size_t index = 0; index < line_map.field1.size(); ++index) {
+    EXPECT_EQ(line_map.field2[index] - line_map.field1[index], 263u);
+  }
+}
+
+// The circulating VBI-only .tbc crops start at broadcast field line 9, so the
+// twelve teletext lines are records 1 to 12 and the mapping starts one record
+// in rather than at record 0.
+TEST(VBILineMapping, TBCVBINTSCRecordsMapOntoTheStandardLines) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  const VBITeletextLineMap line_map = ntsc_wst_line_map();
+
+  ASSERT_EQ(format.field_range.start, 1u);
+  ASSERT_EQ(format.field_range.end, 12u);
+
+  std::string error;
+  uint32_t frame_line = 0;
+  for (uint32_t record = 1; record <= 12u; ++record) {
+    ASSERT_TRUE(map_vbi_record_to_frame_line(format, line_map, 0, record,
+                                             frame_line, error))
+        << error;
+    EXPECT_EQ(frame_line, 9u + (record - 1u)) << "record " << record;
+
+    ASSERT_TRUE(map_vbi_record_to_frame_line(format, line_map, 1, record,
+                                             frame_line, error))
+        << error;
+    EXPECT_EQ(frame_line, 272u + (record - 1u)) << "record " << record;
+  }
+
+  // Record 0 is the last post-equalising line and records 13-15 are active
+  // picture; neither carries a data service, so neither maps.
+  EXPECT_FALSE(
+      map_vbi_record_to_frame_line(format, line_map, 0, 0, frame_line, error));
+  EXPECT_FALSE(
+      map_vbi_record_to_frame_line(format, line_map, 0, 13, frame_line, error));
 }
 
 }  // namespace

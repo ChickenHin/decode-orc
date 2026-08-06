@@ -459,6 +459,79 @@ Goal: extend the working PAL/WST path to the rest of the §3.2 table. Each task
 leans on the seams left in Phases 1–5; none should require touching the bt8x8
 path.
 
+> **What actually landed (2026-08-06), and how it differs from the tasks below.**
+>
+> The NTSC half of this phase was implemented against the circulating 525-line
+> material rather than as a sweep of the §3.2 table, and scoped to what a
+> future 525-line teletext observer needs. What went in:
+>
+> - **Presets.** `tbc-vbi-ntsc` (910 samples, u16le, 16 records/field, family B)
+>   and `bt8x8-ntsc`. `cx88-pal`, `saa7131-pal`, `tbc-pal` and `tbc-vbi-pal`
+>   were not added: no sample of any of them exists to check a preset against,
+>   and preset data nobody can verify is worse than no preset.
+> - **Reader and transport.** u16le decoded; the FLAC transport accepts 16-bit
+>   as well as 8-bit. `s16le` is still refused — no capture stores it, and the
+>   FLAC header carries no signedness to distinguish it from `u16le`.
+> - **Task 7.2 (level mapper) came out differently.** The two-point affine map
+>   through sidecar levels was not needed: a `.tbc`-derived capture's 16-bit
+>   domain is the 10-bit output domain times 64 by construction, so the whole
+>   mapping is that one scale, applied as fixed levels with nothing estimated.
+>   No sidecar is read, because a cropped VBI-only file has none. This also
+>   sidesteps a real defect in the alternative: such a record starts at 0H, so
+>   the quiet-region estimate would have been reading the line's sync pulse and
+>   colour burst.
+> - **Task 7.3.** The 1:1 passthrough is in, as an identity kernel in the
+>   resampler rather than a special case in the caller. The polyphase
+>   arbitrary-ratio path was not needed (it was for `saa7131-pal`).
+> - **Task 7.4 was largely moot.** The stage no longer synthesises a television
+>   signal, so NTSC line, burst and vertical-interval synthesis do not exist to
+>   write. What was needed was the 525-line lattice, the WST-on-525 service
+>   timings and the 525-line vertical map, all of which are in.
+> - **NABTS is placed too**, added the same day on the reasoning that whether
+>   the host can *decode* a service is the slicer's business, not this stage's,
+>   and that refusing it left half the circulating material unloadable. It is
+>   the same lines, the same bit rate and the same container as System B on 525
+>   lines; only the framing code (`0xE7`), the packet length (33 bytes) and the
+>   logic levels differ. `container_family` was added at the same time so a
+>   hand-written container can declare itself TBC-derived, which is what makes
+>   `custom` a real escape hatch rather than a card-capture-only one, and the
+>   family-B offset rule was relaxed to forbid *fitting* an offset rather than
+>   forbidding a configured one.
+>
+>   Because nothing in a capture says which of the two services it holds, the
+>   choice is the user's and cannot be checked. Getting it wrong places the data
+>   as the other service rather than failing.
+>
+> - **The parameter surface was then collapsed to three: the path, the format
+>   and the dropped-frame policy.** Measurement had shown that every other knob
+>   was a property of the format rather than a user's choice, and that several
+>   of them (the data service on a TBC-derived capture, the level policy, the
+>   field order) barely changed the output or could not be got wrong safely.
+>   So `teletext_system`, `capture_offset_mode`, `capture_offset_samples`,
+>   `levels`, `fixed_logic0`, `fixed_logic1`, `first_field` and all ten
+>   `container_*` fields folded into the preset table, and `custom` was deleted
+>   along with `container_family`, which had existed only to make `custom`
+>   capable. `bt8x8-ntsc` went too: unverified, with no sample to check against.
+>
+>   What is left is three presets, named for what the user can recognise about
+>   their file rather than for the design's internal vocabulary:
+>   `bt8x8 card dump, 8-bit (WST)` on PAL, and `.tbc VBI crop, 16-bit (WST)`
+>   and `(NABTS)` on NTSC. The list is filtered by the project's system, so a
+>   PAL project is offered one and an NTSC project two. Adding a format is one
+>   data entry; there is deliberately no way to describe one by hand, because
+>   every fact in the table had to be measured off real captures and guessing
+>   at them produces output that looks right and is not.
+> - **Two things the plan did not anticipate.** A capture ending on an odd
+>   field is legal and common in this material, so the stream-length check
+>   factorises into whole *fields* rather than whole frames and the trailing
+>   field is reported and dropped. And libzvbi's `t_offset` for 525-line
+>   System B (10 500 ns) disagrees with the material by seven bit periods; the
+>   configured anchor is 9 300 ns, measured across two Electra tapes, because
+>   the tabulated figure clipped the head of every run-in.
+>
+> The remaining tasks below stand as written for the PAL formats that were not
+> touched.
+
 ### Task 7.1 — Remaining named presets and readers
 
 Add `bt8x8-ntsc` (1600 valid samples, 448-byte pad, §3.3), `cx88-pal`

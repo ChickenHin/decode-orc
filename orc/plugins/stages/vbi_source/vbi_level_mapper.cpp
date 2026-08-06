@@ -93,6 +93,17 @@ VBISampleMap make_vbi_sample_map(const VBILineLevels& levels,
   return map;
 }
 
+VBILevelMapperConfig vbi_absolute_level_config(
+    const VBIOutputLevels& output_levels) {
+  VBILevelMapperConfig config;
+  config.mode = VBILevelMode::kFixed;
+  config.fixed_logic0 =
+      static_cast<double>(output_levels.logic0) * kTBCSampleScale;
+  config.fixed_logic1 =
+      static_cast<double>(output_levels.logic1) * kTBCSampleScale;
+  return config;
+}
+
 VBIRecordWindows vbi_record_windows(const VBISourceFormat& format,
                                     const VBITeletextService& service,
                                     double quiet_guard_samples) {

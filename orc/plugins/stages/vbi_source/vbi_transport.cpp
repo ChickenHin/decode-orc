@@ -59,11 +59,21 @@ constexpr uint64_t kSeekRetryBackoffBytes[] = {
     64ull * 1024 * 1024,
 };
 
-// Bits per sample this transport can currently unwrap.  8-bit is the card
-// capture family; the 16-bit TBC-derived family has no reader path yet, and
-// unwrapping it would need the encoder's signedness convention, which the
-// FLAC header does not carry.
-constexpr uint32_t kSupportedBitsPerSample = 8;
+// Bits per sample this transport can unwrap: 8-bit for the card capture family
+// and 16-bit for the TBC-derived one.  Both are re-biased to unsigned on the
+// way out, because the FLAC header carries no signedness and every capture in
+// circulation was written by the community encoder's `--sign=unsigned`
+// invocation.
+constexpr uint32_t kSupportedBitsPerSample[] = {8, 16};
+
+bool is_supported_bits_per_sample(int bits) {
+  for (const uint32_t supported : kSupportedBitsPerSample) {
+    if (bits == static_cast<int>(supported)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // -------------------------------------------------------------------------
 // Plain file transport
@@ -276,11 +286,10 @@ std::unique_ptr<VBIFlacByteSource> VBIFlacByteSource::open(
   if (declared_bits <= 0) {
     declared_bits = params->bits_per_coded_sample;
   }
-  if (declared_bits != static_cast<int>(kSupportedBitsPerSample)) {
-    error_message =
-        "'" + path + "' declares " + std::to_string(declared_bits) +
-        " bits per sample; only 8-bit FLAC-wrapped captures can currently be "
-        "unwrapped.";
+  if (!is_supported_bits_per_sample(declared_bits)) {
+    error_message = "'" + path + "' declares " + std::to_string(declared_bits) +
+                    " bits per sample; a FLAC-wrapped VBI capture holds 8-bit "
+                    "or 16-bit samples.";
     return nullptr;
   }
   source->bits_per_sample_ = static_cast<uint32_t>(declared_bits);

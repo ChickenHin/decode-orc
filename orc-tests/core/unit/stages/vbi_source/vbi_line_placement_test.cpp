@@ -30,7 +30,9 @@ constexpr double kPi = 3.14159265358979323846;
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   return format;
 }
 
@@ -46,7 +48,9 @@ VBITeletextService wst_service() {
 VBIOutputFrame pal_output_frame() {
   VBIOutputFrame frame;
   std::string error;
-  EXPECT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, frame, error)) << error;
+  EXPECT_TRUE(make_vbi_output_frame(VBITVSystem::kPAL, VBITeletextSystem::kWST,
+                                    frame, error))
+      << error;
   return frame;
 }
 

@@ -39,7 +39,9 @@ constexpr uint32_t kLastField2Line = 334;
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   format.capture_offset_samples = kCaptureOffsetSamples;
   format.capture_offset_is_auto = false;
   return format;
@@ -276,15 +278,147 @@ TEST(VBIFrameBuilder, AFieldRangeLongerThanTheStandardIsRejected) {
   EXPECT_FALSE(error.empty());
 }
 
-TEST(VBIFrameBuilder, FiveHundredTwentyFiveLineSystemsAreNotYetBuilt) {
-  VBISourceFormat format = bt8x8_pal_format();
-  format.tv_system = VBITVSystem::kNTSC;
+// ---------------------------------------------------------------------------
+// 525-line captures
+// ---------------------------------------------------------------------------
 
+VBISourceFormat tbc_vbi_ntsc_format() {
+  VBISourceFormat format;
+  std::string error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+      << error;
+  return format;
+}
+
+VBITeletextService wst_525_service() {
+  VBITeletextService service;
+  std::string error;
+  EXPECT_TRUE(vbi_teletext_service(VBITVSystem::kNTSC, VBITeletextSystem::kWST,
+                                   service, error))
+      << error;
+  return service;
+}
+
+// One stored frame of a TBC-derived NTSC capture: records in the 16-bit
+// decoder domain, at the levels a real one carries.
+std::vector<VBILineRecord> ntsc_frame_records(const VBISourceFormat& format) {
+  const VBITeletextService service = wst_525_service();
+  const double anchor = service.cri_start_samples(format.sample_rate_hz, 0.0);
+
+  std::vector<VBILineRecord> records;
+  for (uint32_t field = 0; field < 2u; ++field) {
+    for (uint32_t index = format.field_range.start;
+         index <= format.field_range.end; ++index) {
+      VBILineRecord record;
+      record.field_index = field;
+      record.record_index = index;
+
+      SyntheticVBILine line;
+      line.sample_rate_hz = format.sample_rate_hz;
+      line.valid_samples = format.valid_samples;
+      line.bit_rate_hz = service.bit_rate_hz;
+      line.payload_bits = service.payload_bytes * 8u;
+      line.anchor_position_samples = anchor;
+      // The 16-bit domain: 10-bit black and the WST one level, times 64.
+      line.logic0 = 282.0 * 64.0;
+      line.logic1 = 624.0 * 64.0;
+      line.seed = field * 32u + index + 1u;
+      record.samples = render_synthetic_vbi_line(line);
+
+      records.push_back(std::move(record));
+    }
+  }
+  return records;
+}
+
+// The whole 525-line path: twelve records per field onto the twelve lines the
+// standard defines, on a 477 750-sample frame.
+TEST(VBIFrameBuilder, NTSCRecordsArePlacedOnTheStandardLines) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
   VBIFrameBuilder builder;
   std::string error;
-  EXPECT_FALSE(make_vbi_frame_builder(format, VBILevelMapperConfig{},
-                                      kCaptureOffsetSamples, builder, error));
-  EXPECT_FALSE(error.empty());
+  ASSERT_TRUE(make_vbi_frame_builder(format, VBILevelMapperConfig{}, 0.0,
+                                     builder, error))
+      << error;
+
+  ASSERT_EQ(builder.output_frame().samples_per_frame, 477750u);
+  EXPECT_EQ(
+      builder.frame_lines(0),
+      (std::vector<uint32_t>{9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}));
+  EXPECT_EQ(builder.frame_lines(1),
+            (std::vector<uint32_t>{272, 273, 274, 275, 276, 277, 278, 279, 280,
+                                   281, 282, 283}));
+
+  std::vector<int16_t> frame;
+  uint32_t data_lines = 0;
+  ASSERT_TRUE(
+      builder.build_frame(ntsc_frame_records(format), frame, data_lines, error))
+      << error;
+  EXPECT_EQ(data_lines, 24u);
+
+  // WST puts logic 0 at black, which on NTSC sits above blanking, so a data
+  // line never dips below blanking — it is written above it and leaves the
+  // rest of the line untouched.
+  const VBIOutputFrame& output = builder.output_frame();
+  for (uint32_t line = 0; line < output.lines_per_frame; ++line) {
+    const bool data =
+        (line >= 9u && line <= 20u) || (line >= 272u && line <= 283u);
+    const int16_t* samples = frame.data() + output.line_offset(line);
+    const auto bounds =
+        std::minmax_element(samples, samples + output.line_length(line));
+    EXPECT_EQ(*bounds.first, output.levels.blanking) << "line " << line;
+    if (data) {
+      EXPECT_GT(*bounds.second, output.levels.logic0) << "line " << line;
+    } else {
+      EXPECT_EQ(*bounds.second, output.levels.blanking) << "line " << line;
+    }
+  }
+}
+
+// A time-base corrected capture's levels are absolute, so the mapping onto the
+// output domain is the ld-decode scale factor and nothing is estimated: the
+// configured level policy has no effect at all.
+TEST(VBIFrameBuilder, NTSCTBCLevelsAreMappedAbsolutelyWhateverThePolicy) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  const std::vector<VBILineRecord> records = ntsc_frame_records(format);
+
+  std::vector<int16_t> per_line;
+  std::vector<int16_t> fixed;
+  uint32_t data_lines = 0;
+  std::string error;
+
+  VBIFrameBuilder builder;
+  VBILevelMapperConfig policy;
+  policy.mode = VBILevelMode::kPerLine;
+  ASSERT_TRUE(make_vbi_frame_builder(format, policy, 0.0, builder, error))
+      << error;
+  ASSERT_TRUE(builder.build_frame(records, per_line, data_lines, error))
+      << error;
+
+  // A policy that would produce completely different levels if it were applied.
+  policy.mode = VBILevelMode::kFixed;
+  policy.fixed_logic0 = 0.0;
+  policy.fixed_logic1 = 65535.0;
+  ASSERT_TRUE(make_vbi_frame_builder(format, policy, 0.0, builder, error))
+      << error;
+  ASSERT_TRUE(builder.build_frame(records, fixed, data_lines, error)) << error;
+
+  EXPECT_EQ(per_line, fixed);
+
+  // And the mapping really is the scale factor: every sample of the data
+  // region is its record sample divided by 64, to the rounding of the output
+  // word.  The capture is already on the output's lattice, so nothing is
+  // interpolated or filtered on the way.
+  const VBIOutputFrame& output = builder.output_frame();
+  const VBIDataPlacement& placement = builder.placement();
+  const int16_t* line = per_line.data() + output.line_offset(9);
+  for (uint32_t index = 0; index < placement.output_count(); ++index) {
+    const uint32_t at = placement.output_begin + index;
+    const double source = records.front().samples[at];
+    EXPECT_NEAR(static_cast<double>(line[at]), source / 64.0, 0.51)
+        << "sample " << at;
+  }
 }
 
 // A capture offset that puts the record outside the data region entirely is a

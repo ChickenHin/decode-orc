@@ -54,46 +54,19 @@ constexpr const char* kObservationNamespace = "vbi_source";
 
 constexpr const char* kParamInputPath = "input_path";
 constexpr const char* kParamFormat = "format";
-constexpr const char* kParamSampleRate = "container_sample_rate_hz";
-constexpr const char* kParamLineLength = "container_line_length";
-constexpr const char* kParamValidSamples = "container_valid_samples";
-constexpr const char* kParamSampleFormat = "container_sample_format";
-constexpr const char* kParamFieldLines = "container_field_lines";
-constexpr const char* kParamFirstRecord = "container_first_record";
-constexpr const char* kParamLastRecord = "container_last_record";
-constexpr const char* kParamFrameTrailerBytes = "container_frame_trailer_bytes";
-constexpr const char* kParamContainerTvSystem = "container_tv_system";
-constexpr const char* kParamTeletextSystem = "teletext_system";
-constexpr const char* kParamCaptureOffsetMode = "capture_offset_mode";
-constexpr const char* kParamCaptureOffsetSamples = "capture_offset_samples";
-constexpr const char* kParamLevels = "levels";
-constexpr const char* kParamFixedLogic0 = "fixed_logic0";
-constexpr const char* kParamFixedLogic1 = "fixed_logic1";
-constexpr const char* kParamFirstField = "first_field";
 constexpr const char* kParamDrops = "drops";
-
-// The value of "format" that spells the container out field by field.
-constexpr const char* kCustomPreset = "custom";
-
-// Values of the capture-offset mode.
-constexpr const char* kCaptureOffsetAuto = "auto";
-constexpr const char* kCaptureOffsetManual = "manual";
-
-// Values of the level mode.
-constexpr const char* kLevelsPerLine = "per-line";
-constexpr const char* kLevelsRolling = "rolling";
-constexpr const char* kLevelsFixed = "fixed";
 
 // Values of the drop policy.
 constexpr const char* kDropsPreserve = "preserve";
 constexpr const char* kDropsPad = "pad";
 
-// Spellings of the data services and television systems the parameter surface
-// offers.  A system the stage cannot yet synthesise is deliberately absent
-// rather than offered and then refused.
+// Spellings the stage's provenance and observations use for what a preset
+// turned out to describe.  Nothing configures these any more; they are read
+// back off the expanded format.
 constexpr const char* kTeletextWST = "WST";
 constexpr const char* kTeletextNABTS = "NABTS";
 constexpr const char* kTvSystemPAL = "PAL";
+constexpr const char* kTvSystemNTSC = "NTSC";
 
 // Built frames held against a repeat request.  Each PAL frame is 1,4 MB, so the
 // window is a memory-against-rework trade: it covers a preview scrubbing back
@@ -113,6 +86,43 @@ constexpr size_t kFrameCacheSize = 32;
 constexpr uint32_t kCalibrationSampleFrames = 16;
 
 // ---------------------------------------------------------------------------
+// Television systems
+// ---------------------------------------------------------------------------
+
+const char* tv_system_name(VBITVSystem tv_system) {
+  return (tv_system == VBITVSystem::kNTSC) ? kTvSystemNTSC : kTvSystemPAL;
+}
+
+const char* teletext_system_name(VBITeletextSystem tt_system) {
+  return (tt_system == VBITeletextSystem::kNABTS) ? kTeletextNABTS
+                                                  : kTeletextWST;
+}
+
+// The project's television system, as the source format model spells it.  An
+// unknown project format has no answer, in which case the parameter surface
+// offers everything the stage can place rather than guessing.
+std::optional<VBITVSystem> project_tv_system(VideoSystem project_format) {
+  switch (project_format) {
+    case VideoSystem::PAL:
+      return VBITVSystem::kPAL;
+    case VideoSystem::NTSC:
+      return VBITVSystem::kNTSC;
+    default:
+      return std::nullopt;
+  }
+}
+
+// The preset a new node of a project starts on.  On 525 lines that is the WST
+// one rather than the NABTS one, because WST is the service the host can
+// actually decode; the user has to make the choice either way.
+const char* default_preset_for(std::optional<VBITVSystem> tv_system) {
+  if (tv_system == VBITVSystem::kNTSC) {
+    return ".tbc VBI crop, 16-bit (WST)";
+  }
+  return "bt8x8 card dump, 8-bit (WST)";
+}
+
+// ---------------------------------------------------------------------------
 // Parameter map access
 // ---------------------------------------------------------------------------
 
@@ -122,31 +132,6 @@ std::string string_param(const std::map<std::string, ParameterValue>& params,
   if (it == params.end()) return fallback;
   const auto* value = std::get_if<std::string>(&it->second);
   return value ? *value : fallback;
-}
-
-double double_param(const std::map<std::string, ParameterValue>& params,
-                    const char* key, double fallback) {
-  const auto it = params.find(key);
-  if (it == params.end()) return fallback;
-  if (const auto* value = std::get_if<double>(&it->second)) return *value;
-  if (const auto* value = std::get_if<int32_t>(&it->second)) {
-    return static_cast<double>(*value);
-  }
-  if (const auto* value = std::get_if<uint32_t>(&it->second)) {
-    return static_cast<double>(*value);
-  }
-  return fallback;
-}
-
-uint32_t uint_param(const std::map<std::string, ParameterValue>& params,
-                    const char* key, uint32_t fallback) {
-  const auto it = params.find(key);
-  if (it == params.end()) return fallback;
-  if (const auto* value = std::get_if<uint32_t>(&it->second)) return *value;
-  if (const auto* value = std::get_if<int32_t>(&it->second)) {
-    return (*value >= 0) ? static_cast<uint32_t>(*value) : fallback;
-  }
-  return fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,17 +322,34 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
     return true;
   }
 
-  // EBU Tech. 3280-E level and geometry constants for the emitted frames.  The
-  // active picture bounds are the standard's, so that a consumer reading them
-  // sees the frame the stage claims to produce rather than the empty raster it
-  // happens to hold.
+  // EBU Tech. 3280-E (PAL) and SMPTE 244M/170M (NTSC) level and geometry
+  // constants for the emitted frames.  The active picture bounds are the
+  // standard's, so that a consumer reading them sees the frame the stage claims
+  // to produce rather than the empty raster it happens to hold.
   void build_video_parameters() {
     video_params_ = SourceParameters{};
+    video_params_.number_of_sequential_frames =
+        static_cast<int32_t>(frame_count_);
+
+    if (builder_.output_frame().system == VideoSystem::NTSC) {
+      video_params_.system = VideoSystem::NTSC;
+      video_params_.frame_width_nominal = kNtscSamplesPerLine;
+      video_params_.frame_height = kNtscFrameLines;
+      video_params_.sync_tip_level = kNtscSyncTip;
+      video_params_.blanking_level = kNtscBlanking;
+      video_params_.black_level = kNtscBlack;
+      video_params_.white_level = kNtscWhite;
+      video_params_.peak_level = kNtscPeak;
+      video_params_.active_video_start = kNtscActiveVideoStart;
+      video_params_.active_video_end = kNtscActiveVideoEnd;
+      video_params_.first_active_frame_line = kNtscFirstActiveFrameLine;
+      video_params_.last_active_frame_line = kNtscLastActiveFrameLine;
+      return;
+    }
+
     video_params_.system = VideoSystem::PAL;
     video_params_.frame_width_nominal = kPalSamplesPerLineNominal;
     video_params_.frame_height = kPalFrameLines;
-    video_params_.number_of_sequential_frames =
-        static_cast<int32_t>(frame_count_);
     video_params_.sync_tip_level = kPalSyncTip;
     video_params_.blanking_level = kPalBlanking;
     video_params_.black_level = kPalBlack;
@@ -457,12 +459,6 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
 // Configuration helpers
 // ---------------------------------------------------------------------------
 
-VBILevelMode parse_level_mode(const std::string& name) {
-  if (name == kLevelsRolling) return VBILevelMode::kRolling;
-  if (name == kLevelsFixed) return VBILevelMode::kFixed;
-  return VBILevelMode::kPerLine;
-}
-
 VBIDropPolicy parse_drop_policy(const std::string& name) {
   return (name == kDropsPad) ? VBIDropPolicy::kPad : VBIDropPolicy::kPreserve;
 }
@@ -528,105 +524,17 @@ double calibrate_capture_offset(const VBILineReader& reader,
 // Configuration
 // ---------------------------------------------------------------------------
 
-std::string VBISourceStage::Configuration::cache_key() const {
-  std::string key = input_path;
-  key += "|" + format_preset;
-  key += "|" + std::to_string(container_sample_rate_hz);
-  key += "|" + std::to_string(container_line_length);
-  key += "|" + std::to_string(container_valid_samples);
-  key += "|" + container_sample_format;
-  key += "|" + std::to_string(container_field_lines);
-  key += "|" + std::to_string(container_first_record);
-  key += "|" + std::to_string(container_last_record);
-  key += "|" + std::to_string(container_frame_trailer_bytes);
-  key += "|" + container_tv_system;
-  key += "|" + teletext_system;
-  key += "|" + capture_offset_mode;
-  key += "|" + std::to_string(capture_offset_samples);
-  key += "|" + levels;
-  key += "|" + std::to_string(fixed_logic0);
-  key += "|" + std::to_string(fixed_logic1);
-  key += "|" + std::to_string(first_field);
-  key += "|" + drops;
-  return key;
-}
-
 bool VBISourceStage::make_source_format(const Configuration& configuration,
                                         VBISourceFormat& out_format,
                                         std::string& error_message) {
-  if (!expand_vbi_source_preset(configuration.format_preset, out_format,
-                                error_message)) {
-    return false;
-  }
+  // A preset expands to a complete descriptor, so this is the whole of the
+  // configuration step: there is nothing left for the caller to override.
+  return expand_vbi_source_preset(configuration.format_preset, out_format,
+                                  error_message);
+}
 
-  if (configuration.format_preset == kCustomPreset) {
-    if (!parse_vbi_sample_format(configuration.container_sample_format,
-                                 out_format.sample_format)) {
-      error_message = "Container sample format '" +
-                      configuration.container_sample_format +
-                      "' is not one of 'u8', 'u16le' or 's16le'.";
-      return false;
-    }
-    if (configuration.container_tv_system != kTvSystemPAL) {
-      error_message = "Television system '" +
-                      configuration.container_tv_system +
-                      "' is not implemented yet; only PAL frames can "
-                      "currently be synthesised.";
-      return false;
-    }
-
-    out_format.sample_rate_hz = configuration.container_sample_rate_hz;
-    out_format.line_length = configuration.container_line_length;
-    out_format.valid_samples = configuration.container_valid_samples;
-    out_format.field_lines = configuration.container_field_lines;
-    out_format.field_range = VBIFieldRange{configuration.container_first_record,
-                                           configuration.container_last_record};
-    out_format.frame_trailer_bytes =
-        configuration.container_frame_trailer_bytes;
-    out_format.frame_trailer_is_counter =
-        configuration.container_frame_trailer_bytes >= 4u;
-    out_format.tv_system = VBITVSystem::kPAL;
-  }
-
-  // The data service is configured rather than taken from the preset, because
-  // it is a property of the broadcast the capture was made from, not of the
-  // card that made it.
-  if (configuration.teletext_system == kTeletextWST) {
-    out_format.tt_system = VBITeletextSystem::kWST;
-  } else if (configuration.teletext_system == kTeletextNABTS) {
-    out_format.tt_system = VBITeletextSystem::kNABTS;
-    error_message =
-        "Teletext system 'NABTS' is not implemented yet; only WST (System B) "
-        "can currently be placed. The configured system is carried on the "
-        "stage's output so a downstream decoder sees it rather than "
-        "silently decoding the wrong service.";
-    return false;
-  } else {
-    error_message = "Teletext system '" + configuration.teletext_system +
-                    "' is not recognised; it must be 'WST' or 'NABTS'.";
-    return false;
-  }
-
-  if (configuration.first_field != 1u && configuration.first_field != 2u) {
-    error_message =
-        "The first stored field must be television field 1 or 2, "
-        "not " +
-        std::to_string(configuration.first_field) + ".";
-    return false;
-  }
-  out_format.first_field = configuration.first_field;
-
-  if (configuration.capture_offset_mode == kCaptureOffsetManual) {
-    out_format.capture_offset_samples = configuration.capture_offset_samples;
-    out_format.capture_offset_is_auto = false;
-  } else if (configuration.capture_offset_mode != kCaptureOffsetAuto) {
-    error_message = "Capture offset mode '" +
-                    configuration.capture_offset_mode +
-                    "' is not recognised; it must be 'auto' or 'manual'.";
-    return false;
-  }
-
-  return true;
+std::string VBISourceStage::Configuration::cache_key() const {
+  return input_path + "|" + format_preset + "|" + drops;
 }
 
 VBISourceStage::Configuration VBISourceStage::configuration_from(
@@ -637,40 +545,6 @@ VBISourceStage::Configuration VBISourceStage::configuration_from(
       string_param(parameters, kParamInputPath, configuration.input_path);
   configuration.format_preset =
       string_param(parameters, kParamFormat, configuration.format_preset);
-  configuration.container_sample_rate_hz = double_param(
-      parameters, kParamSampleRate, configuration.container_sample_rate_hz);
-  configuration.container_line_length = uint_param(
-      parameters, kParamLineLength, configuration.container_line_length);
-  configuration.container_valid_samples = uint_param(
-      parameters, kParamValidSamples, configuration.container_valid_samples);
-  configuration.container_sample_format = string_param(
-      parameters, kParamSampleFormat, configuration.container_sample_format);
-  configuration.container_field_lines = uint_param(
-      parameters, kParamFieldLines, configuration.container_field_lines);
-  configuration.container_first_record = uint_param(
-      parameters, kParamFirstRecord, configuration.container_first_record);
-  configuration.container_last_record = uint_param(
-      parameters, kParamLastRecord, configuration.container_last_record);
-  configuration.container_frame_trailer_bytes =
-      uint_param(parameters, kParamFrameTrailerBytes,
-                 configuration.container_frame_trailer_bytes);
-  configuration.container_tv_system = string_param(
-      parameters, kParamContainerTvSystem, configuration.container_tv_system);
-  configuration.teletext_system = string_param(parameters, kParamTeletextSystem,
-                                               configuration.teletext_system);
-  configuration.capture_offset_mode = string_param(
-      parameters, kParamCaptureOffsetMode, configuration.capture_offset_mode);
-  configuration.capture_offset_samples =
-      double_param(parameters, kParamCaptureOffsetSamples,
-                   configuration.capture_offset_samples);
-  configuration.levels =
-      string_param(parameters, kParamLevels, configuration.levels);
-  configuration.fixed_logic0 =
-      double_param(parameters, kParamFixedLogic0, configuration.fixed_logic0);
-  configuration.fixed_logic1 =
-      double_param(parameters, kParamFixedLogic1, configuration.fixed_logic1);
-  configuration.first_field =
-      uint_param(parameters, kParamFirstField, configuration.first_field);
   configuration.drops =
       string_param(parameters, kParamDrops, configuration.drops);
 
@@ -689,9 +563,10 @@ VBISourceStage::VBISourceStage(std::shared_ptr<IVBISourceStageDeps> deps)
 NodeTypeInfo VBISourceStage::get_node_type_info() const {
   return NodeTypeInfo{NodeType::SOURCE, kStageName, kDisplayName, kDescription,
                       0, 0, 1, UINT32_MAX,
-                      // Only 625-line frames can be synthesised so far; the
-                      // 525-line systems arrive with their geometry.
-                      VideoFormatCompatibility::PAL_ONLY};
+                      // Both 625-line and 525-line frames can be placed; which
+                      // formats the parameter surface offers follows the
+                      // project's own system.
+                      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> VBISourceStage::execute(
@@ -760,6 +635,16 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
                         "configured container.");
   }
 
+  // A capture that ends on an odd field has passed validation, because such a
+  // file is perfectly ordinary; what is not ordinary is silently dropping a
+  // field, so it is said in as many words.
+  if (reader.has_partial_trailing_frame()) {
+    ORC_LOG_INFO(
+        "{}: '{}' ends on an odd field. The trailing field is one short of a "
+        "frame and is not emitted; {} whole frames were found.",
+        kStageName, configuration.input_path, *stored_frames);
+  }
+
   // --- Capture offset ---
   double capture_offset_samples = format.capture_offset_samples;
   if (format.capture_offset_is_auto) {
@@ -780,14 +665,24 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   format.capture_offset_is_auto = false;
 
   // --- Output representation ---
+  //
+  // The level policy is the default per-line estimate, which is what a card
+  // capture needs; the frame builder replaces it wholesale for a TBC-derived
+  // format, whose levels are already absolute.  Neither is configurable,
+  // because neither is a choice: it follows from what the capture is.
   VBIFrameRepresentation::Setup setup;
   setup.format = format;
-  setup.levels.mode = parse_level_mode(configuration.levels);
-  setup.levels.fixed_logic0 = configuration.fixed_logic0;
-  setup.levels.fixed_logic1 = configuration.fixed_logic1;
   setup.sequence.drops = parse_drop_policy(configuration.drops);
   setup.capture_offset_samples = capture_offset_samples;
   setup.input_path = configuration.input_path;
+
+  if (format.family == VBISourceFamily::kTBCDerived) {
+    ORC_LOG_INFO(
+        "{}: '{}' is a capture cropped from a decoded .tbc, so its levels are "
+        "already absolute: the standard 16-bit decoder domain is mapped "
+        "straight onto the output's and nothing is estimated.",
+        kStageName, configuration.input_path);
+  }
 
   Provenance provenance;
   provenance.stage_name = kStageName;
@@ -795,12 +690,13 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   provenance.parameters = {
       {kParamInputPath, configuration.input_path},
       {kParamFormat, configuration.format_preset},
-      // Carried so a downstream decoder can see which data service the
-      // capture holds rather than assuming one (design §4).
-      {kParamTeletextSystem, configuration.teletext_system},
-      {"video_system", "PAL"},
+      // Read off the expanded preset rather than configured, and carried so a
+      // downstream decoder can see which data service the capture holds
+      // rather than assuming one (design §4).
+      {"teletext_system", teletext_system_name(format.tt_system)},
+      {"video_system", tv_system_name(format.tv_system)},
       {"sample_encoding", "CVBS_U10_4FSC"},
-      {kParamCaptureOffsetSamples, std::to_string(capture_offset_samples)},
+      {"capture_offset_samples", std::to_string(capture_offset_samples)},
       {kParamDrops, configuration.drops},
   };
 
@@ -817,11 +713,15 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   observation_context.set(FieldID(0), kObservationNamespace, "frame_sequence",
                           sequence_summary);
   observation_context.set(FieldID(0), kObservationNamespace, "teletext_system",
-                          configuration.teletext_system);
+                          std::string(teletext_system_name(format.tt_system)));
+  observation_context.set(FieldID(0), kObservationNamespace, "video_system",
+                          std::string(tv_system_name(format.tv_system)));
 
   ORC_LOG_INFO(
-      "{}: loaded '{}' — {} format, {} stored frames, {} output frames. {}",
+      "{}: loaded '{}' — {} format, {} {} teletext, {} stored frames, {} "
+      "output frames. {}",
       kStageName, configuration.input_path, configuration.format_preset,
+      tv_system_name(format.tv_system), teletext_system_name(format.tt_system),
       index.stored_frame_count(), index.output_frame_count(), sequence_summary);
 
   cached_representation_ = representation;
@@ -830,11 +730,18 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
 }
 
 std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
-    VideoSystem /*project_format*/, SourceType /*source_type*/) const {
+    VideoSystem project_format, SourceType /*source_type*/) const {
   std::vector<ParameterDescriptor> descriptors;
 
-  // Shown only when the container is spelled out field by field.
-  const ParameterDependency custom_only{kParamFormat, {kCustomPreset}, true};
+  // A capture's television system fixes the geometry of the frames it is placed
+  // on, so only the formats belonging to the project's own system can produce
+  // frames the project can hold.  The surface offers those and nothing else,
+  // rather than offering everything and refusing most of it at execution.
+  const std::optional<VBITVSystem> tv_system =
+      project_tv_system(project_format);
+  const std::vector<std::string> preset_names =
+      tv_system.has_value() ? vbi_source_preset_names(*tv_system)
+                            : vbi_source_preset_names();
 
   {
     ParameterDescriptor pd;
@@ -856,228 +763,32 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
     pd.name = kParamFormat;
     pd.display_name = "Capture Format";
     pd.description =
-        "Named container preset describing how the capture stores its line "
-        "records. 'custom' spells the container out field by field instead.";
+        "What the capture is, which is the whole of the configuration: the "
+        "geometry, the data service and the timing all follow from it. Only "
+        "the formats belonging to the project's television system are offered."
+        "\n\n"
+        "bt8x8 card dump, 8-bit (WST): a 625-line capture-card dump. 2048 "
+        "samples per record of which 2044 are real, unsigned 8-bit, at 8x fsc "
+        "(35 468 950 Hz); 16 records per field carrying field lines 7-22. The "
+        "card's own time from 0H is unreliable, so it is measured from the "
+        "clock run-in when the capture is opened, and the logic levels are "
+        "estimated per line because they move with its gain control. The last "
+        "four bytes of each frame are the driver's frame counter, which is "
+        "what makes dropped frames detectable."
+        "\n\n"
+        ".tbc VBI crop, 16-bit (WST) / (NABTS): the first 16 line records of "
+        "each field of a decoded 525-line luma .tbc. 910 samples per record "
+        "with no padding, unsigned 16-bit, at 4x fsc (14 318 182 Hz); records "
+        "1-12 carry field lines 10-21 and the rest are the last equalising "
+        "line and the start of the picture. Sample 0 of every record is "
+        "already 0H and the levels are already absolute, so neither is "
+        "measured. Pick the variant matching the service the broadcast "
+        "carried: nothing in the file records it, and the two differ only in "
+        "framing code and packet length.";
     pd.type = ParameterType::STRING;
     pd.constraints.required = true;
-    pd.constraints.default_value = std::string("bt8x8-pal");
-    pd.constraints.allowed_strings = vbi_source_preset_names();
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamSampleRate;
-    pd.display_name = "Sample Rate (Hz)";
-    pd.description =
-        "Exact sampling rate of the capture. Never taken from a FLAC "
-        "wrapper's header, which carries a placeholder.";
-    pd.type = ParameterType::DOUBLE;
-    pd.constraints.default_value = 0.0;
-    pd.constraints.min_value = 0.0;
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamLineLength;
-    pd.display_name = "Record Stride (samples)";
-    pd.description =
-        "Stored samples per line record, hardware padding included.";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{0};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamValidSamples;
-    pd.display_name = "Valid Samples per Record";
-    pd.description =
-        "Real samples at the start of each record. Samples beyond this are "
-        "hardware padding and are never resampled or measured.";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{0};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamSampleFormat;
-    pd.display_name = "Sample Format";
-    pd.description =
-        "Sample word of the stored records. Nothing in the container declares "
-        "it, so it is always configuration.";
-    pd.type = ParameterType::STRING;
-    pd.constraints.default_value = std::string("u8");
-    pd.constraints.allowed_strings = {"u8", "u16le", "s16le"};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamFieldLines;
-    pd.display_name = "Records per Field";
-    pd.description = "Stored line records per field: the field stride.";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{0};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamFirstRecord;
-    pd.display_name = "First Data Record";
-    pd.description =
-        "First stored record of each field that carries the data service "
-        "(0-based).";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{0};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamLastRecord;
-    pd.display_name = "Last Data Record";
-    pd.description =
-        "Last stored record of each field that carries the data service "
-        "(0-based, inclusive).";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{0};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamFrameTrailerBytes;
-    pd.display_name = "Frame Trailer Bytes";
-    pd.description =
-        "Trailing bytes of each stored frame that are not sample data. Four "
-        "for the bt8x8 frame counter, which is what makes dropped frames "
-        "detectable; zero for formats without one.";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{0};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamContainerTvSystem;
-    pd.display_name = "Television System";
-    pd.description =
-        "Television system the capture was made from. Fixes the output frame "
-        "geometry and amplitude domain.";
-    pd.type = ParameterType::STRING;
-    pd.constraints.default_value = std::string(kTvSystemPAL);
-    pd.constraints.allowed_strings = {kTvSystemPAL};
-    pd.constraints.depends_on = custom_only;
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamTeletextSystem;
-    pd.display_name = "Teletext System";
-    pd.description =
-        "Data service the captured lines carry. Only WST (System B, 625 "
-        "lines) can currently be placed; NABTS is refused with a clear error "
-        "rather than decoded as the wrong service.";
-    pd.type = ParameterType::STRING;
-    pd.constraints.default_value = std::string(kTeletextWST);
-    pd.constraints.allowed_strings = {kTeletextWST, kTeletextNABTS};
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamCaptureOffsetMode;
-    pd.display_name = "Capture Offset";
-    pd.description =
-        "How the time from 0H to sample 0 of each record is established. "
-        "'auto' fits it from the clock run-in of the captured lines, which is "
-        "what a card capture needs: its documented offset is unreliable "
-        "hardware folklore. 'manual' applies a configured figure unchanged.";
-    pd.type = ParameterType::STRING;
-    pd.constraints.default_value = std::string(kCaptureOffsetAuto);
-    pd.constraints.allowed_strings = {kCaptureOffsetAuto, kCaptureOffsetManual};
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamCaptureOffsetSamples;
-    pd.display_name = "Capture Offset (samples)";
-    pd.description =
-        "Time from 0H to sample 0 of each record, in source samples. Applied "
-        "globally, never per line.";
-    pd.type = ParameterType::DOUBLE;
-    pd.constraints.default_value = 0.0;
-    pd.constraints.depends_on = ParameterDependency{
-        kParamCaptureOffsetMode, {kCaptureOffsetManual}, true};
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamLevels;
-    pd.display_name = "Level Mapping";
-    pd.description =
-        "How the logic levels of a card capture are established. 'per-line' "
-        "follows fast gain changes; 'rolling' holds lines at the frame's "
-        "median except where they deviate significantly; 'fixed' applies "
-        "configured levels and measures nothing.";
-    pd.type = ParameterType::STRING;
-    pd.constraints.default_value = std::string(kLevelsPerLine);
-    pd.constraints.allowed_strings = {kLevelsPerLine, kLevelsRolling,
-                                      kLevelsFixed};
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamFixedLogic0;
-    pd.display_name = "Fixed Logic 0 Level";
-    pd.description = "Source-domain level taken as logic 0 in 'fixed' mode.";
-    pd.type = ParameterType::DOUBLE;
-    pd.constraints.default_value = 0.0;
-    pd.constraints.depends_on =
-        ParameterDependency{kParamLevels, {kLevelsFixed}, true};
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamFixedLogic1;
-    pd.display_name = "Fixed Logic 1 Level";
-    pd.description = "Source-domain level taken as logic 1 in 'fixed' mode.";
-    pd.type = ParameterType::DOUBLE;
-    pd.constraints.default_value = 255.0;
-    pd.constraints.depends_on =
-        ParameterDependency{kParamLevels, {kLevelsFixed}, true};
-    descriptors.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
-    pd.name = kParamFirstField;
-    pd.display_name = "First Stored Field";
-    pd.description =
-        "Television field the first stored field of each frame carries. A "
-        "driver convention rather than recorded information, so it is "
-        "configuration; getting it wrong swaps the two line ranges.";
-    pd.type = ParameterType::UINT32;
-    pd.constraints.default_value = uint32_t{1};
-    pd.constraints.min_value = uint32_t{1};
-    pd.constraints.max_value = uint32_t{2};
+    pd.constraints.default_value = std::string(default_preset_for(tv_system));
+    pd.constraints.allowed_strings = preset_names;
     descriptors.push_back(pd);
   }
 
@@ -1086,10 +797,11 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
     pd.name = kParamDrops;
     pd.display_name = "Dropped Frames";
     pd.description =
-        "What to do about frames the capture dropped, which the bt8x8 frame "
+        "What to do about frames the capture dropped, which a driver's frame "
         "counter makes visible. 'preserve' emits only the frames present; "
         "'pad' synthesises blank frames so output frame n stays aligned with "
-        "source frame n and the colour sequence survives.";
+        "source frame n. A format carrying no counter cannot report drops at "
+        "all, so neither policy has anything to act on.";
     pd.type = ParameterType::STRING;
     pd.constraints.default_value = std::string(kDropsPreserve);
     pd.constraints.allowed_strings = {kDropsPreserve, kDropsPad};
@@ -1103,22 +815,6 @@ std::map<std::string, ParameterValue> VBISourceStage::get_parameters() const {
   return {
       {kParamInputPath, configuration_.input_path},
       {kParamFormat, configuration_.format_preset},
-      {kParamSampleRate, configuration_.container_sample_rate_hz},
-      {kParamLineLength, configuration_.container_line_length},
-      {kParamValidSamples, configuration_.container_valid_samples},
-      {kParamSampleFormat, configuration_.container_sample_format},
-      {kParamFieldLines, configuration_.container_field_lines},
-      {kParamFirstRecord, configuration_.container_first_record},
-      {kParamLastRecord, configuration_.container_last_record},
-      {kParamFrameTrailerBytes, configuration_.container_frame_trailer_bytes},
-      {kParamContainerTvSystem, configuration_.container_tv_system},
-      {kParamTeletextSystem, configuration_.teletext_system},
-      {kParamCaptureOffsetMode, configuration_.capture_offset_mode},
-      {kParamCaptureOffsetSamples, configuration_.capture_offset_samples},
-      {kParamLevels, configuration_.levels},
-      {kParamFixedLogic0, configuration_.fixed_logic0},
-      {kParamFixedLogic1, configuration_.fixed_logic1},
-      {kParamFirstField, configuration_.first_field},
       {kParamDrops, configuration_.drops},
   };
 }
@@ -1126,32 +822,12 @@ std::map<std::string, ParameterValue> VBISourceStage::get_parameters() const {
 bool VBISourceStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
   for (const auto& [key, value] : params) {
-    if (key == kParamInputPath || key == kParamFormat ||
-        key == kParamSampleFormat || key == kParamContainerTvSystem ||
-        key == kParamTeletextSystem || key == kParamCaptureOffsetMode ||
-        key == kParamLevels || key == kParamDrops) {
-      if (!std::holds_alternative<std::string>(value)) {
-        ORC_LOG_WARN("{}: parameter '{}' expects a string", kStageName, key);
-        return false;
-      }
-    } else if (key == kParamSampleRate || key == kParamCaptureOffsetSamples ||
-               key == kParamFixedLogic0 || key == kParamFixedLogic1) {
-      if (!std::holds_alternative<double>(value)) {
-        ORC_LOG_WARN("{}: parameter '{}' expects a number", kStageName, key);
-        return false;
-      }
-    } else if (key == kParamLineLength || key == kParamValidSamples ||
-               key == kParamFieldLines || key == kParamFirstRecord ||
-               key == kParamLastRecord || key == kParamFrameTrailerBytes ||
-               key == kParamFirstField) {
-      if (!std::holds_alternative<uint32_t>(value) &&
-          !std::holds_alternative<int32_t>(value)) {
-        ORC_LOG_WARN("{}: parameter '{}' expects a whole number", kStageName,
-                     key);
-        return false;
-      }
-    } else {
+    if (key != kParamInputPath && key != kParamFormat && key != kParamDrops) {
       ORC_LOG_WARN("{}: unknown parameter '{}'", kStageName, key);
+      return false;
+    }
+    if (!std::holds_alternative<std::string>(value)) {
+      ORC_LOG_WARN("{}: parameter '{}' expects a string", kStageName, key);
       return false;
     }
   }
@@ -1170,9 +846,9 @@ bool VBISourceStage::set_parameters(
     return true;
   }
 
-  // Everything that can be judged without reading the capture: the preset, the
-  // data service, and the internal consistency of the container fields.  The
-  // stream itself is checked against them at execution.
+  // Everything that can be judged without reading the capture, which for a
+  // preset is only that it exists and is internally consistent.  The stream
+  // itself is checked against it at execution.
   VBISourceFormat format;
   if (!make_source_format(configuration_, format, error)) {
     ORC_LOG_WARN("{}: {}", kStageName, error);

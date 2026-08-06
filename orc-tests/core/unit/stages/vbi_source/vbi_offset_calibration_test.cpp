@@ -34,7 +34,9 @@ using orc::testing::SyntheticVBILine;
 VBISourceFormat bt8x8_pal_format() {
   VBISourceFormat format;
   std::string error;
-  EXPECT_TRUE(expand_vbi_source_preset("bt8x8-pal", format, error)) << error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", format, error))
+      << error;
   return format;
 }
 
@@ -326,7 +328,9 @@ TEST(VBIOffsetCalibration, EveryRecordIsPlacedByTheOneGlobalOffset) {
 
   VBIOutputFrame output;
   std::string error;
-  ASSERT_TRUE(make_vbi_output_frame(format.tv_system, output, error)) << error;
+  ASSERT_TRUE(
+      make_vbi_output_frame(format.tv_system, format.tt_system, output, error))
+      << error;
 
   VBIDataPlacement placement;
   ASSERT_TRUE(make_vbi_data_placement(format, service, output,
