@@ -508,6 +508,81 @@ TEST(TeletextRecoveryStats, SummaryKeepsSliceFiguresWhenLinesWereSliced) {
       << summary;
 }
 
+// ---------------------------------------------------------------------------
+// brief(): the per-field headline
+// ---------------------------------------------------------------------------
+
+TEST(TeletextRecoveryStats, BriefIsOneLineCarryingEveryHeadlineFigure) {
+  TeletextRecoveryStats stats;
+  // Two parity-coded packets, each carrying one damaged data byte, so the
+  // parity headline is 2 failures in 80 data bytes: 2,5%.
+  auto packet =
+      make_valid(make_packet_with_parity_error(1, 0), TeletextDetector::kMlse);
+  packet.has_byte_confidence = true;
+  packet.byte_confidence.fill(0.75F);
+  packet.repaired_bytes = 2;
+  stats.add_line(7, packet);
+  stats.add_line(8, make_valid(make_packet_with_parity_error(2, 5),
+                               TeletextDetector::kMlse));
+  stats.add_line(9, make_rejected(TeletextRejectReason::kFramingCodeMiss));
+  stats.add_line(10, make_rejected(TeletextRejectReason::kAmplitudeGate));
+
+  const std::string brief = stats.brief();
+  EXPECT_EQ(brief.find('\n'), std::string::npos) << brief;
+  EXPECT_NE(brief.find("2 packets from 3 bursts on 4 candidate lines"),
+            std::string::npos)
+      << brief;
+  EXPECT_NE(brief.find("(all MLSE)"), std::string::npos) << brief;
+  // Rejection reasons are named, as in the full summary.
+  EXPECT_NE(brief.find("rejected: amplitude gate 1, framing code miss 1"),
+            std::string::npos)
+      << brief;
+  EXPECT_NE(brief.find("odd parity failed on 2.5% of data bytes in 2 packets"),
+            std::string::npos)
+      << brief;
+  EXPECT_NE(brief.find("confidence 0.75, 2 bytes repaired in 1 packets"),
+            std::string::npos)
+      << brief;
+
+  // The tables the full profile prints are what brief() leaves behind.
+  EXPECT_EQ(brief.find("byte "), std::string::npos) << brief;
+  EXPECT_EQ(brief.find("Per VBI line"), std::string::npos) << brief;
+  EXPECT_EQ(brief.find("residual"), std::string::npos) << brief;
+}
+
+TEST(TeletextRecoveryStats, BriefSpellsOutAMixedDetectorSplit) {
+  TeletextRecoveryStats stats;
+  stats.add_line(7, make_valid(make_clean_packet(1)));
+  stats.add_line(8, make_valid(make_clean_packet(2), TeletextDetector::kMlse));
+
+  EXPECT_NE(stats.brief().find("(threshold 1, MLSE 1)"), std::string::npos)
+      << stats.brief();
+
+  TeletextRecoveryStats threshold_only;
+  threshold_only.add_line(7, make_valid(make_clean_packet(1)));
+  EXPECT_NE(threshold_only.brief().find("(all threshold)"), std::string::npos)
+      << threshold_only.brief();
+}
+
+TEST(TeletextRecoveryStats, BriefOmitsSliceOnlyFiguresForObservedLines) {
+  TeletextRecoveryStats stats;
+  const Packet packet = make_clean_packet(1);
+  stats.add_observed_line(7, &packet, nullptr);
+
+  const std::string brief = stats.brief();
+  EXPECT_NE(brief.find("1 packets from 1 stored observations"),
+            std::string::npos)
+      << brief;
+  EXPECT_EQ(brief.find("burst"), std::string::npos) << brief;
+  EXPECT_EQ(brief.find("threshold"), std::string::npos) << brief;
+  EXPECT_EQ(brief.find("MLSE"), std::string::npos) << brief;
+}
+
+TEST(TeletextRecoveryStats, BriefOfAnEmptyRunSaysSo) {
+  const std::string brief = TeletextRecoveryStats().brief();
+  EXPECT_EQ(brief, "0 packets");
+}
+
 TEST(TeletextRecoveryStats, SummaryIsStableForTheSameInput) {
   TeletextRecoveryStats first;
   TeletextRecoveryStats second;

@@ -84,6 +84,26 @@ std::string format_residual_histogram(
   return text;
 }
 
+// Render the non-zero rejection counters as one comma-separated line of named
+// reasons; empty when nothing was rejected.
+std::string format_rejections(
+    const std::array<uint64_t, kTeletextRejectReasonCount>& counts) {
+  std::string text;
+  for (size_t index = 0; index < counts.size(); ++index) {
+    if (counts[index] == 0) {
+      continue;
+    }
+    if (!text.empty()) {
+      text += ", ";
+    }
+    text += fmt::format(
+        "{} {}",
+        teletext_reject_reason_name(static_cast<TeletextRejectReason>(index)),
+        counts[index]);
+  }
+  return text;
+}
+
 }  // namespace
 
 void TeletextRecoveryStats::add_line(int vbi_line,
@@ -277,6 +297,66 @@ void TeletextRecoveryStats::reset() {
   per_line_.clear();
 }
 
+std::string TeletextRecoveryStats::brief() const {
+  // Same division of labour as summary() below: figures a stored observation
+  // cannot support are omitted rather than printed as zeroes.
+  const uint64_t sliced_lines = lines_seen_ - observed_lines_;
+  std::string text = fmt::format("{} packets", packets_);
+  if (sliced_lines > 0) {
+    text += fmt::format(" from {} bursts on {} candidate lines",
+                        lines_with_burst_, lines_seen_);
+
+    // Which detector is carrying the run is the reading that separates a
+    // broadcast-quality signal from a tape, and it takes only a few characters
+    // once the usual all-of-one case is named as such.
+    const uint64_t threshold = packets_from(TeletextDetector::kThreshold);
+    const uint64_t mlse = packets_from(TeletextDetector::kMlse);
+    if (packets_ > 0) {
+      if (mlse == packets_) {
+        text += " (all MLSE)";
+      } else if (threshold == packets_) {
+        text += " (all threshold)";
+      } else {
+        text += fmt::format(" (threshold {}, MLSE {})", threshold, mlse);
+      }
+    }
+  } else if (observed_lines_ > 0) {
+    text += fmt::format(" from {} stored observations", lines_seen_);
+  }
+
+  const std::string rejections = format_rejections(rejections_);
+  if (!rejections.empty()) {
+    text += fmt::format("; rejected: {}", rejections);
+  }
+
+  // The parity profile in one number: how many display bytes of the recovered
+  // packets are damaged, which is what a reader of the pages will see. Where
+  // the damage sits across the packet is summary()'s table.
+  if (parity_checked_packets_ > 0) {
+    uint64_t failures = 0;
+    for (const uint64_t count : parity_failures_) {
+      failures += count;
+    }
+    const double rate = static_cast<double>(failures) /
+                        static_cast<double>(parity_checked_packets_ *
+                                            static_cast<uint64_t>(kDataBytes));
+    text += fmt::format(
+        "; odd parity failed on {:.1f}% of data bytes in {} "
+        "packets",
+        100.0 * rate, parity_checked_packets_);
+  }
+
+  if (confidence_packets_ > 0) {
+    text += fmt::format("; confidence {:.2f}", mean_byte_confidence());
+    if (packets_repaired_ > 0) {
+      text += fmt::format(", {} bytes repaired in {} packets", bytes_repaired_,
+                          packets_repaired_);
+    }
+  }
+
+  return text;
+}
+
 std::string TeletextRecoveryStats::summary() const {
   // Lines read back from stored observations carry no burst, detector or
   // rejection evidence (see add_observed_line()), so those clauses are printed
@@ -298,19 +378,7 @@ std::string TeletextRecoveryStats::summary() const {
     text += " from stored observations";
   }
 
-  std::string rejections;
-  for (size_t index = 0; index < rejections_.size(); ++index) {
-    if (rejections_[index] == 0) {
-      continue;
-    }
-    if (!rejections.empty()) {
-      rejections += ", ";
-    }
-    rejections += fmt::format(
-        "{} {}",
-        teletext_reject_reason_name(static_cast<TeletextRejectReason>(index)),
-        rejections_[index]);
-  }
+  const std::string rejections = format_rejections(rejections_);
   if (!rejections.empty()) {
     text += fmt::format("\n  Rejected: {}", rejections);
   }

@@ -163,18 +163,19 @@ void TeletextObserver::process_frame(
     context.set(derived_fid, "teletext", "present", line_count > 0);
     context.set(derived_fid, "teletext", "line_count", line_count);
 
-    if (line_count > 0) {
-      ORC_LOG_DEBUG("TeletextObserver: Field {} recovered {} packet(s)",
-                    derived_fid.value(), line_count);
-    }
-
-    // Recovery profile for the field. Only fields that carried a data burst
-    // have anything to say, and the summary is built only when the logger
-    // will actually take it — every field of a full decode passes here.
-    if (stats.lines_with_burst() > 0 &&
-        get_logger()->should_log(spdlog::level::debug)) {
-      ORC_LOG_DEBUG("TeletextObserver: Field {} recovery profile\n{}",
-                    derived_fid.value(), stats.summary());
+    // Recovery diagnostics for the field. Only fields that carried a data
+    // burst have anything to say, and both texts are built only when the
+    // logger will actually take them — every field of a full decode passes
+    // here, so at debug level that is one line per field and the tables of the
+    // full profile are left to trace.
+    if (stats.lines_with_burst() > 0) {
+      if (get_logger()->should_log(spdlog::level::trace)) {
+        ORC_LOG_TRACE("TeletextObserver: Field {} recovery profile\n{}",
+                      derived_fid.value(), stats.summary());
+      } else if (get_logger()->should_log(spdlog::level::debug)) {
+        ORC_LOG_DEBUG("TeletextObserver: Field {}: {}", derived_fid.value(),
+                      stats.brief());
+      }
     }
   }
 }

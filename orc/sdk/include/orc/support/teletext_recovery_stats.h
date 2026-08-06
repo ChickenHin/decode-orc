@@ -188,6 +188,18 @@ class TeletextRecoveryStats {
   void reset();
 
   /**
+   * @brief Human-readable single-line headline
+   *
+   * The figures a reader wants per field — what came in, what came out, why
+   * the rest was discarded, and how damaged what came out is — with the
+   * profiles summary() prints as tables reduced to one number each. Intended
+   * for per-field logging, where summary() would bury the run in tables.
+   *
+   * Never contains a newline. Stable for a given set of inputs.
+   */
+  std::string brief() const;
+
+  /**
    * @brief Human-readable multi-line summary
    *
    * Sections with nothing to report are omitted, so a run that recovered
