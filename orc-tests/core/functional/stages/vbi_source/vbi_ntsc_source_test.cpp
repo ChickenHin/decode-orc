@@ -13,6 +13,9 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/teletext_page_decoder.h>
+#include <orc/support/teletext_slicer.h>
+#include <teletext_observer.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -321,6 +324,206 @@ TEST(VBINTSCSource, TheNABTSFramingCodeIsWhatThisCaptureCarries) {
   EXPECT_GT(as_nabts.detected, as_wst.detected * 2)
       << "the WST framing code matched this NABTS capture nearly as well as "
          "the NABTS one, so the two are not being told apart";
+}
+
+// ---------------------------------------------------------------------------
+// The recovery chain against a real 525-line capture: observer -> observation
+// strings -> page decoder. The stage supplies the frames; what is under test
+// is that the 525-line service survives the whole path a project takes it
+// through, which is the path the preview dialog reads.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Frames read. A page is transmitted a row at a time and this capture carries
+// up to a dozen packets a field, so a few hundred frames span several carousel
+// cycles — enough for whole pages to assemble.
+constexpr uint32_t kPageFrames = 300;
+
+// Where to start reading. The head of a tape is lead-in, so this is a quarter
+// of the way in, as the other tests here do.
+FrameID page_survey_start(uint64_t frame_count) {
+  return static_cast<FrameID>(frame_count / 4);
+}
+
+struct RecoverySurvey {
+  int packets = 0;
+  // Packets whose observation string was the 34-byte one the 525-line service
+  // transmits, rather than the 42-byte 625-line packet.
+  int packets_at_525_length = 0;
+  // Odd-parity display bytes per recovered packet, as a fraction of the 32 the
+  // service carries (ITU-R BT.653 Table 1b §2.4.1). An undamaged packet is
+  // 1,0 throughout; noise sits at 0,5.
+  std::vector<double> parity_fractions;
+  std::vector<TeletextPageSnapshot> pages;
+};
+
+RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
+  RecoverySurvey survey;
+  TeletextObserver observer;
+  TeletextPageDecoder decoder;
+  decoder.set_page_callback([&survey](const TeletextPageSnapshot& page) {
+    survey.pages.push_back(page);
+  });
+
+  const FrameID first = page_survey_start(representation.frame_count());
+  for (uint32_t index = 0; index < kPageFrames; ++index) {
+    const FrameID frame = first + index;
+    if (!representation.has_frame(frame)) break;
+
+    ObservationContext context;
+    observer.process_frame(representation, frame, context);
+
+    for (uint64_t field_index = 0; field_index < 2; ++field_index) {
+      const FieldID field(frame * 2 + field_index);
+      // Ascending field-line order, which is the order a real consumer feeds
+      // and the order the packets were transmitted in.
+      for (int field_line = 5; field_line <= 21; ++field_line) {
+        const auto value =
+            context.get(field, "teletext", "t42_" + std::to_string(field_line));
+        if (!value || !std::holds_alternative<std::string>(*value)) continue;
+        const auto observed =
+            teletext_hex_to_observed_packet(std::get<std::string>(*value));
+        if (!observed) continue;
+
+        ++survey.packets;
+        if (observed->byte_count == kTeletext525PacketBytes) {
+          ++survey.packets_at_525_length;
+        }
+
+        int odd = 0;
+        for (size_t i = 2; i < observed->byte_count; ++i) {
+          odd += teletext_odd_parity_valid(observed->bytes[i]) ? 1 : 0;
+        }
+        survey.parity_fractions.push_back(
+            static_cast<double>(odd) /
+            static_cast<double>(observed->byte_count - 2));
+
+        decoder.process_packet(
+            observed->bytes, static_cast<int64_t>(field.value()),
+            TeletextPageDecoder::kAutoSource,
+            observed->has_confidence ? &observed->confidence : nullptr,
+            observed->byte_count);
+      }
+    }
+  }
+  decoder.finalize(static_cast<int64_t>((first + kPageFrames) * 2));
+  return survey;
+}
+
+// Printable display text of a page, one string per received row.
+std::vector<std::string> page_rows(const TeletextPageSnapshot& page) {
+  std::vector<std::string> rows;
+  for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
+    if (!page.row_received[static_cast<size_t>(row)]) continue;
+    std::string text;
+    for (int column = 0; column < page.columns; ++column) {
+      const auto& cell =
+          page.cells[static_cast<size_t>(row)][static_cast<size_t>(column)];
+      // Mosaic cells are graphics, not text, and are not what is being read.
+      const bool printable = !cell.mosaic && !cell.held_mosaic &&
+                             cell.character >= 0x20 && cell.character < 0x7F;
+      text.push_back(printable ? static_cast<char>(cell.character) : ' ');
+    }
+    rows.push_back(text);
+  }
+  return rows;
+}
+
+// Short alphabetic words on a page. This is what separates a recovered
+// broadcast from a page assembled out of false locks: noise decoded as
+// characters gives long runs of one letter and very few word-shaped tokens,
+// while real text gives many.
+size_t word_count(const TeletextPageSnapshot& page) {
+  size_t words = 0;
+  for (const auto& row : page_rows(page)) {
+    size_t run = 0;
+    for (size_t i = 0; i <= row.size(); ++i) {
+      const bool alpha = i < row.size() &&
+                         std::isalpha(static_cast<unsigned char>(row[i])) != 0;
+      if (alpha) {
+        ++run;
+      } else {
+        if (run >= 2 && run <= 12) ++words;
+        run = 0;
+      }
+    }
+  }
+  return words;
+}
+
+}  // namespace
+
+TEST(VBINTSCSource, TheObserverRecoversPacketsAtTheServicesOwnLength) {
+  if (!electra_capture_available()) {
+    GTEST_SKIP() << "525-line capture not present: " << kElectraCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_electra_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const RecoverySurvey survey = survey_recovery(*representation);
+  ASSERT_GT(survey.packets, 0)
+      << "the observer recovered nothing from a capture the stage placed "
+         "teletext on";
+
+  // Every packet must be the 34-byte one: a 42-byte string here would mean the
+  // observer had read this capture as the 625-line service.
+  EXPECT_EQ(survey.packets_at_525_length, survey.packets);
+
+  // The bits have to be right, not merely present. Odd parity is the standard's
+  // own check on the display bytes and it is content-independent: noise sits at
+  // 0,5, so a median this high says the packets carry the broadcast.
+  auto fractions = survey.parity_fractions;
+  std::sort(fractions.begin(), fractions.end());
+  const double median = fractions[fractions.size() / 2];
+  std::cout << "Electra: " << survey.packets << " packets, median parity "
+            << median << ", " << survey.pages.size() << " pages\n";
+  EXPECT_GT(median, 0.9);
+}
+
+TEST(VBINTSCSource, ThePageDecoderAssemblesReadable32ColumnPages) {
+  if (!electra_capture_available()) {
+    GTEST_SKIP() << "525-line capture not present: " << kElectraCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_electra_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const RecoverySurvey survey = survey_recovery(*representation);
+  ASSERT_FALSE(survey.pages.empty())
+      << "no page completed over " << kPageFrames << " frames";
+
+  for (const auto& page : survey.pages) {
+    ASSERT_EQ(page.columns, static_cast<int>(kTeletext525PacketBytes) - 2)
+        << "page assembled at the wrong width";
+  }
+
+  // Page 100 — magazine 1, page 00 — is the service's front page, so a decode
+  // that addresses packets correctly finds it. Recovering it at all exercises
+  // the Hamming 8/4 MRAG and page-number path on real bytes.
+  const TeletextPageSnapshot* front_page = nullptr;
+  for (const auto& page : survey.pages) {
+    if (page.magazine != 1 || page.page_number != 0x00) continue;
+    if (front_page == nullptr || word_count(page) > word_count(*front_page)) {
+      front_page = &page;
+    }
+  }
+  ASSERT_NE(front_page, nullptr) << "page 100 never completed";
+
+  for (const auto& row : page_rows(*front_page)) {
+    std::cout << "  |" << row << "|\n";
+  }
+
+  // Real text, not a page assembled out of false locks. The front page of this
+  // capture carries its index (\"News index ....101\" and its neighbours) plus
+  // a headline block, which is comfortably above this; a noise page scores a
+  // handful.
+  EXPECT_GT(word_count(*front_page), 20u);
 }
 
 }  // namespace

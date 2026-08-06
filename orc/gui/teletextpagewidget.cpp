@@ -86,6 +86,9 @@ void TeletextPageWidget::setShowDataErrors(bool show) {
 }
 
 QSize TeletextPageWidget::sizeHint() const {
+  // The widest a page can be. paintEvent fits the page it actually holds into
+  // whatever rectangle this ends up giving, so a 32-column service is not
+  // squeezed by the hint being drawn for 40.
   return QSize(orc::presenters::TeletextPageView::kColumns * kCellWidthUnits,
                orc::presenters::TeletextPageView::kRows * kCellHeightUnits);
 }
@@ -101,7 +104,13 @@ void TeletextPageWidget::paintEvent(QPaintEvent* /*event*/) {
   }
 
   constexpr int kRows = orc::presenters::TeletextPageView::kRows;
-  constexpr int kColumns = orc::presenters::TeletextPageView::kColumns;
+  // The service's own row width (ITU-R BT.653 Table 1b makes a 525-line page
+  // 32 columns): a narrower page fills the widget just as a 40-column one
+  // does, rather than being drawn with a blank margin it never had.
+  const int kColumns = page_->columns;
+  if (kColumns <= 0) {
+    return;
+  }
 
   // Fit the page into the widget at the character-rectangle aspect ratio; a
   // stretched grid would misshape every glyph and mosaic block.
@@ -218,7 +227,7 @@ void TeletextPageWidget::paintDataErrorOverlay(
     QPainter& painter, const orc::presenters::TeletextPageView& page,
     const QRectF& page_rect, qreal cell_w, qreal cell_h) {
   constexpr int kRows = orc::presenters::TeletextPageView::kRows;
-  constexpr int kColumns = orc::presenters::TeletextPageView::kColumns;
+  const int kColumns = page.columns;
 
   // Rows no packet was recovered for, but only once something is known to
   // have gone astray in this transmission.

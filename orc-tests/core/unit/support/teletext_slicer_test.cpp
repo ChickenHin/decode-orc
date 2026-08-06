@@ -1,7 +1,7 @@
 /*
  * File:        teletext_slicer_test.cpp
  * Module:      orc-tests/core/unit/support
- * Purpose:     Unit tests for the PAL WST TeletextSlicer (support tier)
+ * Purpose:     Unit tests for the WST TeletextSlicer (support tier)
  *
  * Lines are synthesized in memory at the PAL 4FSC sample rate from known
  * packet bytes; no filesystem, network, or clock access.
@@ -39,6 +39,24 @@ TeletextLineResult slice_line(const std::vector<int16_t>& line,
   return make_slicer(options).slice(line.data(), line.size(),
                                     static_cast<int16_t>(kPalBlack),
                                     static_cast<int16_t>(kPalWhite));
+}
+
+// The 525-line service on an NTSC line: the constructor derives the ITU-R
+// BT.653 Table 1b bit rate from the system, so nothing here has to state it
+// twice.
+TeletextLineResult slice_ntsc_line(const std::vector<int16_t>& line,
+                                   TeletextSlicerOptions options = {}) {
+  const TeletextSlicer slicer(kNtscSampleRate, TeletextSystem::kWst525,
+                              options);
+  return slicer.slice(line.data(), line.size(),
+                      static_cast<int16_t>(kNtscBlack),
+                      static_cast<int16_t>(kNtscWhite));
+}
+
+std::vector<int16_t> synthesize_ntsc_wst_line(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload,
+    TeletextLineSynthOptions opt = ntsc_wst_synth_options()) {
+  return synthesize_teletext_line(payload, opt, kTeletext525PacketBytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,6 +1472,153 @@ TEST(TeletextRejectReasonName, EveryReasonHasItsOwnName) {
     names.insert(name);
   }
   EXPECT_EQ(names.size(), kTeletextRejectReasonCount);
+}
+
+// ---------------------------------------------------------------------------
+// 525-line WST (ITU-R BT.653 Table 1b)
+// ---------------------------------------------------------------------------
+
+TEST(Teletext525Slicer, CleanLineRecoversThe34ByteExactly) {
+  const auto payload = make_525_test_payload();
+  const auto result = slice_ntsc_line(synthesize_ntsc_wst_line(payload));
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.packet_bytes, kTeletext525PacketBytes);
+  EXPECT_EQ(result.bytes, payload);
+  EXPECT_EQ(result.framing_bit_errors, 0);
+}
+
+TEST(Teletext525Slicer, PhaseOffsetSweep_RecoversBytesExactly) {
+  // Sub-sample timing sweep covering more than one full bit period, which is
+  // exactly 2,5 samples at 4FSC NTSC (BT.653 Table 1b: 364 x fH).
+  const auto payload = make_525_test_payload();
+  for (int step = 0; step <= 26; ++step) {
+    const double offset = step * 0.1;
+    TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+    opt.phase_offset_samples = offset;
+    const auto result = slice_ntsc_line(synthesize_ntsc_wst_line(payload, opt));
+    ASSERT_TRUE(result.valid) << "offset=" << offset;
+    EXPECT_EQ(result.bytes, payload) << "offset=" << offset;
+  }
+}
+
+TEST(Teletext525Slicer, TimingSweepCoversTheBt653Tolerance) {
+  // BT.653 Table 1b puts the timing reference at 11,7 us +/- 0,175, so the
+  // first run-in bit centre moves over 9,44 to 9,78 us. The measured 525-line
+  // captures sit a little earlier still (9,3 to 9,4 us leading edge), so the
+  // sweep runs wider than the tolerance in both directions.
+  const auto payload = make_525_test_payload();
+  for (int step = 0; step <= 12; ++step) {
+    const double centre_us = 9.2 + step * 0.05;
+    TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+    opt.first_bit_centre_us = centre_us;
+    const auto result = slice_ntsc_line(synthesize_ntsc_wst_line(payload, opt));
+    ASSERT_TRUE(result.valid) << "centre=" << centre_us;
+    EXPECT_EQ(result.bytes, payload) << "centre=" << centre_us;
+  }
+}
+
+TEST(Teletext525Slicer, AmplitudeSweep_RecoversAcrossSpecRange) {
+  // BT.653 Table 1b: logical '1' at 70 +/- 6 % of the black-to-white
+  // excursion; swept well beyond the tolerance in both directions.
+  const auto payload = make_525_test_payload();
+  for (int step = 0; step <= 9; ++step) {
+    const double fraction = 0.50 + step * 0.05;
+    TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+    opt.amplitude_fraction = fraction;
+    const auto result = slice_ntsc_line(synthesize_ntsc_wst_line(payload, opt));
+    ASSERT_TRUE(result.valid) << "fraction=" << fraction;
+    EXPECT_EQ(result.bytes, payload) << "fraction=" << fraction;
+  }
+}
+
+TEST(Teletext525Slicer, BandLimitedLineIsRecoveredByMlse) {
+  // The tape case, on the 525-line service: a channel rolling off below the
+  // clock run-in fundamental, which the threshold detector cannot lock.
+  const auto payload = make_525_test_payload();
+  TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+  opt.low_pass_cutoff_hz = 2.6e6;
+
+  TeletextSlicerOptions threshold;
+  threshold.detector = TeletextDetector::kThreshold;
+  EXPECT_FALSE(
+      slice_ntsc_line(synthesize_ntsc_wst_line(payload, opt), threshold).valid);
+
+  TeletextSlicerOptions mlse;
+  mlse.detector = TeletextDetector::kMlse;
+  const auto result =
+      slice_ntsc_line(synthesize_ntsc_wst_line(payload, opt), mlse);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.packet_bytes, kTeletext525PacketBytes);
+  EXPECT_EQ(result.bytes, payload);
+  ASSERT_TRUE(result.has_byte_confidence);
+  // Confidence is reported for the bytes that were transmitted and no further.
+  for (size_t i = 0; i < kTeletext525PacketBytes; ++i) {
+    EXPECT_GT(result.byte_confidence[i], 0.0F) << "byte " << i;
+  }
+}
+
+TEST(Teletext525Slicer, A625LineBurstAtItsOwnBitRateIsNotRecovered) {
+  // The framing code and clock run-in are shared (BT.653 Tables 1a and 1b row
+  // 2.1), so it is the bit rate and packet length that keep the two services
+  // apart.
+  TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+  opt.bit_rate = kTeletextBitRate;
+  const auto line = synthesize_teletext_line(make_parity_coded_payload(), opt);
+  EXPECT_FALSE(slice_ntsc_line(line).valid);
+}
+
+TEST(Teletext525Hex, RoundTripsAtItsOwnLength) {
+  const auto payload = make_525_test_payload();
+  const std::string hex =
+      teletext_packet_to_hex(payload, kTeletext525PacketBytes);
+  EXPECT_EQ(hex.size(), kTeletext525PacketBytes * 2);
+
+  const auto observed = teletext_hex_to_observed_packet(hex);
+  ASSERT_TRUE(observed.has_value());
+  EXPECT_EQ(observed->byte_count, kTeletext525PacketBytes);
+  EXPECT_FALSE(observed->has_confidence);
+  EXPECT_EQ(observed->bytes, payload);
+
+  // The fixed-length helper is 625-line only, so a 34-byte packet can never
+  // reach a caller that has nowhere to record its length.
+  EXPECT_FALSE(teletext_hex_to_packet(hex).has_value());
+}
+
+TEST(Teletext525Hex, ConfidenceSuffixRoundTripsAtItsOwnLength) {
+  const auto payload = make_525_test_payload();
+  TeletextPacketConfidence confidence{};
+  for (size_t i = 0; i < kTeletext525PacketBytes; ++i) {
+    confidence[i] = static_cast<float>(i % kTeletextConfidenceLevels) /
+                    static_cast<float>(kTeletextConfidenceLevels - 1);
+  }
+
+  const std::string hex =
+      teletext_packet_to_hex(payload, confidence, kTeletext525PacketBytes);
+  ASSERT_EQ(hex.size(), kTeletext525PacketBytes * 3);
+
+  const auto observed = teletext_hex_to_observed_packet(hex);
+  ASSERT_TRUE(observed.has_value());
+  EXPECT_EQ(observed->byte_count, kTeletext525PacketBytes);
+  ASSERT_TRUE(observed->has_confidence);
+  EXPECT_EQ(observed->bytes, payload);
+  for (size_t i = 0; i < kTeletext525PacketBytes; ++i) {
+    EXPECT_NEAR(observed->confidence[i], confidence[i], 1e-6) << "byte " << i;
+  }
+}
+
+TEST(Teletext525Hex, TheFourAcceptedLengthsAreDistinct) {
+  // What lets a string be decoded without being told which system produced it.
+  const std::set<size_t> lengths{
+      kTeletextPacketBytes * 2, kTeletextPacketBytes * 3,
+      kTeletext525PacketBytes * 2, kTeletext525PacketBytes * 3};
+  EXPECT_EQ(lengths.size(), 4u);
+
+  // And a length that is neither service's is refused rather than truncated.
+  const std::string good =
+      teletext_packet_to_hex(make_525_test_payload(), kTeletext525PacketBytes);
+  EXPECT_FALSE(teletext_hex_to_observed_packet(good.substr(0, good.size() - 2))
+                   .has_value());
+  EXPECT_FALSE(teletext_hex_to_observed_packet(good + "00").has_value());
 }
 
 }  // namespace

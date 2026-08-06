@@ -18,15 +18,21 @@ namespace orc::presenters {
 /**
  * @brief One recovered T42 teletext packet from a single VBI line
  *
- * The 42 bytes are the MRAG plus 40 data bytes in transmission coding
- * (ETSI EN 300 706 §7.1) exactly as recovered by the teletext observer.
+ * The bytes are the MRAG plus the service's data bytes in transmission coding,
+ * exactly as recovered by the teletext observer: 42 in all on 625-line systems
+ * (ETSI EN 300 706 §7.1) and 34 on 525-line ones (ITU-R BT.653 Table 1b).
  */
 struct TeletextPacketView {
   /// 0-based field line the packet was recovered from
   int field_line = 0;
-  /// MRAG + 40 data bytes, transmission coding (matches the SDK
-  /// kTeletextPacketBytes contract; static_assert'ed in the presenter)
+  /// MRAG + data bytes, transmission coding. The buffer is the widest a
+  /// service transmits (matches the SDK kTeletextPacketBytes contract;
+  /// static_assert'ed in the presenter); only the leading @ref byte_count were
+  /// sent, and the rest are zero.
   std::array<uint8_t, 42> bytes{};
+  /// Bytes of @ref bytes the service transmitted: 42 on 625-line systems, 34
+  /// on 525-line ones.
+  int byte_count = 42;
   /// Whether the recovery chain could say how sure it was of each byte. False
   /// for packets recovered by threshold slicing and for observations stored
   /// before confidences existed.
@@ -43,7 +49,7 @@ struct TeletextPacketView {
  */
 struct TeletextFieldPacketsView {
   /// The "teletext" observation namespace exists for this field (false for
-  /// non-PAL sources or fields that have not been observed)
+  /// systems with no WST service, or fields that have not been observed)
   bool observed = false;
   /// At least one valid packet was recovered in the field
   bool present = false;
@@ -130,11 +136,16 @@ struct TeletextPageRecoveryView {
 };
 
 /**
- * @brief A rendered 40×25 Level 1 teletext page snapshot
+ * @brief A rendered Level 1 teletext page snapshot
  */
 struct TeletextPageView {
   static constexpr int kRows = 25;     ///< header row 0 + display rows 1-24
   static constexpr int kColumns = 40;  ///< EN 300 706 §9.3.2: 40 bytes/row
+
+  /// Display columns the service transmits: kColumns on 625-line systems, 32
+  /// on 525-line ones (ITU-R BT.653 Table 1b §3.4). Cells from here to
+  /// kColumns are no part of the page; a renderer draws this many wide.
+  int columns = kColumns;
 
   int magazine = 8;        ///< Displayed magazine number 1-8
   int page_number = 0;     ///< Two-digit hexadecimal page number 0x00-0xFF

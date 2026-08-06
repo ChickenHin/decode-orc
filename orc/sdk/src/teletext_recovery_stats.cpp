@@ -1,7 +1,7 @@
 /*
  * File:        teletext_recovery_stats.cpp
  * Module:      decode-orc Plugin SDK (support tier)
- * Purpose:     Accumulates PAL WST teletext recovery outcomes into a
+ * Purpose:     Accumulates WST teletext recovery outcomes into a
  *              diagnostic profile of a decoding run
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -24,6 +24,11 @@ namespace {
 // X/26 to X/29) or independent data services (§9.8, packet X/31), neither of
 // which is byte-wise odd parity — the same boundary the MLSE parity gate uses.
 constexpr int kLastParityCodedRow = 25;
+
+// ETSI EN 300 706 §7.1.2 / ITU-R BT.653 Table 1b §3.3: the packet opens with
+// two addressing bytes, whatever the system, so the data bytes the parity
+// profile covers start after them.
+constexpr size_t kMragBytes = 2;
 
 // Data bytes printed per line of the parity profile.
 constexpr size_t kParityProfileColumns = 10;
@@ -154,10 +159,10 @@ void TeletextRecoveryStats::add_line(int vbi_line,
   // strength of that (ETSI EN 300 706 §8.1 parity plus the decision margins).
   if (result.has_byte_confidence) {
     double sum = 0.0;
-    for (const float confidence : result.byte_confidence) {
-      sum += static_cast<double>(confidence);
+    for (size_t i = 0; i < result.packet_bytes; ++i) {
+      sum += static_cast<double>(result.byte_confidence[i]);
     }
-    confidence_sum_ += sum / static_cast<double>(kTeletextPacketBytes);
+    confidence_sum_ += sum / static_cast<double>(result.packet_bytes);
     ++confidence_packets_;
   }
   if (result.repaired_bytes > 0) {
@@ -169,7 +174,10 @@ void TeletextRecoveryStats::add_line(int vbi_line,
   // anything to measure.
   if (result.detector == TeletextDetector::kMlse) {
     ++bit_error_packets_;
-    for (size_t bit = 0; bit < kPayloadBits; ++bit) {
+    // Only the bits the system transmits: a 525-line packet leaves the tail of
+    // the buffer at zero, and averaging that in would read as a channel that
+    // reconstructs its last bytes perfectly.
+    for (size_t bit = 0; bit < result.packet_bytes * 8; ++bit) {
       bit_error_sums_[bit] +=
           static_cast<double>(result.payload_bit_errors[bit]);
     }
@@ -189,8 +197,8 @@ void TeletextRecoveryStats::add_line(int vbi_line,
     return;
   }
   ++parity_checked_packets_;
-  for (size_t i = 0; i < kDataBytes; ++i) {
-    if (!teletext_odd_parity_valid(result.bytes[i + 2])) {
+  for (size_t i = 0; i + kMragBytes < result.packet_bytes; ++i) {
+    if (!teletext_odd_parity_valid(result.bytes[i + kMragBytes])) {
       ++parity_failures_[i];
     }
   }
@@ -198,7 +206,8 @@ void TeletextRecoveryStats::add_line(int vbi_line,
 
 void TeletextRecoveryStats::add_observed_line(
     int vbi_line, const std::array<uint8_t, kTeletextPacketBytes>* packet,
-    const TeletextPacketConfidence* confidence) {
+    const TeletextPacketConfidence* confidence, size_t packet_bytes) {
+  const size_t byte_count = std::min(packet_bytes, kTeletextPacketBytes);
   ++lines_seen_;
   ++observed_lines_;
   LineStats& line = per_line_[vbi_line];
@@ -216,10 +225,10 @@ void TeletextRecoveryStats::add_observed_line(
 
   if (confidence != nullptr) {
     double sum = 0.0;
-    for (const float byte_confidence : *confidence) {
-      sum += static_cast<double>(byte_confidence);
+    for (size_t i = 0; i < byte_count; ++i) {
+      sum += static_cast<double>((*confidence)[i]);
     }
-    confidence_sum_ += sum / static_cast<double>(kTeletextPacketBytes);
+    confidence_sum_ += sum / static_cast<double>(byte_count);
     ++confidence_packets_;
   }
 
@@ -235,8 +244,8 @@ void TeletextRecoveryStats::add_observed_line(
     return;
   }
   ++parity_checked_packets_;
-  for (size_t i = 0; i < kDataBytes; ++i) {
-    if (!teletext_odd_parity_valid((*packet)[i + 2])) {
+  for (size_t i = 0; i + kMragBytes < byte_count; ++i) {
+    if (!teletext_odd_parity_valid((*packet)[i + kMragBytes])) {
       ++parity_failures_[i];
     }
   }

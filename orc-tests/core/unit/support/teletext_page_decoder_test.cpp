@@ -811,4 +811,131 @@ TEST_F(TeletextSubtitleCueTest, MultiRowSubtitlesJoinWithNewlines) {
   EXPECT_EQ(cues[0].text, "LINE ONE\nLINE TWO");
 }
 
+// ---------------------------------------------------------------------------
+// 525-line WST (ITU-R BT.653 Table 1b): a 34-byte packet, so 32-column rows
+// and 24 header-text characters. Everything the decoder reads by position —
+// MRAG, page number, sub-code, control bits — is at the same offsets, so these
+// build on the 625-line helpers and simply stop short.
+// ---------------------------------------------------------------------------
+
+using orc::kTeletext525PacketBytes;
+
+// Display columns of a 525-line page: the packet less its two MRAG bytes.
+constexpr int k525Columns = static_cast<int>(kTeletext525PacketBytes) - 2;
+
+std::array<uint8_t, kTeletextPacketBytes> make_525_header(
+    int magazine, int page_number, int subcode, HeaderFlags flags = {},
+    const std::string& header_text = "") {
+  auto packet = make_header(magazine, page_number, subcode, flags, header_text);
+  // Bytes past the 34 the service transmits were never sent.
+  for (size_t i = kTeletext525PacketBytes; i < kTeletextPacketBytes; ++i) {
+    packet[i] = 0;
+  }
+  return packet;
+}
+
+std::array<uint8_t, kTeletextPacketBytes> make_525_row(
+    int magazine, int row, const std::string& text) {
+  auto packet = make_row(magazine, row, text);
+  for (size_t i = kTeletext525PacketBytes; i < kTeletextPacketBytes; ++i) {
+    packet[i] = 0;
+  }
+  return packet;
+}
+
+std::array<uint8_t, kTeletextPacketBytes> make_525_time_filling_header(
+    int magazine) {
+  return make_525_header(magazine, 0xFF, 0x3F7F & 0x1FFF);
+}
+
+class Teletext525PageDecoderTest : public TeletextPageDecoderTest {
+ protected:
+  // Every packet of a 525-line stream carries its own length; the decoder
+  // takes the row width from it.
+  void feed(const std::array<uint8_t, kTeletextPacketBytes>& packet,
+            int64_t field_index) {
+    decoder_.process_packet(packet, field_index,
+                            TeletextPageDecoder::kAutoSource,
+                            /*confidence=*/nullptr, kTeletext525PacketBytes);
+  }
+};
+
+TEST_F(Teletext525PageDecoderTest, PageIsThirtyTwoColumnsWide) {
+  feed(make_525_header(1, 0x00, 0, {}, "ELECTRA NEWS"), 0);
+  feed(make_525_row(1, 1, "TOP STORY"), 1);
+  feed(make_525_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(page.columns, k525Columns);
+  EXPECT_EQ(page.magazine, 1);
+  EXPECT_EQ(page.page_number, 0x00);
+  EXPECT_EQ(row_text(page, 1), "TOP STORY");
+}
+
+TEST_F(Teletext525PageDecoderTest, HeaderTextStopsAtTheServiceWidth) {
+  // 24 header-text characters from column 8, not 32 (Table 1b §3.4 leaves a
+  // 32-byte data block, of which the header spends 8 on addressing).
+  const std::string text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  feed(make_525_header(1, 0x00, 0, {}, text), 0);
+  feed(make_525_time_filling_header(1), 1);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(row_text(page, 0), "        " + text.substr(0, k525Columns - 8));
+}
+
+TEST_F(Teletext525PageDecoderTest, ColumnsBeyondTheServiceWidthStayBlank) {
+  // The bytes past the packet were never transmitted; they must not surface as
+  // content, and — being zero — must not surface as parity damage either.
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 5, std::string(40, 'X')), 1);
+  feed(make_525_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(row_text(page, 5), std::string(k525Columns, 'X'));
+  for (int column = k525Columns; column < TeletextPageSnapshot::kColumns;
+       ++column) {
+    const auto& cell = page.cells[5][static_cast<size_t>(column)];
+    EXPECT_EQ(cell.character, 0x20) << "column " << column;
+    EXPECT_FALSE(cell.parity_error) << "column " << column;
+  }
+}
+
+TEST_F(Teletext525PageDecoderTest, SubtitleTextStopsAtTheServiceWidth) {
+  HeaderFlags flags;
+  flags.subtitle = true;
+  ASSERT_TRUE(decoder_.set_subtitle_page("100"));
+  feed(make_525_header(1, 0x00, 0, flags), 0);
+  // Start Box / End Box around the text (EN 300 706 §12.2 0/A-0/B).
+  std::string boxed_row;
+  boxed_row.push_back(0x0B);
+  boxed_row.push_back(0x0B);
+  boxed_row += "ELECTRA";
+  boxed_row.push_back(0x0A);
+  feed(make_525_row(1, 20, boxed_row), 1);
+  feed(make_525_time_filling_header(1), 2);
+  decoder_.finalize(100);
+
+  const auto& cues = decoder_.subtitle_cues();
+  ASSERT_EQ(cues.size(), 1u);
+  EXPECT_EQ(cues[0].text, "ELECTRA");
+}
+
+TEST_F(TeletextPageDecoderTest, DefaultPacketLengthKeepsTheFortyColumnPage) {
+  // The 625-line default is unchanged by the width having become a parameter.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, std::string(40, 'Y')), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(snapshots_.front().columns, TeletextPageSnapshot::kColumns);
+  EXPECT_EQ(row_text(snapshots_.front(), 1), std::string(40, 'Y'));
+}
+
 }  // namespace orc_unit_test

@@ -1,8 +1,8 @@
 /*
  * File:        teletext_slicer.h
  * Module:      decode-orc Plugin SDK (support tier)
- * Purpose:     PAL WST (System B) teletext data-line slicer producing T42
- *              packets
+ * Purpose:     WST (System B) teletext data-line slicer producing T42 packets,
+ *              on 625-line and 525-line television systems
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -29,12 +29,54 @@ constexpr double kTeletextBitRate = 6'937'500.0;
 // ETSI EN 300 706 §7.1: a teletext packet comprises 360 bits organized as 45
 // bytes; removing the clock run-in (2 bytes, §6.1) and framing code (1 byte,
 // §6.2) leaves the 42-byte MRAG + data payload — the T42 packet.
+//
+// This is also the size of the packet buffer everywhere in the SDK: the
+// 525-line variant below is shorter and occupies the leading bytes of the same
+// array (see TeletextLineResult::packet_bytes).
 constexpr size_t kTeletextPacketBytes = 42;
 
-// Payload bits of one packet: the 42 T42 bytes, transmitted LSB first per byte
-// (ETSI EN 300 706 §7.1). The detectors index the packet by bit as well as by
-// byte, and the per-bit diagnostics are sized from here.
+// ITU-R BT.653 Table 1b, Teletext System B on 525-line television systems:
+// bit rate = 364 × fH = 5,727272 Mbit/s ± 25 ppm. At 4FSC NTSC that is exactly
+// 2,5 samples per bit.
+constexpr double kTeletext525BitRate = 5'727'272.0;
+
+// ITU-R BT.653 Table 1b: the 525-line data line is 296 bits = 37 bytes;
+// removing the clock run-in (2 bytes) and the framing code (1 byte) leaves 34
+// bytes — the 2-byte prefix (MRAG) plus a 32-byte data block. The framing code
+// and the clock run-in are those of the 625-line service; the bit rate and the
+// packet length are not, which is why a 625-line slicer pointed at a 525-line
+// line reads noise rather than a short packet.
+constexpr size_t kTeletext525PacketBytes = 34;
+
+// Payload bits of one 625-line packet: the 42 T42 bytes, transmitted LSB first
+// per byte (ETSI EN 300 706 §7.1). The detectors index the packet by bit as
+// well as by byte, and the per-bit diagnostics are sized from here — a
+// 525-line packet fills the leading kTeletext525PacketBytes * 8 of them.
 constexpr size_t kTeletextPayloadBits = kTeletextPacketBytes * 8;
+
+// Television system the teletext service is carried on. Both are ITU-R BT.653
+// System B — the same framing code, clock run-in and transmission coding — and
+// differ in bit rate, packet length and the position of the data in the line.
+enum class TeletextSystem {
+  // ETSI EN 300 706 (System B on 625 lines): 6,9375 Mbit/s, 42-byte packet.
+  kWst625,
+
+  // ITU-R BT.653 Table 1b (System B on 525 lines): 5,727272 Mbit/s, 34-byte
+  // packet. The service US broadcasters carried as "WST".
+  kWst525,
+};
+
+// Transmitted bit rate of |system|, in Hz.
+constexpr double teletext_bit_rate(TeletextSystem system) {
+  return system == TeletextSystem::kWst525 ? kTeletext525BitRate
+                                           : kTeletextBitRate;
+}
+
+// Packet length of |system|, in bytes (framing code excluded).
+constexpr size_t teletext_packet_bytes(TeletextSystem system) {
+  return system == TeletextSystem::kWst525 ? kTeletext525PacketBytes
+                                           : kTeletextPacketBytes;
+}
 
 // Encode a 4-bit value as a Hamming 8/4 protected byte.
 // ETSI EN 300 706 §8.2: bits 1, 3, 5, 7 (LSB numbering, transmission order)
@@ -59,26 +101,40 @@ constexpr int kTeletextConfidenceLevels = 16;
 // TeletextLineResult::byte_confidence).
 using TeletextPacketConfidence = std::array<float, kTeletextPacketBytes>;
 
-// Encode a 42-byte T42 packet as 84 lowercase hex characters. Shared between
-// the teletext observer (producer) and the teletext sink (consumer) so the
-// observation-string representation has a single definition.
+// Encode the leading |byte_count| bytes of a packet as lowercase hex, two
+// characters per byte — 84 for a 625-line T42 packet, 68 for a 525-line one.
+// Shared between the teletext observer (producer) and the teletext sink
+// (consumer) so the observation-string representation has a single definition.
+//
+// The length of the string is what carries the packet length: the two are the
+// only ones a WST service transmits and they are unambiguous (see
+// teletext_hex_to_observed_packet).
 std::string teletext_packet_to_hex(
-    const std::array<uint8_t, kTeletextPacketBytes>& bytes);
+    const std::array<uint8_t, kTeletextPacketBytes>& bytes,
+    size_t byte_count = kTeletextPacketBytes);
 
 // As above, with the detector's per-byte confidence (see
-// TeletextLineResult::byte_confidence) appended as a further 42 hex digits, one
-// per byte — 126 characters in all.
+// TeletextLineResult::byte_confidence) appended as a further |byte_count| hex
+// digits, one per byte — 126 characters for a 625-line packet, 102 for a
+// 525-line one.
 //
 // The suffix is optional by design: an observation written before it existed is
 // 84 characters and decodes as full confidence, so a stored sweep of a
 // recording stays usable and nothing has to be re-observed to read it.
 std::string teletext_packet_to_hex(
     const std::array<uint8_t, kTeletextPacketBytes>& bytes,
-    const TeletextPacketConfidence& confidence);
+    const TeletextPacketConfidence& confidence,
+    size_t byte_count = kTeletextPacketBytes);
 
-// Decode an observation string (either case, with or without the confidence
-// suffix) back to the 42 packet bytes. Returns std::nullopt when the length or
-// any character is invalid.
+// Decode a 625-line observation string (either case, with or without the
+// confidence suffix) back to its 42 packet bytes. Returns std::nullopt when
+// the length or any character is invalid.
+//
+// Deliberately 625-line only: the returned array carries no length, so
+// accepting a 34-byte 525-line packet here would hand the caller eight bytes
+// that were never transmitted with nothing to mark them as such. A caller that
+// handles both lengths uses teletext_hex_to_observed_packet() below, whose
+// result states the length it decoded.
 std::optional<std::array<uint8_t, kTeletextPacketBytes>> teletext_hex_to_packet(
     std::string_view hex);
 
@@ -86,6 +142,10 @@ std::optional<std::array<uint8_t, kTeletextPacketBytes>> teletext_hex_to_packet(
 // string carried.
 struct TeletextObservedPacket {
   std::array<uint8_t, kTeletextPacketBytes> bytes{};
+  // Bytes of |bytes| the string actually carried: kTeletextPacketBytes for a
+  // 625-line packet, kTeletext525PacketBytes for a 525-line one. Bytes past it
+  // are zero and were never transmitted.
+  size_t byte_count = kTeletextPacketBytes;
   // False when the string carried no suffix (an observation from a build
   // before confidences existed, or a threshold-detected packet, which has
   // none); |confidence| is then 1,0 throughout — a copy of unknown quality
@@ -94,8 +154,11 @@ struct TeletextObservedPacket {
   TeletextPacketConfidence confidence{};
 };
 
-// Decode an observation string with its confidence suffix, if it has one.
-// Returns std::nullopt on the same invalid input as teletext_hex_to_packet().
+// Decode an observation string of either packet length, with its confidence
+// suffix if it has one. The four accepted lengths — 68, 84, 102 and 126
+// characters — are distinct, so the string decodes without the caller having
+// to say which system produced it. Returns std::nullopt when the length or any
+// character is invalid.
 std::optional<TeletextObservedPacket> teletext_hex_to_observed_packet(
     std::string_view hex);
 
@@ -209,10 +272,19 @@ struct TeletextLineResult {
   // was extracted (subject to the optional MRAG plausibility filter).
   bool valid = false;
 
-  // MRAG + 40 data bytes in transmission coding (Hamming 8/4 on addressing
+  // MRAG + data bytes in transmission coding (Hamming 8/4 on addressing
   // bytes, odd parity on display bytes). No error correction is applied to
   // the payload: the T42 contract preserves transmission coding.
+  //
+  // Only the leading |packet_bytes| are transmitted; on a 525-line service the
+  // remaining eight are left zero.
   std::array<uint8_t, kTeletextPacketBytes> bytes{};
+
+  // Bytes of |bytes| the service transmits: kTeletextPacketBytes on 625 lines,
+  // kTeletext525PacketBytes on 525 (ITU-R BT.653 Table 1a/1b). Set whether or
+  // not the line yielded a packet, so a caller reading a rejected result still
+  // knows what it was looking for.
+  size_t packet_bytes = kTeletextPacketBytes;
 
   // Number of bit errors accepted in the framing code: 0, or 1 when the
   // slicer runs in tolerant-framing mode.
@@ -300,6 +372,12 @@ struct TeletextLineResult {
 // Slicer tuning options. Defaults match the strictest behaviour: exact
 // framing-code match and MRAG plausibility filtering enabled.
 struct TeletextSlicerOptions {
+  // Television system the service is carried on. It selects the packet length,
+  // the position of the data in the line and the nominal data '1' amplitude
+  // (ITU-R BT.653 Tables 1a and 1b); the bit rate comes from the constructor,
+  // which derives it from this unless a caller states one explicitly.
+  TeletextSystem system = TeletextSystem::kWst625;
+
   // Accept a framing code with one bit error (ETSI EN 300 706 §6.2 defines
   // the exact 8-bit pattern; some receivers tolerate a single error, at the
   // cost of a higher false-positive rate on noisy sources).
@@ -321,12 +399,13 @@ struct TeletextSlicerOptions {
 
   // MLSE detector only: sample phases scored per bit period.
   //
-  // At the PAL 4FSC sample rate one teletext bit spans ≈ 2.556 samples (the
-  // ETSI EN 300 706 §5.3 bit rate against the 4FSC sample clock), so the
-  // capture already holds more than two independent observations of every bit.
+  // At the PAL 4FSC sample rate one teletext bit spans ≈ 2.556 samples, and at
+  // the NTSC 4FSC rate exactly 2.5 (the ITU-R BT.653 bit rate of the system
+  // against the 4FSC sample clock), so the capture already holds more than two
+  // independent observations of every bit.
   // The detector fits the channel per phase and accumulates its branch metric
   // over all of them, which is what turns those extra samples into evidence.
-  // Three is the most a ≈ 2.556-sample bit period supports before two grid
+  // Three is the most a bit period of 2,5 samples supports before two grid
   // points fall between the same pair of captured samples and stop being
   // independent. A value of 1 reduces the detector to scoring the bit centre
   // alone, which is what the fractionally-spaced metric is measured against;
@@ -360,12 +439,14 @@ struct TeletextSlicerOptions {
 };
 
 /**
- * @brief PAL WST teletext data-line slicer.
+ * @brief WST (System B) teletext data-line slicer.
  *
- * Recovers 42-byte T42 packets (MRAG + data, transmission coding) from
- * single VBI lines of 4FSC-sampled PAL video. At the decode-orc PAL sample
- * rate one teletext bit spans ≈ 2.556 samples, so recovery uses clock run-in
- * correlation and interpolated bit-centre sampling rather than a
+ * Recovers T42 packets (MRAG + data, transmission coding) from single VBI
+ * lines of 4FSC-sampled video: 42 bytes on 625-line systems (ETSI EN 300 706)
+ * and 34 on 525-line ones (ITU-R BT.653 Table 1b), selected by
+ * TeletextSlicerOptions::system. At the decode-orc sample rates one teletext
+ * bit spans ≈ 2.556 samples (PAL) or exactly 2.5 (NTSC), so recovery uses
+ * clock run-in correlation and interpolated bit-centre sampling rather than a
  * transition-map approach.
  *
  * Two bit detectors are available, selected by TeletextSlicerOptions::detector:
@@ -376,10 +457,10 @@ struct TeletextSlicerOptions {
  *
  * The MLSE detector runs two passes. The first detects against a channel
  * fitted to the known 24-bit preamble and supplies the diagnostics and the
- * lock gates; the second refits the channel to all 360 bits the first pass
- * decided and detects again, which is where most of its accuracy on a tape
- * comes from — 20 fit equations per sample phase describe a channel far less
- * well than 336 do.
+ * lock gates; the second refits the channel to all bits the first pass decided
+ * and detects again, which is where most of its accuracy on a tape comes from
+ * — 20 fit equations per sample phase describe a channel far less well than
+ * 336 do.
  *
  * Thread safety: slice() is const and the class holds no mutable state; a
  * single instance may be used concurrently from multiple threads.
@@ -388,31 +469,54 @@ class TeletextSlicer {
  public:
   // |sample_rate| in Hz (e.g. kPalSampleRate = 17,734,475 Hz).
   // |bit_rate| fixed at 444 × fH by ETSI EN 300 706 §5.3; overridable for
-  // tests only.
+  // tests only. Everything else the system decides comes from
+  // TeletextSlicerOptions::system, which defaults to the 625-line service.
   explicit TeletextSlicer(double sample_rate,
                           double bit_rate = kTeletextBitRate,
                           TeletextSlicerOptions options = {});
 
+  // As above with the bit rate derived from |system| (ITU-R BT.653 Table 1a /
+  // Table 1b), which is what every caller slicing real video wants: the system
+  // then decides the bit rate, the packet length and the data timing together
+  // rather than in two places. Any |options.system| is overwritten by |system|.
+  TeletextSlicer(double sample_rate, TeletextSystem system,
+                 TeletextSlicerOptions options = {});
+
   // Slice one candidate VBI line of |sample_count| samples in the
   // CVBS_U10_4FSC 10-bit level domain. |black_level| and |white_level| locate
-  // the data levels of ETSI EN 300 706 §5.2 (0 = black, 1 = 66 % of
-  // black-to-white). Returns a result with valid == false when the line
-  // carries no recoverable teletext packet.
+  // the data levels (ETSI EN 300 706 §5.2 on 625 lines: 0 = black, 1 = 66 % of
+  // black-to-white; ITU-R BT.653 Table 1b on 525: 70 % of the same excursion).
+  // Returns a result with valid == false when the line carries no recoverable
+  // teletext packet.
   TeletextLineResult slice(const int16_t* line, size_t sample_count,
                            int16_t black_level, int16_t white_level) const;
 
+  // Packet length of the configured system, in bytes.
+  size_t packet_bytes() const { return packet_bytes_; }
+
  private:
   // Both detectors share the caller's level domain, so slice() computes the
-  // §5.2 nominal '1' amplitude and the empty-line rejection gate once and
-  // hands them down.
+  // nominal '1' amplitude and the empty-line rejection gate once and hands
+  // them down.
   TeletextLineResult slice_threshold(const int16_t* line, size_t sample_count,
                                      double amplitude_gate) const;
   TeletextLineResult slice_mlse(const int16_t* line, size_t sample_count,
                                 double nominal_amplitude) const;
 
+  // A blank result already stamped with the configured packet length, so no
+  // path can return one that misreports what it was looking for.
+  TeletextLineResult new_result() const;
+
   double sample_rate_;
   double samples_per_bit_;
   TeletextSlicerOptions options_;
+
+  // System-dependent geometry, resolved once from options_.system.
+  size_t packet_bytes_;
+  int payload_bits_;
+  double data_one_fraction_;
+  double search_start_samples_;
+  double search_end_samples_;
 };
 
 }  // namespace orc

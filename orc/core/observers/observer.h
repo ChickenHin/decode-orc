@@ -78,7 +78,7 @@ class Observer {
    * @brief Whether this observer can ever produce observations for a source
    *
    * Applicability is a pure function of the source's video parameters (e.g.
-   * teletext is PAL-only, FM code is NTSC-only); it must not depend on frame
+   * FM code is NTSC-only); it must not depend on frame
    * content. The observer pass and every coverage probe use this predicate to
    * skip both the observer run and its per-field store records, so an
    * observer returning false here must also produce no observations from

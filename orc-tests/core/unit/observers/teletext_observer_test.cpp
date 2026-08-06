@@ -3,9 +3,10 @@
  * Module:      orc-tests/core/unit/observers
  * Purpose:     Unit tests for TeletextObserver
  *
- * Covers: observation schema keys and hex payload correctness, key absence
- * for empty lines, PAL-only gating, luma-path selection for YC sources, and
- * statelessness. Frame data is synthesised in memory; no I/O is performed.
+ * Covers: observation schema keys and hex payload correctness on both the
+ * 625-line and 525-line WST services, key absence for empty lines, luma-path
+ * selection for YC sources, and statelessness. Frame data is synthesised in
+ * memory; no I/O is performed.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -120,12 +121,24 @@ std::vector<int16_t> make_black_pal_frame() {
                               static_cast<int16_t>(kPalBlack));
 }
 
+std::vector<int16_t> make_black_ntsc_frame() {
+  return std::vector<int16_t>(static_cast<size_t>(kNtscFrameSamples),
+                              static_cast<int16_t>(kNtscBlack));
+}
+
 // Copy a synthesized teletext line into frame-flat line |flat_line|.
 void inject_line(std::vector<int16_t>& frame, size_t flat_line,
                  const std::vector<int16_t>& line) {
   const size_t offset = frame_line_sample_offset(
       VideoSystem::PAL, static_cast<size_t>(kPalSamplesPerLineNominal),
       flat_line);
+  std::copy(line.begin(), line.end(), frame.begin() + offset);
+}
+
+void inject_ntsc_line(std::vector<int16_t>& frame, size_t flat_line,
+                      const std::vector<int16_t>& line) {
+  const size_t offset = frame_line_sample_offset(
+      VideoSystem::NTSC, static_cast<size_t>(kNtscSamplesPerLine), flat_line);
   std::copy(line.begin(), line.end(), frame.begin() + offset);
 }
 
@@ -234,21 +247,107 @@ TEST(TeletextObserver, EmptyFrame_ReportsNotPresentWithZeroCount) {
 }
 
 // ---------------------------------------------------------------------------
-// PAL-only gating
+// 525-line WST (ITU-R BT.653 Table 1b)
 // ---------------------------------------------------------------------------
 
-TEST(TeletextObserver, NonPalFrame_ProducesNoObservations) {
-  std::vector<int16_t> frame(static_cast<size_t>(kNtscFrameSamples),
-                             static_cast<int16_t>(kNtscBlack));
+TEST(TeletextObserver, NtscFrame_RecoversThe34BytePacketOnBothFields) {
+  auto frame = make_black_ntsc_frame();
+  const auto payload_f1 = make_525_test_payload();
+  auto payload_f2 = payload_f1;
+  payload_f2[2] ^= 0xFF;  // distinguishable field-2 payload
+
+  // BT.653 §2 candidate lines are 0-based field lines 9-20 of each field;
+  // field 2 sits kNtscField1Lines further into the frame-flat buffer.
+  inject_ntsc_line(
+      frame, 11,
+      synthesize_teletext_line(payload_f1, ntsc_wst_synth_options(),
+                               kTeletext525PacketBytes));
+  inject_ntsc_line(
+      frame, static_cast<size_t>(kNtscField1Lines) + 14,
+      synthesize_teletext_line(payload_f2, ntsc_wst_synth_options(),
+                               kTeletext525PacketBytes));
+
   FlatBufferVFR vfr(std::move(frame), make_ntsc_params());
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  const FieldID f0(0);
+  EXPECT_EQ(context.get(f0, "teletext", "present"),
+            std::optional<ObservationValue>(true));
+  EXPECT_EQ(context.get(f0, "teletext", "line_count"),
+            std::optional<ObservationValue>(int32_t{1}));
+  const auto hex_f1 = get_string(context, f0, "t42_11");
+  ASSERT_TRUE(hex_f1.has_value());
+  // The string's length is what says the packet is the 34-byte one.
+  EXPECT_EQ(hex_f1->size(), kTeletext525PacketBytes * 2);
+  const auto observed_f1 = teletext_hex_to_observed_packet(*hex_f1);
+  ASSERT_TRUE(observed_f1.has_value());
+  EXPECT_EQ(observed_f1->byte_count, kTeletext525PacketBytes);
+  EXPECT_EQ(observed_f1->bytes, payload_f1);
+  // A 34-byte packet must not reach a consumer expecting 42.
+  EXPECT_FALSE(teletext_hex_to_packet(*hex_f1).has_value());
+
+  const FieldID f1(1);
+  EXPECT_EQ(context.get(f1, "teletext", "line_count"),
+            std::optional<ObservationValue>(int32_t{1}));
+  const auto hex_f2 = get_string(context, f1, "t42_14");
+  ASSERT_TRUE(hex_f2.has_value());
+  const auto observed_f2 = teletext_hex_to_observed_packet(*hex_f2);
+  ASSERT_TRUE(observed_f2.has_value());
+  EXPECT_EQ(observed_f2->bytes, payload_f2);
+}
+
+TEST(TeletextObserver, NtscFrame_LeavesLinesOutsideTheBt653WindowAlone) {
+  // Field line 8 is broadcast line 9, one before the first line BT.653 §2
+  // assigns to the service: a packet there must not be picked up.
+  auto frame = make_black_ntsc_frame();
+  inject_ntsc_line(frame, 8,
+                   synthesize_teletext_line(make_525_test_payload(),
+                                            ntsc_wst_synth_options(),
+                                            kTeletext525PacketBytes));
+
+  FlatBufferVFR vfr(std::move(frame), make_ntsc_params());
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  EXPECT_EQ(context.get(FieldID(0), "teletext", "present"),
+            std::optional<ObservationValue>(false));
+  EXPECT_FALSE(context.has(FieldID(0), "teletext", "t42_8"));
+}
+
+TEST(TeletextObserver, NtscFrame_RejectsA625LinePacketAtItsOwnBitRate) {
+  // The two services share a framing code and a clock run-in, so what has to
+  // separate them is the bit rate and the packet length. A 625-line burst laid
+  // on an NTSC line must therefore yield nothing.
+  auto frame = make_black_ntsc_frame();
+  TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+  opt.bit_rate = kTeletextBitRate;
+  inject_ntsc_line(frame, 11,
+                   synthesize_teletext_line(make_test_payload(), opt));
+
+  FlatBufferVFR vfr(std::move(frame), make_ntsc_params());
+  ObservationContext context;
+  TeletextObserver observer;
+  observer.process_frame(vfr, FrameID(0), context);
+
+  EXPECT_EQ(context.get(FieldID(0), "teletext", "present"),
+            std::optional<ObservationValue>(false));
+}
+
+TEST(TeletextObserver, EmptyNtscFrame_ReportsNotPresentWithZeroCount) {
+  FlatBufferVFR vfr(make_black_ntsc_frame(), make_ntsc_params());
   ObservationContext context;
   TeletextObserver observer;
   observer.process_frame(vfr, FrameID(0), context);
 
   for (const uint64_t field : {0u, 1u}) {
     const FieldID fid(field);
-    EXPECT_FALSE(context.has(fid, "teletext", "present"));
-    EXPECT_TRUE(context.get_namespaces(fid).empty());
+    EXPECT_EQ(context.get(fid, "teletext", "present"),
+              std::optional<ObservationValue>(false));
+    EXPECT_EQ(context.get(fid, "teletext", "line_count"),
+              std::optional<ObservationValue>(int32_t{0}));
   }
 }
 

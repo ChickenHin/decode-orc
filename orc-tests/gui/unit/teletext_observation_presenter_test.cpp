@@ -286,4 +286,65 @@ TEST(TeletextObservationPresenterTest,
   EXPECT_TRUE(view.recovery.complete());
 }
 
+// ---------------------------------------------------------------------------
+// 525-line WST (ITU-R BT.653 Table 1b): a 34-byte packet giving 32-column
+// pages, carried by the observation string's own length
+// ---------------------------------------------------------------------------
+
+TEST(TeletextObservationPresenterTest, Decodes525LinePacketsWithTheirLength) {
+  ObservationContext context;
+  const FieldID field(12);
+  const auto packet = patternPacket(0x5A);
+  context.set(field, "teletext", "present", true);
+  context.set(field, "teletext", "line_count", int32_t{1});
+  context.set(
+      field, "teletext", "t42_11",
+      orc::teletext_packet_to_hex(packet, orc::kTeletext525PacketBytes));
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  ASSERT_EQ(view.packets.size(), 1u);
+  EXPECT_EQ(view.packets[0].field_line, 11);
+  EXPECT_EQ(view.packets[0].byte_count,
+            static_cast<int>(orc::kTeletext525PacketBytes));
+  // The bytes the service sent survive; the rest are zero because they were
+  // never transmitted.
+  for (size_t i = 0; i < orc::kTeletext525PacketBytes; ++i) {
+    EXPECT_EQ(view.packets[0].bytes[i], packet[i]) << "byte " << i;
+  }
+  for (size_t i = orc::kTeletext525PacketBytes; i < kTeletextPacketBytes; ++i) {
+    EXPECT_EQ(view.packets[0].bytes[i], 0) << "byte " << i;
+  }
+}
+
+TEST(TeletextObservationPresenterTest, A625LinePacketStillReportsFortyTwo) {
+  ObservationContext context;
+  const FieldID field(14);
+  context.set(field, "teletext", "present", true);
+  context.set(field, "teletext", "t42_7",
+              orc::teletext_packet_to_hex(patternPacket(0x11)));
+
+  const auto view =
+      TeletextObservationPresenter::extractFieldObservations(field, &context);
+
+  ASSERT_EQ(view.packets.size(), 1u);
+  EXPECT_EQ(view.packets[0].byte_count, static_cast<int>(kTeletextPacketBytes));
+}
+
+TEST(TeletextObservationPresenterTest, PageViewCarriesTheServiceWidth) {
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.columns = 32;
+  snapshot.cells[1][31].character = 'A';
+  // Beyond the service width the snapshot holds nothing; the view must not
+  // walk there either.
+  snapshot.cells[1][39].parity_error = true;
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.columns, 32);
+  EXPECT_EQ(view.cells[1][31].character, U'A');
+  EXPECT_EQ(view.recovery.damaged_bytes, 0);
+}
+
 }  // namespace gui_unit_test

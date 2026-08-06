@@ -1,8 +1,8 @@
 /*
  * File:        teletext_page_decoder.h
  * Module:      decode-orc Plugin SDK (support tier)
- * Purpose:     PAL WST (System B) teletext magazine/page decoder producing
- *              Level 1 page snapshots and subtitle cues
+ * Purpose:     WST (System B) teletext magazine/page decoder producing Level 1
+ *              page snapshots and subtitle cues
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -82,11 +82,19 @@ struct TeletextPageCell {
   bool parity_error = false;
 };
 
-// A completed Level 1 page: the 40×25 grid (row 0 is the header row) plus
+// A completed Level 1 page: the 25-row grid (row 0 is the header row) plus
 // the page address and header control bits of ETSI EN 300 706 §9.3.1.
 struct TeletextPageSnapshot {
   static constexpr int kRows = 25;     // header row 0 + display rows 1-24
   static constexpr int kColumns = 40;  // EN 300 706 §9.3.2: 40 display bytes
+
+  // Display columns the service actually transmits: kColumns on 625 lines (EN
+  // 300 706 §9.3.2, a 40-byte data block) and 32 on 525 lines (ITU-R BT.653
+  // Table 1b §3.4, a 32-byte one). Cells from here to kColumns are no part of
+  // the page and keep their defaults — a renderer draws this many columns wide
+  // rather than blanking a margin, because a 32-column service fills its
+  // screen just as a 40-column one does.
+  int columns = kColumns;
 
   // Displayed magazine number 1-8. Transmission magazine 0 is displayed as
   // magazine 8 (EN 300 706 §3.1 "page number" convention: page 100 = 1/00).
@@ -160,14 +168,21 @@ struct TeletextSubtitleCue {
 };
 
 /**
- * @brief PAL WST teletext magazine/page decoder (Level 1).
+ * @brief WST teletext magazine/page decoder (Level 1).
  *
- * Consumes 42-byte T42 packets (MRAG + 40 data bytes, transmission coding)
- * in strictly temporal order, applies Hamming 8/4 and odd-parity decoding
- * (ETSI EN 300 706 §8.1-8.2), and assembles pages in both serial and
- * parallel magazine transmission modes (§7.2, §7.3, control bit C11).
+ * Consumes T42 packets (MRAG + data bytes, transmission coding) in strictly
+ * temporal order, applies Hamming 8/4 and odd-parity decoding (ETSI EN 300 706
+ * §8.1-8.2), and assembles pages in both serial and parallel magazine
+ * transmission modes (§7.2, §7.3, control bit C11).
  *
- * Completed pages are delivered as 40×25 Level 1 snapshots through the page
+ * Both packet lengths ITU-R BT.653 defines for System B are handled: 42 bytes
+ * giving 40-column pages on 625 lines, and 34 giving 32-column ones on 525
+ * (Table 1b). Everything the decoder reads by position — the MRAG, the page
+ * number, the sub-code and the control bits — sits at the same byte offsets in
+ * both, so only the row width changes (see process_packet() and
+ * TeletextPageSnapshot::columns).
+ *
+ * Completed pages are delivered as Level 1 snapshots through the page
  * callback when the page transmission is terminated by the next page header
  * (§7.2.1) or by finalize(). When a subtitle page filter is set, subtitle
  * cues are additionally emitted per the C5/C6 conventions (§9.3.1.3): page
@@ -236,13 +251,22 @@ class TeletextPageDecoder {
   // counted again. The default derives a unique id per call, which is what a
   // one-pass consumer wants.
   //
-  // |confidence| is how sure the recovery chain was of each of the 42 bytes,
-  // passed on to an attached squasher so its vote can be weighted by it (see
+  // |confidence| is how sure the recovery chain was of each byte, passed on to
+  // an attached squasher so its vote can be weighted by it (see
   // teletext_row_squasher.h). nullptr — the default — means the caller cannot
   // say, and the copy votes at full weight.
+  //
+  // |packet_bytes| is how many of |packet| the service transmitted:
+  // kTeletextPacketBytes on 625 lines, kTeletext525PacketBytes on 525 (the
+  // byte_count of TeletextObservedPacket, or the packet_bytes of
+  // TeletextLineResult). It sets the row width for every page assembled from
+  // here on — a recording carries one service throughout, and rows are
+  // rendered long after the packet that brought them, so the width has to be
+  // decoder state rather than something each stored row carries.
   void process_packet(const std::array<uint8_t, kTeletextPacketBytes>& packet,
                       int64_t field_index, int64_t source = kAutoSource,
-                      const TeletextPacketConfidence* confidence = nullptr);
+                      const TeletextPacketConfidence* confidence = nullptr,
+                      size_t packet_bytes = kTeletextPacketBytes);
 
   /// Sentinel for process_packet()'s |source|: allocate a fresh copy id.
   static constexpr int64_t kAutoSource = -1;
@@ -329,6 +353,11 @@ class TeletextPageDecoder {
 
   // Identity of the page currently open in |magazine|, for squasher keying.
   TeletextPageKey page_key(int transmission_magazine) const;
+
+  // Display columns of the service being decoded (see
+  // TeletextPageSnapshot::columns), taken from the packet length passed to
+  // process_packet().
+  int columns_ = TeletextPageSnapshot::kColumns;
 
   // Erase epoch of |identity| (0 until its first C4 header).
   int erase_epoch(const PageIdentity& identity) const;

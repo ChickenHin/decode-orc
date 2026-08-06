@@ -1,7 +1,7 @@
 /*
  * File:        teletext_recovery_stats.h
  * Module:      decode-orc Plugin SDK (support tier)
- * Purpose:     Accumulates PAL WST teletext recovery outcomes into a
+ * Purpose:     Accumulates WST teletext recovery outcomes into a
  *              diagnostic profile of a decoding run
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -48,6 +48,8 @@ namespace orc {
 class TeletextRecoveryStats {
  public:
   // ETSI EN 300 706 §7.1: the T42 packet is 2 MRAG bytes then 40 data bytes.
+  // The 525-line packet is 2 then 32 (ITU-R BT.653 Table 1b), so a run of that
+  // service fills only the leading 32 positions of the parity profile.
   static constexpr size_t kDataBytes = kTeletextPacketBytes - 2;
 
   // MLSE residual histogram. Residuals are fractions of the fitted channel
@@ -58,7 +60,8 @@ class TeletextRecoveryStats {
   static constexpr double kResidualBinWidth = 0.05;
 
   // Payload bit positions the per-bit reconstruction-error profile covers
-  // (ETSI EN 300 706 §7.1: the 42 T42 bytes, LSB first).
+  // (ETSI EN 300 706 §7.1: the 42 T42 bytes, LSB first). A 525-line run fills
+  // the leading 272 of them.
   static constexpr size_t kPayloadBits = kTeletextPayloadBits;
 
   /// Outcomes for one VBI line position, across every field examined
@@ -99,15 +102,19 @@ class TeletextRecoveryStats {
    * Lines recorded this way are kept apart from sliced ones so summary() can
    * omit the figures it would otherwise have to invent.
    *
-   * @param vbi_line   Caller's line identity, as add_line() above
-   * @param packet     The recovered packet, or nullptr when the line yielded
-   *                   none
-   * @param confidence Per-byte confidence carried by the observation, or
-   *                   nullptr when it carries none
+   * @param vbi_line     Caller's line identity, as add_line() above
+   * @param packet       The recovered packet, or nullptr when the line yielded
+   *                     none
+   * @param confidence   Per-byte confidence carried by the observation, or
+   *                     nullptr when it carries none
+   * @param packet_bytes Bytes of @p packet the service transmitted
+   *                     (TeletextObservedPacket::byte_count); the rest were
+   *                     never sent and are left out of every profile
    */
   void add_observed_line(
       int vbi_line, const std::array<uint8_t, kTeletextPacketBytes>* packet,
-      const TeletextPacketConfidence* confidence);
+      const TeletextPacketConfidence* confidence,
+      size_t packet_bytes = kTeletextPacketBytes);
 
   /// Candidate lines recorded
   uint64_t lines_seen() const { return lines_seen_; }

@@ -1,7 +1,7 @@
 /*
  * File:        teletext_page_decoder.cpp
  * Module:      decode-orc Plugin SDK (support tier)
- * Purpose:     PAL WST (System B) teletext magazine/page decoder producing
+ * Purpose:     WST (System B) teletext magazine/page decoder producing
  *              Level 1 page snapshots and subtitle cues
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -10,11 +10,25 @@
 
 #include <orc/support/teletext_page_decoder.h>
 
+#include <algorithm>
 #include <utility>
 
 namespace orc {
 
 namespace {
+
+// ETSI EN 300 706 §7.1.2 / ITU-R BT.653 Table 1b §3.3: every packet opens with
+// the two Hamming 8/4 magazine-and-row address bytes, so the display bytes of
+// a row start after them on either service.
+constexpr int kMragBytes = 2;
+
+// ETSI EN 300 706 §9.3.1: a page header (X/0) spends its first ten bytes on
+// addressing and control — the MRAG, the two page-number bytes, the four
+// sub-code bytes and the two control-bit bytes. The header text follows, and
+// is displayed from column 8: columns 0-7 carry the receiver's own page number
+// and clock.
+constexpr size_t kHeaderControlBytes = 10;
+constexpr int kHeaderTextColumn = 8;
 
 // ETSI EN 300 706 §9.3.1.1: page number 0xFF marks time-filling / page
 // terminating headers ("null page" convention, §7.2.2 with sub-code 3F7F);
@@ -111,9 +125,15 @@ bool TeletextPageDecoder::set_subtitle_page(std::string_view page) {
 void TeletextPageDecoder::process_packet(
     const std::array<uint8_t, kTeletextPacketBytes>& packet,
     int64_t field_index, int64_t source,
-    const TeletextPacketConfidence* confidence) {
+    const TeletextPacketConfidence* confidence, size_t packet_bytes) {
   last_row_attribution_.reset();
   last_row_number_ = 0;
+
+  // The service's row width, from the packet the service transmits: 42 bytes
+  // less the MRAG gives the 40 display bytes of EN 300 706 §9.3.2, 34 gives
+  // the 32 of ITU-R BT.653 Table 1b §3.4.
+  columns_ = std::clamp(static_cast<int>(packet_bytes) - kMragBytes, 0,
+                        TeletextPageSnapshot::kColumns);
 
   // MRAG: two Hamming 8/4 bytes carrying the 3-bit magazine and 5-bit packet
   // number (ETSI EN 300 706 §7.1.2). An uncorrectable MRAG byte means the
@@ -273,21 +293,23 @@ void TeletextPageDecoder::handle_header_packet(
   }
   state.last_field_index = field_index;
 
-  // Header display bytes: transmission bytes 14-45 = packet bytes 10-41
-  // carry 32 odd-parity characters shown in row 0 columns 8-39
-  // (EN 300 706 §9.3.1.4). Columns 0-7 are decoder-generated (page number,
-  // clock) and left as spaces here.
+  // Header display bytes: the packet bytes after the ten addressing and
+  // control ones carry odd-parity characters shown in row 0 from column 8
+  // (EN 300 706 §9.3.1.4) — 32 of them on 625 lines, 24 on 525, the addressing
+  // ahead of them being identical (ITU-R BT.653 Table 1b §3.3). Columns 0-7
+  // are decoder-generated (page number, clock) and left as spaces here.
   RowData& header_row = state.rows[0];
   header_row.present = true;
   header_row.characters.fill(0x20);
   header_row.parity_error.fill(false);
-  for (size_t i = 0; i < 32; ++i) {
-    const uint8_t byte = packet[10 + i];
+  for (int column = kHeaderTextColumn; column < columns_; ++column) {
+    const auto i = static_cast<size_t>(column - kHeaderTextColumn);
+    const uint8_t byte = packet[kHeaderControlBytes + i];
     if (teletext_odd_parity_valid(byte)) {
-      header_row.characters[8 + i] = byte & 0x7F;
+      header_row.characters[static_cast<size_t>(column)] = byte & 0x7F;
     } else {
-      header_row.characters[8 + i] = 0x20;
-      header_row.parity_error[8 + i] = true;
+      header_row.characters[static_cast<size_t>(column)] = 0x20;
+      header_row.parity_error[static_cast<size_t>(column)] = true;
     }
   }
 }
@@ -310,9 +332,10 @@ void TeletextPageDecoder::handle_display_packet(
 
   RowData& row_data = state.rows[static_cast<size_t>(row)];
   row_data.present = true;
-  for (size_t column = 0; column < TeletextPageSnapshot::kColumns; ++column) {
-    // 40 display bytes, 7 data bits + odd parity (EN 300 706 §9.3.2, §8.1).
-    const uint8_t byte = packet[2 + column];
+  for (size_t column = 0; column < static_cast<size_t>(columns_); ++column) {
+    // The service's display bytes, 7 data bits + odd parity (EN 300 706
+    // §9.3.2, §8.1).
+    const uint8_t byte = packet[kMragBytes + column];
     if (teletext_odd_parity_valid(byte)) {
       row_data.characters[column] = byte & 0x7F;
       row_data.parity_error[column] = false;
@@ -323,15 +346,19 @@ void TeletextPageDecoder::handle_display_packet(
   }
 
   if (row_squasher_ != nullptr) {
+    // The squasher's rows are the widest a service transmits; a narrower one
+    // leaves the tail at zero and the render below never reads it back, so the
+    // squasher needs no notion of the width itself.
     TeletextRowBytes display{};
-    std::copy(packet.begin() + 2, packet.begin() + 2 + kTeletextRowBytes,
-              display.begin());
-    // The row's own bytes are packet bytes 2 onwards (§9.3.2), so its
+    std::copy(packet.begin() + kMragBytes,
+              packet.begin() + kMragBytes + kTeletextRowBytes, display.begin());
+    // The row's own bytes are the packet bytes after the MRAG (§9.3.2), so its
     // confidences are the matching slice of the packet's.
     TeletextRowConfidence weights{};
     if (confidence != nullptr) {
-      std::copy(confidence->begin() + 2,
-                confidence->begin() + 2 + kTeletextRowBytes, weights.begin());
+      std::copy(confidence->begin() + kMragBytes,
+                confidence->begin() + kMragBytes + kTeletextRowBytes,
+                weights.begin());
     }
     row_squasher_->add_row(key, row, display, source,
                            confidence != nullptr ? &weights : nullptr);
@@ -403,6 +430,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   snapshot.national_option_subset = state.national_option_subset;
   snapshot.header_field_index = state.header_field_index;
   snapshot.last_field_index = state.last_field_index;
+  snapshot.columns = columns_;
 
   // With a squasher attached, display rows come from the combined copies
   // rather than from the last one received: repeated transmissions correct
@@ -420,7 +448,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
       if (const auto squashed = row_squasher_->squashed_row(key, row)) {
         row_copies = static_cast<int>(row_squasher_->copy_count(key, row));
         local_row_data.present = true;
-        for (size_t column = 0; column < TeletextPageSnapshot::kColumns;
+        for (size_t column = 0; column < static_cast<size_t>(columns_);
              ++column) {
           const uint8_t byte = (*squashed)[column];
           if (teletext_odd_parity_valid(byte)) {
@@ -459,7 +487,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     uint8_t held_character = 0x20;
     bool held_separated = false;
 
-    for (int column = 0; column < TeletextPageSnapshot::kColumns; ++column) {
+    for (int column = 0; column < columns_; ++column) {
       const uint8_t code =
           row_data.present ? row_data.characters[static_cast<size_t>(column)]
                            : static_cast<uint8_t>(0x20);
@@ -606,7 +634,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     const size_t lower_row = static_cast<size_t>(row) + 1;
     is_lower_row[lower_row] = true;
     auto& lower_cells = snapshot.cells[lower_row];
-    for (int column = 0; column < TeletextPageSnapshot::kColumns; ++column) {
+    for (int column = 0; column < snapshot.columns; ++column) {
       TeletextPageCell lower;
       lower.background = origin_cells[static_cast<size_t>(column)].background;
       lower.double_height_lower = true;
@@ -674,7 +702,8 @@ std::string TeletextPageDecoder::extract_subtitle_text(
     const auto& cells = snapshot.cells[static_cast<size_t>(row)];
     std::string row_text;
     bool last_was_space = true;  // collapses runs and trims the left edge
-    for (const auto& cell : cells) {
+    for (int column = 0; column < snapshot.columns; ++column) {
+      const TeletextPageCell& cell = cells[static_cast<size_t>(column)];
       char c = ' ';
       if (!cell.mosaic && !cell.held_mosaic && !cell.conceal &&
           !cell.double_height_lower && !cell.parity_error &&

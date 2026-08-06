@@ -133,13 +133,19 @@ void PreviewDialog::setObserverAvailabilityForFormat(
   // SMPTE 170M-2004 §8.4 / CEA-608-E §4: the NTSC-specific observers (FM code,
   // white flag) and line 21 closed captions exist only on 525-line NTSC.
   const bool is_ntsc = (format == orc::presenters::VideoFormat::NTSC);
-  // ETSI EN 300 706 §1: System B teletext is carried on 625-line PAL only, so
-  // PAL-M (525-line) is deliberately excluded here.
-  const bool is_pal = (format == orc::presenters::VideoFormat::PAL);
+  // ITU-R BT.653 defines Teletext System B on both 625- and 525-line
+  // television systems (Table 1a and Table 1b), and the observer, the page
+  // decoder and the page widget all follow the service's row width — 40
+  // columns on 625 lines, 32 on 525 — so every system decode-orc reads can
+  // carry teletext.
+  const bool is_teletext_system =
+      (format == orc::presenters::VideoFormat::PAL) ||
+      (format == orc::presenters::VideoFormat::NTSC) ||
+      (format == orc::presenters::VideoFormat::PAL_M);
 
   show_ntsc_observer_action_->setEnabled(is_ntsc);
   show_closed_caption_action_->setEnabled(is_ntsc);
-  show_teletext_action_->setEnabled(is_pal);
+  show_teletext_action_->setEnabled(is_teletext_system);
 }
 
 PreviewDialog::~PreviewDialog() = default;

@@ -35,7 +35,8 @@ void evictLeastRecentlySeen(Catalogue& catalogue) {
 }
 
 // Candidate VBI lines per field, for packing (field, line) into one copy
-// identity. The observer scans field lines 5-21, well inside this bound.
+// identity. The observer scans field lines 5-21 on 625-line systems and 9-20
+// on 525-line ones, both well inside this bound.
 constexpr int64_t kFieldLineStride = 64;
 
 // Release a consumed frame's packets. The entry itself stays, because it is
@@ -406,7 +407,10 @@ void TeletextPageAssembler::refreshCatalogue() const {
         // votes at full weight.
         const orc::TeletextPacketConfidence* confidence =
             packet.has_confidence ? &packet.confidence : nullptr;
-        decoder_->process_packet(packet.bytes, field_index, source, confidence);
+        // The packet's own length, so the decoder takes the service's row
+        // width from the stream rather than assuming the 625-line one.
+        decoder_->process_packet(packet.bytes, field_index, source, confidence,
+                                 static_cast<size_t>(packet.byte_count));
       }
       // Recorded for every decoded field, empty ones included: an empty field
       // in the middle of a page transmission is exactly what lost packets

@@ -21,8 +21,12 @@ namespace orc {
 
 namespace {
 
-// The host teletext observer's fixed candidate window: 0-based field lines
-// 5-21 in both fields (broadcast lines 6-22 / 318-335, EN 300 706 §4.1).
+// The host teletext observer's 625-line candidate window: 0-based field lines
+// 5-21 in both fields (broadcast lines 6-22 / 318-335, EN 300 706 §4.1). The
+// observer's 525-line window (field lines 9-20) falls inside it, and the
+// packets it records there are 34 bytes rather than 42, so
+// teletext_hex_to_packet() below declines them and this feed stays 625-line —
+// which is also what kPalFieldsPerSecond assumes.
 constexpr int32_t kFirstCandidateFieldLine = 5;
 constexpr int32_t kLastCandidateFieldLine = 21;
 

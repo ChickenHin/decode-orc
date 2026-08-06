@@ -483,7 +483,13 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             if (obs && std::holds_alternative<std::string>(*obs)) {
               const auto observed =
                   teletext_hex_to_observed_packet(std::get<std::string>(*obs));
-              if (observed.has_value()) {
+              // 625-line packets only. The observer also records the 34-byte
+              // packet of the 525-line service (ITU-R BT.653 Table 1b), whose
+              // 32-byte rows this stage's .t42 output, page decoding and
+              // squashing are all not written for; taking one here would emit
+              // eight bytes per packet that were never transmitted.
+              if (observed.has_value() &&
+                  observed->byte_count == kTeletextPacketBytes) {
                 packet = observed->bytes;
                 has_confidence = observed->has_confidence;
                 confidence = observed->confidence;

@@ -155,9 +155,9 @@ SourceParameters params_for(VideoSystem system) {
 }
 
 // Independent restatement of the applicability contract (Observer::applies_to
-// per observer): teletext is PAL-only, fm_code/white_flag are NTSC-only,
-// everything else applies to every system. A drift in either direction fails
-// this test.
+// per observer): fm_code/white_flag are NTSC-only, everything else — teletext
+// included, ITU-R BT.653 defining System B on both 625- and 525-line systems —
+// applies to every system. A drift in either direction fails this test.
 const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
     {"white_snr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"black_psnr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
@@ -170,7 +170,7 @@ const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
     {"disc_quality", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"fm_code", {VideoSystem::NTSC}},
     {"white_flag", {VideoSystem::NTSC}},
-    {"teletext", {VideoSystem::PAL}},
+    {"teletext", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
 };
 
 TEST(StandardObserverApplies, MatchesApplicabilityContract) {
@@ -210,8 +210,7 @@ TEST(FilterApplicableObservers, DropsInapplicableObserversPerSystem) {
       id_set(filter_applicable_observers(all, params_for(VideoSystem::PAL))),
       pal_expected);
 
-  auto ntsc_expected = kExpectedObserverIds;
-  ntsc_expected.erase("teletext");
+  const auto& ntsc_expected = kExpectedObserverIds;
   EXPECT_EQ(
       id_set(filter_applicable_observers(all, params_for(VideoSystem::NTSC))),
       ntsc_expected);

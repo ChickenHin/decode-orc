@@ -23,11 +23,16 @@
 namespace orc {
 namespace tests {
 
-// Full transmission packet: run-in (2) + framing (1) + MRAG-and-data (42).
-// ETSI EN 300 706 §7.1: 360 bits = 45 bytes.
+// Full 625-line transmission packet: run-in (2) + framing (1) +
+// MRAG-and-data (42). ETSI EN 300 706 §7.1: 360 bits = 45 bytes.
 constexpr size_t kTeletextTransmissionBytes = 45;
 
-// Synthesis options. Defaults produce a clean, nominally timed PAL line.
+// The same on 525 lines: run-in (2) + framing (1) + MRAG-and-data (34).
+// ITU-R BT.653 Table 1b: 296 bits = 37 bytes.
+constexpr size_t kTeletext525TransmissionBytes = 37;
+
+// Synthesis options. Defaults produce a clean, nominally timed PAL line; see
+// ntsc_wst_synth_options() below for the 525-line equivalent.
 struct TeletextLineSynthOptions {
   double sample_rate = kPalSampleRate;
   double bit_rate = kTeletextBitRate;  // EN 300 706 §5.3: 444 × fH
@@ -36,9 +41,15 @@ struct TeletextLineSynthOptions {
   int16_t white_level = static_cast<int16_t>(kPalWhite);
   // EN 300 706 §5.2: '1' level nominally 66 % of black-to-white.
   double amplitude_fraction = 0.66;
-  // Centre of the first run-in bit. EN 300 706 §6.3: timing reference (mid
-  // penultimate '1', run-in bit 15 of 16) nominally 12,0 µs after the sync
-  // leading edge → first bit centre 14 bit periods earlier ≈ 9,98 µs.
+  // Centre of the first run-in bit. EN 300 706 §6.3: the timing reference is
+  // the mid point of the penultimate '1' of the run-in — run-in bit 13 of 16,
+  // the ones being bits 1, 3 … 15 — nominally 12,0 µs after the sync leading
+  // edge, so the first bit centre is 12 bit periods earlier at 10,27 µs.
+  //
+  // The default sits two bit periods before that, well inside the ± 2 µs the
+  // slicer searches. It is left there because every measured recovery figure
+  // in these tests and in the slicer's own comments was taken at this phase,
+  // and a fixture that is not exactly nominal is the more honest test anyway.
   double first_bit_centre_us = 9.98;
   // Additional sub-sample/bit-phase offset applied to the whole burst.
   double phase_offset_samples = 0.0;
@@ -93,19 +104,31 @@ inline void band_limit_line(std::vector<int16_t>& line, double sample_rate,
   }
 }
 
-// Build the 45-byte transmission packet for a 42-byte T42 payload.
+// Build the transmission packet for the leading |payload_bytes| of a payload.
 // Bytes are LSB-first on air (EN 300 706 §7.1): run-in 1010… → 0x55 0x55
 // (§6.1); framing 11100100 in transmission order → LSB-first byte 0x27
-// (conventionally written 0xE4 MSB-first, §6.2).
-inline std::array<uint8_t, kTeletextTransmissionBytes> make_transmission_packet(
-    const std::array<uint8_t, kTeletextPacketBytes>& payload) {
-  std::array<uint8_t, kTeletextTransmissionBytes> packet{};
+// (conventionally written 0xE4 MSB-first, §6.2). The 525-line service uses the
+// same three (ITU-R BT.653 Table 1b rows 1.7 and 2.1) and differs only in how
+// many payload bytes follow.
+inline std::vector<uint8_t> make_transmission_bytes(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload,
+    size_t payload_bytes = kTeletextPacketBytes) {
+  std::vector<uint8_t> packet(3 + payload_bytes, 0);
   packet[0] = 0x55;
   packet[1] = 0x55;
   packet[2] = 0x27;
-  for (size_t i = 0; i < payload.size(); ++i) {
+  for (size_t i = 0; i < payload_bytes; ++i) {
     packet[3 + i] = payload[i];
   }
+  return packet;
+}
+
+// Build the 45-byte 625-line transmission packet for a 42-byte T42 payload.
+inline std::array<uint8_t, kTeletextTransmissionBytes> make_transmission_packet(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload) {
+  const auto bytes = make_transmission_bytes(payload);
+  std::array<uint8_t, kTeletextTransmissionBytes> packet{};
+  std::copy(bytes.begin(), bytes.end(), packet.begin());
   return packet;
 }
 
@@ -121,11 +144,11 @@ inline std::array<uint8_t, 2> make_mrag(int magazine, int packet_number) {
           teletext_hamming84_encode(nibble2)};
 }
 
-// Synthesize an NRZ teletext line from a raw 45-byte transmission packet.
-// Rectangular NRZ pulses at the §5.2 levels, LSB-first per byte, on a black
-// baseline; optional deterministic uniform noise (xorshift PRNG).
-inline std::vector<int16_t> synthesize_teletext_line_raw(
-    const std::array<uint8_t, kTeletextTransmissionBytes>& packet,
+// Synthesize an NRZ teletext line from a raw transmission packet of any
+// length. Rectangular NRZ pulses at the §5.2 levels, LSB-first per byte, on a
+// black baseline; optional deterministic uniform noise (xorshift PRNG).
+inline std::vector<int16_t> synthesize_teletext_line_bytes(
+    const std::vector<uint8_t>& packet,
     const TeletextLineSynthOptions& opt = {}) {
   std::vector<int16_t> line(opt.sample_count, opt.black_level);
   const double spb = opt.sample_rate / opt.bit_rate;
@@ -136,12 +159,11 @@ inline std::vector<int16_t> synthesize_teletext_line_raw(
       opt.amplitude_fraction * (static_cast<double>(opt.white_level) -
                                 static_cast<double>(opt.black_level));
 
-  constexpr int kTotalBits =
-      static_cast<int>(kTeletextTransmissionBytes) * 8;  // §7.1: 360 bits
+  const int total_bits = static_cast<int>(packet.size()) * 8;
   for (size_t s = 0; s < line.size(); ++s) {
     const int bit_index =
         static_cast<int>(std::lround((static_cast<double>(s) - t0) / spb));
-    if (bit_index < 0 || bit_index >= kTotalBits) {
+    if (bit_index < 0 || bit_index >= total_bits) {
       continue;
     }
     const int bit =
@@ -171,11 +193,38 @@ inline std::vector<int16_t> synthesize_teletext_line_raw(
   return line;
 }
 
-// Synthesize an NRZ teletext line carrying the given 42-byte T42 payload.
+// Synthesize an NRZ teletext line from a raw 45-byte 625-line packet.
+inline std::vector<int16_t> synthesize_teletext_line_raw(
+    const std::array<uint8_t, kTeletextTransmissionBytes>& packet,
+    const TeletextLineSynthOptions& opt = {}) {
+  return synthesize_teletext_line_bytes(
+      std::vector<uint8_t>(packet.begin(), packet.end()), opt);
+}
+
+// Synthesize an NRZ teletext line carrying the leading |payload_bytes| of the
+// given payload — 42 for the 625-line service, 34 for the 525-line one.
 inline std::vector<int16_t> synthesize_teletext_line(
     const std::array<uint8_t, kTeletextPacketBytes>& payload,
-    const TeletextLineSynthOptions& opt = {}) {
-  return synthesize_teletext_line_raw(make_transmission_packet(payload), opt);
+    const TeletextLineSynthOptions& opt = {},
+    size_t payload_bytes = kTeletextPacketBytes) {
+  return synthesize_teletext_line_bytes(
+      make_transmission_bytes(payload, payload_bytes), opt);
+}
+
+// Synthesis options for a clean, nominally timed 525-line WST line.
+// ITU-R BT.653 Table 1b: 364 × fH, logical '1' at 70 % of the black-to-white
+// excursion, timing reference 11,7 µs → first run-in bit centre 12 bit periods
+// earlier at 9,61 µs (see TeletextLineSynthOptions::first_bit_centre_us).
+inline TeletextLineSynthOptions ntsc_wst_synth_options() {
+  TeletextLineSynthOptions opt;
+  opt.sample_rate = kNtscSampleRate;
+  opt.bit_rate = kTeletext525BitRate;
+  opt.sample_count = static_cast<size_t>(kNtscSamplesPerLine);
+  opt.black_level = static_cast<int16_t>(kNtscBlack);
+  opt.white_level = static_cast<int16_t>(kNtscWhite);
+  opt.amplitude_fraction = 0.70;
+  opt.first_bit_centre_us = 9.61;
+  return opt;
 }
 
 // A deterministic, MRAG-valid 42-byte test payload (magazine 1, packet 0,
@@ -201,6 +250,17 @@ inline std::array<uint8_t, kTeletextPacketBytes> make_parity_coded_payload() {
   for (size_t i = 2; i < payload.size(); ++i) {
     payload[i] = teletext_odd_parity_encode(payload[i] & 0x7F);
   }
+  return payload;
+}
+
+// A 525-line payload in the same buffer shape the slicer returns: the 34 bytes
+// the service transmits, parity coded, with the remainder left at zero because
+// it was never sent (ITU-R BT.653 Table 1b).
+inline std::array<uint8_t, kTeletextPacketBytes> make_525_test_payload() {
+  std::array<uint8_t, kTeletextPacketBytes> payload{};
+  const auto coded = make_parity_coded_payload();
+  std::copy(coded.begin(), coded.begin() + kTeletext525PacketBytes,
+            payload.begin());
   return payload;
 }
 

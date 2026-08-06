@@ -1,8 +1,8 @@
 /*
  * File:        teletext_slicer.cpp
  * Module:      decode-orc Plugin SDK (support tier)
- * Purpose:     PAL WST (System B) teletext data-line slicer producing T42
- *              packets
+ * Purpose:     WST (System B) teletext data-line slicer producing T42 packets,
+ *              on 625-line and 525-line television systems
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -32,33 +32,55 @@ constexpr int kRunInBits = 16;
 constexpr int kFramingBits = 8;
 constexpr int kFramingCodeBits[kFramingBits] = {1, 1, 1, 0, 0, 1, 0, 0};
 
-// ETSI EN 300 706 §7.1: 360-bit packet minus run-in (16) and framing (8)
-// leaves 336 payload bits = 42 bytes, transmitted LSB first per byte.
-constexpr int kPayloadBits = static_cast<int>(kTeletextPayloadBits);
+// The payload of a 625-line packet is 336 bits: ETSI EN 300 706 §7.1's 360-bit
+// packet less the run-in (16) and framing code (8), transmitted LSB first per
+// byte. A 525-line packet is shorter (ITU-R BT.653 Table 1b) and fills the
+// leading bits of the same buffers, which are sized from kTeletextPayloadBits;
+// the count the detectors actually work to is TeletextSlicer::payload_bits_.
 
-// ETSI EN 300 706 §5.2: data '1' level is 66 % of the black-to-white
-// difference (the '0' level is black).
-constexpr double kDataOneLevelFraction = 0.66;
+// Data '1' level as a fraction of the black-to-white difference (the '0' level
+// is black in both systems).
+//   625 lines: ETSI EN 300 706 §5.2 and ITU-R BT.653 Table 1a — 66 % ± 6 %.
+//   525 lines: ITU-R BT.653 Table 1b — 70 % ± 6 %.
+constexpr double kDataOneLevelFraction625 = 0.66;
+constexpr double kDataOneLevelFraction525 = 0.70;
 
-// Minimum recovered data amplitude, as a fraction of the nominal §5.2 '1'
-// level, below which a line is treated as empty. Implementation choice: half
-// the nominal amplitude rejects blank and noise-only lines cheaply while
-// accepting the §5.2 tolerance range (66 ± 6 %) with wide margin.
+// Minimum recovered data amplitude, as a fraction of the nominal '1' level,
+// below which a line is treated as empty. Implementation choice: half the
+// nominal amplitude rejects blank and noise-only lines cheaply while accepting
+// the ± 6 % tolerance of either system with wide margin.
 constexpr double kAmplitudeGateFraction = 0.5;
 
 // Search window for the centre of the first clock run-in bit, in µs from the
-// start of the line. ETSI EN 300 706 §6.3: the timing reference (mid-point of
-// the penultimate '1' of the run-in, i.e. run-in bit 15 of 16) is nominally
-// 12,0 µs after the half-amplitude point of the sync leading edge, placing
-// the first bit centre 14 bit periods (≈ 2,02 µs) earlier, at ≈ 9,98 µs. The
-// §6.3 note allows departures for network re-timing, so the window spans
-// ± 2 µs around nominal; the lower bound also clears the PAL colour burst
-// (which ends ≈ 7,8 µs into the line).
-constexpr double kRunInSearchStartUs = 8.0;
-constexpr double kRunInSearchEndUs = 12.0;
+// start of the line (which decode-orc places at 0H).
+//
+// ETSI EN 300 706 §6.3 fixes the timing reference at the mid point of the
+// penultimate '1' of the clock run-in. The run-in is 1010…1010 over 16 bits,
+// so its ones are bits 1, 3 … 15 and the penultimate one is bit 13 — the same
+// bit ITU-R BT.653 Table 1a/1b names. The first bit centre therefore sits 12
+// bit periods before the reference:
+//
+//   625 lines: reference 12,0 µs (§6.3 note, BT.653 Table 1a) → first bit
+//     centre at 12,0 − 12/6,9375 = 10,27 µs, leading edge at 10,20 µs — which
+//     is the 10 300 ns libzvbi tabulates and the VBI source stage places to.
+//   525 lines: reference 11,7 µs ± 0,175 (BT.653 Table 1b) → first bit centre
+//     at 11,7 − 12/5,727272 = 9,61 µs, leading edge at 9,52 µs. The 525-line
+//     reference captures measured for the VBI source stage put the leading
+//     edge at 9,3 to 9,4 µs, which agrees with this to within a bit period —
+//     and disagrees with libzvbi's tabulated 10 500 ns by seven of them.
+//
+// The §6.3 note allows departures from the nominal for network re-timing, so
+// each window spans roughly ± 2 µs around it. The lower bound also has to
+// clear the colour burst, which ends ≈ 7,8 µs into the line on both systems;
+// that is what makes the 525-line window asymmetric about its nominal.
+constexpr double kRunInSearchStartUs625 = 8.0;
+constexpr double kRunInSearchEndUs625 = 12.0;
+constexpr double kRunInSearchStartUs525 = 8.0;
+constexpr double kRunInSearchEndUs525 = 11.5;
 
-// Correlation phase-search step in samples. At ≈ 2.556 samples/bit a quarter
-// sample bounds the bit-centre placement error at ≈ 5 % of a bit period.
+// Correlation phase-search step in samples. At the ≈ 2.556 samples/bit of the
+// 625-line service, or the 2.5 of the 525-line one, a quarter sample bounds
+// the bit-centre placement error at ≈ 5 % of a bit period.
 constexpr double kPhaseSearchStep = 0.25;
 
 // Minimum run-in bits that must match the alternating pattern after
@@ -102,17 +124,17 @@ constexpr int kChannelCentre = 2;
 constexpr int kMlseStates = 1 << (kChannelTaps - 1);
 
 // Bit periods past the end of the packet the detector reads when the line is
-// long enough to hold them. ETSI EN 300 706 §7.1: nothing follows the 360th
-// bit, so the line is back at black level there and those samples are the
-// known-bit evidence that pins the last payload bits. Filling the whole state
-// register takes kChannelTaps - 1 of them.
+// long enough to hold them. ETSI EN 300 706 §7.1: nothing follows the last
+// packet bit, so the line is back at black level there and those samples are
+// the known-bit evidence that pins the last payload bits. Filling the whole
+// state register takes kChannelTaps - 1 of them.
 constexpr int kTrailingBits = kChannelTaps - 1;
 
 // Upper bound on TeletextSlicerOptions::mlse_samples_per_bit, which sets how
 // many evenly spaced positions within each bit period the detector scores.
-// At the PAL 4FSC rate a bit spans ≈ 2.556 samples, so beyond three grid
-// points per bit two of them fall between the same pair of captured samples
-// and carry no independent information.
+// At the PAL 4FSC rate a bit spans ≈ 2.556 samples and at the NTSC one exactly
+// 2.5, so beyond three grid points per bit two of them fall between the same
+// pair of captured samples and carry no independent information.
 constexpr int kMaxMlseSamplesPerBit = 3;
 
 // Bit-phase search step for the preamble fit, in samples. Finer than the
@@ -121,7 +143,7 @@ constexpr int kMaxMlseSamplesPerBit = 3;
 constexpr double kMlsePhaseStep = 0.2;
 
 // Minimum fitted channel gain (sum of taps = the modelled black-to-'1' step)
-// as a fraction of the §5.2 nominal '1' amplitude. A fit that explains the
+// as a fraction of the nominal '1' amplitude. A fit that explains the
 // preamble with almost no gain has locked onto flat noise.
 constexpr double kMlseMinGainFraction = 0.25;
 
@@ -139,12 +161,13 @@ constexpr double kMlseMaxResidualFraction = 0.20;
 // LaserDisc captures, real packets sit below 0.4.
 constexpr double kMlseMaxPayloadResidualFraction = 0.5;
 
-// Minimum fraction of the 40 data bytes that must carry odd parity for an
-// MLSE-recovered packet in a parity-coded row.
+// Minimum fraction of the data bytes (40 of them on 625 lines, 32 on 525) that
+// must carry odd parity for an MLSE-recovered packet in a parity-coded row.
 //
-// ETSI EN 300 706 §9.3.1 gives the display bytes odd parity, and every
-// Hamming 8/4 codeword (§8.2) is odd-parity as well, so an undamaged packet
-// in rows 0-25 has all 40 data bytes odd — confirmed at exactly 1,000 across
+// ETSI EN 300 706 §9.3.1 gives the display bytes odd parity — ITU-R BT.653
+// Table 1b says the same of the 525-line service — and every Hamming 8/4
+// codeword (§8.2) is odd-parity as well, so an undamaged packet
+// in rows 0-25 has all its data bytes odd — confirmed at exactly 1,000 across
 // 130 000 packets of an independently decoded reference stream. Random bytes
 // sit at 0,5, so this rejects a false lock with high confidence while leaving
 // room for a genuinely damaged packet the row squasher can still repair.
@@ -159,7 +182,9 @@ constexpr size_t kMragBytes = 2;
 // ETSI EN 300 706 §9.3.1: a page header (X/0) spends its first ten bytes on
 // addressing and control — the MRAG, the two page-number bytes, the four
 // sub-code bytes and the two control-bit bytes — all Hamming 8/4 coded. The
-// 32 bytes that follow are the odd-parity header text.
+// bytes that follow are the odd-parity header text (32 of them on 625 lines,
+// 24 on 525; the addressing is the same either way, ITU-R BT.653 Table 1b
+// §3.3).
 constexpr size_t kHeaderControlBytes = 10;
 
 // Rows above this carry Hamming 24/18 triplets (§9.6 packets X/26 to X/29) or
@@ -170,7 +195,13 @@ constexpr int kMlseLastParityCodedRow = 25;
 // Observation-string encoding: two hex characters per packet byte, optionally
 // followed by one per byte of quantised confidence.
 constexpr char kHexDigits[] = "0123456789abcdef";
-constexpr size_t kPacketHexLength = kTeletextPacketBytes * 2;
+
+// Packet lengths a WST service transmits, and therefore the only ones an
+// observation string may encode. The four resulting string lengths — 68, 84,
+// 102 and 126 characters — are distinct, which is what lets a string be
+// decoded without being told which system produced it.
+constexpr size_t kPacketByteLengths[] = {kTeletextPacketBytes,
+                                         kTeletext525PacketBytes};
 
 // Value of one hex character (either case), or -1 when it is not one.
 inline int hex_nibble(char c) {
@@ -866,23 +897,25 @@ int teletext_hamming84_decode(uint8_t byte) {
 }
 
 std::string teletext_packet_to_hex(
-    const std::array<uint8_t, kTeletextPacketBytes>& bytes) {
+    const std::array<uint8_t, kTeletextPacketBytes>& bytes, size_t byte_count) {
+  const size_t count = std::min(byte_count, kTeletextPacketBytes);
   std::string hex;
-  hex.reserve(kTeletextPacketBytes * 2);
-  for (const uint8_t byte : bytes) {
-    hex.push_back(kHexDigits[byte >> 4]);
-    hex.push_back(kHexDigits[byte & 0x0F]);
+  hex.reserve(count * 2);
+  for (size_t i = 0; i < count; ++i) {
+    hex.push_back(kHexDigits[bytes[i] >> 4]);
+    hex.push_back(kHexDigits[bytes[i] & 0x0F]);
   }
   return hex;
 }
 
 std::string teletext_packet_to_hex(
     const std::array<uint8_t, kTeletextPacketBytes>& bytes,
-    const TeletextPacketConfidence& confidence) {
-  std::string hex = teletext_packet_to_hex(bytes);
-  hex.reserve(kPacketHexLength + kTeletextPacketBytes);
-  for (const float value : confidence) {
-    const double scaled = static_cast<double>(value) *
+    const TeletextPacketConfidence& confidence, size_t byte_count) {
+  const size_t count = std::min(byte_count, kTeletextPacketBytes);
+  std::string hex = teletext_packet_to_hex(bytes, count);
+  hex.reserve(count * 3);
+  for (size_t i = 0; i < count; ++i) {
+    const double scaled = static_cast<double>(confidence[i]) *
                           static_cast<double>(kTeletextConfidenceLevels - 1);
     const int level = static_cast<int>(std::lround(std::clamp(
         scaled, 0.0, static_cast<double>(kTeletextConfidenceLevels - 1))));
@@ -894,7 +927,9 @@ std::string teletext_packet_to_hex(
 std::optional<std::array<uint8_t, kTeletextPacketBytes>> teletext_hex_to_packet(
     std::string_view hex) {
   const auto observed = teletext_hex_to_observed_packet(hex);
-  if (!observed.has_value()) {
+  // 625-line packets only: the array carries no length, so a shorter packet
+  // would reach the caller as eight bytes it never received (see the header).
+  if (!observed.has_value() || observed->byte_count != kTeletextPacketBytes) {
     return std::nullopt;
   }
   return observed->bytes;
@@ -902,15 +937,31 @@ std::optional<std::array<uint8_t, kTeletextPacketBytes>> teletext_hex_to_packet(
 
 std::optional<TeletextObservedPacket> teletext_hex_to_observed_packet(
     std::string_view hex) {
-  const bool with_confidence =
-      hex.size() == kPacketHexLength + kTeletextPacketBytes;
-  if (hex.size() != kPacketHexLength && !with_confidence) {
+  // The string's length names the packet length and says whether the
+  // confidence suffix is there. Both are read from the same table of the
+  // lengths a WST service actually transmits, so a string of any other length
+  // is rejected rather than truncated to one that fits.
+  size_t byte_count = 0;
+  bool with_confidence = false;
+  for (const size_t candidate : kPacketByteLengths) {
+    if (hex.size() == candidate * 2) {
+      byte_count = candidate;
+      break;
+    }
+    if (hex.size() == candidate * 3) {
+      byte_count = candidate;
+      with_confidence = true;
+      break;
+    }
+  }
+  if (byte_count == 0) {
     return std::nullopt;
   }
 
   TeletextObservedPacket packet;
+  packet.byte_count = byte_count;
   packet.confidence.fill(1.0F);
-  for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+  for (size_t i = 0; i < byte_count; ++i) {
     const int high = hex_nibble(hex[i * 2]);
     const int low = hex_nibble(hex[i * 2 + 1]);
     if (high < 0 || low < 0) {
@@ -919,8 +970,8 @@ std::optional<TeletextObservedPacket> teletext_hex_to_observed_packet(
     packet.bytes[i] = static_cast<uint8_t>((high << 4) | low);
   }
   if (with_confidence) {
-    for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
-      const int level = hex_nibble(hex[kPacketHexLength + i]);
+    for (size_t i = 0; i < byte_count; ++i) {
+      const int level = hex_nibble(hex[byte_count * 2 + i]);
       if (level < 0) {
         return std::nullopt;
       }
@@ -937,26 +988,55 @@ TeletextSlicer::TeletextSlicer(double sample_rate, double bit_rate,
                                TeletextSlicerOptions options)
     : sample_rate_(sample_rate),
       samples_per_bit_(sample_rate / bit_rate),
-      options_(options) {}
+      options_(options),
+      packet_bytes_(teletext_packet_bytes(options.system)),
+      payload_bits_(static_cast<int>(packet_bytes_ * 8)),
+      data_one_fraction_(options.system == TeletextSystem::kWst525
+                             ? kDataOneLevelFraction525
+                             : kDataOneLevelFraction625),
+      search_start_samples_((options.system == TeletextSystem::kWst525
+                                 ? kRunInSearchStartUs525
+                                 : kRunInSearchStartUs625) *
+                            sample_rate / 1e6),
+      search_end_samples_((options.system == TeletextSystem::kWst525
+                               ? kRunInSearchEndUs525
+                               : kRunInSearchEndUs625) *
+                          sample_rate / 1e6) {}
+
+TeletextSlicer::TeletextSlicer(double sample_rate, TeletextSystem system,
+                               TeletextSlicerOptions options)
+    : TeletextSlicer(sample_rate, teletext_bit_rate(system), [system, options] {
+        TeletextSlicerOptions resolved = options;
+        resolved.system = system;
+        return resolved;
+      }()) {}
+
+TeletextLineResult TeletextSlicer::new_result() const {
+  TeletextLineResult result;
+  result.packet_bytes = packet_bytes_;
+  return result;
+}
 
 TeletextLineResult TeletextSlicer::slice(const int16_t* line,
                                          size_t sample_count,
                                          int16_t black_level,
                                          int16_t white_level) const {
-  TeletextLineResult result;
+  TeletextLineResult result = new_result();
 
   const double spb = samples_per_bit_;
-  // Whole packet (360 bits, §7.1) must fit after the earliest search start.
-  const double search_start = kRunInSearchStartUs * sample_rate_ / 1e6;
+  // Whole packet (§7.1 / ITU-R BT.653 Table 1a-1b row 1.7) must fit after the
+  // earliest search start.
+  const double search_start = search_start_samples_;
   const double min_samples =
-      search_start + (kRunInBits + kFramingBits + kPayloadBits) * spb + 2.0;
+      search_start + (kRunInBits + kFramingBits + payload_bits_) * spb + 2.0;
   if (line == nullptr || static_cast<double>(sample_count) < min_samples) {
     return reject(result, TeletextRejectReason::kInsufficientSamples);
   }
 
-  // ETSI EN 300 706 §5.2: nominal '1' amplitude above black level.
+  // Nominal '1' amplitude above black level (ETSI EN 300 706 §5.2 on 625
+  // lines, ITU-R BT.653 Table 1b on 525).
   const double nominal_amplitude =
-      kDataOneLevelFraction *
+      data_one_fraction_ *
       (static_cast<double>(white_level) - static_cast<double>(black_level));
   if (nominal_amplitude <= 0.0) {
     return reject(result, TeletextRejectReason::kInsufficientSamples);
@@ -990,16 +1070,16 @@ TeletextLineResult TeletextSlicer::slice(const int16_t* line,
 
 TeletextLineResult TeletextSlicer::slice_threshold(
     const int16_t* line, size_t sample_count, double amplitude_gate) const {
-  TeletextLineResult result;
+  TeletextLineResult result = new_result();
   result.detector = TeletextDetector::kThreshold;
   const double spb = samples_per_bit_;
-  const double search_start = kRunInSearchStartUs * sample_rate_ / 1e6;
+  const double search_start = search_start_samples_;
 
   // Clock run-in acquisition (§6.1): correlate against a ±
   // alternating kernel at the known bit period across the §6.3 timing window.
   // The correlation peak yields the bit phase; the recovered 0/1 levels set
   // an adaptive slicing threshold local to the data burst.
-  const double search_end = kRunInSearchEndUs * sample_rate_ / 1e6;
+  const double search_end = search_end_samples_;
   double best_corr = 0.0;
   double best_t0 = -1.0;
   for (double t0 = search_start; t0 <= search_end; t0 += kPhaseSearchStep) {
@@ -1078,7 +1158,7 @@ TeletextLineResult TeletextSlicer::slice_threshold(
     framing_matched = true;
     // The whole packet must fit at this alignment (§7.1).
     const double start = payload_start(shift);
-    if (start < 0.0 || start + (kPayloadBits - 1) * spb + 1.0 >=
+    if (start < 0.0 || start + (payload_bits_ - 1) * spb + 1.0 >=
                            static_cast<double>(sample_count)) {
       continue;
     }
@@ -1113,11 +1193,11 @@ TeletextLineResult TeletextSlicer::slice_threshold(
                               : TeletextRejectReason::kFramingCodeMiss);
   }
 
-  // Payload extraction (§7.1): 336 bits at bit-centre positions, LSB first
-  // per byte. No Hamming/parity correction is applied: the T42 contract
-  // preserves transmission coding.
+  // Payload extraction (§7.1): the system's payload bits at bit-centre
+  // positions, LSB first per byte. No Hamming/parity correction is applied:
+  // the T42 contract preserves transmission coding.
   const double data_start = payload_start(best_shift);
-  for (int n = 0; n < kPayloadBits; ++n) {
+  for (int n = 0; n < payload_bits_; ++n) {
     if (sample_at(line, data_start + n * spb) > threshold) {
       result.bytes[static_cast<size_t>(n) >> 3] |=
           static_cast<uint8_t>(1u << (n & 7));
@@ -1137,11 +1217,11 @@ TeletextLineResult TeletextSlicer::slice_threshold(
 TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
                                               size_t sample_count,
                                               double nominal_amplitude) const {
-  TeletextLineResult result;
+  TeletextLineResult result = new_result();
   result.detector = TeletextDetector::kMlse;
   const double spb = samples_per_bit_;
-  const double search_start = kRunInSearchStartUs * sample_rate_ / 1e6;
-  const double search_end = kRunInSearchEndUs * sample_rate_ / 1e6;
+  const double search_start = search_start_samples_;
+  const double search_end = search_end_samples_;
   const double min_gain = kMlseMinGainFraction * nominal_amplitude;
   const int phases =
       std::clamp(options_.mlse_samples_per_bit, 1, kMaxMlseSamplesPerBit);
@@ -1164,7 +1244,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   for (double t0 = search_start; t0 <= search_end; t0 += kMlsePhaseStep) {
     // Both the preamble window and the payload that follows must fit.
     const double last_sample =
-        t0 + (kPreambleBits + kPayloadBits - 1) * spb + 1.0;
+        t0 + (kPreambleBits + payload_bits_ - 1) * spb + 1.0;
     if (last_sample >= static_cast<double>(sample_count)) {
       continue;
     }
@@ -1188,16 +1268,16 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   //
   // The span runs kTrailingBits past the packet when the line is long enough to
   // hold them: those samples carry the known black level the line returns to
-  // after the 360th bit, which is what lets the trellis be terminated rather
-  // than left to end wherever it likes.
+  // after the last packet bit, which is what lets the trellis be terminated
+  // rather than left to end wherever it likes.
   const int trailing =
-      (best_t0 + (kPreambleBits + kPayloadBits + kTrailingBits - 1) * spb +
+      (best_t0 + (kPreambleBits + payload_bits_ + kTrailingBits - 1) * spb +
            2.0 <
        static_cast<double>(sample_count))
           ? kTrailingBits
           : 0;
   resample_bit_grid(line, sample_count, best_t0, spb,
-                    kPreambleBits + kPayloadBits + trailing, phases, grid);
+                    kPreambleBits + payload_bits_ + trailing, phases, grid);
   const ChannelFit best_fit = fit_preamble_channel(grid, phases);
   // Only a positive gain is required here — acquisition has already applied
   // the min-gain test, and a fractionally-spaced fit that then claims a weak
@@ -1219,7 +1299,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   }
 
   const double data_start = best_t0 + kPreambleBits * spb;
-  std::vector<uint8_t> bits(static_cast<size_t>(kPayloadBits), 0);
+  std::vector<uint8_t> bits(static_cast<size_t>(payload_bits_), 0);
 
   // Pass 1 — detect against the channel fitted to the preamble. That channel
   // knows nothing of the payload, which is what makes this pass, and only this
@@ -1227,7 +1307,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   // its residual is the gate below, and its per-bit errors are the timing
   // diagnostic.
   const double payload_residual =
-      mlse_detect(grid, kPreambleBits, best_fit, kPayloadBits, bits.data(),
+      mlse_detect(grid, kPreambleBits, best_fit, payload_bits_, bits.data(),
                   result.payload_bit_errors.data(),
                   /*bit_confidence_out=*/nullptr, trailing) /
       best_fit.gain;
@@ -1235,13 +1315,15 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   // Per-bit errors carry the same normalisation as the residual above: a
   // fraction of the fitted gain, so profiles from lines of different amplitude
   // are on one scale.
-  for (float& error : result.payload_bit_errors) {
-    error = static_cast<float>(static_cast<double>(error) / best_fit.gain);
+  for (int n = 0; n < payload_bits_; ++n) {
+    result.payload_bit_errors[static_cast<size_t>(n)] = static_cast<float>(
+        static_cast<double>(result.payload_bit_errors[static_cast<size_t>(n)]) /
+        best_fit.gain);
   }
 
   // The preamble gate above rules out lines whose first 24 bits are not a
   // preamble; this one rules out lines where they happened to be but the rest
-  // is not a teletext packet, using 336 samples rather than 20.
+  // is not a teletext packet, using every payload bit rather than 20.
   //
   // It is applied between the two passes deliberately. The refit below fits the
   // channel to the bits it is then judged against, so its residual is
@@ -1255,18 +1337,18 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
 
   // Pass 2 — refit the channel against the whole line and detect again.
   //
-  // The preamble offers 20 usable equations per phase; the packet offers 336 of
-  // them. Five bit-spaced taps fitted to the shorter set describe the head of
-  // the channel's pulse response well and its tail poorly, and what the tail
-  // costs is bytes. Refitting against the bits pass 1 decided and re-running
-  // the trellis recovers them: on synthesized band-limited lines it takes exact
-  // packet recovery from 29 of 48 to 48 of 48, and on the reference VHS
-  // captures it raises the packets whose data bytes are all parity-clean by
+  // The preamble offers 20 usable equations per phase; a 625-line packet offers
+  // 336 of them. Five bit-spaced taps fitted to the shorter set describe the
+  // head of the channel's pulse response well and its tail poorly, and what the
+  // tail costs is bytes. Refitting against the bits pass 1 decided and
+  // re-running the trellis recovers them: on synthesized band-limited lines it
+  // takes exact packet recovery from 29 of 48 to 48 of 48, and on the reference
+  // VHS captures it raises the packets whose data bytes are all parity-clean by
   // 71 % (LP) and 34 % (SP).
   //
   // Decision-directed refitting is stable here because pass 1 is already right
-  // about the overwhelming majority of the 336 bits, and a handful of wrong
-  // ones move a 336-equation fit by very little.
+  // about the overwhelming majority of the payload bits, and a handful of wrong
+  // ones move a fit of that many equations by very little.
   //
   // The confidences come from this pass rather than the first: they describe
   // the bits that are emitted, and those are these. A refit that fails is the
@@ -1274,28 +1356,29 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   // measure it would cost every line a third trellis for a case that needs a
   // singular normal matrix to arise at all.
   std::array<float, kTeletextPayloadBits> bit_confidence{};
-  const int last_fittable = kPreambleBits + kPayloadBits + trailing - 1 -
+  const int last_fittable = kPreambleBits + payload_bits_ + trailing - 1 -
                             (kChannelTaps - 1 - kChannelCentre);
-  const auto decided_bit = [&bits](int k) {
+  const int payload_bits = payload_bits_;
+  const auto decided_bit = [&bits, payload_bits](int k) {
     if (k < kPreambleBits) {
       return preamble_bit(k);
     }
     const int index = k - kPreambleBits;
     // ETSI EN 300 706 §7.1: nothing follows the packet, so the line is black.
-    return index < kPayloadBits
+    return index < payload_bits
                ? static_cast<int>(bits[static_cast<size_t>(index)])
                : 0;
   };
   const ChannelFit refit = fit_channel_range(grid, phases, decided_bit,
                                              kChannelCentre, last_fittable);
   if (refit.ok && refit.gain > 0.0) {
-    mlse_detect(grid, kPreambleBits, refit, kPayloadBits, bits.data(),
+    mlse_detect(grid, kPreambleBits, refit, payload_bits_, bits.data(),
                 /*bit_errors_out=*/nullptr, bit_confidence.data(), trailing);
     result.has_byte_confidence = true;
   }
 
   // §7.1: LSB first per byte, transmission coding preserved.
-  for (int n = 0; n < kPayloadBits; ++n) {
+  for (int n = 0; n < payload_bits_; ++n) {
     if (bits[static_cast<size_t>(n)] != 0) {
       result.bytes[static_cast<size_t>(n) >> 3] |=
           static_cast<uint8_t>(1u << (n & 7));
@@ -1305,7 +1388,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   // A byte is only as sure as the least sure of its eight bits: one wrong bit
   // is a wrong byte.
   if (result.has_byte_confidence) {
-    for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
+    for (size_t i = 0; i < packet_bytes_; ++i) {
       float lowest = 1.0F;
       for (size_t bit = 0; bit < 8; ++bit) {
         lowest = std::min(lowest, bit_confidence[i * 8 + bit]);
@@ -1327,12 +1410,12 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
     const int row = ((mrag_low >> 3) & 0x01) | ((mrag_high << 1) & 0x1E);
     if (row <= kMlseLastParityCodedRow) {
       int odd_bytes = 0;
-      for (size_t i = 2; i < kTeletextPacketBytes; ++i) {
+      for (size_t i = kMragBytes; i < packet_bytes_; ++i) {
         odd_bytes += odd_parity(result.bytes[i]) ? 1 : 0;
       }
       const double parity_fraction =
           static_cast<double>(odd_bytes) /
-          static_cast<double>(kTeletextPacketBytes - 2);
+          static_cast<double>(packet_bytes_ - kMragBytes);
       if (parity_fraction < kMlseMinDataParityFraction) {
         return reject(result, TeletextRejectReason::kParityFraction);
       }
@@ -1352,7 +1435,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
         // those to the decoder that understands them.
         const size_t first_repairable =
             (row == 0) ? kHeaderControlBytes : kMragBytes;
-        for (size_t i = first_repairable; i < kTeletextPacketBytes; ++i) {
+        for (size_t i = first_repairable; i < packet_bytes_; ++i) {
           if (odd_parity(result.bytes[i])) {
             continue;
           }

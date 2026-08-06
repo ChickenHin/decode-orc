@@ -21,8 +21,8 @@ namespace orc::presenters {
 
 namespace {
 
-// The view type mirrors the SDK packet size without including SDK headers in
-// the view-types tier; keep the two in lock-step.
+// The view type mirrors the SDK packet buffer size without including SDK
+// headers in the view-types tier; keep the two in lock-step.
 static_assert(std::tuple_size<decltype(TeletextPacketView::bytes)>::value ==
                   orc::kTeletextPacketBytes,
               "TeletextPacketView::bytes must match the SDK T42 packet size");
@@ -142,6 +142,10 @@ TeletextFieldPacketsView TeletextObservationPresenter::extractFieldObservations(
     TeletextPacketView packet;
     packet.field_line = field_line;
     packet.bytes = observed->bytes;
+    // Carried rather than assumed: the page decoder takes the service's row
+    // width from it (ITU-R BT.653 Table 1b gives 525-line WST a 34-byte packet
+    // and therefore 32-column rows).
+    packet.byte_count = static_cast<int>(observed->byte_count);
     packet.has_confidence = observed->has_confidence;
     packet.confidence = observed->confidence;
     result.packets.push_back(packet);
@@ -161,6 +165,7 @@ TeletextPageView TeletextObservationPresenter::makePageView(
   static_assert(TeletextPageView::kColumns == TeletextPageSnapshot::kColumns);
 
   TeletextPageView view;
+  view.columns = snapshot.columns;
   view.magazine = snapshot.magazine;
   view.page_number = snapshot.page_number;
   view.subcode = snapshot.subcode;
@@ -171,7 +176,7 @@ TeletextPageView TeletextObservationPresenter::makePageView(
   view.transmission_complete = snapshot.transmission_complete;
 
   for (int row = 0; row < TeletextPageView::kRows; ++row) {
-    for (int col = 0; col < TeletextPageView::kColumns; ++col) {
+    for (int col = 0; col < view.columns; ++col) {
       const auto& cell =
           snapshot.cells[static_cast<size_t>(row)][static_cast<size_t>(col)];
       auto& out =
@@ -225,8 +230,8 @@ TeletextPageView TeletextObservationPresenter::makePageView(
       view.row_unconfirmed[static_cast<size_t>(row)] = true;
       ++view.recovery.unconfirmed_rows;
     }
-    for (const auto& cell : cells) {
-      if (cell.parity_error) {
+    for (int col = 0; col < view.columns; ++col) {
+      if (cells[static_cast<size_t>(col)].parity_error) {
         ++view.recovery.damaged_bytes;
       }
     }

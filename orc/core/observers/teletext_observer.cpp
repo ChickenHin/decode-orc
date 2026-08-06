@@ -1,7 +1,7 @@
 /*
  * File:        teletext_observer.cpp
  * Module:      orc-core
- * Purpose:     PAL WST teletext observer implementation
+ * Purpose:     WST teletext observer implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -24,12 +24,33 @@ namespace orc {
 
 namespace {
 
-// Candidate VBI window as 0-based field lines, identical in both fields.
-// ETSI EN 300 706 §4.1: broadcast lines 6 to 22 (field 1) and 318 to 335
-// (field 2) may carry teletext; in the frame-flat buffer these are 0-based
-// field lines 5-21 of each field (field 2 offset by kPalField1Lines = 313).
-constexpr size_t kFirstCandidateFieldLine = 5;
-constexpr size_t kLastCandidateFieldLine = 21;
+// Candidate VBI window as 0-based field lines, identical in both fields of a
+// frame.
+//
+// 625 lines — ETSI EN 300 706 §4.1: broadcast lines 6 to 22 (field 1) and 318
+// to 335 (field 2) may carry teletext; in the frame-flat buffer those are
+// 0-based field lines 5-21 of each field (field 2 offset by kPalField1Lines).
+constexpr size_t kFirstCandidateFieldLine625 = 5;
+constexpr size_t kLastCandidateFieldLine625 = 21;
+
+// 525 lines — ITU-R BT.653 §2: broadcast lines 10 to 21 (field 1) and 273 to
+// 284 (field 2), which are 0-based field lines 9-20 of each field. The same
+// list the VBI source stage places to (vbi_line_mapping.cpp), so a capture
+// that stage wrote and a TBC of the same broadcast are read on one window.
+//
+// Field line 20 is broadcast line 21, which on a captioned NTSC recording
+// carries EIA-608 rather than teletext. The two services are alternatives, not
+// neighbours, and a caption line has no framing code, so it is examined and
+// rejected rather than excluded here.
+constexpr size_t kFirstCandidateFieldLine525 = 9;
+constexpr size_t kLastCandidateFieldLine525 = 20;
+
+// The widest window, which is what the observation-key table has to span.
+constexpr size_t kFirstCandidateFieldLine = kFirstCandidateFieldLine625;
+constexpr size_t kLastCandidateFieldLine = kLastCandidateFieldLine625;
+static_assert(kFirstCandidateFieldLine525 >= kFirstCandidateFieldLine &&
+                  kLastCandidateFieldLine525 <= kLastCandidateFieldLine,
+              "525-line candidates must be a subset of the declared keys");
 
 // Observation key for a candidate field line's recovered packet. Built once:
 // process_frame() asks per recovered line of every field it observes.
@@ -70,12 +91,38 @@ TeletextSlicerOptions observer_slicer_options() {
   return options;
 }
 
+// Which teletext system a video system carries, and where in the field to look
+// for it.
+struct SystemProfile {
+  TeletextSystem teletext_system = TeletextSystem::kWst625;
+  size_t first_field_line = kFirstCandidateFieldLine625;
+  size_t last_field_line = kLastCandidateFieldLine625;
+};
+
+SystemProfile profile_for(VideoSystem system) {
+  if (system == VideoSystem::PAL) {
+    return SystemProfile{TeletextSystem::kWst625, kFirstCandidateFieldLine625,
+                         kLastCandidateFieldLine625};
+  }
+  // NTSC and PAL_M share the 525-line structure and therefore the service
+  // (ITU-R BT.653 Table 1b); only the 4FSC sample rate differs between them,
+  // which is a property of the slicer rather than of this table.
+  return SystemProfile{TeletextSystem::kWst525, kFirstCandidateFieldLine525,
+                       kLastCandidateFieldLine525};
+}
+
 }  // namespace
 
 TeletextObserver::TeletextObserver()
-    // EBU Tech. 3280-E §1.1.1 Table 1: 4FSC PAL sample rate; the bit rate is
-    // fixed at 444 × fH by ETSI EN 300 706 §5.3 (TeletextSlicer default).
-    : slicer_(kPalSampleRate, kTeletextBitRate, observer_slicer_options()) {}
+    // EBU Tech. 3280-E §1.1.1 Table 1 / SMPTE 244M-2003 §4.1 / ITU-R BT.1700-1
+    // Annex 1 Part B: the 4FSC sample rate of each system. The bit rate comes
+    // from the teletext system (ITU-R BT.653 Tables 1a and 1b).
+    : slicer_pal_(kPalSampleRate, TeletextSystem::kWst625,
+                  observer_slicer_options()),
+      slicer_ntsc_(kNtscSampleRate, TeletextSystem::kWst525,
+                   observer_slicer_options()),
+      slicer_palm_(kPalMSampleRate, TeletextSystem::kWst525,
+                   observer_slicer_options()) {}
 
 void TeletextObserver::process_frame(
     const VideoFrameRepresentation& representation, FrameID frame_id,
@@ -88,18 +135,33 @@ void TeletextObserver::process_frame(
   }
   const auto& vp = vp_opt.value();
 
-  // Non-PAL systems produce no observations (see applies_to()); callers
-  // normally skip the observer entirely, this early-return is defence in
-  // depth.
+  // Systems with no defined WST service produce no observations (see
+  // applies_to()); callers normally skip the observer entirely, this
+  // early-return is defence in depth.
   if (!applies_to(vp)) {
     return;
   }
 
-  // Levels from the source, with the spec constants as fallback.
-  const int16_t black_level =
-      static_cast<int16_t>(vp.black_level >= 0 ? vp.black_level : kPalBlack);
-  const int16_t white_level =
-      static_cast<int16_t>(vp.white_level >= 0 ? vp.white_level : kPalWhite);
+  const SystemProfile profile = profile_for(vp.system);
+  const TeletextSlicer& slicer = (vp.system == VideoSystem::PAL) ? slicer_pal_
+                                 : (vp.system == VideoSystem::PAL_M)
+                                     ? slicer_palm_
+                                     : slicer_ntsc_;
+
+  // Levels from the source, with the spec constants as fallback. The data '0'
+  // reference is black in both systems (ETSI EN 300 706 §5.2, ITU-R BT.653
+  // Table 1b); on a 525-line system the transmitted '0' actually sits at
+  // blanking, below the 7,5 IRE setup black, which makes the amplitude gate
+  // derived from these levels stricter than the standard requires rather than
+  // looser — measured against a real burst it still clears by a factor of two.
+  const int16_t default_black = static_cast<int16_t>(
+      vp.system == VideoSystem::PAL ? kPalBlack : kNtscBlack);
+  const int16_t default_white = static_cast<int16_t>(
+      vp.system == VideoSystem::PAL ? kPalWhite : kNtscWhite);
+  const int16_t black_level = static_cast<int16_t>(
+      vp.black_level >= 0 ? vp.black_level : default_black);
+  const int16_t white_level = static_cast<int16_t>(
+      vp.white_level >= 0 ? vp.white_level : default_white);
 
   const size_t f1_lines = field1_lines(vp.system);
   const size_t line_width = static_cast<size_t>(vp.frame_width_nominal);
@@ -115,8 +177,8 @@ void TeletextObserver::process_frame(
     TeletextRecoveryStats stats;
 
     int32_t line_count = 0;
-    for (size_t field_line = kFirstCandidateFieldLine;
-         field_line <= kLastCandidateFieldLine; ++field_line) {
+    for (size_t field_line = profile.first_field_line;
+         field_line <= profile.last_field_line; ++field_line) {
       const size_t flat_line = line_offset + field_line;
       if (flat_line >= frame_height) {
         continue;
@@ -141,7 +203,7 @@ void TeletextObserver::process_frame(
       }
 
       const TeletextLineResult sliced =
-          slicer_.slice(line_data, sample_count, black_level, white_level);
+          slicer.slice(line_data, sample_count, black_level, white_level);
       stats.add_line(static_cast<int>(field_line), sliced);
       if (!sliced.valid) {
         continue;
@@ -150,13 +212,16 @@ void TeletextObserver::process_frame(
       // The recovered bytes, and — where the detector could measure it — how
       // sure it was of each of them, so a consumer combining repeated copies of
       // a row can weight this one (orc/support/teletext_row_squasher.h). The
-      // suffix is optional at both ends: observations stored by earlier builds
-      // carry none and stay perfectly usable.
+      // length of the string names the packet length as well as whether the
+      // confidence suffix is there; the suffix is optional at both ends, so
+      // observations stored by earlier builds carry none and stay perfectly
+      // usable.
       context.set(
           derived_fid, "teletext", t42_key(field_line),
           sliced.has_byte_confidence
-              ? teletext_packet_to_hex(sliced.bytes, sliced.byte_confidence)
-              : teletext_packet_to_hex(sliced.bytes));
+              ? teletext_packet_to_hex(sliced.bytes, sliced.byte_confidence,
+                                       sliced.packet_bytes)
+              : teletext_packet_to_hex(sliced.bytes, sliced.packet_bytes));
       ++line_count;
     }
 
@@ -192,9 +257,11 @@ std::vector<ObservationKey> TeletextObserver::get_provided_observations()
        field_line <= kLastCandidateFieldLine; ++field_line) {
     keys.emplace_back(
         "teletext", t42_key(field_line), ObservationType::STRING,
-        "42 recovered T42 bytes (84 hex chars), optionally followed by 42 "
-        "per-byte confidence digits, for 0-based field line " +
-            std::to_string(field_line),
+        "Recovered T42 packet for 0-based field line " +
+            std::to_string(field_line) +
+            ": two hex chars per byte (42 bytes on 625-line systems, 34 on "
+            "525-line ones), optionally followed by one confidence digit per "
+            "byte",
         true);
   }
   return keys;

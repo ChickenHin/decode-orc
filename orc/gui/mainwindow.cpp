@@ -2477,9 +2477,11 @@ bool MainWindow::checkUnsavedChanges() {
 
 void MainWindow::updatePreviewInfo() {
   // Update standard-specific observer menu availability: the NTSC observers
-  // (FM code, white flag) and closed captions are NTSC-only, teletext is
-  // PAL-only. Done before the early returns so the menu never keeps the
-  // previous project's availability while no stage is selected.
+  // (FM code, white flag) and closed captions are NTSC-only, and the teletext
+  // page viewer is 625-line only (see
+  // PreviewDialog::setObserverAvailabilityForFormat). Done before the early
+  // returns so the menu never keeps the previous project's availability while
+  // no stage is selected.
   auto video_format_presenter = project_.presenter()->getVideoFormat();
   preview_dialog_->setObserverAvailabilityForFormat(video_format_presenter);
 
