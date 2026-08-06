@@ -112,6 +112,7 @@ gtest_discover_tests(orc-core-functional-tests-plugin-isolation
 # files on disk, so they are functional (not unit). No stage plugins needed.
 add_executable(orc-core-functional-tests-observation
     observation_persistence_sqlite_test.cpp
+    observation_cache_retention_fs_test.cpp
 )
 target_include_directories(orc-core-functional-tests-observation PRIVATE
     ${CMAKE_SOURCE_DIR}/orc/core/include

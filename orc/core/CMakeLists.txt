@@ -87,6 +87,9 @@ add_library(orc-core SHARED
     # SQLite-backed observation sidecar (survives application restarts)
     sqlite_observation_persistence.cpp
 
+    # Retention policy for the per-source sidecar cache directory
+    observation_cache_retention.cpp
+
     # Observation change propagation and store garbage collection
     observation_invalidation.cpp
 

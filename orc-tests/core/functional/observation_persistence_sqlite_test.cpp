@@ -128,6 +128,59 @@ TEST_F(SqliteSidecarTest, Exists_ProbesPresenceWithoutLoading) {
   EXPECT_FALSE(db.exists(key("fpA", 4, "white_snr", "2.0.0")));
 }
 
+TEST_F(SqliteSidecarTest, LoadStoredKeys_StreamsRecordIdentitiesInFieldOrder) {
+  SqliteObservationPersistence db(db_path_);
+  db.save({
+      // Deliberately out of field order, and with a multi-value record whose
+      // rows must collapse to a single key.
+      PersistedObservation{key("fpA", 6, "black_psnr", "1.0.0"),
+                           all_variants_record()},
+      PersistedObservation{key("fpA", 2, "white_snr", "1.0.0"),
+                           all_variants_record()},
+      PersistedObservation{key("fpA", 2, "black_psnr", "1.0.0"),
+                           ObservationRecord{}},
+      PersistedObservation{key("fpA", 4, "white_snr", "2.0.0"),
+                           all_variants_record()},
+      // A different fingerprint must not appear in fpA's walk.
+      PersistedObservation{key("fpB", 0, "white_snr", "1.0.0"),
+                           all_variants_record()},
+  });
+
+  std::vector<std::string> seen;
+  EXPECT_TRUE(db.load_stored_keys(
+      fp("fpA"), [&](FieldID field, const std::string& observer_id,
+                     const std::string& observer_version) {
+        seen.push_back(std::to_string(field.value()) + "/" + observer_id + "/" +
+                       observer_version);
+        return true;
+      }));
+
+  // One entry per record (not per value row), ascending by field id, and the
+  // present-but-empty record is reported like any other.
+  EXPECT_EQ(seen, (std::vector<std::string>{
+                      "2/black_psnr/1.0.0", "2/white_snr/1.0.0",
+                      "4/white_snr/2.0.0", "6/black_psnr/1.0.0"}));
+
+  // A sink that stops early abandons the walk; the call still reports that it
+  // ran, so the caller does not fall back to per-key probes.
+  std::size_t delivered = 0;
+  EXPECT_TRUE(db.load_stored_keys(
+      fp("fpA"), [&](FieldID, const std::string&, const std::string&) {
+        ++delivered;
+        return false;
+      }));
+  EXPECT_EQ(delivered, 1u);
+
+  // An unknown fingerprint is a successful walk over nothing.
+  delivered = 0;
+  EXPECT_TRUE(db.load_stored_keys(
+      fp("nope"), [&](FieldID, const std::string&, const std::string&) {
+        ++delivered;
+        return true;
+      }));
+  EXPECT_EQ(delivered, 0u);
+}
+
 TEST_F(SqliteSidecarTest, MergeFrom_AdoptsRowsTheTargetLacks) {
   const std::string cache_path = (dir_ / "quick-cache.sqlite").string();
   const auto shared = key("fpA", 0, "white_snr", "1.0.0");

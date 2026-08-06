@@ -141,6 +141,37 @@ class IObservationPersistence {
   virtual bool exists(const ObservationRecordKey& key) {
     return load_one(key).has_value();
   }
+
+  /**
+   * @brief Stream the identity of every record persisted for @p fingerprint,
+   *        without materialising a single observation value.
+   *
+   * Backs whole-node coverage decisions ("which frames still need observing?").
+   * Answering that with exists() costs one query per key — millions of them for
+   * a feature-length source, each one a fresh statement and an index seek —
+   * whereas this is a single ordered walk. @p sink is invoked once per distinct
+   * (field, observer, version) triple in ascending field order, so a caller can
+   * accumulate coverage and report honest progress against a known field count
+   * from the same pass; returning false from it abandons the walk early
+   * (cancellation), leaving coverage partial.
+   *
+   * @p sink runs with the implementation's own lock held and must not re-enter
+   * this object.
+   *
+   * @return true if this implementation performed the walk (whether or not
+   *         @p sink stopped it), false if it cannot answer — in which case the
+   *         caller must fall back to per-key exists() probes.
+   *
+   * Default: unsupported, so an implementation that only archives need not
+   * override it.
+   */
+  virtual bool load_stored_keys(
+      const NodeFingerprint& /*fingerprint*/,
+      const std::function<bool(FieldID field_id, const std::string& observer_id,
+                               const std::string& observer_version)>&
+      /*sink*/) {
+    return false;
+  }
 };
 
 }  // namespace orc

@@ -443,6 +443,37 @@ bool SqliteObservationPersistence::exists(const ObservationRecordKey& key) {
   return sqlite3_step(stmt.get()) == SQLITE_ROW;
 }
 
+bool SqliteObservationPersistence::load_stored_keys(
+    const NodeFingerprint& fingerprint,
+    const std::function<bool(FieldID, const std::string&, const std::string&)>&
+        sink) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_) return false;
+
+  // field_id/observer_id/observer_version are a prefix of the primary key, so
+  // this is served entirely from the primary-key index: it walks index pages
+  // in order and never touches a table row, where the bulky value text lives.
+  // That is what makes a whole-node coverage answer cost one sequential scan
+  // instead of millions of point queries. DISTINCT collapses a record's
+  // per-value rows; the ORDER BY is the index's own order (so it is free) and
+  // is what lets the caller turn row arrival into progress.
+  Statement stmt(db_,
+                 "SELECT DISTINCT field_id, observer_id, observer_version"
+                 " FROM observation_record WHERE node_fingerprint = ?"
+                 " ORDER BY field_id, observer_id, observer_version");
+  if (!stmt) return false;
+  bind_text(stmt.get(), 1, fingerprint.value);
+
+  while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+    const FieldID field(
+        static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 0)));
+    if (!sink(field, column_text(stmt.get(), 1), column_text(stmt.get(), 2))) {
+      break;  // caller cancelled; the walk itself still counts as performed
+    }
+  }
+  return true;
+}
+
 std::string SqliteObservationPersistence::get_meta(const std::string& key) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!db_) return {};

@@ -467,6 +467,7 @@ orc_add_core_unit_tests(
         observation/observer_pass_test.cpp
         observation/observation_scheduler_test.cpp
         observation/sink_fallback_output_index_test.cpp
+        observation/observation_cache_retention_test.cpp
 )
 
         orc_add_core_unit_tests(
