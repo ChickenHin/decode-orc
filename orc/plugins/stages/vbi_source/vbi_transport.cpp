@@ -42,6 +42,23 @@ namespace {
 // enough that a scrub across the capture does.
 constexpr uint64_t kForwardDecodeLimitBytes = 4ull * 1024 * 1024;
 
+// How far back a failed seek is retried.  The community encoder writes no
+// SEEKTABLE, so libavformat locates a target by bisecting the stream and
+// parsing a frame header at each probe position to read its timestamp.  A
+// probe that lands where the parser cannot complete a frame abandons the
+// whole seek, even though positions on either side of it are perfectly
+// seekable -- the reference capture has one such target in its last few
+// frames, which is exactly where reading the final frames lands.  Seeking
+// earlier than asked is always sound here, because the caller only needs to
+// be positioned at or before the target and decodes forward from there; the
+// only cost is decoding the bytes stepped over, which is why the ladder
+// starts small.
+constexpr uint64_t kSeekRetryBackoffBytes[] = {
+    1ull * 1024 * 1024,
+    8ull * 1024 * 1024,
+    64ull * 1024 * 1024,
+};
+
 // Bits per sample this transport can currently unwrap.  8-bit is the card
 // capture family; the 16-bit TBC-derived family has no reader path yet, and
 // unwrapping it would need the encoder's signedness convention, which the
@@ -121,9 +138,11 @@ class VBIRawFileByteSource final : public IVBIByteSource {
 // detection rather than any timing decision (design §3.3).
 //
 // The stream is decoded lazily, one block at a time, and never materialised:
-// a four-hour bt8x8 capture is 24 GB raw.  Random access uses the demuxer's
-// seek index (the FLAC SEEKTABLE, parsed on open) so scrubbing does not
-// re-decode from the head of the file.
+// a four-hour bt8x8 capture is 24 GB raw.  Random access asks the demuxer to
+// seek so that scrubbing does not re-decode from the head of the file; where
+// the capture carries a SEEKTABLE that is an index lookup, and where it does
+// not -- which is what the community encoder produces -- libavformat bisects
+// the stream instead, which is fallible in the way seek_at_or_before covers.
 // -------------------------------------------------------------------------
 
 class VBIFlacByteSource final : public IVBIByteSource {
@@ -162,6 +181,12 @@ class VBIFlacByteSource final : public IVBIByteSource {
   // Reposition the decoder so that the next decoded block covers or precedes
   // target_byte, seeking only when decoding forward would be wasteful.
   bool ensure_position(uint64_t target_byte, std::string& error_message);
+
+  // Seek to the last stream position at or before target_byte, retrying
+  // earlier positions when the demuxer refuses one.  On success
+  // out_landed_byte is the position actually asked for, which is at or before
+  // target_byte and is where the decoder will resume.
+  bool seek_at_or_before(uint64_t target_byte, uint64_t& out_landed_byte);
 
   // Decode the next block into block_bytes_, setting block_start_byte_ from
   // its presentation timestamp.  Returns false at end of stream (with an
@@ -418,6 +443,49 @@ bool VBIFlacByteSource::decode_next_block(std::string& error_message) {
   }
 }
 
+bool VBIFlacByteSource::seek_at_or_before(uint64_t target_byte,
+                                          uint64_t& out_landed_byte) {
+  const auto attempt = [&](uint64_t candidate_byte) {
+    const int64_t candidate_sample =
+        static_cast<int64_t>(candidate_byte / bytes_per_sample_);
+    if (av_seek_frame(format_ctx_, stream_index_, candidate_sample,
+                      AVSEEK_FLAG_BACKWARD) < 0) {
+      return false;
+    }
+    out_landed_byte = candidate_byte;
+    return true;
+  };
+
+  if (attempt(target_byte)) {
+    return true;
+  }
+
+  for (const uint64_t backoff : kSeekRetryBackoffBytes) {
+    if (backoff >= target_byte) {
+      break;
+    }
+    if (attempt(target_byte - backoff)) {
+      ORC_LOG_WARN(
+          "VBI transport: the FLAC demuxer refused a seek to byte {}; "
+          "resumed from byte {} and decoded forward",
+          target_byte, target_byte - backoff);
+      return true;
+    }
+  }
+
+  // The head of the stream needs no bisection, so it is the one position that
+  // is always reachable; taking it turns a hard failure into a slow read
+  // rather than a wrong one.
+  if (target_byte > 0 && attempt(0)) {
+    ORC_LOG_WARN(
+        "VBI transport: no seek point near byte {} was accepted; decoding "
+        "forward from the head of the stream",
+        target_byte);
+    return true;
+  }
+  return false;
+}
+
 bool VBIFlacByteSource::ensure_position(uint64_t target_byte,
                                         std::string& error_message) {
   if (have_block_) {
@@ -440,11 +508,10 @@ bool VBIFlacByteSource::ensure_position(uint64_t target_byte,
     return true;
   }
 
-  const int64_t target_sample =
-      static_cast<int64_t>(target_byte / bytes_per_sample_);
-  if (av_seek_frame(format_ctx_, stream_index_, target_sample,
-                    AVSEEK_FLAG_BACKWARD) < 0) {
-    error_message = "Seeking the FLAC stream failed.";
+  uint64_t landed_byte = 0;
+  if (!seek_at_or_before(target_byte, landed_byte)) {
+    error_message = "Seeking the FLAC stream to byte " +
+                    std::to_string(target_byte) + " failed.";
     return false;
   }
 
@@ -454,7 +521,8 @@ bool VBIFlacByteSource::ensure_position(uint64_t target_byte,
   draining_ = false;
   at_end_ = false;
   seek_pending_ = true;
-  seek_target_byte_ = target_byte;
+  // Where the decoder resumes, which a retry may have put earlier than asked.
+  seek_target_byte_ = landed_byte;
   return true;
 }
 

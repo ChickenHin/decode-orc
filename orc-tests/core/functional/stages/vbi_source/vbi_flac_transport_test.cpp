@@ -40,6 +40,10 @@ constexpr uint64_t kReferenceFrameCount = 368007ull;
 // the whole capture.
 constexpr uint64_t kPrefixFrames = 8;
 
+// Frames read from the end of the capture, far enough back to cover the
+// stream's last few decoded blocks.
+constexpr uint64_t kTailFrames = 8;
+
 bool reference_capture_available() {
   return std::filesystem::exists(kReferenceCapture);
 }
@@ -193,6 +197,39 @@ TEST(VBIFlacTransport, RandomAccessSeeksRatherThanDecodingFromTheHead) {
   // seek costs a few blocks.
   EXPECT_LT(backward_cost, 64ull * 1024 * 1024)
       << "backward access decoded " << backward_cost << " bytes";
+}
+
+// The demuxer bisects the stream to find a seek point, and a probe that lands
+// where a frame header cannot be parsed makes it refuse the seek outright.
+// The reference capture has such a target among its last frames, so the tail
+// is exactly where a transport that treats a refused seek as fatal breaks --
+// and the tail is read by anything that walks the capture to its end.
+TEST(VBIFlacTransport, FramesAtTheTailOfTheCaptureAreReachable) {
+  if (!reference_capture_available()) {
+    GTEST_SKIP() << "Reference capture not present: " << kReferenceCapture;
+  }
+
+  std::string error;
+  std::unique_ptr<IVBIByteSource> source = open_reference(error);
+  ASSERT_NE(source, nullptr) << error;
+
+  const VBISourceFormat format = bt8x8_pal_format();
+  VBILineReader reader(format, *source);
+  ASSERT_TRUE(reader.frame_count().has_value());
+  const uint64_t frame_count = *reader.frame_count();
+  ASSERT_GT(frame_count, kTailFrames);
+
+  // Descending, so every frame is reached by a seek rather than by decoding
+  // on from the previous one.
+  for (uint64_t offset = 1; offset <= kTailFrames; ++offset) {
+    const uint64_t frame = frame_count - offset;
+
+    VBIFrameRecords records;
+    ASSERT_TRUE(reader.read_frame(frame, records, error))
+        << "frame " << frame << ": " << error;
+    EXPECT_EQ(records.lines.size(), 32u) << "frame " << frame;
+    EXPECT_TRUE(records.frame_counter.has_value()) << "frame " << frame;
+  }
 }
 
 // Seeking must be exact rather than approximate: the same frame reached from
