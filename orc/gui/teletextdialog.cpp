@@ -124,7 +124,8 @@ void TeletextDialog::setupUI() {
       {tr("Page"), tr("Seen"), tr("Frames")});
   pages_table_->horizontalHeaderItem(kColumnSeen)
       ->setToolTip(tr("How many times the carousel brought this page round "
-                      "over the analysed range."));
+                      "over the analysed range. A page transmitted as a "
+                      "sequence of sub-pages counts all of them."));
   pages_table_->horizontalHeaderItem(kColumnFrame)
       ->setToolTip(tr("Frames carrying the first and last transmission."));
   // The two numeric columns are right-aligned so their digits line up; their
@@ -155,8 +156,51 @@ void TeletextDialog::setupUI() {
   list_column->addWidget(pages_table_, /*stretch=*/1);
   body_row->addLayout(list_column);
 
+  // Right column: the page display, with the sub-page control beneath it. A
+  // multi-page set (ETSI EN 300 706 Annex A.1) is a sequence of pages sharing
+  // one page number, and a receiver shows them one at a time as the service
+  // cycles through — so the control belongs against the display it steps, not
+  // against the table of page numbers.
+  auto* page_column = new QVBoxLayout();
   page_widget_ = new TeletextPageWidget(this);
-  body_row->addWidget(page_widget_, /*stretch=*/1);
+  page_column->addWidget(page_widget_, /*stretch=*/1);
+
+  subpage_bar_ = new QWidget(this);
+  subpage_bar_->setObjectName("teletextSubpageBar");
+  auto* subpage_row = new QHBoxLayout(subpage_bar_);
+  subpage_row->setContentsMargins(0, 0, 0, 0);
+  subpage_row->addStretch();
+
+  prev_subpage_button_ = new QToolButton(subpage_bar_);
+  prev_subpage_button_->setObjectName("teletextPrevSubpageButton");
+  prev_subpage_button_->setArrowType(Qt::LeftArrow);
+  prev_subpage_button_->setToolTip(
+      tr("Show the previous sub-page of this page, wrapping round at the "
+         "start of the sequence."));
+  connect(prev_subpage_button_, &QToolButton::clicked, this,
+          [this] { stepSubpage(-1); });
+  subpage_row->addWidget(prev_subpage_button_);
+
+  subpage_label_ = new QLabel(subpage_bar_);
+  subpage_label_->setObjectName("teletextSubpageLabel");
+  subpage_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  subpage_row->addWidget(subpage_label_);
+
+  next_subpage_button_ = new QToolButton(subpage_bar_);
+  next_subpage_button_->setObjectName("teletextNextSubpageButton");
+  next_subpage_button_->setArrowType(Qt::RightArrow);
+  next_subpage_button_->setToolTip(
+      tr("Show the next sub-page of this page, wrapping round at the end of "
+         "the sequence."));
+  connect(next_subpage_button_, &QToolButton::clicked, this,
+          [this] { stepSubpage(1); });
+  subpage_row->addWidget(next_subpage_button_);
+  subpage_row->addStretch();
+
+  subpage_bar_->setVisible(false);
+  page_column->addWidget(subpage_bar_);
+
+  body_row->addLayout(page_column, /*stretch=*/1);
   content_layout->addLayout(body_row, /*stretch=*/1);
 
   // How the run went as a whole, below the page display: an empty page list
@@ -206,6 +250,8 @@ void TeletextDialog::clearContent() {
   data_ = orc::presenters::TeletextAnalysisView{};
   has_data_ = false;
   current_page_.reset();
+  refreshSubpageControl(nullptr);
+  subpage_address_.reset();
   status_label_->setVisible(false);
   status_label_->clear();
   summary_label_->setVisible(false);
@@ -255,6 +301,24 @@ uint64_t TeletextDialog::listedSeenCount(const QString& page_label) const {
     }
   }
   return 0;
+}
+
+QString TeletextDialog::subpageText() const {
+  return subpage_bar_->isVisibleTo(this) ? subpage_label_->text() : QString();
+}
+
+int TeletextDialog::subpageCount() const {
+  const auto page_address = orc::TeletextPageDecoder::parse_page_number(
+      page_edit_->text().toStdString());
+  if (!page_address) {
+    return 0;
+  }
+  const auto* entry = findPage(page_address->first, page_address->second);
+  return entry == nullptr ? 0 : static_cast<int>(entry->subpages.size());
+}
+
+int TeletextDialog::subpageIndex() const {
+  return current_page_.has_value() ? subpage_index_ : -1;
 }
 
 QString TeletextDialog::recoveryText() const {
@@ -371,6 +435,23 @@ QString TeletextDialog::formatPageLabel(int magazine, int page_number) {
       .toUpper();
 }
 
+QString TeletextDialog::formatSubcode(int subcode) {
+  // ETSI EN 300 706 §9.3.1.2: the sub-code is four elements of different
+  // widths — S1 (0-F), S2 (0-7), S3 (0-F), S4 (0-3) — packed here into 13
+  // bits. Written out, as Annex A.1 writes them, they are four digits with S4
+  // leading: sub-page 2 of a display page is 0002.
+  const int s1 = subcode & 0xF;
+  const int s2 = (subcode >> 4) & 0x7;
+  const int s3 = (subcode >> 7) & 0xF;
+  const int s4 = (subcode >> 11) & 0x3;
+  return QStringLiteral("%1%2%3%4")
+      .arg(s4, 1, 16)
+      .arg(s3, 1, 16)
+      .arg(s2, 1, 16)
+      .arg(s1, 1, 16)
+      .toUpper();
+}
+
 const orc::presenters::TeletextCataloguedPageView* TeletextDialog::findPage(
     int magazine, int page_number) const {
   const auto match = std::find_if(
@@ -420,12 +501,30 @@ void TeletextDialog::updatePageRow(
   // The subtitle marker is spelled out rather than shown as a symbol because
   // there is nowhere in this table to put a legend.
   page_item->setText(entry.subtitle ? tr("%1 subs").arg(label) : label);
+
+  // Whatever createPageRow() had to say about the address comes first; what
+  // follows is about this page's transmission.
+  QStringList tips;
+  if (!page_item->toolTip().isEmpty()) {
+    tips << page_item->toolTip();
+  }
   if (entry.subtitle) {
-    page_item->setToolTip(
-        tr("Page %1 is transmitted with the C6 subtitle control bit set: it "
-           "is the page this service carries its subtitles on. Use it as the "
-           "subtitle page when exporting subtitles.")
-            .arg(label));
+    tips << tr("Page %1 is transmitted with the C6 subtitle control bit set: "
+               "it is the page this service carries its subtitles on. Use it "
+               "as the subtitle page when exporting subtitles.")
+                .arg(label);
+  }
+  if (entry.subpages.size() > 1) {
+    // Which pages are multi-page sets is not otherwise visible from the
+    // table: their sub-pages are counted together in the Seen column, because
+    // the row is about the page number.
+    tips << tr("Page %1 is a sequence of %n sub-page(s) the service cycles "
+               "through; step through them under the page display.",
+               nullptr, static_cast<int>(entry.subpages.size()))
+                .arg(label);
+  }
+  if (!tips.isEmpty()) {
+    page_item->setToolTip(tips.join(QStringLiteral("\n\n")));
   }
 
   pages_table_->item(row, kColumnSeen)
@@ -516,23 +615,43 @@ void TeletextDialog::renderPage() {
     current_page_.reset();
     seen_label_->setText(tr("Invalid page number (e.g. 100, 888)"));
     recovery_label_->setVisible(false);
+    refreshSubpageControl(nullptr);
     page_widget_->clearPage();
     syncListSelection(QString());
     return;
   }
 
+  // A different page number starts at the top of that page's sequence; a
+  // re-render of the same one (stepping the carousel, or a fresh delivery of
+  // the same catalogue) keeps the sub-page the reader is on.
+  if (subpage_address_ != page_address) {
+    subpage_address_ = page_address;
+    subpage_index_ = 0;
+  }
+
   const QString label =
       formatPageLabel(page_address->first, page_address->second);
   const auto* entry = findPage(page_address->first, page_address->second);
-  if (entry != nullptr) {
-    current_page_ = entry->page;
-    // 1-based frame numbering in the UI (see frame_numbering.h).
+  refreshSubpageControl(entry);
+  if (entry != nullptr && !entry->subpages.empty()) {
+    const auto& subpage =
+        entry->subpages[static_cast<std::size_t>(subpage_index_)];
+    current_page_ = subpage.page;
+    // The status line describes what is on screen, so on a multi-page set it
+    // reports the sub-page rather than the set: its own count and the frames
+    // it — not its siblings — was seen at. Frame numbers are 1-based in the UI
+    // (see frame_numbering.h).
+    const bool multi_page_set = entry->subpages.size() > 1;
     seen_label_->setText(
-        tr("Page %1 seen %n time(s), frames %2-%3", nullptr,
-           static_cast<int>(entry->times_seen))
+        (multi_page_set
+             ? tr("Page %1 sub-page %4 seen %n time(s), frames %2-%3", nullptr,
+                  static_cast<int>(subpage.times_seen))
+             : tr("Page %1 seen %n time(s), frames %2-%3", nullptr,
+                  static_cast<int>(subpage.times_seen)))
             .arg(label)
-            .arg(static_cast<qulonglong>(entry->first_seen_frame) + 1)
-            .arg(static_cast<qulonglong>(entry->last_seen_frame) + 1));
+            .arg(static_cast<qulonglong>(subpage.first_seen_frame) + 1)
+            .arg(static_cast<qulonglong>(subpage.last_seen_frame) + 1)
+            .arg(formatSubcode(subpage.subcode)));
     recovery_label_->setText(formatRecovery(*current_page_));
     recovery_label_->setVisible(true);
     page_widget_->setPage(*current_page_);
@@ -550,3 +669,62 @@ void TeletextDialog::renderPage() {
   }
   syncListSelection(label);
 }
+
+void TeletextDialog::refreshSubpageControl(
+    const orc::presenters::TeletextCataloguedPageView* entry) {
+  if (entry == nullptr || entry->subpages.empty()) {
+    subpage_index_ = 0;
+    subpage_bar_->setVisible(false);
+    subpage_label_->clear();
+    return;
+  }
+
+  const int count = static_cast<int>(entry->subpages.size());
+  subpage_index_ = std::clamp(subpage_index_, 0, count - 1);
+  const auto& subpage =
+      entry->subpages[static_cast<std::size_t>(subpage_index_)];
+
+  if (count == 1) {
+    // Annex A.1: a page with no sub-pages associated is coded Mxx-0000. Said
+    // rather than hidden, so "one page" is distinguishable from a control that
+    // has not been noticed.
+    subpage_label_->setText(tr("No sub-pages"));
+    subpage_label_->setToolTip(
+        tr("This page number carried a single page over the analysed range."));
+  } else {
+    subpage_label_->setText(tr("Sub-page %1 of %2 (%3)")
+                                .arg(subpage_index_ + 1)
+                                .arg(count)
+                                .arg(formatSubcode(subpage.subcode)));
+    subpage_label_->setToolTip(
+        tr("This page number is transmitted as a sequence of sub-pages that "
+           "the service cycles through (ETSI EN 300 706 Annex A.1); a "
+           "receiver shows them one after another. The sub-code in brackets "
+           "is the sub-page's own address, which is how the sequence is "
+           "ordered here."));
+  }
+  prev_subpage_button_->setEnabled(count > 1);
+  next_subpage_button_->setEnabled(count > 1);
+  subpage_bar_->setVisible(true);
+}
+
+void TeletextDialog::stepSubpage(int delta) {
+  const auto page_address = orc::TeletextPageDecoder::parse_page_number(
+      page_edit_->text().toStdString());
+  if (!page_address) {
+    return;
+  }
+  const auto* entry = findPage(page_address->first, page_address->second);
+  if (entry == nullptr || entry->subpages.size() < 2) {
+    return;
+  }
+  // Wrapping, because the carousel itself does: stepping past the last
+  // sub-page is what the service does next.
+  const int count = static_cast<int>(entry->subpages.size());
+  subpage_index_ = ((subpage_index_ + delta) % count + count) % count;
+  renderPage();
+}
+
+void TeletextDialog::showNextSubpage() { stepSubpage(1); }
+
+void TeletextDialog::showPreviousSubpage() { stepSubpage(-1); }

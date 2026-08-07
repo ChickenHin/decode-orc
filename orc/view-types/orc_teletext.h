@@ -136,11 +136,40 @@ struct TeletextPageView {
 };
 
 /**
+ * @brief One sub-page of a catalogued page
+ *
+ * A page number can carry a sequence of sub-pages the service cycles through —
+ * the multi-page set of ETSI EN 300 706 Annex A.1, seen on a receiver as a page
+ * that changes on its own every few seconds. Each is catalogued in its own
+ * right so a reader can step through the sequence rather than being left with
+ * whichever one the carousel sent last.
+ */
+struct TeletextSubPageView {
+  /// 13-bit page sub-code S1-S4 as transmitted (ETSI EN 300 706 §9.3.1.2),
+  /// packed S1 in bits 0-3, S2 in 4-6, S3 in 7-10, S4 in 11-12. Annex A.1
+  /// numbers the sub-pages of a display page from 0001, the decimal digits of
+  /// S2 and S1; a page with no sub-pages is coded 0000.
+  int subcode = 0;
+  /// Frames carrying the first and the most recent header packet of this
+  /// sub-page (0-based; the view adds one where it displays them)
+  uint64_t first_seen_frame = 0;
+  uint64_t last_seen_frame = 0;
+  /// Appearances of this sub-page counted over the analysed range
+  uint64_t times_seen = 0;
+  /// Best assembly of the sub-page over the whole analysed range
+  TeletextPageView page;
+};
+
+/**
  * @brief One page the analysed range carried
  *
  * Teletext is a carousel, so a page is not one transmission but hundreds of
  * them: the entry holds the best assembly of the page built from every row copy
  * the range yielded, plus how often and where the carousel brought it round.
+ *
+ * Where the page is a multi-page set, that assembly is per sub-page — see
+ * @ref subpages, which always holds at least one entry — and the figures here
+ * cover the set as a whole.
  */
 struct TeletextCataloguedPageView {
   int magazine = 8;     ///< Displayed magazine number 1-8
@@ -149,15 +178,17 @@ struct TeletextCataloguedPageView {
   /// (0-based; the view adds one where it displays them)
   uint64_t first_seen_frame = 0;
   uint64_t last_seen_frame = 0;
-  /// Appearances counted over the analysed range. A header re-sent part-way
-  /// through the page's own transmission is the same appearance, not another.
+  /// Appearances counted over the analysed range, summed over the sub-pages. A
+  /// header re-sent part-way through a transmission is the same appearance,
+  /// not another.
   uint64_t times_seen = 0;
   /// Transmitted with C6 (subtitle, ETSI EN 300 706 §9.3.1.3 Table 2) set at
   /// least once. Sticky: a service may drop C6 between captions and the page
   /// is still the subtitle page in between.
   bool subtitle = false;
-  /// Best assembly of the page over the whole analysed range
-  TeletextPageView page;
+  /// The page's sub-pages, ascending by sub-code, never empty. A page that is
+  /// not a multi-page set has exactly one entry.
+  std::vector<TeletextSubPageView> subpages;
 };
 
 /**

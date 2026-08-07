@@ -519,6 +519,46 @@ TEST_F(TeletextPageDecoderTest, ErasePageLeavesOtherPagesOfTheMagazineAlone) {
   EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x20, 0, 1}, 1), 1u);
 }
 
+// A page number transmitted as a sequence of sub-pages (ETSI EN 300 706 Annex
+// A.1) carries different content under each sub-code, so copies must be
+// combined per sub-page: squashing them together would blend one sub-page's
+// rows into another's. The sub-code is part of the squasher key, and this is
+// what holds it there.
+TEST_F(TeletextPageDecoderTest, SquasherCombinesCopiesPerSubpage) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  // Two cycles of a two-sub-page carousel on page 150.
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    const int64_t field = cycle * 4;
+    decoder_.process_packet(make_header(1, 0x50, 0x0001, {}), field);
+    decoder_.process_packet(make_row(1, 1, "SUBPAGE ONE"), field + 1);
+    decoder_.process_packet(make_header(1, 0x50, 0x0002, {}), field + 2);
+    decoder_.process_packet(make_row(1, 1, "SUBPAGE TWO"), field + 3);
+  }
+  decoder_.finalize(8);
+
+  // Each sub-page has two copies of its own row and none of its sibling's.
+  const orc::TeletextPageKey first{1, 0x50, 0x0001, 0};
+  const orc::TeletextPageKey second{1, 0x50, 0x0002, 0};
+  EXPECT_EQ(squasher.copy_count(first, 1), 2u);
+  EXPECT_EQ(squasher.copy_count(second, 1), 2u);
+
+  const auto first_row = squasher.squashed_row(first, 1);
+  ASSERT_TRUE(first_row.has_value());
+  EXPECT_EQ((*first_row)[8], orc::teletext_odd_parity_encode('O'));
+  const auto second_row = squasher.squashed_row(second, 1);
+  ASSERT_TRUE(second_row.has_value());
+  EXPECT_EQ((*second_row)[8], orc::teletext_odd_parity_encode('T'));
+
+  // And each renders from its own copies: two confirmed rows, not four.
+  ASSERT_EQ(snapshots_.size(), 4u);
+  EXPECT_EQ(row_text(snapshots_[2], 1), "SUBPAGE ONE");
+  EXPECT_EQ(snapshots_[2].row_copies[1], 2);
+  EXPECT_EQ(row_text(snapshots_[3], 1), "SUBPAGE TWO");
+  EXPECT_EQ(snapshots_[3].row_copies[1], 2);
+}
+
 // A consumer rewriting a recovered stream feeds it once to build the squasher
 // and again to apply it. The second pass must not destroy what the first
 // built — which is what deleting the copies on C4 used to do, leaving the

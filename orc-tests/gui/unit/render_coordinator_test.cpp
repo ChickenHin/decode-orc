@@ -627,6 +627,7 @@ orc::presenters::TeletextAnalysisView makeTeletextCatalogue(int page_number) {
   page.magazine = 1;
   page.page_number = page_number;
   page.times_seen = 5;
+  page.subpages.emplace_back();
   view.pages.push_back(page);
   view.summary.frames_analysed = 100;
   return view;

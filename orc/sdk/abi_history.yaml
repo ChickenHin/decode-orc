@@ -223,3 +223,20 @@ history:
       SINK → Sink), so a plugin can never place a stage under an invented
       category. Layout- and source-breaking: the `NodeTypeInfo` constructor
       loses its trailing `SinkCategory` and `menu_category` parameters.
+  - abi: 13
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/analysis_sink_results.h
+    summary: >-
+      Teletext sub-pages: `TeletextCataloguedPage` in
+      `<orc/stage/analysis_sink_results.h>` replaces its single
+      `TeletextPageSnapshot page` member with a `std::vector` of the new
+      `TeletextCataloguedSubPage` (sub-code, first/last seen frame, times seen,
+      page snapshot), ascending by sub-code and never empty. A page number can
+      carry a sequence of sub-pages the service cycles through — the multi-page
+      set of ETSI EN 300 706 Annex A.1 — and cataloguing one assembly per page
+      number kept only whichever sub-page was transmitted last. The page-level
+      `times_seen`, `first_seen_frame` and `last_seen_frame` now cover the whole
+      set. Layout- and source-breaking for any plugin or host reading the
+      teletext catalogue.

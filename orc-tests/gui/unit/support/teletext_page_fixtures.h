@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace gui_unit_test {
 
@@ -40,7 +41,22 @@ inline orc::presenters::TeletextPageView makePageView(int magazine,
   return page;
 }
 
-// One catalogue entry, as the viewer receives it for a triggered node.
+// One sub-page of a catalogue entry, carrying @p text on display row 1.
+inline orc::presenters::TeletextSubPageView makeSubPage(
+    int magazine, int page_number, int subcode, const std::string& text,
+    uint64_t first_seen_frame = 0, uint64_t last_seen_frame = 0,
+    uint64_t times_seen = 1) {
+  orc::presenters::TeletextSubPageView subpage;
+  subpage.subcode = subcode;
+  subpage.first_seen_frame = first_seen_frame;
+  subpage.last_seen_frame = last_seen_frame;
+  subpage.times_seen = times_seen;
+  subpage.page = makePageView(magazine, page_number, text);
+  return subpage;
+}
+
+// One catalogue entry that is not a multi-page set, as the viewer receives it
+// for a triggered node.
 inline orc::presenters::TeletextCataloguedPageView makeCataloguedPage(
     int magazine, int page_number, const std::string& text,
     uint64_t first_seen_frame = 0, uint64_t last_seen_frame = 0,
@@ -52,7 +68,32 @@ inline orc::presenters::TeletextCataloguedPageView makeCataloguedPage(
   entry.last_seen_frame = last_seen_frame;
   entry.times_seen = times_seen;
   entry.subtitle = subtitle;
-  entry.page = makePageView(magazine, page_number, text);
+  // Annex A.1: a page with no sub-pages associated is coded Mxx-0000.
+  entry.subpages.push_back(makeSubPage(magazine, page_number, /*subcode=*/0,
+                                       text, first_seen_frame, last_seen_frame,
+                                       times_seen));
+  return entry;
+}
+
+// A catalogue entry for a multi-page set: one sub-page per entry of @p texts,
+// numbered from sub-code 0001 as Annex A.1 numbers them, each seen once.
+inline orc::presenters::TeletextCataloguedPageView makeCarouselPage(
+    int magazine, int page_number, const std::vector<std::string>& texts) {
+  orc::presenters::TeletextCataloguedPageView entry;
+  entry.magazine = magazine;
+  entry.page_number = page_number;
+  entry.times_seen = texts.size();
+  entry.last_seen_frame = texts.empty() ? 0 : texts.size() - 1;
+  for (size_t index = 0; index < texts.size(); ++index) {
+    // Annex A.1 numbers display sub-pages with the decimal digits of S2 and
+    // S1, so sub-page 10 is coded 0010 rather than 000A.
+    const int number = static_cast<int>(index) + 1;
+    const int subcode = ((number / 10) << 4) | (number % 10);
+    entry.subpages.push_back(makeSubPage(magazine, page_number, subcode,
+                                         texts[index],
+                                         /*first_seen_frame=*/index,
+                                         /*last_seen_frame=*/index));
+  }
   return entry;
 }
 

@@ -50,24 +50,59 @@ class IBurstLevelAnalysisResults {
 };
 
 /**
+ * @brief One sub-page of a catalogued teletext page
+ *
+ * A page number can carry a sequence of sub-pages that the service cycles
+ * through — the multi-page set of ETSI EN 300 706 Annex A.1, what a receiver
+ * presents as a rotating page. Each is a page in its own right, told from its
+ * siblings by the page sub-code (§9.3.1.2), and each is catalogued separately
+ * so a reader can step through the sequence instead of seeing only whichever
+ * one the carousel happened to leave behind.
+ */
+struct TeletextCataloguedSubPage {
+  /// 13-bit page sub-code S1-S4 as transmitted (ETSI EN 300 706 §9.3.1.2),
+  /// packed S1 in bits 0-3, S2 in 4-6, S3 in 7-10, S4 in 11-12
+  int subcode = 0;
+
+  /// Frames carrying the first and the most recent header packet of this
+  /// sub-page
+  uint64_t first_seen_frame = 0;
+  uint64_t last_seen_frame = 0;
+
+  /// Appearances of this sub-page counted over the analysed range. A header
+  /// re-sent part-way through the sub-page's own transmission is the same
+  /// appearance, not another one.
+  uint64_t times_seen = 0;
+
+  /// Best assembly of the sub-page, built from every row copy recovered over
+  /// the analysed range rather than from one transmission
+  TeletextPageSnapshot page;
+};
+
+/**
  * @brief One teletext page the analysed range carried
  *
  * The page is catalogued rather than kept per transmission: a carousel brings
  * the same page round hundreds of times in a recording, and what a reader wants
  * is one best assembly of it plus how often and where it was seen.
+ *
+ * Where the page is a multi-page set, that assembly is per sub-page: see
+ * @ref subpages, which always holds at least one entry.
  */
 struct TeletextCataloguedPage {
   int magazine = 8;     ///< Displayed magazine number 1-8
   int page_number = 0;  ///< Two-digit hexadecimal page number 0x00-0xFF
 
-  /// Frames carrying the first and the most recent header packet of the page
+  /// Frames carrying the first and the most recent header packet of the page,
+  /// over all of its sub-pages
   uint64_t first_seen_frame = 0;
   uint64_t last_seen_frame = 0;
 
   /// Appearances counted over the analysed range — how often the carousel
   /// brought the page round, and so a rough measure of how reliably it can be
   /// recovered. A header re-sent part-way through the page's own transmission
-  /// is the same appearance, not another one.
+  /// is the same appearance, not another one. Summed over the sub-pages, so on
+  /// a multi-page set this counts the transmissions rather than the cycles.
   uint64_t times_seen = 0;
 
   /// The page has been transmitted with C6 (subtitle, ETSI EN 300 706 §9.3.1.3
@@ -75,9 +110,10 @@ struct TeletextCataloguedPage {
   /// captions, and the page is still the subtitle page in between.
   bool subtitle = false;
 
-  /// Best assembly of the page, built from every row copy recovered over the
-  /// analysed range rather than from one transmission
-  TeletextPageSnapshot page;
+  /// The page's sub-pages, ascending by sub-page number, never empty. A page
+  /// that is not a multi-page set has exactly one entry — sub-code 0000 in the
+  /// coding of Annex A.1 — so a consumer need not special-case either.
+  std::vector<TeletextCataloguedSubPage> subpages;
 };
 
 /**
@@ -104,8 +140,8 @@ struct TeletextRecoverySummary {
   /// field, so an empty slot is a packet the recording lost. An estimate, and
   /// silent about pages that never started arriving at all.
   uint64_t lost_packets_estimate = 0;
-  /// True when the page cap was reached and the least recently seen pages were
-  /// dropped, so the catalogue is not the whole set the range carried.
+  /// True when the sub-page cap was reached and the least recently seen ones
+  /// were dropped, so the catalogue is not the whole set the range carried.
   bool pages_truncated = false;
 };
 

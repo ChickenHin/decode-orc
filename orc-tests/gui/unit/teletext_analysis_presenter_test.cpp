@@ -228,8 +228,10 @@ TEST(TeletextAnalysisPresenterTest, Dataset_ConvertsCatalogueAndSummary) {
   page100.first_seen_frame = 12;
   page100.last_seen_frame = 4096;
   page100.times_seen = 37;
-  page100.page.magazine = 1;
-  page100.page.cells[1][0].character = 'A';
+  orc::TeletextCataloguedSubPage page100_only;
+  page100_only.page.magazine = 1;
+  page100_only.page.cells[1][0].character = 'A';
+  page100.subpages.push_back(page100_only);
   dataset.pages.push_back(page100);
 
   orc::TeletextCataloguedPage subtitles;
@@ -237,6 +239,7 @@ TEST(TeletextAnalysisPresenterTest, Dataset_ConvertsCatalogueAndSummary) {
   subtitles.page_number = 0x90;
   subtitles.subtitle = true;
   subtitles.times_seen = 4;
+  subtitles.subpages.emplace_back();
   dataset.pages.push_back(subtitles);
 
   dataset.summary.frames_analysed = 5000;
@@ -258,7 +261,8 @@ TEST(TeletextAnalysisPresenterTest, Dataset_ConvertsCatalogueAndSummary) {
   EXPECT_EQ(view.pages[0].last_seen_frame, 4096u);
   EXPECT_EQ(view.pages[0].times_seen, 37u);
   EXPECT_FALSE(view.pages[0].subtitle);
-  EXPECT_EQ(view.pages[0].page.cells[1][0].character, U'A');
+  ASSERT_EQ(view.pages[0].subpages.size(), 1u);
+  EXPECT_EQ(view.pages[0].subpages[0].page.cells[1][0].character, U'A');
   EXPECT_TRUE(view.pages[1].subtitle);
 
   EXPECT_EQ(view.summary.frames_analysed, 5000u);
@@ -270,6 +274,47 @@ TEST(TeletextAnalysisPresenterTest, Dataset_ConvertsCatalogueAndSummary) {
   EXPECT_EQ(view.summary.characters_damaged, 44u);
   EXPECT_EQ(view.summary.lost_packets_estimate, 7u);
   EXPECT_TRUE(view.summary.pages_truncated);
+}
+
+// A page number transmitted as a sequence of sub-pages (ETSI EN 300 706 Annex
+// A.1) converts as the whole sequence, in the order the catalogue holds it,
+// each sub-page carrying its own figures and its own rendered page.
+TEST(TeletextAnalysisPresenterTest, Dataset_ConvertsEverySubpageOfAPage) {
+  orc::TeletextAnalysisDataset dataset;
+  orc::TeletextCataloguedPage page;
+  page.magazine = 1;
+  page.page_number = 0x50;
+  page.times_seen = 9;
+
+  orc::TeletextCataloguedSubPage one;
+  one.subcode = 0x0001;
+  one.times_seen = 5;
+  one.first_seen_frame = 10;
+  one.last_seen_frame = 900;
+  one.page.cells[1][0].character = '1';
+  page.subpages.push_back(one);
+
+  orc::TeletextCataloguedSubPage two;
+  two.subcode = 0x0002;
+  two.times_seen = 4;
+  two.page.cells[1][0].character = '2';
+  page.subpages.push_back(two);
+
+  dataset.pages.push_back(page);
+
+  const auto view = TeletextAnalysisPresenter::makeAnalysisView(dataset);
+
+  ASSERT_EQ(view.pages.size(), 1u);
+  EXPECT_EQ(view.pages[0].times_seen, 9u);
+  ASSERT_EQ(view.pages[0].subpages.size(), 2u);
+  EXPECT_EQ(view.pages[0].subpages[0].subcode, 0x0001);
+  EXPECT_EQ(view.pages[0].subpages[0].times_seen, 5u);
+  EXPECT_EQ(view.pages[0].subpages[0].first_seen_frame, 10u);
+  EXPECT_EQ(view.pages[0].subpages[0].last_seen_frame, 900u);
+  EXPECT_EQ(view.pages[0].subpages[0].page.cells[1][0].character, U'1');
+  EXPECT_EQ(view.pages[0].subpages[1].subcode, 0x0002);
+  EXPECT_EQ(view.pages[0].subpages[1].times_seen, 4u);
+  EXPECT_EQ(view.pages[0].subpages[1].page.cells[1][0].character, U'2');
 }
 
 // A range that carried no teletext converts to an empty catalogue rather than
@@ -292,18 +337,21 @@ TEST(TeletextAnalysisPresenterTest, Dataset_Carries525LinePageWidth) {
   orc::TeletextCataloguedPage page;
   page.magazine = 1;
   page.page_number = 0x00;
-  page.page.columns = 32;
-  page.page.cells[1][31].character = 'Z';
-  page.page.cells[1][39].parity_error = true;  // never transmitted
-  page.page.row_received[1] = true;
+  orc::TeletextCataloguedSubPage only;
+  only.page.columns = 32;
+  only.page.cells[1][31].character = 'Z';
+  only.page.cells[1][39].parity_error = true;  // never transmitted
+  only.page.row_received[1] = true;
+  page.subpages.push_back(only);
   dataset.pages.push_back(page);
 
   const auto view = TeletextAnalysisPresenter::makeAnalysisView(dataset);
 
   ASSERT_EQ(view.pages.size(), 1u);
-  EXPECT_EQ(view.pages[0].page.columns, 32);
-  EXPECT_EQ(view.pages[0].page.cells[1][31].character, U'Z');
-  EXPECT_EQ(view.pages[0].page.recovery.damaged_bytes, 0);
+  ASSERT_EQ(view.pages[0].subpages.size(), 1u);
+  EXPECT_EQ(view.pages[0].subpages[0].page.columns, 32);
+  EXPECT_EQ(view.pages[0].subpages[0].page.cells[1][31].character, U'Z');
+  EXPECT_EQ(view.pages[0].subpages[0].page.recovery.damaged_bytes, 0);
 }
 
 }  // namespace gui_unit_test

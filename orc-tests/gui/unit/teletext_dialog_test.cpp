@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QPalette>
 #include <QTableWidget>
+#include <QToolButton>
 
 #include "support/teletext_page_fixtures.h"
 #include "teletextdialog.h"
@@ -386,15 +387,15 @@ TEST(TeletextDialogTest, RecoveryReadoutDistinguishesArrivingFromComplete) {
 
   orc::presenters::TeletextAnalysisView view;
   auto entry = makeCataloguedPage(1, 0x00, "ROW ONE");
-  entry.page.transmission_complete = false;
+  entry.subpages[0].page.transmission_complete = false;
   view.pages.push_back(entry);
   dialog.setAnalysisData(view);
 
   EXPECT_EQ(dialog.recoveryText(),
             QStringLiteral("Partial - still arriving (1 row(s) so far)"));
 
-  view.pages[0].page.transmission_complete = true;
-  view.pages[0].page.recovery.damaged_bytes = 2;
+  view.pages[0].subpages[0].page.transmission_complete = true;
+  view.pages[0].subpages[0].page.recovery.damaged_bytes = 2;
   dialog.setAnalysisData(view);
 
   EXPECT_EQ(dialog.recoveryText(),
@@ -649,6 +650,156 @@ TEST(TeletextPageWidgetTest, DataErrorOverlayMarksRowsSeenOnlyOnce) {
       << "row resting on a single copy was not marked";
   EXPECT_FALSE(cellHasForeground(marked, 6, 0, qRgb(0, 0, 0)))
       << "a row confirmed by a repeat must not be marked";
+}
+
+// ---------------------------------------------------------------------------
+// Sub-page navigation (multi-page sets, ETSI EN 300 706 Annex A.1)
+// ---------------------------------------------------------------------------
+
+// A page number transmitted as a sequence of sub-pages is browsed one sub-page
+// at a time, so the viewer has to say how many there are and which is on
+// screen — otherwise the reader sees one page and has no way to know the rest
+// of the sequence was recovered at all.
+TEST(TeletextDialogTest, CarouselPageReportsItsPositionInTheSequence) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  orc::presenters::TeletextAnalysisView view;
+  view.pages.push_back(makeCarouselPage(1, 0x00, {"ONE", "TWO", "THREE"}));
+  dialog.setAnalysisData(view);
+
+  EXPECT_EQ(dialog.subpageCount(), 3);
+  EXPECT_EQ(dialog.subpageIndex(), 0);
+  // The sub-code as Annex A.1 writes it, so the sequence position and the
+  // page's own address are both visible.
+  EXPECT_EQ(dialog.subpageText(), QString("Sub-page 1 of 3 (0001)"));
+  ASSERT_TRUE(dialog.currentPage().has_value());
+  EXPECT_EQ(rowText(*dialog.currentPage(), 1), "ONE");
+}
+
+TEST(TeletextDialogTest, SubpageControlsStepThroughTheSequence) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  orc::presenters::TeletextAnalysisView view;
+  view.pages.push_back(makeCarouselPage(1, 0x00, {"ONE", "TWO", "THREE"}));
+  dialog.setAnalysisData(view);
+
+  auto* next = dialog.findChild<QToolButton*>("teletextNextSubpageButton");
+  auto* previous = dialog.findChild<QToolButton*>("teletextPrevSubpageButton");
+  ASSERT_NE(next, nullptr);
+  ASSERT_NE(previous, nullptr);
+  EXPECT_TRUE(next->isEnabled());
+  EXPECT_TRUE(previous->isEnabled());
+
+  next->click();
+  EXPECT_EQ(dialog.subpageIndex(), 1);
+  EXPECT_EQ(dialog.subpageText(), QString("Sub-page 2 of 3 (0002)"));
+  ASSERT_TRUE(dialog.currentPage().has_value());
+  EXPECT_EQ(rowText(*dialog.currentPage(), 1), "TWO");
+
+  previous->click();
+  EXPECT_EQ(dialog.subpageIndex(), 0);
+  EXPECT_EQ(rowText(*dialog.currentPage(), 1), "ONE");
+}
+
+// The carousel wraps, so stepping past either end of the sequence does what
+// the service itself does next.
+TEST(TeletextDialogTest, SubpageNavigationWrapsAtBothEnds) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  orc::presenters::TeletextAnalysisView view;
+  view.pages.push_back(makeCarouselPage(1, 0x00, {"ONE", "TWO", "THREE"}));
+  dialog.setAnalysisData(view);
+
+  dialog.showPreviousSubpage();
+  EXPECT_EQ(dialog.subpageIndex(), 2);
+  ASSERT_TRUE(dialog.currentPage().has_value());
+  EXPECT_EQ(rowText(*dialog.currentPage(), 1), "THREE");
+
+  dialog.showNextSubpage();
+  EXPECT_EQ(dialog.subpageIndex(), 0);
+  EXPECT_EQ(rowText(*dialog.currentPage(), 1), "ONE");
+}
+
+// Typing another page number starts at the top of that page's sequence rather
+// than carrying a position across to a page it means nothing on.
+TEST(TeletextDialogTest, ChangingPageResetsToTheFirstSubpage) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  orc::presenters::TeletextAnalysisView view;
+  view.pages.push_back(makeCarouselPage(1, 0x00, {"ONE", "TWO", "THREE"}));
+  view.pages.push_back(makeCarouselPage(2, 0x00, {"ALPHA", "BETA"}));
+  dialog.setAnalysisData(view);
+
+  dialog.showNextSubpage();
+  EXPECT_EQ(dialog.subpageIndex(), 1);
+
+  dialog.setPageNumberText("200");
+  EXPECT_EQ(dialog.subpageCount(), 2);
+  EXPECT_EQ(dialog.subpageIndex(), 0);
+  ASSERT_TRUE(dialog.currentPage().has_value());
+  EXPECT_EQ(rowText(*dialog.currentPage(), 1), "ALPHA");
+  EXPECT_EQ(dialog.subpageText(), QString("Sub-page 1 of 2 (0001)"));
+}
+
+// Annex A.1 codes a page with no sub-pages associated as Mxx-0000. The control
+// says so rather than disappearing: an empty space where a count would be is
+// not an answer.
+TEST(TeletextDialogTest, PageWithoutSubpagesSaysSoAndDisablesTheControls) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+  dialog.setAnalysisData(makePage100Catalogue());
+
+  EXPECT_EQ(dialog.subpageCount(), 1);
+  EXPECT_EQ(dialog.subpageText(), QString("No sub-pages"));
+
+  auto* next = dialog.findChild<QToolButton*>("teletextNextSubpageButton");
+  ASSERT_NE(next, nullptr);
+  EXPECT_FALSE(next->isEnabled());
+
+  // Stepping is inert rather than an error.
+  dialog.showNextSubpage();
+  EXPECT_EQ(dialog.subpageIndex(), 0);
+
+  // A page the range did not carry has no sequence to report at all.
+  dialog.setPageNumberText("888");
+  EXPECT_TRUE(dialog.subpageText().isEmpty());
+  EXPECT_EQ(dialog.subpageIndex(), -1);
+}
+
+// The status line describes what is on screen, so on a multi-page set it
+// reports the sub-page's own transmissions rather than the whole set's.
+TEST(TeletextDialogTest, StatusLineReportsTheDisplayedSubpage) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  orc::presenters::TeletextAnalysisView view;
+  auto entry = makeCarouselPage(1, 0x00, {"ONE", "TWO"});
+  entry.subpages[1].times_seen = 7;
+  entry.subpages[1].first_seen_frame = 30;
+  entry.subpages[1].last_seen_frame = 900;
+  view.pages.push_back(entry);
+  dialog.setAnalysisData(view);
+
+  dialog.showNextSubpage();
+
+  auto* seen = dialog.findChild<QLabel*>("teletextSeenLabel");
+  ASSERT_NE(seen, nullptr);
+  // 1-based frame numbering in the UI.
+  EXPECT_EQ(seen->text(),
+            QString("Page 100 sub-page 0002 seen 7 time(s), frames 31-901"));
 }
 
 TEST(TeletextDialogTest, ShowDataErrorsCheckDrivesThePageWidget) {

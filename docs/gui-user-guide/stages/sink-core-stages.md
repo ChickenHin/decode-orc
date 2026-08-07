@@ -374,7 +374,7 @@ Both television systems ITU-R BT.653 defines System B on are covered, and the se
 * **625 lines** (PAL) — ETSI EN 300 706, 42-byte packets, written as `.t42`
 * **525 lines** (NTSC, PAL-M) — BT.653 Table 1b, 34-byte packets, written as `.t34`
 
-The same pass assembles the pages, so the run also produces a catalogue of every page the recording carried — where each was first and last seen, how often the carousel brought it round, and its best assembly from every copy recovered. That is what the **Teletext Pages** tool shows. Because it comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel.
+The same pass assembles the pages, so the run also produces a catalogue of every page the recording carried — where each was first and last seen, how often the carousel brought it round, and its best assembly from every copy recovered. That is what the **Teletext Pages** tool shows. Because it comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel. A page number transmitted as a sequence of sub-pages (ETSI EN 300 706 Annex A.1 — on a receiver, a page that changes on its own every few seconds) is catalogued as the whole sequence, one assembly per sub-page.
 
 Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-quality CVBS captures are read exactly by threshold slicing, while consumer VHS loses the clock run-in entirely and needs the MLSE detector, which recovers readable pages from PAL SP and LP recordings. The default `detector` setting picks between the two per line, so neither source needs configuring. By default the stage also mends display bytes that fail their parity check and combines the repeated transmissions of each page row before writing (`repair_damaged_bytes`, `squash_repeated_rows`); turn both off to write the packets exactly as recovered.
 
@@ -437,6 +437,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 **Stage tools**
 
 * **Teletext Pages** — the page viewer for this node. It lists every page the range carried, with how many times each was seen and the frames it was first and last seen at, and renders the selected page as a Level 1 display alongside the run's recovery summary. It opens automatically when the node is triggered, which is how the pages are reached: leave `output_path` empty and triggering the node is a decode-and-browse with no file written.
+    - Where a page number carries a sequence of sub-pages, the control under the display says how many there are, which one is on screen and its sub-code (`0001`, `0002`, …), and the arrows either side step through the sequence, wrapping round at each end. The status line then describes the sub-page on screen rather than the whole set; the page list keeps counting the set together, because a row there is about the page number. A page's row says in its tooltip when it is a sequence.
 
 **Notes**
 

@@ -586,6 +586,16 @@ bool TeletextSinkStage::trigger(
                            : " to " + result.output_path;
     trigger_status_ += "; " + std::to_string(result.dataset.pages.size()) +
                        (result.dataset.pages.size() == 1 ? " page" : " pages");
+    // A page number transmitted as a sequence of sub-pages is one page here
+    // but several pages to read, so the count only means something with the
+    // sub-pages named beside it.
+    std::size_t subpages = 0;
+    for (const auto& page : result.dataset.pages) {
+      subpages += page.subpages.size();
+    }
+    if (subpages > result.dataset.pages.size()) {
+      trigger_status_ += " (" + std::to_string(subpages) + " sub-pages)";
+    }
     if (result.bytes_repaired > 0) {
       trigger_status_ += "; repaired " + std::to_string(result.bytes_repaired) +
                          " damaged bytes";

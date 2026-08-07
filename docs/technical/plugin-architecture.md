@@ -164,13 +164,10 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `11` (`FrameDescriptor` dropped the `colour_frame_index`,
-`frame_number`, and `timecode` fields — colour-sequence phase is measured via
-the host `colour_frame_phase` observer through
-`<orc/stage/observation/colour_frame_phase_query.h>`, and VBI picture numbers /
-timecodes come from the `biphase` observer's interpreted `vbi.*` keys; the
-analysis-sink result types in `<orc/stage/common_types.h>` also became canonical
-per-frame records with the aggregated per-bucket fields removed). The
+**Current value:** `13` (`TeletextCataloguedPage` in
+`<orc/stage/analysis_sink_results.h>` replaced its single page snapshot with a
+vector of `TeletextCataloguedSubPage`, so a page number transmitted as a
+sequence of sub-pages is catalogued as the whole sequence). The
 authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 

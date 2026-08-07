@@ -542,7 +542,8 @@ TEST_F(TeletextSinkDeps, Analyse_CataloguesEveryPageTheRangeCarried) {
   EXPECT_EQ(page_800.first_seen_frame, 0u);
   EXPECT_EQ(page_800.last_seen_frame, 2u);
   EXPECT_FALSE(page_800.subtitle);
-  EXPECT_TRUE(page_800.page.row_received[1]);
+  ASSERT_EQ(page_800.subpages.size(), 1u);
+  EXPECT_TRUE(page_800.subpages[0].page.row_received[1]);
 
   const auto& page_888 = result.dataset.pages[1];
   EXPECT_EQ(page_888.page_number, 0x88);
@@ -586,7 +587,8 @@ TEST_F(TeletextSinkDeps, Analyse_CataloguesWithoutWritingWhenNoPath) {
   EXPECT_EQ(result.packets_written, 2u);
   ASSERT_EQ(result.dataset.pages.size(), 1u);
   EXPECT_EQ(result.dataset.pages[0].page_number, 0x00);
-  EXPECT_TRUE(result.dataset.pages[0].page.row_received[1]);
+  ASSERT_EQ(result.dataset.pages[0].subpages.size(), 1u);
+  EXPECT_TRUE(result.dataset.pages[0].subpages[0].page.row_received[1]);
   EXPECT_NE(result.message.find("no packet stream written"), std::string::npos)
       << result.message;
   EXPECT_NE(result.report.find("(none; pages browsed only)"), std::string::npos)

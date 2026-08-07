@@ -28,7 +28,9 @@ class TeletextAnalysisPresenter {
    * @brief Convert a triggered stage's dataset into the viewer's model
    *
    * Page order is carried through unchanged (ascending by {magazine, page
-   * number}); the viewer decides how to present it.
+   * number}), as is each page's sub-page order (ascending by sub-code, the
+   * sequence a multi-page set cycles through); the viewer decides how to
+   * present them.
    */
   static TeletextAnalysisView makeAnalysisView(
       const TeletextAnalysisDataset& dataset);

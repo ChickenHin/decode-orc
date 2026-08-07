@@ -55,7 +55,16 @@ TeletextAnalysisView TeletextAnalysisPresenter::makeAnalysisView(
     entry.last_seen_frame = catalogued.last_seen_frame;
     entry.times_seen = catalogued.times_seen;
     entry.subtitle = catalogued.subtitle;
-    entry.page = makePageView(catalogued.page);
+    entry.subpages.reserve(catalogued.subpages.size());
+    for (const auto& subpage : catalogued.subpages) {
+      TeletextSubPageView sub_view;
+      sub_view.subcode = subpage.subcode;
+      sub_view.first_seen_frame = subpage.first_seen_frame;
+      sub_view.last_seen_frame = subpage.last_seen_frame;
+      sub_view.times_seen = subpage.times_seen;
+      sub_view.page = makePageView(subpage.page);
+      entry.subpages.push_back(std::move(sub_view));
+    }
     view.pages.push_back(std::move(entry));
   }
 

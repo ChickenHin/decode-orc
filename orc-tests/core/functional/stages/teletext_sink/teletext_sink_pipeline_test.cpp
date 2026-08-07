@@ -459,8 +459,36 @@ TEST_F(TeletextSinkPipelineTest, PalCaptureCataloguesTheServicesPages) {
 
   // A 625-line page is 40 columns from one 42-byte packet per row.
   for (const auto& page : run.dataset.pages) {
-    EXPECT_EQ(page.page.columns, TeletextPageSnapshot::kColumns);
+    ASSERT_FALSE(page.subpages.empty());
+    for (const auto& subpage : page.subpages) {
+      EXPECT_EQ(subpage.page.columns, TeletextPageSnapshot::kColumns);
+    }
   }
+
+  // A page number is not always one page: a service transmits some of them as
+  // a sequence of sub-pages and cycles through it (ETSI EN 300 706 Annex A.1).
+  // This window of the capture carries such sequences, and the sub-pages of
+  // one are distinct pages under distinct sub-codes — which is what a
+  // catalogue keyed on the page number alone would have thrown away, keeping
+  // only whichever was transmitted last.
+  size_t multi_page_sets = 0;
+  for (const auto& page : run.dataset.pages) {
+    if (page.subpages.size() < 2) {
+      continue;
+    }
+    ++multi_page_sets;
+    std::set<int> subcodes;
+    for (const auto& subpage : page.subpages) {
+      EXPECT_GT(subpage.times_seen, 0u);
+      subcodes.insert(subpage.subcode);
+    }
+    EXPECT_EQ(subcodes.size(), page.subpages.size())
+        << "sub-pages of one page must have distinct sub-codes";
+  }
+  std::cout << "[ INFO     ] PAL WST: " << multi_page_sets
+            << " page(s) transmitted as a sequence of sub-pages" << std::endl;
+  EXPECT_GT(multi_page_sets, 0u)
+      << "no multi-page set found in a window that carries them";
 }
 
 // ---------------------------------------------------------------------------
@@ -601,10 +629,14 @@ TEST_F(TeletextSinkPipelineTest, NtscCaptureCataloguesTheServicesPages) {
   // of each row in row-extension packets, which the catalogue's page assembly
   // reads. A page still 32 wide would mean they had stopped being recognised.
   size_t wide_pages = 0;
+  size_t subpages = 0;
   for (const auto& page : run.dataset.pages) {
-    if (page.page.columns == TeletextPageSnapshot::kColumns) ++wide_pages;
+    for (const auto& subpage : page.subpages) {
+      ++subpages;
+      if (subpage.page.columns == TeletextPageSnapshot::kColumns) ++wide_pages;
+    }
   }
-  EXPECT_EQ(wide_pages, run.dataset.pages.size());
+  EXPECT_EQ(wide_pages, subpages);
 }
 
 }  // namespace
