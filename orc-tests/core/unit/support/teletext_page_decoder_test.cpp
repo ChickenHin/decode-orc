@@ -68,9 +68,14 @@ std::array<uint8_t, kTeletextPacketBytes> make_header(
       ((subcode >> 11) & 0x3) | (flags.newsflash ? 0x4 : 0x0) |
       (flags.subtitle ? 0x8 : 0x0)));               // S4 + C5 + C6
   packet[8] = orc::teletext_hamming84_encode(0x0);  // C7-C10
+  // C11 in bit 2 of byte 13, then C12, C13, C14 in bits 4, 6 and 8
+  // (§9.3.1.3 Table 2) = Hamming data bits D1-D4. The sub-set number indexes
+  // §15.2 Table 32 with C12 as its most significant bit, so it goes out
+  // least-significant-bit-last.
+  const int subset = flags.national_option_subset & 0x7;
   packet[9] = orc::teletext_hamming84_encode(static_cast<uint8_t>(
-      (flags.magazine_serial ? 0x1 : 0x0) |
-      ((flags.national_option_subset & 0x7) << 1)));  // C11-C14
+      (flags.magazine_serial ? 0x1 : 0x0) | (((subset >> 2) & 0x1) << 1) |
+      (((subset >> 1) & 0x1) << 2) | ((subset & 0x1) << 3)));  // C11-C14
   for (size_t i = 0; i < 32; ++i) {
     const char c = i < header_text.size() ? header_text[i] : ' ';
     packet[10 + i] = orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
@@ -641,6 +646,109 @@ TEST_F(TeletextPageDecoderTest, HoldMosaics_SubstitutesHeldCharacter) {
   EXPECT_EQ(cells[4].foreground, TeletextColour::Green);
 }
 
+TEST_F(TeletextPageDecoderTest, NationalOptionSubsetReadsC12AsMostSignificant) {
+  // Table 32 lists the sub-sets against C12 C13 C14 read in that order, so
+  // French is 1 0 0 = 4. Byte 13 sends C12 first, i.e. in the low data bit.
+  HeaderFlags flags;
+  flags.national_option_subset =
+      static_cast<int>(orc::TeletextNationalOption::French);
+
+  decoder_.process_packet(make_header(1, 0x00, 0, flags), 0);
+  decoder_.process_packet(make_row(1, 1, "A"), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(snapshots_[0].national_option_subset,
+            static_cast<int>(orc::TeletextNationalOption::French));
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+
+TEST(TeletextLatinG0Test, PrimarySetPositionsAreAscii) {
+  // EN 300 706 §15.6.1 Table 35: every position the national option sub-sets
+  // leave alone coincides with ASCII.
+  const int english = static_cast<int>(orc::TeletextNationalOption::English);
+  for (uint8_t code = 0x20; code < 0x7F; ++code) {
+    const bool reserved = code == 0x23 || code == 0x24 || code == 0x40 ||
+                          (code >= 0x5B && code <= 0x60) ||
+                          (code >= 0x7B && code <= 0x7E);
+    if (reserved) {
+      continue;
+    }
+    EXPECT_EQ(orc::teletext_latin_g0_to_unicode(code, english),
+              static_cast<char32_t>(code))
+        << "code " << std::hex << static_cast<int>(code);
+  }
+  // Table 35 NOTE 1: 2/0 is SPACE. NOTE 4: 7/F is a filled rectangle.
+  EXPECT_EQ(orc::teletext_latin_g0_to_unicode(0x20, english), U' ');
+  EXPECT_EQ(orc::teletext_latin_g0_to_unicode(0x7F, english), U'■');
+  // Spacing attributes are not characters (§15.5).
+  EXPECT_EQ(orc::teletext_latin_g0_to_unicode(0x0D, english), U' ');
+}
+
+TEST(TeletextLatinG0Test, SubsetsSubstituteTheThirteenReservedPositions) {
+  // EN 300 706 §15.6.2 Table 36, one row apiece.
+  struct Case {
+    orc::TeletextNationalOption subset;
+    std::array<char32_t, 13> expected;
+  };
+  const std::array<uint8_t, 13> positions = {0x23, 0x24, 0x40, 0x5B, 0x5C,
+                                             0x5D, 0x5E, 0x5F, 0x60, 0x7B,
+                                             0x7C, 0x7D, 0x7E};
+  const std::array<Case, 7> cases = {{
+      {orc::TeletextNationalOption::English,
+       {U'£', U'$', U'@', U'←', U'½', U'→', U'↑', U'#', U'—', U'¼', U'‖', U'¾',
+        U'÷'}},
+      {orc::TeletextNationalOption::German,
+       {U'#', U'$', U'§', U'Ä', U'Ö', U'Ü', U'^', U'_', U'°', U'ä', U'ö', U'ü',
+        U'ß'}},
+      {orc::TeletextNationalOption::SwedishFinnishHungarian,
+       {U'#', U'¤', U'É', U'Ä', U'Ö', U'Å', U'Ü', U'_', U'é', U'ä', U'ö', U'å',
+        U'ü'}},
+      {orc::TeletextNationalOption::Italian,
+       {U'£', U'$', U'é', U'°', U'ç', U'→', U'↑', U'#', U'ù', U'à', U'ò', U'è',
+        U'ì'}},
+      {orc::TeletextNationalOption::French,
+       {U'é', U'ï', U'à', U'ë', U'ê', U'ù', U'î', U'#', U'è', U'â', U'ô', U'û',
+        U'ç'}},
+      {orc::TeletextNationalOption::PortugueseSpanish,
+       {U'ç', U'$', U'¡', U'á', U'é', U'í', U'ó', U'ú', U'¿', U'ü', U'ñ', U'è',
+        U'à'}},
+      {orc::TeletextNationalOption::CzechSlovak,
+       {U'#', U'ů', U'č', U'ť', U'ž', U'ý', U'í', U'ř', U'é', U'á', U'ě', U'ú',
+        U'š'}},
+  }};
+
+  for (const auto& c : cases) {
+    for (size_t i = 0; i < positions.size(); ++i) {
+      EXPECT_EQ(orc::teletext_latin_g0_to_unicode(positions[i],
+                                                  static_cast<int>(c.subset)),
+                c.expected[i])
+          << "subset " << static_cast<int>(c.subset) << " position " << i;
+    }
+  }
+}
+
+TEST(TeletextLatinG0Test, UndefinedDesignationRendersAsEnglish) {
+  // Table 32 defines no sub-set for C12-C14 = 1 1 1 and Table 35's own glyphs
+  // at these positions apply only through a packet X/26 (Table 35 NOTE 2).
+  const int undefined =
+      static_cast<int>(orc::TeletextNationalOption::Undefined);
+  EXPECT_EQ(orc::teletext_latin_g0_to_unicode(0x23, undefined), U'£');
+  EXPECT_EQ(orc::teletext_latin_g0_to_unicode(0x23, -1), U'£');
+}
+
+TEST(TeletextLatinG0Test, Utf8MatchesTheUnicodeMapping) {
+  const int english = static_cast<int>(orc::TeletextNationalOption::English);
+  EXPECT_EQ(orc::teletext_latin_g0_to_utf8('A', english), "A");
+  EXPECT_EQ(orc::teletext_latin_g0_to_utf8(0x23, english), "£");  // 2 bytes
+  EXPECT_EQ(orc::teletext_latin_g0_to_utf8(0x5B, english), "←");  // 3 bytes
+  EXPECT_EQ(orc::teletext_latin_g0_to_utf8(0x7F, english), "■");
+  EXPECT_EQ(orc::teletext_latin_g0_to_utf8(
+                0x7E, static_cast<int>(orc::TeletextNationalOption::German)),
+            "ß");
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace {
@@ -696,6 +804,33 @@ TEST_F(TeletextSubtitleCueTest, PageArrivalOpensCueAndFinalizeClosesIt) {
   EXPECT_EQ(cues[0].text, "HELLO SUBTITLE");
   EXPECT_EQ(cues[0].start_field_index, 12);
   EXPECT_EQ(cues[0].end_field_index, 100);
+}
+
+TEST_F(TeletextSubtitleCueTest, CueTextUsesThePagesNationalOptionSubset) {
+  // Code 2/3 is "£" on an English service and "#" on a German one
+  // (EN 300 706 §15.6.2 Table 36); the cue carries the character the page
+  // displays, UTF-8 encoded, not the transmitted code as ASCII.
+  HeaderFlags flags = subtitle_header_flags(true);
+  decoder_.process_packet(make_header(kMagazine, kPage, 0, flags), 0);
+  decoder_.process_packet(make_row(kMagazine, 20,
+                                   boxed("COST \x23"
+                                         "5")),
+                          2);
+
+  flags.national_option_subset =
+      static_cast<int>(orc::TeletextNationalOption::German);
+  decoder_.process_packet(make_header(kMagazine, kPage, 0, flags), 40);
+  decoder_.process_packet(make_row(kMagazine, 20,
+                                   boxed("KOST \x23"
+                                         "5")),
+                          42);
+  decoder_.process_packet(make_time_filling_header(kMagazine), 44);
+  decoder_.finalize(100);
+
+  const auto& cues = decoder_.subtitle_cues();
+  ASSERT_EQ(cues.size(), 2u);
+  EXPECT_EQ(cues[0].text, "COST £5");
+  EXPECT_EQ(cues[1].text, "KOST #5");
 }
 
 TEST_F(TeletextSubtitleCueTest, EraseHeaderWithEmptyPageClearsTheCue) {

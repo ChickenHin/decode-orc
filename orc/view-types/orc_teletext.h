@@ -69,8 +69,8 @@ struct TeletextFieldPacketsView {
 struct TeletextPageCellView {
   /// Render as a 2×3 block-mosaic cell instead of a character glyph
   bool mosaic = false;
-  /// Unicode code point for alphanumeric cells (Latin G0 with the English
-  /// national option sub-set applied by the presenter)
+  /// Unicode code point for alphanumeric cells (Latin G0 with the national
+  /// option sub-set the page's header selected, applied by the presenter)
   char32_t character = U' ';
   /// Six sixel bits for mosaic cells (EN 300 706 §15.7.1 Table 47):
   /// bit 0 top-left, 1 top-right, 2 middle-left, 3 middle-right,

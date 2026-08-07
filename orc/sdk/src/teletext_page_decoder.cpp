@@ -101,6 +101,45 @@ int displayed_magazine(int transmission_magazine) {
   return transmission_magazine == 0 ? 8 : transmission_magazine;
 }
 
+// The thirteen G0 positions a national option sub-set replaces
+// (ETSI EN 300 706 §15.6.1 Table 35 NOTE 2 — the shaded positions).
+constexpr std::array<uint8_t, 13> kNationalOptionPositions = {
+    0x23, 0x24, 0x40, 0x5B, 0x5C, 0x5D, 0x5E,
+    0x5F, 0x60, 0x7B, 0x7C, 0x7D, 0x7E};
+
+// ETSI EN 300 706 §15.6.2 Table 36, the seven sub-sets a Level 1 page can
+// reach through C12-C14, in TeletextNationalOption order. Columns follow
+// kNationalOptionPositions.
+//
+// Two glyphs the standard draws rather than names take the nearest Unicode:
+// English 6/0 is a horizontal line across the character rectangle (em dash
+// here) and 7/C a double vertical line (U+2016). Note that the sub-sets which
+// take 2/3 for a currency or accented character put the '#' the primary set
+// holds there at 5/F instead, rather than dropping it.
+constexpr std::array<std::array<char32_t, 13>, 7> kNationalOptionSubsets = {{
+    // English
+    {U'£', U'$', U'@', U'←', U'½', U'→', U'↑', U'#', U'—', U'¼', U'‖', U'¾',
+     U'÷'},
+    // German
+    {U'#', U'$', U'§', U'Ä', U'Ö', U'Ü', U'^', U'_', U'°', U'ä', U'ö', U'ü',
+     U'ß'},
+    // Swedish/Finnish/Hungarian
+    {U'#', U'¤', U'É', U'Ä', U'Ö', U'Å', U'Ü', U'_', U'é', U'ä', U'ö', U'å',
+     U'ü'},
+    // Italian
+    {U'£', U'$', U'é', U'°', U'ç', U'→', U'↑', U'#', U'ù', U'à', U'ò', U'è',
+     U'ì'},
+    // French
+    {U'é', U'ï', U'à', U'ë', U'ê', U'ù', U'î', U'#', U'è', U'â', U'ô', U'û',
+     U'ç'},
+    // Portuguese/Spanish
+    {U'ç', U'$', U'¡', U'á', U'é', U'í', U'ó', U'ú', U'¿', U'ü', U'ñ', U'è',
+     U'à'},
+    // Czech/Slovak
+    {U'#', U'ů', U'č', U'ť', U'ž', U'ý', U'í', U'ř', U'é', U'á', U'ě', U'ú',
+     U'š'},
+}};
+
 }  // namespace
 
 bool teletext_odd_parity_valid(uint8_t byte) {
@@ -124,6 +163,52 @@ uint8_t teletext_odd_parity_encode(uint8_t value) {
     byte |= 0x80;
   }
   return byte;
+}
+
+char32_t teletext_latin_g0_to_unicode(uint8_t code,
+                                      int national_option_subset) {
+  const uint8_t c = static_cast<uint8_t>(code & 0x7F);
+  // Codes 0/0-1/F are spacing attributes, not characters (§15.5).
+  if (c < 0x20) {
+    return U' ';
+  }
+  // §15.6.1 Table 35 NOTE 4: 7/F is a rectangle filling the character area.
+  if (c == 0x7F) {
+    return U'■';
+  }
+  const size_t subset =
+      national_option_subset >= 0 &&
+              static_cast<size_t>(national_option_subset) <
+                  kNationalOptionSubsets.size()
+          ? static_cast<size_t>(national_option_subset)
+          : 0;  // Table 32 designates no sub-set for 1 1 1; render as English
+  for (size_t i = 0; i < kNationalOptionPositions.size(); ++i) {
+    if (kNationalOptionPositions[i] == c) {
+      return kNationalOptionSubsets[subset][i];
+    }
+  }
+  // Every remaining Table 35 position coincides with ASCII.
+  return static_cast<char32_t>(c);
+}
+
+std::string teletext_latin_g0_to_utf8(uint8_t code,
+                                      int national_option_subset) {
+  const char32_t cp =
+      teletext_latin_g0_to_unicode(code, national_option_subset);
+  std::string out;
+  // Table 36 reaches U+2016 at most, so two continuation bytes suffice; the
+  // three-byte branch is written out anyway rather than assuming that.
+  if (cp < 0x80) {
+    out.push_back(static_cast<char>(cp));
+  } else if (cp < 0x800) {
+    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  }
+  return out;
 }
 
 TeletextPageDecoder::TeletextPageDecoder() = default;
@@ -368,12 +453,18 @@ void TeletextPageDecoder::handle_header_packet(
   }
   state.newsflash = newsflash;
   state.subtitle = subtitle;
-  state.suppress_header = (c7_c10 & 0x1) != 0;          // C7
-  state.update_indicator = (c7_c10 & 0x2) != 0;         // C8
-  state.interrupted_sequence = (c7_c10 & 0x4) != 0;     // C9
-  state.inhibit_display = (c7_c10 & 0x8) != 0;          // C10
-  state.magazine_serial = magazine_serial;              // C11
-  state.national_option_subset = (c11_c14 >> 1) & 0x7;  // C12-C14
+  state.suppress_header = (c7_c10 & 0x1) != 0;       // C7
+  state.update_indicator = (c7_c10 & 0x2) != 0;      // C8
+  state.interrupted_sequence = (c7_c10 & 0x4) != 0;  // C9
+  state.inhibit_display = (c7_c10 & 0x8) != 0;       // C10
+  state.magazine_serial = magazine_serial;           // C11
+  // C12-C14. Byte 13 carries C11 in bit 2 and C12, C13, C14 in bits 4, 6 and 8
+  // (§9.3.1.3 Table 2), which Hamming 8/4 delivers as D1-D4 in bits 0-3 — so
+  // the three come out least-significant-first and have to be reversed to
+  // index Table 32, which prints C12 as the most significant of them.
+  state.national_option_subset = (((c11_c14 >> 1) & 0x1) << 2) |  // C12
+                                 (((c11_c14 >> 2) & 0x1) << 1) |  // C13
+                                 ((c11_c14 >> 3) & 0x1);          // C14
   // The header that *opened* this transmission stamps it, so a rolling header
   // re-sent while the rows are still going out does not make the same
   // appearance of the page look like a series of new ones.
@@ -921,20 +1012,24 @@ std::string TeletextPageDecoder::extract_subtitle_text(
     bool last_was_space = true;  // collapses runs and trims the left edge
     for (int column = 0; column < snapshot.columns; ++column) {
       const TeletextPageCell& cell = cells[static_cast<size_t>(column)];
-      char c = ' ';
+      // Displayable cells go out as UTF-8 through the page's own G0 set, so
+      // the text reads as the page does: a UK service's 2/3 is "£", not the
+      // "#" the transmitted code would be in ASCII (§15.6.2 Table 36).
+      std::string glyph;
       if (!cell.mosaic && !cell.held_mosaic && !cell.conceal &&
           !cell.double_height_lower && !cell.parity_error &&
           (!boxed_only || cell.boxed) && cell.character > 0x20 &&
           cell.character < 0x7F) {
-        c = static_cast<char>(cell.character);
+        glyph = teletext_latin_g0_to_utf8(cell.character,
+                                          snapshot.national_option_subset);
       }
-      if (c == ' ') {
+      if (glyph.empty()) {
         if (!last_was_space) {
           row_text.push_back(' ');
         }
         last_was_space = true;
       } else {
-        row_text.push_back(c);
+        row_text += glyph;
         last_was_space = false;
       }
     }

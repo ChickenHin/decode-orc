@@ -158,7 +158,7 @@ TEST(TeletextObservationPresenterTest, PageView_MapsIdentityAndAsciiCells) {
   snapshot.cells[1][1].character = 'i';
   snapshot.cells[1][1].foreground = orc::TeletextColour::Yellow;
   snapshot.cells[1][1].background = orc::TeletextColour::Blue;
-  snapshot.cells[1][2].character = 0x23;  // English national option: £
+  snapshot.cells[1][2].character = 0x23;  // English (the default subset): £
   snapshot.cells[2][0].character = 'X';
   snapshot.cells[2][0].parity_error = true;
 
@@ -176,6 +176,22 @@ TEST(TeletextObservationPresenterTest, PageView_MapsIdentityAndAsciiCells) {
   EXPECT_EQ(view.cells[1][1].background, 4);  // blue
   EXPECT_EQ(view.cells[1][2].character, U'£');
   EXPECT_TRUE(view.cells[2][0].parity_error);
+}
+
+TEST(TeletextObservationPresenterTest, PageView_AppliesThePagesNationalOption) {
+  // The same code renders differently depending on the sub-set the page
+  // header selected (EN 300 706 §15.2, §15.6.2 Table 36) — 2/3 is "£" on an
+  // English service and "#" on a German one, whose 7/E is "ß".
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.national_option_subset =
+      static_cast<int>(orc::TeletextNationalOption::German);
+  snapshot.cells[1][0].character = 0x23;
+  snapshot.cells[1][1].character = 0x7E;
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_EQ(view.cells[1][0].character, U'#');
+  EXPECT_EQ(view.cells[1][1].character, U'ß');
 }
 
 TEST(TeletextObservationPresenterTest, PageView_MapsMosaicSixels) {

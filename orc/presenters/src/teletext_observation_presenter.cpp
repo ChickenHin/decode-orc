@@ -31,52 +31,6 @@ static_assert(
         orc::kTeletextPacketBytes,
     "TeletextPacketView::confidence must match the SDK T42 packet size");
 
-// Map a 7-bit G0 character code to Unicode: Latin G0 primary set
-// (ETSI EN 300 706 §15.6.1 Table 35) with the English national option
-// sub-set substitutions (§15.6.2 Table 36). Codes outside 0x20-0x7F render
-// as SPACE.
-char32_t latin_g0_english(uint8_t code) {
-  switch (code) {
-    // EN 300 706 §15.6.2 Table 36, English national option sub-set.
-    case 0x23:
-      return U'£';
-    case 0x24:
-      return U'$';
-    case 0x40:
-      return U'@';
-    case 0x5B:
-      return U'←';
-    case 0x5C:
-      return U'½';
-    case 0x5D:
-      return U'→';
-    case 0x5E:
-      return U'↑';
-    case 0x5F:
-      return U'#';
-    case 0x60:
-      return U'—';
-    case 0x7B:
-      return U'¼';
-    case 0x7C:
-      return U'‖';
-    case 0x7D:
-      return U'¾';
-    case 0x7E:
-      return U'÷';
-    // EN 300 706 §15.6.1 Table 35 NOTE 4: 7/F is a filled rectangle.
-    case 0x7F:
-      return U'■';
-    default:
-      break;
-  }
-  if (code < 0x20 || code > 0x7E) {
-    return U' ';
-  }
-  // Remaining Table 35 positions coincide with ASCII.
-  return static_cast<char32_t>(code);
-}
-
 // True when a 7-bit code selects a G1 block-mosaic character.
 //
 // With |blast_through|, codes 4/0-5/F remain alphanumeric capitals even in
@@ -210,7 +164,10 @@ TeletextPageView TeletextObservationPresenter::makePageView(
         out.mosaic_separated = cell.separated_mosaic;
         out.character = U' ';
       } else {
-        out.character = latin_g0_english(cell.character);
+        // The page's own G0 set: the national option sub-set its header
+        // selected, not a fixed English one (EN 300 706 §15.2, §15.6.2).
+        out.character = orc::teletext_latin_g0_to_unicode(
+            cell.character, snapshot.national_option_subset);
       }
     }
   }

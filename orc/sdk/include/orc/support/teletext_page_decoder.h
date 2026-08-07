@@ -37,6 +37,46 @@ bool teletext_odd_parity_valid(uint8_t byte);
 // §8.1). Only the low 7 bits of |value| are used.
 uint8_t teletext_odd_parity_encode(uint8_t value);
 
+// National option sub-sets a Level 1 page can select, in the order the C12,
+// C13 and C14 header bits designate them.
+//
+// ETSI EN 300 706 §15.2 Table 32 indexes the sub-set by the default G0/G2
+// designation *and* those three bits; a Level 1 page has no packet X/28 or
+// M/29 to carry a designation, so §15.2 says the sub-set "is defined by the
+// C12, C13 and C14 control bits in the page header alone" and the default
+// designation row (triplet 1 bits 14-11 = 0000) is the one that applies.
+// C12 is the most significant of the three bits, as the table prints them.
+//
+// Table 32 leaves 1 1 1 blank for this designation — no sub-set is defined —
+// and there is nothing to fall back on: Table 35's own glyphs at these
+// positions apply only when the set is reached through a packet X/26
+// (Table 35 NOTE 2). It is rendered as English.
+enum class TeletextNationalOption : uint8_t {
+  English = 0,
+  German = 1,
+  SwedishFinnishHungarian = 2,
+  Italian = 3,
+  French = 4,
+  PortugueseSpanish = 5,
+  CzechSlovak = 6,
+  Undefined = 7,
+};
+
+// Map a 7-bit G0 display code to its Unicode code point: the Latin G0 primary
+// set of ETSI EN 300 706 §15.6.1 Table 35, with the |national_option_subset|
+// substitutions of §15.6.2 Table 36 at the thirteen positions Table 35 NOTE 2
+// reserves for them (2/3, 2/4, 4/0, 5/B-5/F, 6/0 and 7/B-7/E).
+//
+// |national_option_subset| is a TeletextNationalOption, i.e. the value
+// TeletextPageSnapshot::national_option_subset carries; anything outside its
+// range is treated as English. Codes below 2/0 are spacing attributes rather
+// than characters and return SPACE.
+char32_t teletext_latin_g0_to_unicode(uint8_t code, int national_option_subset);
+
+// teletext_latin_g0_to_unicode() encoded as UTF-8, for text output (subtitle
+// cues and the like) rather than a glyph grid.
+std::string teletext_latin_g0_to_utf8(uint8_t code, int national_option_subset);
+
 // Level 1 display colours in spacing-attribute code order.
 // ETSI EN 300 706 §12.2 Table 26: alpha colour codes 0/0-0/7 and mosaic
 // colour codes 1/0-1/7 select black through white in this order.
@@ -131,7 +171,10 @@ struct TeletextPageSnapshot {
   bool interrupted_sequence = false;  // C9
   bool inhibit_display = false;       // C10
   bool magazine_serial = false;       // C11
-  int national_option_subset = 0;     // C12-C14 (EN 300 706 §15.2)
+  // C12-C14 as a TeletextNationalOption: which national option sub-set the
+  // page's G0 set uses (EN 300 706 §15.2 Table 32). C12 is the most
+  // significant bit, so the value indexes Table 32 as printed.
+  int national_option_subset = 0;
 
   // Field indices (as passed to process_packet()) of the header packet that
   // *opened* this transmission and of the last packet that contributed to

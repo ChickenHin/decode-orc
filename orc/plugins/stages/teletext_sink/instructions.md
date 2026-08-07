@@ -17,7 +17,7 @@ For each frame in the input range, the stage probes the candidate VBI lines of b
 
 The output is a flat, headerless sequence of 42-byte packets in **transmission coding**: Hamming 8/4 on addressing bytes and odd parity on display bytes are preserved, so consumers decode the stream exactly as they would a live transmission. What the coding does not promise is that every byte is the one this copy of the line carried. By default the stage mends display bytes that fail their parity check and combines the repeated transmissions of each page row (`repair_damaged_bytes` and `squash_repeated_rows` below), which is most of what makes a tape readable; turn both off and the packets are written exactly as recovered.
 
-Optionally, the stage can additionally decode the subtitle page (pages flagged C6 in the header control bits, conventionally page 888 in the UK) and write the recovered subtitles as a SubRip (`.srt`) file next to the packet stream. Cue timing derives from the field number at 50 fields/s; colour, positioning, and other Level 1 presentation attributes are dropped — SRT carries the plain text.
+Optionally, the stage can additionally decode the subtitle page (pages flagged C6 in the header control bits, conventionally page 888 in the UK) and write the recovered subtitles as a SubRip (`.srt`) file next to the packet stream. Cue timing derives from the field number at 50 fields/s; colour, positioning, and other Level 1 presentation attributes are dropped — SRT carries the plain text. Text is written as UTF-8 through the national option sub-set the page header selects (ETSI EN 300 706 §15.6.2 Table 36), so a UK page's `£`, `½` and `¼` reach the file as themselves rather than as the ASCII the transmitted codes would be.
 
 ## Parameters
 
