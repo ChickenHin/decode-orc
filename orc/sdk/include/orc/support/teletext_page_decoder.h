@@ -95,6 +95,25 @@ struct TeletextPageSnapshot {
   // kColumns by consumers so a service that displays fewer can say so.
   int columns = kColumns;
 
+  // Whether character codes 4/0-5/F keep their alphanumeric meaning while
+  // mosaic graphics are selected — "blast-through", ETSI EN 300 706 §15.7.1
+  // Table 47 NOTE 1 — so that capitals can be written into a graphic without
+  // leaving mosaic mode. True on 625 lines.
+  //
+  // The 525-line recordings say otherwise: their page graphics run codes from
+  // that range in among the mosaic ones (the service logo alternates 6/0 and
+  // 7/E with 5/7 and 5/F, identically in every copy of the row), and read as
+  // mosaics those are the block patterns the drawing needs — 5/F being a solid
+  // block. Rendered as capitals they put stray letters through the artwork.
+  // Nothing in ITU-R BT.653 settles it: §5.2.2 describes mosaic coding without
+  // giving a code table, so this is what the material shows rather than what a
+  // standard states.
+  //
+  // A renderer reads this to decide whether a cell in mosaic mode holding such
+  // a code is a character or a block; nothing else about the page depends on
+  // it.
+  bool mosaic_blast_through = true;
+
   // Displayed magazine number 1-8. Transmission magazine 0 is displayed as
   // magazine 8 (EN 300 706 §3.1 "page number" convention: page 100 = 1/00).
   int magazine = 8;
@@ -187,16 +206,28 @@ struct TeletextSubtitleCue {
  * way a 34-byte packet can deliver the 40-column page the standard's own
  * addressing, header layout and display model assume.
  *
- * An extension packet is addressed to magazine M|4, which leaves the service
- * the four magazines 8, 1, 2 and 3 for its pages. Its 32 display bytes are four
- * groups of 8 carrying columns 32-39 of four consecutive rows, and its packet
- * number identifies that block of four rather than naming a row: it rounds down
- * to a multiple of four, so packets numbered 1, 4, 8, 12, 16 and 20 complete
- * rows 0-3, 4-7, 8-11, 12-15, 16-19 and 20-23. The first block's packets carry
- * 1 rather than 0 because 0 is the page header's own packet number. Row 0 is
- * therefore extended like any other: on the reference recordings its columns
- * 32-39 carry the service name, which is where a 40-column receiver photograph
- * of the same service shows it.
+ * An extension packet is addressed to magazine M|4. Its 32 display bytes are
+ * four groups of 8 carrying columns 32-39 of four consecutive rows, and its
+ * packet number identifies that block of four rather than naming a row: it
+ * rounds down to a multiple of four, so packets numbered 1, 4, 8, 12, 16 and 20
+ * complete rows 0-3, 4-7, 8-11, 12-15, 16-19 and 20-23. The first block's
+ * packets carry 1 rather than 0 because 0 is the page header's own packet
+ * number. Row 0 is therefore extended like any other: on the reference
+ * recordings its columns 32-39 carry the service name, which is where a
+ * 40-column receiver photograph of the same service shows it.
+ *
+ * Magazine M|4 is only borrowed where the service is not using it for pages.
+ * The reference recordings carry pages in magazines 8, 1, 2, 3 *and* 4 (test
+ * pages 400-403), with extensions only in 5 and 6 — so which of 4 to 7 are
+ * extension carriers has to be read from the stream rather than assumed. The
+ * signal is exact: a magazine carrying pages opens every one of them with an
+ * X/0 header (§7.2.1), and an extension carrier, having no pages, never sends
+ * one, and sends nothing but the six block numbers. A magazine 4-7 is therefore
+ * taken to carry pages the moment an X/0 arrives in it, and to be an extension
+ * carrier once it has sent a page's worth of block-numbered packets and nothing
+ * else. Its packets are discarded until then, because an extension applied to a
+ * page it was never meant for cannot be taken back — a squasher keeps every
+ * copy — while ones discarded here come round again with the next cycle.
  *
  * A row that gets no extension shows spaces there, as it would on a receiver.
  *
@@ -395,6 +426,16 @@ class TeletextPageDecoder {
   // to process_packet() less the MRAG. Equal to columns_ on 625 lines; 32 of
   // the 40 on 525, the rest arriving in row-extension packets.
   int head_columns_ = TeletextPageSnapshot::kColumns;
+
+  // Magazines seen to carry pages of their own, which for 4 to 7 is what says
+  // they are not row-extension carriers (see the class comment). Indices 0 to 3
+  // are unused: a service's own magazines are never read as carriers.
+  std::array<bool, 8> magazine_carries_pages_{};
+
+  // Consecutive block-numbered packets seen from magazines 4 to 7 while it is
+  // still unsettled whether they carry pages, counted to the threshold that
+  // decides it and reset by any packet numbered otherwise.
+  std::array<int, 8> magazine_extension_evidence_{};
 
   // Erase epoch of |identity| (0 until its first C4 header).
   int erase_epoch(const PageIdentity& identity) const;

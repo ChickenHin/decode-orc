@@ -142,9 +142,9 @@ struct TeletextPageView {
   static constexpr int kRows = 25;     ///< header row 0 + display rows 1-24
   static constexpr int kColumns = 40;  ///< EN 300 706 §9.3.2: 40 bytes/row
 
-  /// Display columns the service transmits: kColumns on 625-line systems, 32
-  /// on 525-line ones (ITU-R BT.653 Table 1b §3.4). Cells from here to
-  /// kColumns are no part of the page; a renderer draws this many wide.
+  /// Display columns to draw. kColumns on both services: the Level 1 display
+  /// is a 40-column grid whatever the packet length, and a row a service left
+  /// short simply shows spaces to the right of what it sent.
   int columns = kColumns;
 
   int magazine = 8;        ///< Displayed magazine number 1-8

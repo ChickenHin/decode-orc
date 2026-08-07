@@ -849,18 +849,6 @@ std::array<uint8_t, kTeletextPacketBytes> make_525_time_filling_header(
   return make_525_header(magazine, 0xFF, 0x3F7F & 0x1FFF);
 }
 
-class Teletext525PageDecoderTest : public TeletextPageDecoderTest {
- protected:
-  // Every packet of a 525-line stream carries its own length; the decoder
-  // takes the row width from it.
-  void feed(const std::array<uint8_t, kTeletextPacketBytes>& packet,
-            int64_t field_index) {
-    decoder_.process_packet(packet, field_index,
-                            TeletextPageDecoder::kAutoSource,
-                            /*confidence=*/nullptr, kTeletext525PacketBytes);
-  }
-};
-
 // A 525-line row-extension packet: addressed to magazine|4, carrying columns
 // 32-39 of the block of four display rows |packet_number| identifies, as four
 // groups of eight (see the TeletextPageDecoder class comment). |tails| supplies
@@ -881,6 +869,29 @@ std::array<uint8_t, kTeletextPacketBytes> make_525_extension(
   }
   return packet;
 }
+
+class Teletext525PageDecoderTest : public TeletextPageDecoderTest {
+ protected:
+  // Every packet of a 525-line stream carries its own length; the decoder
+  // takes the row width from it.
+  void feed(const std::array<uint8_t, kTeletextPacketBytes>& packet,
+            int64_t field_index,
+            int64_t source = TeletextPageDecoder::kAutoSource) {
+    decoder_.process_packet(packet, field_index, source,
+                            /*confidence=*/nullptr, kTeletext525PacketBytes);
+  }
+
+  // Show the decoder that magazine|4 carries row extensions rather than pages
+  // of its own, which it learns from a page's worth of block-numbered packets
+  // (see the TeletextPageDecoder class comment). Fed before any header, so the
+  // packets themselves are dropped for want of an open page and contribute
+  // nothing to what the tests then assert.
+  void settle_extension_carrier(int magazine) {
+    for (const int block : {1, 4, 8, 12, 16, 20}) {
+      feed(make_525_extension(magazine, block, {}), -1);
+    }
+  }
+};
 
 TEST_F(Teletext525PageDecoderTest, ShortPacketsStillGiveTheFortyColumnGrid) {
   // The display grid is 40 columns whatever the packet length; a service that
@@ -951,6 +962,7 @@ TEST_F(Teletext525PageDecoderTest, SubtitleTextStopsAtTheServiceWidth) {
 }
 
 TEST_F(Teletext525PageDecoderTest, RowExtensionPacketsCompleteTheFortyColumns) {
+  settle_extension_carrier(1);
   feed(make_525_header(1, 0x00, 0), 0);
   feed(make_525_row(1, 4, "The San Francisco 49ers have won"), 1);
   feed(make_525_row(1, 5, "NFL title game 28-3 over the Chi"), 2);
@@ -966,6 +978,7 @@ TEST_F(Teletext525PageDecoderTest, RowExtensionPacketsCompleteTheFortyColumns) {
 }
 
 TEST_F(Teletext525PageDecoderTest, TheFirstBlockIsNumberedOneAndServesRowZero) {
+  settle_extension_carrier(1);
   // The extension packet number identifies a block of four rows, not a row, so
   // the first block's packets carry 1 — 0 being the page header's own number —
   // and serve rows 0 to 3. It must complete the header rather than being read
@@ -987,21 +1000,43 @@ TEST_F(Teletext525PageDecoderTest, TheFirstBlockIsNumberedOneAndServesRowZero) {
   EXPECT_EQ(row_text(page, 3), std::string(32, 'X') + "row thre");
 }
 
-TEST_F(Teletext525PageDecoderTest, BlocksAreIdentifiedByRoundingTheNumberDown) {
-  // Blocks start at multiples of four; a packet numbered inside one serves that
-  // block, which is what lets the first block be numbered 1 at all.
+TEST_F(Teletext525PageDecoderTest, SixBlocksCoverTheWholePage) {
+  settle_extension_carrier(1);
+  // The six packet numbers the scheme uses tile rows 0 to 23 exactly once —
+  // which is what says packet 1 serves rows 0-3 rather than 1-4, the reading
+  // that would leave row 0 unserved and row 4 claimed twice.
   feed(make_525_header(1, 0x00, 0), 0);
-  feed(make_525_row(1, 5, std::string(32, 'X')), 1);
-  feed(make_525_extension(1, 7, {"", "tail"}), 2);
+  for (int row = 1; row < TeletextPageSnapshot::kRows; ++row) {
+    feed(make_525_row(1, row, std::string(32, 'X')), 1);
+  }
+  for (const int block : {1, 4, 8, 12, 16, 20}) {
+    feed(make_525_extension(
+             1, block,
+             {std::to_string(block) + "a", std::to_string(block) + "b",
+              std::to_string(block) + "c", std::to_string(block) + "d"}),
+         2);
+  }
   feed(make_525_time_filling_header(1), 3);
   decoder_.finalize(10);
 
   ASSERT_FALSE(snapshots_.empty());
-  // Packet 7 is in the block starting at row 4, so its second group is row 5.
-  EXPECT_EQ(row_text(snapshots_.front(), 5), std::string(32, 'X') + "tail");
+  const auto& page = snapshots_.front();
+  const char* kGroup = "abcd";
+  for (const int block : {1, 4, 8, 12, 16, 20}) {
+    const int first_row = block == 1 ? 0 : block;
+    for (int group = 0; group < 4; ++group) {
+      const int row = first_row + group;
+      const std::string expected =
+          std::to_string(block) + std::string(1, kGroup[group]);
+      const std::string actual = row_text(page, row);
+      EXPECT_EQ(actual.substr(actual.size() - expected.size()), expected)
+          << "row " << row << " read \"" << actual << "\"";
+    }
+  }
 }
 
 TEST_F(Teletext525PageDecoderTest, ExtensionColumnsSurviveARollingHeader) {
+  settle_extension_carrier(1);
   // A re-sent header rewrites row 0's own display bytes; the extension columns
   // came from another packet and it says nothing about them.
   feed(make_525_header(1, 0x25, 0, {}, "20:37:21 Mon Jan  9 P125"), 0);
@@ -1017,6 +1052,7 @@ TEST_F(Teletext525PageDecoderTest, ExtensionColumnsSurviveARollingHeader) {
 
 TEST_F(Teletext525PageDecoderTest,
        ADamagedExtensionByteNeverReplacesACleanOne) {
+  settle_extension_carrier(1);
   feed(make_525_header(1, 0x00, 0), 0);
   feed(make_525_row(1, 8, std::string(32, 'X')), 1);
   feed(make_525_extension(1, 8, {"ABCDEFGH"}), 2);
@@ -1034,6 +1070,7 @@ TEST_F(Teletext525PageDecoderTest,
 }
 
 TEST_F(Teletext525PageDecoderTest, RowsWithNoExtensionKeepBlankColumns) {
+  settle_extension_carrier(1);
   // Widening the page must not turn the columns of an unextended row into
   // whatever the short packet left behind.
   feed(make_525_header(1, 0x00, 0), 0);
@@ -1055,6 +1092,7 @@ TEST_F(Teletext525PageDecoderTest, RowsWithNoExtensionKeepBlankColumns) {
 }
 
 TEST_F(Teletext525PageDecoderTest, ExtensionColumnsSurviveRowSquashing) {
+  settle_extension_carrier(1);
   // With a squasher attached the head columns come from the combined copies;
   // the extension columns are not display rows and must still reach the page.
   orc::TeletextRowSquasher squasher;
@@ -1075,6 +1113,7 @@ TEST_F(Teletext525PageDecoderTest, ExtensionColumnsSurviveRowSquashing) {
 }
 
 TEST_F(Teletext525PageDecoderTest, RepeatedExtensionsCorrectEachOther) {
+  settle_extension_carrier(1);
   // The point of squashing the extension columns: a damaged copy loses to the
   // clean copies of the same columns, exactly as a damaged display row does.
   orc::TeletextRowSquasher squasher;
@@ -1105,7 +1144,44 @@ TEST_F(Teletext525PageDecoderTest, RepeatedExtensionsCorrectEachOther) {
   }
 }
 
+TEST_F(Teletext525PageDecoderTest, TheHeaderExtensionIsSquashedNotItsClock) {
+  settle_extension_carrier(1);
+  // The header's own display bytes carry a live clock and cannot be combined
+  // across transmissions, but the columns its extension packet brings hold the
+  // service name and can — which matters because they are otherwise the one
+  // part of a page that never gets the benefit of a repeat.
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  for (int pass = 0; pass < 3; ++pass) {
+    const int64_t field = pass * 4;
+    feed(make_525_header(1, 0x00, 0, {},
+                         "20:37:2" + std::to_string(pass) + " Mon Jan  9 P100"),
+         field);
+    auto extension = make_525_extension(1, 1, {" ELECTRA"});
+    if (pass == 1) {
+      extension[3] ^= 0x01;  // breaks odd parity on the name's second letter
+      extension[4] ^= 0x01;
+    }
+    feed(extension, field + 1, field + 1);
+  }
+  feed(make_525_time_filling_header(1), 100);
+  decoder_.finalize(200);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.back();
+  // The clock is the last one transmitted, the name the combined copies.
+  EXPECT_EQ(row_text(page, 0), "        20:37:22 Mon Jan  9 P100 ELECTRA");
+  for (int column = 32; column < TeletextPageSnapshot::kColumns; ++column) {
+    EXPECT_FALSE(page.cells[0][static_cast<size_t>(column)].parity_error)
+        << "column " << column;
+  }
+  // And it is still not counted as a squashed row: row 0 rests on its header.
+  EXPECT_EQ(page.row_copies[0], 0);
+}
+
 TEST_F(Teletext525PageDecoderTest, ExtensionCopiesDoNotCountAsRowCopies) {
+  settle_extension_carrier(1);
   // "How many times was this row transmitted" means the display packets; the
   // packets that only extend it must not inflate the count a consumer weighs
   // its confidence in the row by.
@@ -1123,6 +1199,110 @@ TEST_F(Teletext525PageDecoderTest, ExtensionCopiesDoNotCountAsRowCopies) {
 
   ASSERT_FALSE(snapshots_.empty());
   EXPECT_EQ(snapshots_.back().row_copies[8], 2);
+}
+
+TEST_F(Teletext525PageDecoderTest, AShortPacketServiceHasNoBlastThroughRegion) {
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_time_filling_header(1), 1);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_FALSE(snapshots_.front().mosaic_blast_through);
+}
+
+TEST_F(TeletextPageDecoderTest, A625LineServiceKeepsItsBlastThroughRegion) {
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_time_filling_header(1), 1);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_TRUE(snapshots_.front().mosaic_blast_through);
+}
+
+TEST_F(Teletext525PageDecoderTest, AMagazineWithPagesOfItsOwnIsNotACarrier) {
+  // Magazines 4-7 are only borrowed for row extensions where the service is not
+  // using them for pages. This one is: it sends headers, so its packets are its
+  // own page's rows and must be decoded as such.
+  feed(make_525_header(4, 0x00, 0, {}, "CLOCK CRACKER 1"), 0);
+  feed(make_525_row(4, 4, std::string(32, 'Z')), 1);
+  feed(make_525_time_filling_header(4), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(page.magazine, 4);
+  EXPECT_EQ(row_text(page, 0), "        CLOCK CRACKER 1");
+  EXPECT_EQ(row_text(page, 4), std::string(32, 'Z'));
+}
+
+TEST_F(Teletext525PageDecoderTest, ADisplayRowNumberStopsTheCarrierReading) {
+  // A magazine that sends a packet numbered anything but a block number is
+  // transmitting rows, so the evidence for it being a carrier starts again —
+  // otherwise the block-numbered rows of a page magazine would be taken for
+  // extensions before its first header arrived.
+  for (int pass = 0; pass < 4; ++pass) {
+    for (const int row : {1, 2, 3, 4, 5, 6, 7, 8}) {
+      feed(make_525_extension(1, row, {"XXXXXXXX"}), pass);
+    }
+  }
+  feed(make_525_header(1, 0x00, 0), 10);
+  feed(make_525_row(1, 4, std::string(32, 'Y')), 11);
+  feed(make_525_time_filling_header(1), 12);
+  decoder_.finalize(20);
+
+  ASSERT_FALSE(snapshots_.empty());
+  // Never settled as a carrier, so nothing reached the page's columns 32-39.
+  EXPECT_EQ(row_text(snapshots_.front(), 4), std::string(32, 'Y'));
+}
+
+TEST_F(Teletext525PageDecoderTest, AMisreadAddressDoesNotUnsettleACarrier) {
+  // The MRAG is Hamming 8/4, which mis-corrects on a burst, so a settled
+  // carrier does occasionally address a packet to something that is not a
+  // block. Taking that as evidence of a change of role cost the six packets
+  // that followed it — a whole page's extensions — on real media.
+  settle_extension_carrier(1);
+  feed(make_525_extension(1, 7, {"MISREAD"}), 0);   // not a block number
+  feed(make_525_extension(1, 21, {"MISREAD"}), 0);  // nor this
+  feed(make_525_header(1, 0x00, 0), 1);
+  feed(make_525_row(1, 8, std::string(32, 'X')), 2);
+  feed(make_525_extension(1, 8, {"recovery"}), 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(row_text(snapshots_.front(), 8), std::string(32, 'X') + "recovery");
+}
+
+TEST_F(Teletext525PageDecoderTest, AMisreadHeaderDoesNotUnsettleACarrier) {
+  // Same failure from the other side: one packet of a settled carrier whose
+  // address mis-corrected to X/0 used to mark the magazine as carrying pages
+  // of its own, which disabled its extensions for the rest of the recording.
+  settle_extension_carrier(1);
+  auto misread = make_525_extension(1, 0, {"MISREAD"});
+  feed(misread, 0);
+  feed(make_525_header(1, 0x00, 0), 1);
+  feed(make_525_row(1, 8, std::string(32, 'X')), 2);
+  feed(make_525_extension(1, 8, {"recovery"}), 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(snapshots_.front().magazine, 1);
+  EXPECT_EQ(row_text(snapshots_.front(), 8), std::string(32, 'X') + "recovery");
+}
+
+TEST_F(Teletext525PageDecoderTest, ExtensionsAreHeldUntilTheCarrierIsKnown) {
+  // Until the role is settled the packets are discarded, not guessed at: a
+  // squasher keeps every copy it is given, so one written to the wrong page
+  // could never be taken back.
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 8, std::string(32, 'X')), 1);
+  feed(make_525_extension(1, 8, {"TOOEARLY"}), 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(row_text(snapshots_.front(), 8), std::string(32, 'X'));
 }
 
 TEST_F(TeletextPageDecoderTest, A625LineStreamKeepsMagazinesFourToSeven) {

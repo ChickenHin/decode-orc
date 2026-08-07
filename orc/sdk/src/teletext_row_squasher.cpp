@@ -24,13 +24,19 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
                                   const TeletextRowBytes& bytes, int64_t source,
                                   const TeletextRowConfidence* confidence,
                                   size_t first_column, size_t column_count) {
-  if (row < 1 || row >= static_cast<int>(
+  if (row < 0 || row >= static_cast<int>(
                             std::tuple_size<decltype(PageRows::rows)>::value)) {
-    return;  // header row and enhancement packets are not squashed
+    return;  // enhancement packets are not squashed
   }
   first_column = std::min(first_column, kTeletextRowBytes);
   column_count = std::min(column_count, kTeletextRowBytes - first_column);
   if (column_count == 0) {
+    return;
+  }
+  if (row == 0 && first_column == 0) {
+    // The header packet's own display bytes carry a live clock, which differs
+    // between transmissions of the same page by design; only columns a separate
+    // packet carries can be combined (see the class comment).
     return;
   }
 
@@ -106,7 +112,7 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
     covered->fill(false);
   }
   const auto it = pages_.find(key);
-  if (it == pages_.end() || row < 1 ||
+  if (it == pages_.end() || row < 0 ||
       row >=
           static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
     return std::nullopt;
@@ -213,7 +219,7 @@ void TeletextRowSquasher::erase_page(const TeletextPageKey& key) {
 size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key,
                                        int row) const {
   const auto it = pages_.find(key);
-  if (it == pages_.end() || row < 1 ||
+  if (it == pages_.end() || row < 0 ||
       row >=
           static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
     return 0;

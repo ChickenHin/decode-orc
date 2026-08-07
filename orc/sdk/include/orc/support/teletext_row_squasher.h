@@ -114,9 +114,12 @@ struct TeletextPageKey {
  * window is rebuilt — replaces its earlier copy instead of stuffing the
  * ballot.
  *
- * Header packets (X/0) are deliberately not squashed by this class: their
- * display bytes carry a real-time clock (§9.3.1.4) that legitimately differs
- * between transmissions of the same page.
+ * A header packet's own display bytes are deliberately not squashed: they carry
+ * a real-time clock (§9.3.1.4) that legitimately differs between transmissions
+ * of the same page, so a copy of row 0 starting at column 0 is refused. Columns
+ * further along row 0 are accepted — where a service carries part of its header
+ * row in a separate packet (525-line WST's row extensions, which put the
+ * service name at columns 32-39) that part holds still and is worth combining.
  *
  * Thread safety: none; confine an instance to one thread.
  */

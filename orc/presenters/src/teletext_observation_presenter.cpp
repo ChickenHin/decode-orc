@@ -77,11 +77,21 @@ char32_t latin_g0_english(uint8_t code) {
   return static_cast<char32_t>(code);
 }
 
-// True when a 7-bit code selects a G1 block-mosaic character. Codes 4/0-5/F
-// remain alphanumeric capitals even in mosaic mode (EN 300 706 §15.7.1
-// Table 47 NOTE 1, "blast-through").
-bool is_mosaic_code(uint8_t code) {
-  return (code >= 0x20 && code <= 0x3F) || (code >= 0x60 && code <= 0x7F);
+// True when a 7-bit code selects a G1 block-mosaic character.
+//
+// With |blast_through|, codes 4/0-5/F remain alphanumeric capitals even in
+// mosaic mode (EN 300 706 §15.7.1 Table 47 NOTE 1). Without it every code from
+// 2/0 up is a mosaic — which is what the 525-line service's own graphics need
+// (see TeletextPageSnapshot::mosaic_blast_through). Codes below 2/0 are
+// spacing attributes and never reach here as characters.
+bool is_mosaic_code(uint8_t code, bool blast_through) {
+  if (code < 0x20) {
+    return false;
+  }
+  if (!blast_through) {
+    return true;
+  }
+  return code <= 0x3F || code >= 0x60;
 }
 
 // Extract the six sixel bits of a G1 mosaic code (EN 300 706 §15.7.1
@@ -193,7 +203,8 @@ TeletextPageView TeletextObservationPresenter::makePageView(
 
       // Held-mosaic cells carry the held character; separated_mosaic then
       // reflects the held character's original mode.
-      if ((cell.mosaic || cell.held_mosaic) && is_mosaic_code(cell.character)) {
+      if ((cell.mosaic || cell.held_mosaic) &&
+          is_mosaic_code(cell.character, snapshot.mosaic_blast_through)) {
         out.mosaic = true;
         out.mosaic_pattern = mosaic_sixels(cell.character);
         out.mosaic_separated = cell.separated_mosaic;

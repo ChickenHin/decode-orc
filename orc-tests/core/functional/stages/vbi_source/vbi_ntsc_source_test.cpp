@@ -573,16 +573,18 @@ TEST(VBINTSCSource, ThePageDecoderAssemblesReadable40ColumnPages) {
   // the extension packets each serve four rows, and one attributed to the wrong
   // block puts eight characters into four wrong places at once.
   //
-  // Magazine 8 is excluded. It carries this service's time-filling test
-  // pattern, which sends an extension packet against every row rather than one
-  // per block, so its copies of a block genuinely disagree with each other.
+  // Only the magazines that carry the service's content. This capture also
+  // carries test pages — magazine 8's rolling character ramp and magazine 4's
+  // "CLOCK CRACKER", whose display bytes are chosen to stress a receiver's
+  // clock recovery rather than to satisfy odd parity — and neither has an
+  // extension carrier, so they would only dilute both figures.
   const int kHeadColumns = static_cast<int>(kTeletext525PacketBytes) - 2;
   size_t head_cells = 0;
   size_t damaged_head_cells = 0;
   size_t extension_cells = 0;
   size_t damaged_extension_cells = 0;
   for (const auto& page : survey.pages) {
-    if (page.magazine == 8) continue;
+    if (page.magazine != 1 && page.magazine != 2) continue;
     for (int row = 1; row < TeletextPageSnapshot::kRows; ++row) {
       if (!page.row_received[static_cast<size_t>(row)]) continue;
       for (int column = 0; column < page.columns; ++column) {
@@ -597,6 +599,33 @@ TEST(VBINTSCSource, ThePageDecoderAssemblesReadable40ColumnPages) {
       }
     }
   }
+  // And they reach every page, not just the one being looked at. A single
+  // mis-corrected address in the carrier magazine used to disable extensions
+  // for every page that followed it, which shows up here and nowhere else: a
+  // page that lost them still renders, just 32 columns wide.
+  size_t pages_with_extension_content = 0;
+  size_t pages_with_a_carrier = 0;
+  for (const auto& page : survey.pages) {
+    if (page.magazine != 1 && page.magazine != 2) continue;
+    ++pages_with_a_carrier;
+    bool any = false;
+    for (int row = 0; row < TeletextPageSnapshot::kRows && !any; ++row) {
+      for (int column = kHeadColumns; column < page.columns; ++column) {
+        if (page.cells[static_cast<size_t>(row)][static_cast<size_t>(column)]
+                .character != 0x20) {
+          any = true;
+          break;
+        }
+      }
+    }
+    pages_with_extension_content += any ? 1 : 0;
+  }
+  std::cout << "Electra: " << pages_with_extension_content << " of "
+            << pages_with_a_carrier
+            << " pages in a magazine with a carrier hold extension content\n";
+  ASSERT_GT(pages_with_a_carrier, 20u);
+  EXPECT_GT(pages_with_extension_content, pages_with_a_carrier * 3 / 4);
+
   ASSERT_GT(extension_cells, 1000u);
   const double head_damage =
       static_cast<double>(damaged_head_cells) / static_cast<double>(head_cells);

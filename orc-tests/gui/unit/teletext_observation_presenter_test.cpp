@@ -209,6 +209,33 @@ TEST(TeletextObservationPresenterTest, PageView_MapsMosaicSixels) {
   EXPECT_EQ(view.cells[3][3].mosaic_pattern, 0x10);
 }
 
+TEST(TeletextObservationPresenterTest,
+     PageView_DrawsBlastThroughCodesAsMosaics) {
+  // A page whose service has no blast-through region reads every code from 2/0
+  // up as a mosaic, so the codes that would otherwise put capitals through a
+  // drawing become the block patterns the drawing is made of.
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.mosaic_blast_through = false;
+  auto& solid = snapshot.cells[3][0];
+  solid.character = 0x5F;  // 'link' in the 625-line reading; solid block here
+  solid.mosaic = true;
+  auto& partial = snapshot.cells[3][1];
+  partial.character = 0x57;  // 'W' in the 625-line reading
+  partial.mosaic = true;
+  auto& alpha = snapshot.cells[3][2];
+  alpha.character = 'A';
+  alpha.mosaic = false;  // not in mosaic mode: still a letter
+
+  const auto view = TeletextObservationPresenter::makePageView(snapshot);
+
+  EXPECT_TRUE(view.cells[3][0].mosaic);
+  EXPECT_EQ(view.cells[3][0].mosaic_pattern, 0x3F);
+  EXPECT_TRUE(view.cells[3][1].mosaic);
+  EXPECT_EQ(view.cells[3][1].mosaic_pattern, 0x37);
+  EXPECT_FALSE(view.cells[3][2].mosaic);
+  EXPECT_EQ(view.cells[3][2].character, U'A');
+}
+
 TEST(TeletextObservationPresenterTest, PageView_SummarisesRecovery) {
   orc::TeletextPageSnapshot snapshot;
   snapshot.row_received[0] = true;  // header row: not a display row
