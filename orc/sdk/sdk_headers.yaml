@@ -514,7 +514,7 @@ headers:
     domain: ""
     deprecated: false
     since_abi: ""
-    notes: "PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues"
+    notes: "WST teletext page decoder (625 and 525 line) producing Level 1 snapshots and subtitle cues"
   - path: orc/support/teletext_recovery_stats.h
     tier: support
     domain: ""
@@ -532,7 +532,7 @@ headers:
     domain: ""
     deprecated: false
     since_abi: ""
-    notes: "PAL WST teletext data-line slicer producing T42 packets"
+    notes: "WST teletext data-line slicer producing 42-byte (625 line) or 34-byte (525 line) packets"
   - path: orc/support/vbi_types.h
     tier: support
     domain: ""

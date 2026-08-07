@@ -172,10 +172,10 @@ plugin at the author's convenience.
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
-| `<orc/support/teletext_page_decoder.h>` | PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues |
+| `<orc/support/teletext_page_decoder.h>` | WST teletext page decoder (625 and 525 line) producing Level 1 snapshots and subtitle cues |
 | `<orc/support/teletext_recovery_stats.h>` | Accumulates teletext recovery outcomes into a diagnostic profile of a run |
 | `<orc/support/teletext_row_squasher.h>` | Combines repeated copies of a teletext page row into one best-estimate row |
-| `<orc/support/teletext_slicer.h>` | PAL WST teletext data-line slicer producing T42 packets |
+| `<orc/support/teletext_slicer.h>` | WST teletext data-line slicer producing 42-byte (625 line) or 34-byte (525 line) packets |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
 

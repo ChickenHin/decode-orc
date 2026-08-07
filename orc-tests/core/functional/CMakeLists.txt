@@ -165,3 +165,37 @@ if(TARGET orc-vbi-source)
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "functional\;sources")
 endif()
+
+# The teletext analysis sink end to end: the reference 625-line and 525-line
+# WST captures, read through the VBI source stage and decoded by the sink, with
+# the exported packet stream compared against golden data. Real media on disk,
+# so functional; the samples are not checked in (test-data/ is ignored), so the
+# tests skip when they are absent.
+if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-analysis-sink)
+    add_executable(orc-core-functional-tests-teletext-analysis-sink
+        stages/teletext_analysis_sink/teletext_analysis_pipeline_test.cpp
+    )
+    target_include_directories(orc-core-functional-tests-teletext-analysis-sink PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/core/include
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-core-functional-tests-teletext-analysis-sink
+        orc-core
+        orc-vbi-source
+        orc-stage-plugin-teletext-analysis-sink
+        GTest::gmock_main
+    )
+    if(TARGET orc-stage-plugin-vbi-source)
+        target_link_libraries(orc-core-functional-tests-teletext-analysis-sink
+            orc-stage-plugin-vbi-source)
+    endif()
+    target_compile_definitions(orc-core-functional-tests-teletext-analysis-sink PRIVATE
+        ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
+    )
+    gtest_discover_tests(orc-core-functional-tests-teletext-analysis-sink
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;sinks")
+endif()
