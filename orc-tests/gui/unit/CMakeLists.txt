@@ -99,8 +99,7 @@ orc_add_gui_unit_tests(
             quick_project_planner_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
-            teletext_observation_presenter_test.cpp
-            teletext_page_assembler_test.cpp
+            teletext_analysis_presenter_test.cpp
             vectorscope_geometry_test.cpp
 )
 

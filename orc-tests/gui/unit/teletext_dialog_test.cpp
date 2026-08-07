@@ -1,7 +1,7 @@
 /*
  * File:        teletext_dialog_test.cpp
  * Module:      orc-tests/gui/unit
- * Purpose:     Tier 3 offscreen tests for the teletext page preview dialog
+ * Purpose:     Tier 3 offscreen tests for the teletext analysis page viewer
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -17,7 +17,7 @@
 #include <QPalette>
 #include <QTableWidget>
 
-#include "support/teletext_packet_fixtures.h"
+#include "support/teletext_page_fixtures.h"
 #include "teletextdialog.h"
 #include "teletextpagewidget.h"
 
@@ -44,45 +44,26 @@ QApplication& ensureApplication() {
   return *app;
 }
 
-// Deliver a three-frame window where frame 1 carries page 100.
-void deliverPage100Window(TeletextDialog& dialog) {
-  dialog.setCurrentFrame(2);
-  for (const uint64_t frame : dialog.framesNeedingData()) {
-    if (frame == 1) {
-      dialog.deliverFrameData(
-          true, frame * 2,
-          makeFieldView({makeHeaderPacket(1, 0x00),
-                         makeRowPacket(1, 1, "HELLO TELETEXT")}),
-          makeFieldView({makeTimeFillingHeader(1)}));
-    } else {
-      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
-                              makeEmptyFieldView());
-    }
-  }
+// One trigger run's worth of results: page 100 seen once early in the range.
+orc::presenters::TeletextAnalysisView makePage100Catalogue() {
+  orc::presenters::TeletextAnalysisView view;
+  view.pages.push_back(makeCataloguedPage(1, 0x00, "HELLO TELETEXT",
+                                          /*first_seen_frame=*/1,
+                                          /*last_seen_frame=*/1));
+  view.summary.frames_analysed = 12;
+  view.summary.fields_with_data = 2;
+  view.summary.packets_recovered = 4;
+  return view;
 }
 
-// Deliver a three-frame window carrying page 100 (frame 1) and page 888
-// (frame 2).
-void deliverTwoPageWindow(TeletextDialog& dialog) {
-  dialog.setCurrentFrame(2);
-  for (const uint64_t frame : dialog.framesNeedingData()) {
-    if (frame == 1) {
-      dialog.deliverFrameData(
-          true, frame * 2,
-          makeFieldView({makeHeaderPacket(1, 0x00),
-                         makeRowPacket(1, 1, "HELLO TELETEXT")}),
-          makeFieldView({makeTimeFillingHeader(1)}));
-    } else if (frame == 2) {
-      dialog.deliverFrameData(
-          true, frame * 2,
-          makeFieldView({makeHeaderPacket(8, 0x88),
-                         makeRowPacket(8, 1, "SUBTITLE TEXT")}),
-          makeFieldView({makeTimeFillingHeader(8)}));
-    } else {
-      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
-                              makeEmptyFieldView());
-    }
-  }
+// Page 100 and the subtitle page the service declared with C6.
+orc::presenters::TeletextAnalysisView makeTwoPageCatalogue() {
+  orc::presenters::TeletextAnalysisView view = makePage100Catalogue();
+  view.pages.push_back(makeCataloguedPage(8, 0x88, "SUBTITLE TEXT",
+                                          /*first_seen_frame=*/2,
+                                          /*last_seen_frame=*/9,
+                                          /*times_seen=*/3));
+  return view;
 }
 
 }  // namespace
@@ -112,17 +93,17 @@ TEST(TeletextDialogTest, PendingThenPopulated_RendersRequestedPage) {
   dialog.show();
   QCoreApplication::processEvents();
 
-  dialog.setCurrentFrame(2);
-  EXPECT_EQ(dialog.framesNeedingData().size(), 3u);
+  // The stage decode runs on the coordinator's worker thread; until it
+  // delivers, the viewer says so rather than showing an empty page list as if
+  // it were the answer.
   dialog.showPending();
   QCoreApplication::processEvents();
   EXPECT_TRUE(status->isVisible());
 
-  deliverPage100Window(dialog);
+  dialog.setAnalysisData(makePage100Catalogue());
   QCoreApplication::processEvents();
 
   EXPECT_FALSE(status->isVisible());
-  EXPECT_TRUE(dialog.framesNeedingData().empty());
 
   // Cell accuracy is asserted on the page-view model, not on pixels.
   ASSERT_TRUE(dialog.currentPage().has_value());
@@ -132,46 +113,27 @@ TEST(TeletextDialogTest, PendingThenPopulated_RendersRequestedPage) {
 
   auto* seen = dialog.findChild<QLabel*>("teletextSeenLabel");
   ASSERT_NE(seen, nullptr);
-  EXPECT_EQ(seen->text(),
-            QString("Page 100 last seen at frame 2 (1 transmission(s))"));
+  // 1-based frame numbering in the UI.
+  EXPECT_EQ(seen->text(), QString("Page 100 seen 1 time(s), frames 2-2"));
 
   auto* page_widget = dialog.findChild<TeletextPageWidget*>();
   ASSERT_NE(page_widget, nullptr);
   EXPECT_TRUE(page_widget->hasPage());
 }
 
-TEST(TeletextDialogTest, UnavailableFramesResolveThePendingState) {
-  (void)ensureApplication();
-
-  TeletextDialog dialog;
-  dialog.setCurrentFrame(2);
-  dialog.showPending();
-
-  for (const uint64_t frame : dialog.framesNeedingData()) {
-    dialog.deliverFrameData(false, frame * 2, makeEmptyFieldView(),
-                            makeEmptyFieldView());
-  }
-
-  // Unobservable frames are not re-requested, so the window converges.
-  EXPECT_TRUE(dialog.framesNeedingData().empty());
-  auto* status = dialog.findChild<QLabel*>("observationStatusLabel");
-  ASSERT_NE(status, nullptr);
-  EXPECT_FALSE(status->isVisible());
-}
-
 TEST(TeletextDialogTest, PageNumberEntry_SelectsAndClearsPage) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverPage100Window(dialog);
+  dialog.setAnalysisData(makePage100Catalogue());
 
   ASSERT_TRUE(dialog.currentPage().has_value());
 
-  // A page not present in the window clears the display.
+  // A page the range did not carry clears the display.
   dialog.setPageNumberText("888");
   EXPECT_FALSE(dialog.currentPage().has_value());
 
-  // Returning to the transmitted page re-renders it from the cache.
+  // Returning to a catalogued page re-renders it.
   dialog.setPageNumberText("100");
   ASSERT_TRUE(dialog.currentPage().has_value());
   EXPECT_EQ(rowText(*dialog.currentPage(), 1), "HELLO TELETEXT");
@@ -181,7 +143,7 @@ TEST(TeletextDialogTest, InvalidPageNumber_ShowsNotice) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverPage100Window(dialog);
+  dialog.setAnalysisData(makePage100Catalogue());
 
   dialog.setPageNumberText("9x");
 
@@ -191,11 +153,11 @@ TEST(TeletextDialogTest, InvalidPageNumber_ShowsNotice) {
   EXPECT_TRUE(seen->text().contains("Invalid"));
 }
 
-TEST(TeletextDialogTest, SeenPagesAreTabulatedInPageOrder) {
+TEST(TeletextDialogTest, CataloguedPagesAreTabulatedInPageOrder) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverTwoPageWindow(dialog);
+  dialog.setAnalysisData(makeTwoPageCatalogue());
 
   const auto listed = dialog.listedPages();
   ASSERT_EQ(listed.size(), 2u);
@@ -206,10 +168,12 @@ TEST(TeletextDialogTest, SeenPagesAreTabulatedInPageOrder) {
   ASSERT_NE(table, nullptr);
   ASSERT_EQ(table->columnCount(), 3);
   EXPECT_EQ(table->item(0, 0)->text(), QString("100"));
-  // One transmission each, and where each was last seen (1-based frames).
+  // Transmissions counted, and the frames the page was first and last seen at
+  // (1-based). A page seen at one frame only shows that frame.
   EXPECT_EQ(table->item(0, 1)->text(), QString("1"));
   EXPECT_EQ(table->item(0, 2)->text(), QString("2"));
-  EXPECT_EQ(table->item(1, 2)->text(), QString("3"));
+  EXPECT_EQ(table->item(1, 1)->text(), QString("3"));
+  EXPECT_EQ(table->item(1, 2)->text(), QString("3-10"));
   // The rendered page is selected in the table.
   EXPECT_EQ(table->currentRow(), 0);
 }
@@ -218,7 +182,7 @@ TEST(TeletextDialogTest, SelectingATabulatedPageRendersIt) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverTwoPageWindow(dialog);
+  dialog.setAnalysisData(makeTwoPageCatalogue());
 
   auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
   ASSERT_NE(table, nullptr);
@@ -231,40 +195,21 @@ TEST(TeletextDialogTest, SelectingATabulatedPageRendersIt) {
   EXPECT_EQ(rowText(*dialog.currentPage(), 1), "SUBTITLE TEXT");
 }
 
-// A carousel repeats its pages, so how often one came round is what tells the
-// user whether it can be recovered reliably here.
-TEST(TeletextDialogTest, RepeatedTransmissionsAccumulateASeenCount) {
+// A carousel repeats its pages, so how often one came round over the analysed
+// range is what tells the user whether it can be recovered reliably here.
+TEST(TeletextDialogTest, TimesSeenIsTabulated) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverPage100Window(dialog);
-  ASSERT_EQ(dialog.listedSeenCount("100"), 1u);
+  dialog.setAnalysisData(makeTwoPageCatalogue());
 
-  // Step forward, re-transmitting page 100 every third frame.
-  for (uint64_t frame = 3; frame <= 11; ++frame) {
-    dialog.setCurrentFrame(frame);
-    if (frame % 3 == 0) {
-      dialog.deliverFrameData(
-          true, frame * 2,
-          makeFieldView({makeHeaderPacket(1, 0x00),
-                         makeRowPacket(1, 1, "HELLO TELETEXT")}),
-          makeFieldView({makeTimeFillingHeader(1)}));
-    } else {
-      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
-                              makeEmptyFieldView());
-    }
-  }
-
-  // Frames 3, 6 and 9 carried the page on top of the original transmission.
-  // The window is re-decoded on every frame change, so this also asserts that
-  // replayed transmissions are not counted again.
-  EXPECT_EQ(dialog.listedSeenCount("100"), 4u);
-  EXPECT_EQ(dialog.listedPages().size(), 1u);
+  EXPECT_EQ(dialog.listedSeenCount("100"), 1u);
+  EXPECT_EQ(dialog.listedSeenCount("888"), 3u);
 }
 
 // Which page carries the subtitles is a property of the recording: 888 is the
 // broadcast convention, but the LaserDisc samples this was developed against
-// use 190. The service declares it with C6, so the dialog says so outright
+// use 190. The service declares it with C6, so the viewer says so outright
 // rather than leaving the reader to guess a page number.
 TEST(TeletextDialogTest, SubtitlePageIsAnnouncedAndMarkedInTheList) {
   (void)ensureApplication();
@@ -275,27 +220,13 @@ TEST(TeletextDialogTest, SubtitlePageIsAnnouncedAndMarkedInTheList) {
   dialog.show();
   EXPECT_TRUE(dialog.subtitleHintText().isEmpty());
 
-  dialog.setCurrentFrame(2);
-  for (const uint64_t frame : dialog.framesNeedingData()) {
-    if (frame == 1) {
-      dialog.deliverFrameData(
-          true, frame * 2,
-          makeFieldView({makeHeaderPacket(1, 0x00),
-                         makeRowPacket(1, 1, "HELLO TELETEXT")}),
-          makeFieldView({makeTimeFillingHeader(1)}));
-    } else if (frame == 2) {
-      dialog.deliverFrameData(
-          true, frame * 2,
-          makeFieldView(
-              {makeHeaderPacket(1, 0x90, /*subcode=*/0, /*erase_page=*/false,
-                                /*subtitle=*/true),
-               makeRowPacket(1, 20, "SUBTITLE TEXT")}),
-          makeFieldView({makeTimeFillingHeader(1)}));
-    } else {
-      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
-                              makeEmptyFieldView());
-    }
-  }
+  orc::presenters::TeletextAnalysisView view = makePage100Catalogue();
+  view.pages.push_back(makeCataloguedPage(1, 0x90, "SUBTITLE TEXT",
+                                          /*first_seen_frame=*/2,
+                                          /*last_seen_frame=*/40,
+                                          /*times_seen=*/6,
+                                          /*subtitle=*/true));
+  dialog.setAnalysisData(view);
 
   EXPECT_TRUE(dialog.subtitleHintText().contains("190"));
   EXPECT_FALSE(dialog.subtitleHintText().contains("100"));
@@ -309,7 +240,7 @@ TEST(TeletextDialogTest, SubtitlePageIsAnnouncedAndMarkedInTheList) {
   EXPECT_TRUE(table->item(1, 0)->text().contains("subs"));
   EXPECT_FALSE(table->item(0, 0)->text().contains("subs"));
 
-  // A page-list rebuild with no subtitle page left takes the notice away.
+  // Clearing the viewer takes the notice away with the catalogue.
   dialog.clearContent();
   EXPECT_TRUE(dialog.subtitleHintText().isEmpty());
 }
@@ -321,21 +252,10 @@ TEST(TeletextDialogTest, NonSelectablePagesSortLastAndAreGreyed) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  dialog.setCurrentFrame(2);
-  for (const uint64_t frame : dialog.framesNeedingData()) {
-    if (frame == 1) {
-      dialog.deliverFrameData(true, frame * 2,
-                              makeFieldView({makeHeaderPacket(1, 0xAF)}),
-                              makeFieldView({makeTimeFillingHeader(1)}));
-    } else if (frame == 2) {
-      dialog.deliverFrameData(true, frame * 2,
-                              makeFieldView({makeHeaderPacket(8, 0x88)}),
-                              makeFieldView({makeTimeFillingHeader(8)}));
-    } else {
-      dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
-                              makeEmptyFieldView());
-    }
-  }
+  orc::presenters::TeletextAnalysisView view;
+  view.pages.push_back(makeCataloguedPage(1, 0xAF, ""));
+  view.pages.push_back(makeCataloguedPage(8, 0x88, ""));
+  dialog.setAnalysisData(view);
 
   const auto listed = dialog.listedPages();
   ASSERT_EQ(listed.size(), 2u);
@@ -350,86 +270,135 @@ TEST(TeletextDialogTest, NonSelectablePagesSortLastAndAreGreyed) {
   EXPECT_NE(table->item(0, 0)->foreground(), muted);
 }
 
-// Playback bumps the catalogue on almost every frame; rebuilding the table
-// each time dropped the scroll position and the selection under the user.
-TEST(TeletextDialogTest, TableRowsSurviveOngoingDeliveries) {
+// Re-triggering the node hands the viewer a fresh catalogue; nothing of the
+// previous run may survive into it.
+TEST(TeletextDialogTest, NewDataReplacesThePreviousCatalogue) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverTwoPageWindow(dialog);
-
-  auto* table = dialog.findChild<QTableWidget*>("teletextPagesTable");
-  ASSERT_NE(table, nullptr);
-  table->setCurrentCell(1, 0);
-  ASSERT_EQ(dialog.pageNumberText(), QString("888"));
-
-  const QTableWidgetItem* row0 = table->item(0, 0);
-  const QTableWidgetItem* row1 = table->item(1, 0);
-
-  // Keep delivering frames that re-transmit page 888 only.
-  for (uint64_t frame = 3; frame <= 12; ++frame) {
-    dialog.setCurrentFrame(frame);
-    dialog.deliverFrameData(true, frame * 2,
-                            makeFieldView({makeHeaderPacket(8, 0x88)}),
-                            makeFieldView({makeTimeFillingHeader(8)}));
-  }
-
-  // The rows were updated in place, not recreated, and the user's selection
-  // is untouched.
-  EXPECT_EQ(table->item(0, 0), row0);
-  EXPECT_EQ(table->item(1, 0), row1);
-  EXPECT_EQ(table->currentRow(), 1);
-  EXPECT_EQ(dialog.pageNumberText(), QString("888"));
-  EXPECT_GT(dialog.listedSeenCount("888"), 1u);
-}
-
-TEST(TeletextDialogTest, PageListSurvivesSequentialStepping) {
-  (void)ensureApplication();
-
-  TeletextDialog dialog;
-  deliverTwoPageWindow(dialog);
+  dialog.setAnalysisData(makeTwoPageCatalogue());
   ASSERT_EQ(dialog.listedPages().size(), 2u);
 
-  // Step past the trailing window one frame at a time: the frames carrying
-  // the pages are evicted, but the pages stay listed.
-  for (uint64_t frame = 3;
-       frame <= TeletextPageAssembler::kTrailingWindowFrames + 10; ++frame) {
-    dialog.setCurrentFrame(frame);
-    dialog.deliverFrameData(true, frame * 2, makeEmptyFieldView(),
-                            makeEmptyFieldView());
-  }
+  dialog.setAnalysisData(makePage100Catalogue());
 
-  EXPECT_EQ(dialog.listedPages().size(), 2u);
-  EXPECT_TRUE(dialog.currentPage().has_value());
+  const auto listed = dialog.listedPages();
+  ASSERT_EQ(listed.size(), 1u);
+  EXPECT_EQ(listed[0], QString("100"));
 }
 
-TEST(TeletextDialogTest, SkippingRestartsThePageList) {
+TEST(TeletextDialogTest, ClearContentResetsTheDisplay) {
   (void)ensureApplication();
 
   TeletextDialog dialog;
-  deliverTwoPageWindow(dialog);
-  ASSERT_EQ(dialog.listedPages().size(), 2u);
-
-  // A jump with no overlap with the previous window discards the list; it is
-  // rebuilt from the frames preceding the position jumped to.
-  dialog.setCurrentFrame(2 + TeletextPageAssembler::kTrailingWindowFrames);
-
-  EXPECT_TRUE(dialog.listedPages().empty());
-  EXPECT_FALSE(dialog.currentPage().has_value());
-}
-
-TEST(TeletextDialogTest, ClearContentResetsCacheAndDisplay) {
-  (void)ensureApplication();
-
-  TeletextDialog dialog;
-  deliverPage100Window(dialog);
+  dialog.setAnalysisData(makePage100Catalogue());
   ASSERT_TRUE(dialog.currentPage().has_value());
 
   dialog.clearContent();
 
   EXPECT_FALSE(dialog.currentPage().has_value());
   EXPECT_TRUE(dialog.listedPages().empty());
-  EXPECT_EQ(dialog.framesNeedingData().size(), 3u);  // cache dropped
+  EXPECT_TRUE(dialog.summaryText().isEmpty());
+}
+
+// A range that yielded no page at all is a different answer from one whose
+// pages simply do not include the one being asked for, and the summary is
+// what tells them apart.
+TEST(TeletextDialogTest, EmptyCatalogueReportsTheRunRatherThanNothing) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  orc::presenters::TeletextAnalysisView view;
+  view.summary.frames_analysed = 500;
+  dialog.setAnalysisData(view);
+
+  EXPECT_TRUE(dialog.listedPages().empty());
+  EXPECT_FALSE(dialog.currentPage().has_value());
+  auto* seen = dialog.findChild<QLabel*>("teletextSeenLabel");
+  ASSERT_NE(seen, nullptr);
+  EXPECT_TRUE(seen->text().contains("No teletext pages"));
+  EXPECT_TRUE(dialog.summaryText().contains("500 frames"));
+}
+
+TEST(TeletextDialogTest, SummaryReportsTheRunsRecoveryFigures) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  orc::presenters::TeletextAnalysisView view = makePage100Catalogue();
+  view.summary.packets_recovered = 1200;
+  view.summary.fields_with_data = 600;
+  view.summary.frames_analysed = 400;
+  view.summary.characters_written = 48000;
+  view.summary.characters_damaged = 12;
+  view.summary.lost_packets_estimate = 3;
+  view.summary.pages_truncated = true;
+  dialog.setAnalysisData(view);
+
+  const QString summary = dialog.summaryText();
+  EXPECT_TRUE(summary.contains("1200 packets"));
+  EXPECT_TRUE(summary.contains("600 fields"));
+  EXPECT_TRUE(summary.contains("12 of 48000 characters"));
+  EXPECT_TRUE(summary.contains("about 3 packets lost"));
+  EXPECT_TRUE(summary.contains("truncated"));
+}
+
+TEST(TeletextDialogTest, RecoveryReadoutReportsWhatArrived) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  auto* recovery = dialog.findChild<QLabel*>("teletextRecoveryLabel");
+  ASSERT_NE(recovery, nullptr);
+
+  dialog.show();
+  QCoreApplication::processEvents();
+  // Nothing selected yet: no readout to make sense of.
+  EXPECT_TRUE(dialog.recoveryText().isEmpty());
+
+  dialog.setAnalysisData(makePage100Catalogue());
+  ASSERT_TRUE(dialog.currentPage().has_value());
+
+  // The fixture page carries the header plus row 1 only. The 23 rows the
+  // service chose not to send are not a shortfall, so the readout counts what
+  // arrived rather than presenting a fraction of the grid.
+  EXPECT_EQ(dialog.currentPage()->recovery.rows_received, 1);
+  EXPECT_EQ(dialog.currentPage()->recovery.lost_packets, 0);
+  EXPECT_EQ(dialog.recoveryText(), QStringLiteral("Complete (1 row(s))"));
+
+  // A page the range never carried has nothing to report.
+  dialog.setPageNumberText("777");
+  EXPECT_TRUE(dialog.recoveryText().isEmpty());
+}
+
+// A page whose last transmission was still arriving when the range ran out
+// looks exactly like a finished one with rows missing, so the readout has to
+// say which it is.
+TEST(TeletextDialogTest, RecoveryReadoutDistinguishesArrivingFromComplete) {
+  (void)ensureApplication();
+
+  TeletextDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  orc::presenters::TeletextAnalysisView view;
+  auto entry = makeCataloguedPage(1, 0x00, "ROW ONE");
+  entry.page.transmission_complete = false;
+  view.pages.push_back(entry);
+  dialog.setAnalysisData(view);
+
+  EXPECT_EQ(dialog.recoveryText(),
+            QStringLiteral("Partial - still arriving (1 row(s) so far)"));
+
+  view.pages[0].page.transmission_complete = true;
+  view.pages[0].page.recovery.damaged_bytes = 2;
+  dialog.setAnalysisData(view);
+
+  EXPECT_EQ(dialog.recoveryText(),
+            QStringLiteral("1 row(s), 2 damaged byte(s)"));
 }
 
 namespace {
@@ -680,84 +649,6 @@ TEST(TeletextPageWidgetTest, DataErrorOverlayMarksRowsSeenOnlyOnce) {
       << "row resting on a single copy was not marked";
   EXPECT_FALSE(cellHasForeground(marked, 6, 0, qRgb(0, 0, 0)))
       << "a row confirmed by a repeat must not be marked";
-}
-
-TEST(TeletextDialogTest, RecoveryReadoutReportsRowsAndDamagedBytes) {
-  (void)ensureApplication();
-
-  TeletextDialog dialog;
-  auto* recovery = dialog.findChild<QLabel*>("teletextRecoveryLabel");
-  ASSERT_NE(recovery, nullptr);
-
-  dialog.show();
-  QCoreApplication::processEvents();
-  // Nothing selected yet: no readout to make sense of.
-  EXPECT_TRUE(dialog.recoveryText().isEmpty());
-
-  deliverPage100Window(dialog);
-  ASSERT_TRUE(dialog.currentPage().has_value());
-
-  // The fixture transmits the header plus row 1 only. The 23 rows it chose
-  // not to send are not a shortfall, so the readout counts what arrived
-  // rather than presenting a fraction of the grid.
-  EXPECT_EQ(dialog.currentPage()->recovery.rows_received, 1);
-  EXPECT_EQ(dialog.currentPage()->recovery.lost_packets, 0);
-  EXPECT_EQ(dialog.recoveryText(), QStringLiteral("Complete (1 row(s))"));
-
-  // A page that was never seen has nothing to report.
-  dialog.setPageNumberText("777");
-  EXPECT_TRUE(dialog.recoveryText().isEmpty());
-}
-
-// A page part-way through its transmission looks exactly like a finished one
-// with rows missing, so the readout has to say which it is. This is what a
-// user stepping through the several frames one page occupies actually sees.
-TEST(TeletextDialogTest, RecoveryReadoutDistinguishesArrivingFromComplete) {
-  (void)ensureApplication();
-
-  TeletextDialog dialog;
-  dialog.show();
-  QCoreApplication::processEvents();
-
-  // Two packets in every field that carries teletext, as a real insertion
-  // does: an under-filled field would read as a lost packet, which is exactly
-  // the distinction the readout is drawing.
-  //
-  // Frame 0: the header and the first row of page 100 — the transmission has
-  // started but the service has not moved on.
-  dialog.setCurrentFrame(0);
-  dialog.deliverFrameData(true, 0,
-                          makeFieldView({makeHeaderPacket(1, 0x00),
-                                         makeRowPacket(1, 1, "ROW ONE")}),
-                          makeEmptyFieldView());
-  ASSERT_TRUE(dialog.currentPage().has_value());
-  EXPECT_FALSE(dialog.currentPage()->transmission_complete);
-  EXPECT_EQ(dialog.recoveryText(),
-            QStringLiteral("Partial - still arriving (1 row(s) so far)"));
-
-  // Frame 1 adds two more rows; still arriving.
-  dialog.setCurrentFrame(1);
-  dialog.deliverFrameData(true, 2,
-                          makeFieldView({makeRowPacket(1, 2, "ROW TWO"),
-                                         makeRowPacket(1, 3, "ROW THREE")}),
-                          makeEmptyFieldView());
-  EXPECT_FALSE(dialog.currentPage()->transmission_complete);
-  EXPECT_EQ(dialog.recoveryText(),
-            QStringLiteral("Partial - still arriving (3 row(s) so far)"));
-
-  // Frame 2 carries the next page's header, which ends the transmission.
-  dialog.setCurrentFrame(2);
-  dialog.deliverFrameData(
-      true, 4,
-      makeFieldView({makeTimeFillingHeader(1), makeTimeFillingHeader(1)}),
-      makeEmptyFieldView());
-  ASSERT_TRUE(dialog.currentPage().has_value());
-  EXPECT_TRUE(dialog.currentPage()->transmission_complete);
-  EXPECT_EQ(dialog.currentPage()->recovery.lost_packets, 0);
-  EXPECT_EQ(dialog.recoveryText(), QStringLiteral("Complete (3 row(s))"));
-
-  // The whole arrival was one appearance of the page, not one per frame.
-  EXPECT_EQ(dialog.listedSeenCount("100"), 1u);
 }
 
 TEST(TeletextDialogTest, ShowDataErrorsCheckDrivesThePageWidget) {

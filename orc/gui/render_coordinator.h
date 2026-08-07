@@ -66,15 +66,15 @@ enum class RenderRequestType {
   RenderPreview,         // Render a preview image
   GetObservations,       // Fetch a frame's observations (async, non-blocking)
   GetVBIData,            // Decode VBI data for a field
-  GetTeletextData,       // Fetch teletext packets for a frame (async)
   GetClosedCaptionData,  // Fetch closed caption bytes for a frame (async)
   GetDropoutData,        // Get dropout analysis data
   GetSNRData,            // Get SNR analysis data
   GetBurstLevelData,     // Get burst level analysis data
-  TriggerStage,          // Trigger a stage (batch processing)
-  CancelTrigger,         // Cancel ongoing trigger
-  GetAvailableOutputs,   // Query available preview outputs
-  GetAudioChannelPairs,  // Query the node's audio channel pairs
+  GetTeletextAnalysisData,  // Get the teletext page catalogue of a sink stage
+  TriggerStage,             // Trigger a stage (batch processing)
+  CancelTrigger,            // Cancel ongoing trigger
+  GetAvailableOutputs,      // Query available preview outputs
+  GetAudioChannelPairs,     // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
   GetLineSamples,           // Get 16-bit samples for a line
   GetFrameTiming,           // Get all frame samples for timing view
@@ -157,19 +157,6 @@ struct GetVBIDataRequest : public RenderRequest {
 };
 
 /**
- * @brief Request to fetch teletext packets for the frame containing a field
- */
-struct GetTeletextDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::FieldID field_id;
-
-  GetTeletextDataRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
-      : RenderRequest(RenderRequestType::GetTeletextData, id),
-        node_id(std::move(node)),
-        field_id(fid) {}
-};
-
-/**
  * @brief Request to fetch closed caption bytes for the frame containing a field
  */
 struct GetClosedCaptionDataRequest : public RenderRequest {
@@ -217,6 +204,17 @@ struct GetBurstLevelDataRequest : public RenderRequest {
 
   GetBurstLevelDataRequest(uint64_t id, orc::NodeID node)
       : RenderRequest(RenderRequestType::GetBurstLevelData, id),
+        node_id(std::move(node)) {}
+};
+
+/**
+ * @brief Request to get the teletext page catalogue of an analysis sink stage
+ */
+struct GetTeletextAnalysisDataRequest : public RenderRequest {
+  orc::NodeID node_id;
+
+  GetTeletextAnalysisDataRequest(uint64_t id, orc::NodeID node)
+      : RenderRequest(RenderRequestType::GetTeletextAnalysisData, id),
         node_id(std::move(node)) {}
 };
 
@@ -537,6 +535,8 @@ class IRenderPresenter {
       NodeID node_id) = 0;
   virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(NodeID node_id) = 0;
+  virtual std::optional<orc::presenters::TeletextAnalysisView>
+  getTeletextAnalysisData(NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -707,21 +707,6 @@ class RenderCoordinator : public QObject {
   uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
 
   /**
-   * @brief Request teletext packets for the frame containing a field (async)
-   *
-   * Answered from the provenance-keyed store when present, otherwise computed
-   * on the background scheduler (same delivery path as requestObservations()).
-   * One request covers both fields of the field's parent frame; the extracted
-   * per-field packet views are emitted via teletextDataReady.
-   *
-   * @param node_id  Node whose output frame is observed
-   * @param field_id Any field of the frame of interest
-   * @return Request ID for matching / discarding stale responses
-   */
-  uint64_t requestTeletextData(const orc::NodeID& node_id,
-                               orc::FieldID field_id);
-
-  /**
    * @brief Request closed caption bytes for the frame containing a field
    *        (async)
    *
@@ -784,6 +769,18 @@ class RenderCoordinator : public QObject {
    * @return Request ID for matching response
    */
   uint64_t requestBurstLevelData(const orc::NodeID& node_id);
+
+  /**
+   * @brief Request the teletext page catalogue of an analysis sink (async)
+   *
+   * Fetch-or-trigger, as for the graph analyses: an untriggered stage is
+   * triggered first (progress via teletextAnalysisProgress) and the catalogue
+   * read back. Result is emitted via teletextAnalysisDataReady.
+   *
+   * @param node_id Teletext analysis sink node to read
+   * @return Request ID for matching response
+   */
+  uint64_t requestTeletextAnalysisData(const orc::NodeID& node_id);
 
   /**
    * @brief Request available outputs for a node (async)
@@ -997,28 +994,6 @@ class RenderCoordinator : public QObject {
                     orc::presenters::VBIFieldInfoView info);
 
   /**
-   * @brief Emitted (on the GUI thread) when a requestTeletextData() response
-   *        is ready
-   *
-   * Carries the recovered T42 packet views for both fields of the requested
-   * frame, in temporal order (field1 precedes field2).
-   *
-   * @param request_id      Id returned by requestTeletextData()
-   * @param available       True when the frame's observations were produced
-   * @param field1_id_value First field of the frame (FieldID::value())
-   * @param field1          Packet view for the first field
-   * @param field2_id_value Second field of the frame
-   * @param field2          Packet view for the second field
-   *
-   * Marshalled from the worker/scheduler thread via a queued connection.
-   */
-  void teletextDataReady(uint64_t request_id, bool available,
-                         qulonglong field1_id_value,
-                         orc::presenters::TeletextFieldPacketsView field1,
-                         qulonglong field2_id_value,
-                         orc::presenters::TeletextFieldPacketsView field2);
-
-  /**
    * @brief Emitted (on the GUI thread) when a requestClosedCaptionData()
    *        response is ready
    *
@@ -1072,6 +1047,17 @@ class RenderCoordinator : public QObject {
    * @brief Emitted during burst level analysis progress
    */
   void burstLevelProgress(size_t current, size_t total, QString message);
+
+  /**
+   * @brief Emitted when the teletext page catalogue is ready
+   */
+  void teletextAnalysisDataReady(uint64_t request_id,
+                                 orc::presenters::TeletextAnalysisView data);
+
+  /**
+   * @brief Emitted while an untriggered teletext analysis sink is decoding
+   */
+  void teletextAnalysisProgress(size_t current, size_t total, QString message);
 
   /**
    * @brief Emitted when available outputs query completes
@@ -1249,11 +1235,6 @@ class RenderCoordinator : public QObject {
   void handleGetVBIData(const GetVBIDataRequest& req);
 
   /**
-   * @brief Handle GetTeletextData request
-   */
-  void handleGetTeletextData(const GetTeletextDataRequest& req);
-
-  /**
    * @brief Handle GetClosedCaptionData request
    */
   void handleGetClosedCaptionData(const GetClosedCaptionDataRequest& req);
@@ -1272,6 +1253,11 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetBurstLevelData request
    */
   void handleGetBurstLevelData(const GetBurstLevelDataRequest& req);
+
+  /**
+   * @brief Handle GetTeletextAnalysisData request
+   */
+  void handleGetTeletextAnalysisData(const GetTeletextAnalysisDataRequest& req);
 
   /**
    * @brief Handle GetAvailableOutputs request

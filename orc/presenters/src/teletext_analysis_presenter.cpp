@@ -1,35 +1,20 @@
 /*
- * File:        teletext_observation_presenter.cpp
+ * File:        teletext_analysis_presenter.cpp
  * Module:      orc-presenters
- * Purpose:     Teletext observation presenter implementation
+ * Purpose:     Teletext analysis presenter implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "../include/teletext_observation_presenter.h"
-
-#include <orc/stage/observation/observation_context.h>
-#include <orc/support/teletext_slicer.h>
+#include "../include/teletext_analysis_presenter.h"
 
 #include <algorithm>
-#include <string>
-#include <string_view>
-#include <variant>
+#include <utility>
 
 namespace orc::presenters {
 
 namespace {
-
-// The view type mirrors the SDK packet buffer size without including SDK
-// headers in the view-types tier; keep the two in lock-step.
-static_assert(std::tuple_size<decltype(TeletextPacketView::bytes)>::value ==
-                  orc::kTeletextPacketBytes,
-              "TeletextPacketView::bytes must match the SDK T42 packet size");
-static_assert(
-    std::tuple_size<decltype(TeletextPacketView::confidence)>::value ==
-        orc::kTeletextPacketBytes,
-    "TeletextPacketView::confidence must match the SDK T42 packet size");
 
 // True when a 7-bit code selects a G1 block-mosaic character.
 //
@@ -57,73 +42,38 @@ uint8_t mosaic_sixels(uint8_t code) {
 
 }  // namespace
 
-TeletextFieldPacketsView TeletextObservationPresenter::extractFieldObservations(
-    FieldID field_id, const void* obs_context_ptr) {
-  const auto* obs_context =
-      static_cast<const orc::ObservationContext*>(obs_context_ptr);
-  TeletextFieldPacketsView result;
+TeletextAnalysisView TeletextAnalysisPresenter::makeAnalysisView(
+    const TeletextAnalysisDataset& dataset) {
+  TeletextAnalysisView view;
 
-  auto present_obs = obs_context->get(field_id, "teletext", "present");
-  if (!present_obs) {
-    // Non-PAL sources (and unobserved fields) carry no "teletext" namespace.
-    return result;
-  }
-  result.observed = true;
-
-  if (std::holds_alternative<bool>(*present_obs)) {
-    result.present = std::get<bool>(*present_obs);
-  }
-
-  auto count_obs = obs_context->get(field_id, "teletext", "line_count");
-  if (count_obs && std::holds_alternative<int32_t>(*count_obs)) {
-    result.line_count = std::get<int32_t>(*count_obs);
+  view.pages.reserve(dataset.pages.size());
+  for (const auto& catalogued : dataset.pages) {
+    TeletextCataloguedPageView entry;
+    entry.magazine = catalogued.magazine;
+    entry.page_number = catalogued.page_number;
+    entry.first_seen_frame = catalogued.first_seen_frame;
+    entry.last_seen_frame = catalogued.last_seen_frame;
+    entry.times_seen = catalogued.times_seen;
+    entry.subtitle = catalogued.subtitle;
+    entry.page = makePageView(catalogued.page);
+    view.pages.push_back(std::move(entry));
   }
 
-  // The t42_<n> keys are sparse (absent for lines that carried no data);
-  // enumerate whatever the observer recorded and order by field line.
-  for (const auto& key : obs_context->get_keys(field_id, "teletext")) {
-    constexpr std::string_view kPrefix = "t42_";
-    if (key.rfind(kPrefix, 0) != 0) {
-      continue;
-    }
-    int field_line = 0;
-    try {
-      field_line = std::stoi(key.substr(kPrefix.size()));
-    } catch (const std::exception&) {
-      continue;
-    }
+  const auto& summary = dataset.summary;
+  view.summary.frames_analysed = summary.frames_analysed;
+  view.summary.fields_with_data = summary.fields_with_data;
+  view.summary.packets_recovered = summary.packets_recovered;
+  view.summary.packets_corrected = summary.packets_corrected;
+  view.summary.bytes_repaired = summary.bytes_repaired;
+  view.summary.characters_written = summary.characters_written;
+  view.summary.characters_damaged = summary.characters_damaged;
+  view.summary.lost_packets_estimate = summary.lost_packets_estimate;
+  view.summary.pages_truncated = summary.pages_truncated;
 
-    auto packet_obs = obs_context->get(field_id, "teletext", key);
-    if (!packet_obs || !std::holds_alternative<std::string>(*packet_obs)) {
-      continue;
-    }
-    const auto observed = orc::teletext_hex_to_observed_packet(
-        std::get<std::string>(*packet_obs));
-    if (!observed) {
-      continue;
-    }
-
-    TeletextPacketView packet;
-    packet.field_line = field_line;
-    packet.bytes = observed->bytes;
-    // Carried rather than assumed: the page decoder needs to know how many of
-    // a row's columns one packet brought (ITU-R BT.653 Table 1b gives 525-line
-    // WST a 34-byte packet, so 32 of the 40, the rest arriving separately).
-    packet.byte_count = static_cast<int>(observed->byte_count);
-    packet.has_confidence = observed->has_confidence;
-    packet.confidence = observed->confidence;
-    result.packets.push_back(packet);
-  }
-
-  std::sort(result.packets.begin(), result.packets.end(),
-            [](const TeletextPacketView& a, const TeletextPacketView& b) {
-              return a.field_line < b.field_line;
-            });
-
-  return result;
+  return view;
 }
 
-TeletextPageView TeletextObservationPresenter::makePageView(
+TeletextPageView TeletextAnalysisPresenter::makePageView(
     const TeletextPageSnapshot& snapshot) {
   static_assert(TeletextPageView::kRows == TeletextPageSnapshot::kRows);
   static_assert(TeletextPageView::kColumns == TeletextPageSnapshot::kColumns);

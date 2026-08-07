@@ -128,32 +128,6 @@ void MainWindow::onVBIDataReady(uint64_t request_id,
   pending_vbi_field2_ready_ = false;
 }
 
-void MainWindow::onTeletextDataReady(
-    uint64_t request_id, bool available, qulonglong field1_id_value,
-    orc::presenters::TeletextFieldPacketsView field1,
-    qulonglong /*field2_id_value*/,
-    orc::presenters::TeletextFieldPacketsView field2) {
-  const auto pending = pending_teletext_requests_.find(request_id);
-  if (pending == pending_teletext_requests_.end()) {
-    return;  // stale / superseded response
-  }
-  pending_teletext_requests_.erase(pending);
-
-  if (!teletext_dialog_) {
-    return;
-  }
-
-  // Feed the dialog's packet cache whether or not it is currently visible,
-  // so that when it is shown again the window is already warm.
-  teletext_dialog_->deliverFrameData(
-      available, static_cast<uint64_t>(field1_id_value), field1, field2);
-
-  // The dialog hands out the frames it needs a batch at a time, so a delivery
-  // is what draws down the next of them; without this the window would only
-  // ever fill one batch per frame change.
-  issueTeletextRequests();
-}
-
 void MainWindow::onClosedCaptionDataReady(
     uint64_t request_id, bool available, qulonglong field1_id_value,
     orc::presenters::ClosedCaptionFieldDataView field1,
@@ -984,6 +958,66 @@ void MainWindow::onBurstLevelProgress(size_t current, size_t total,
   std::vector<QPointer<QProgressDialog>> snapshot;
   snapshot.reserve(burst_level_progress_dialogs_.size());
   for (auto& [id, pd] : burst_level_progress_dialogs_) {
+    if (pd) snapshot.push_back(pd);
+  }
+  for (QPointer<QProgressDialog>& pd : snapshot) {
+    if (pd) pd->setValue(percentage);
+    if (pd) pd->setLabelText(message);
+  }
+}
+
+void MainWindow::onTeletextAnalysisDataReady(
+    uint64_t request_id, orc::presenters::TeletextAnalysisView data) {
+  // Find which node this request was for
+  auto req_it = pending_teletext_analysis_requests_.find(request_id);
+  if (req_it == pending_teletext_analysis_requests_.end()) {
+    ORC_LOG_DEBUG(
+        "Ignoring stale teletext data response (unknown request_id {})",
+        request_id);
+    return;
+  }
+
+  orc::NodeID node_id = req_it->second;
+  pending_teletext_analysis_requests_.erase(req_it);
+
+  ORC_LOG_DEBUG("onTeletextAnalysisDataReady for node '{}': {} pages",
+                node_id.to_string(), data.pages.size());
+
+  // Close progress dialog safely (matches onTriggerComplete pattern). Erase
+  // from the map FIRST so a re-entrant progress callback sees it gone.
+  auto prog_it = teletext_analysis_progress_dialogs_.find(node_id);
+  if (prog_it != teletext_analysis_progress_dialogs_.end() && prog_it->second) {
+    QProgressDialog* pd = prog_it->second.data();
+    teletext_analysis_progress_dialogs_.erase(prog_it);
+    pd->blockSignals(true);
+    pd->hide();
+    pd->deleteLater();
+  }
+
+  // Find the viewer for this stage
+  auto dialog_it = teletext_analysis_dialogs_.find(node_id);
+  if (dialog_it == teletext_analysis_dialogs_.end() || !dialog_it->second) {
+    return;
+  }
+
+  auto* dialog = dialog_it->second;
+  dialog->setAnalysisData(data);
+
+  // Bring the viewer to the front now that it has data
+  dialog->raise();
+  dialog->activateWindow();
+}
+
+void MainWindow::onTeletextAnalysisProgress(size_t current, size_t total,
+                                            QString message) {
+  if (total == 0) return;
+  int percentage = static_cast<int>((current * 100) / total);
+  if (percentage >= 100) percentage = 99;
+
+  // Snapshot QPointers by value — see onDropoutProgress for reasoning.
+  std::vector<QPointer<QProgressDialog>> snapshot;
+  snapshot.reserve(teletext_analysis_progress_dialogs_.size());
+  for (auto& [id, pd] : teletext_analysis_progress_dialogs_) {
     if (pd) snapshot.push_back(pd);
   }
   for (QPointer<QProgressDialog>& pd : snapshot) {

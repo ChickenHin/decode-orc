@@ -390,7 +390,6 @@ MainWindow::MainWindow(QWidget* parent)
       preview_dialog_(nullptr),
       vbi_dialog_(nullptr),
       ntsc_observer_dialog_(nullptr),
-      teletext_dialog_(nullptr),
       closed_caption_dialog_(nullptr),
       dag_view_(nullptr),
       dag_model_(nullptr),
@@ -433,8 +432,6 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onPreviewReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::vbiDataReady, this,
           &MainWindow::onVBIDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::teletextDataReady,
-          this, &MainWindow::onTeletextDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::closedCaptionDataReady,
           this, &MainWindow::onClosedCaptionDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::availableOutputsReady,
@@ -462,6 +459,12 @@ MainWindow::MainWindow(QWidget* parent)
           this, &MainWindow::onBurstLevelDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::burstLevelProgress,
           this, &MainWindow::onBurstLevelProgress, Qt::QueuedConnection);
+  connect(render_coordinator_.get(),
+          &RenderCoordinator::teletextAnalysisDataReady, this,
+          &MainWindow::onTeletextAnalysisDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(),
+          &RenderCoordinator::teletextAnalysisProgress, this,
+          &MainWindow::onTeletextAnalysisProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
           &MainWindow::onTriggerProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerComplete, this,
@@ -563,10 +566,6 @@ MainWindow::~MainWindow() {
     delete ntsc_observer_dialog_;
     ntsc_observer_dialog_ = nullptr;
   }
-  if (teletext_dialog_) {
-    delete teletext_dialog_;
-    teletext_dialog_ = nullptr;
-  }
   if (closed_caption_dialog_) {
     delete closed_caption_dialog_;
     closed_caption_dialog_ = nullptr;
@@ -632,9 +631,6 @@ void MainWindow::setupUI() {
   // Create NTSC observer dialog (initially hidden)
   ntsc_observer_dialog_ = new NtscObserverDialog(this);
 
-  // Create teletext page preview dialog (initially hidden)
-  teletext_dialog_ = new TeletextDialog(this);
-
   // Create closed caption preview dialog (initially hidden)
   closed_caption_dialog_ = new ClosedCaptionDialog(this);
 
@@ -693,8 +689,6 @@ void MainWindow::setupUI() {
           &MainWindow::onShowVideoParameterObserverDialog);
   connect(preview_dialog_, &PreviewDialog::showNtscObserverDialogRequested,
           this, &MainWindow::onShowNtscObserverDialog);
-  connect(preview_dialog_, &PreviewDialog::showTeletextDialogRequested, this,
-          &MainWindow::onShowTeletextDialog);
   connect(preview_dialog_, &PreviewDialog::showClosedCaptionDialogRequested,
           this, &MainWindow::onShowClosedCaptionDialog);
   connect(preview_dialog_, &PreviewDialog::lineScopeRequested, this,
@@ -1288,9 +1282,6 @@ void MainWindow::closeAllDialogs() {
   if (ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible()) {
     ntsc_observer_dialog_->hide();
   }
-  if (teletext_dialog_ && teletext_dialog_->isVisible()) {
-    teletext_dialog_->hide();
-  }
   if (closed_caption_dialog_ && closed_caption_dialog_->isVisible()) {
     closed_caption_dialog_->hide();
   }
@@ -1318,11 +1309,17 @@ void MainWindow::closeAllDialogs() {
       dialogs_to_close.push_back(pair.second);
     }
   }
+  for (auto& pair : teletext_analysis_dialogs_) {
+    if (pair.second) {
+      dialogs_to_close.push_back(pair.second);
+    }
+  }
   // Clear maps before closing to prevent destroyed signal handlers from
   // modifying them
   dropout_analysis_dialogs_.clear();
   snr_analysis_dialogs_.clear();
   burst_level_analysis_dialogs_.clear();
+  teletext_analysis_dialogs_.clear();
 
   // Now safe to close all dialogs
   for (auto* dialog : dialogs_to_close) {
@@ -1359,6 +1356,14 @@ void MainWindow::closeAllDialogs() {
     }
   }
   burst_level_progress_dialogs_.clear();
+
+  for (auto& pair : teletext_analysis_progress_dialogs_) {
+    if (pair.second) {
+      pair.second->close();
+      delete pair.second;
+    }
+  }
+  teletext_analysis_progress_dialogs_.clear();
 }
 
 void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
@@ -2477,8 +2482,7 @@ bool MainWindow::checkUnsavedChanges() {
 
 void MainWindow::updatePreviewInfo() {
   // Update standard-specific observer menu availability: the NTSC observers
-  // (FM code, white flag) and closed captions are NTSC-only, and the teletext
-  // page viewer is 625-line only (see
+  // (FM code, white flag) and closed captions are NTSC-only (see
   // PreviewDialog::setObserverAvailabilityForFormat). Done before the early
   // returns so the menu never keeps the previous project's availability while
   // no stage is selected.
@@ -3894,6 +3898,10 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       tool_info.stage_tool_contract ==
           "decode-orc.stage-tools.burst-level-analysis.v1" ||
       tool_info.id == "burst_level_analysis";
+  const bool is_teletext_analysis_tool =
+      tool_info.stage_tool_contract ==
+          "decode-orc.stage-tools.teletext-analysis.v1" ||
+      tool_info.id == "teletext_analysis";
 
   ORC_LOG_DEBUG("Running analysis '{}' for node '{}'", tool_info.name,
                 node_id.to_string());
@@ -4423,6 +4431,79 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     return;
   }
 
+  // Special-case: Teletext Analysis decodes the range and shows the page viewer
+  if (is_teletext_analysis_tool) {
+    // Get node info from project
+    auto nodes = project_.presenter()->getNodes();
+    auto node_it = std::find_if(nodes.begin(), nodes.end(),
+                                [&node_id](const orc::presenters::NodeInfo& n) {
+                                  return n.node_id == node_id;
+                                });
+
+    QString node_label = QString::fromStdString(stage_name);
+    if (node_it != nodes.end()) {
+      node_label = QString::fromStdString(
+          node_it->label.empty() ? node_it->stage_name : node_it->label);
+    }
+    QString title = QString("Teletext Pages - %1 (%2)")
+                        .arg(node_label)
+                        .arg(QString::fromStdString(node_id.to_string()));
+
+    // Get or create the viewer for this stage
+    TeletextDialog* dialog = nullptr;
+    auto it = teletext_analysis_dialogs_.find(node_id);
+    if (it == teletext_analysis_dialogs_.end()) {
+      dialog = new TeletextDialog(this);
+      dialog->setWindowTitle(title);
+      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+
+      // Connect destroyed signal to clean up map entry
+      connect(dialog, &QObject::destroyed, [this, node_id]() {
+        teletext_analysis_dialogs_.erase(node_id);
+        teletext_analysis_progress_dialogs_.erase(node_id);
+      });
+
+      teletext_analysis_dialogs_[node_id] = dialog;
+    } else {
+      dialog = it->second;
+    }
+
+    // Create and show progress dialog for this stage
+    auto& prog_dialog = teletext_analysis_progress_dialogs_[node_id];
+    if (prog_dialog) {
+      delete prog_dialog;
+    }
+    prog_dialog = new QProgressDialog("Decoding teletext data...", QString(), 0,
+                                      100, this);
+    prog_dialog->setWindowTitle(dialog->windowTitle());
+    prog_dialog->setWindowModality(Qt::ApplicationModal);
+    prog_dialog->setMinimumDuration(0);
+    prog_dialog->setCancelButton(nullptr);
+    prog_dialog->setValue(0);
+    // No activateWindow(): requesting activation on a short-lived modal leaves
+    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
+    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
+    prog_dialog->show();
+    prog_dialog->raise();
+
+    // Show the viewer (empty until the catalogue arrives)
+    dialog->showPending();
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+
+    // Request the catalogue from the coordinator, which triggers the stage
+    // first when it has not been triggered yet.
+    uint64_t request_id =
+        render_coordinator_->requestTeletextAnalysisData(node_id);
+    pending_teletext_analysis_requests_[request_id] = node_id;
+
+    ORC_LOG_DEBUG(
+        "Requested teletext analysis data for node '{}', request_id={}",
+        node_id.to_string(), request_id);
+    return;
+  }
+
   // Default path: Generic analysis dialog for all other tools
   // This handles tools like Frame Corruption Generator using auto-generated UI
 
@@ -4548,20 +4629,6 @@ void MainWindow::onShowNtscObserverDialog() {
 
   // Update NTSC observer information after showing
   updateNtscObserverDialog();
-}
-
-void MainWindow::onShowTeletextDialog() {
-  if (!teletext_dialog_) {
-    return;
-  }
-
-  // Show the dialog first
-  teletext_dialog_->show();
-  teletext_dialog_->raise();
-  teletext_dialog_->activateWindow();
-
-  // Update teletext information after showing
-  updateTeletextDialog();
 }
 
 void MainWindow::onShowClosedCaptionDialog() {
@@ -5030,7 +5097,6 @@ void MainWindow::updateAllPreviewComponents() {
   updateVBIDialog();
   updateVideoParameterObserverDialog();
   updateNtscObserverDialog();
-  updateTeletextDialog();
   updateClosedCaptionDialog();
 
   // Notify line scope dialog that preview frame has changed
@@ -5233,37 +5299,6 @@ std::optional<uint64_t> MainWindow::previewFrameForObservers() const {
   return static_cast<uint64_t>(current_index);
 }
 
-void MainWindow::updateTeletextDialog() {
-  // Only update while the dialog is visible (observer-dialog convention).
-  if (!teletext_dialog_ || !teletext_dialog_->isVisible()) {
-    return;
-  }
-
-  if (!current_view_node_id_.is_valid()) {
-    pending_teletext_requests_.clear();
-    teletext_cache_node_id_ = orc::NodeID();
-    teletext_dialog_->clearContent();
-    return;
-  }
-
-  // The trailing-window packet cache only carries over while the view node
-  // is unchanged; a node switch means different observations.
-  if (teletext_cache_node_id_ != current_view_node_id_) {
-    teletext_cache_node_id_ = current_view_node_id_;
-    pending_teletext_requests_.clear();
-    teletext_dialog_->clearCache();
-  }
-
-  const auto current_frame = previewFrameForObservers();
-  if (!current_frame) {
-    teletext_dialog_->clearContent();
-    return;
-  }
-
-  teletext_dialog_->setCurrentFrame(*current_frame);
-  issueTeletextRequests();
-}
-
 void MainWindow::updateClosedCaptionDialog() {
   // Only update while the dialog is visible (observer-dialog convention).
   if (!closed_caption_dialog_ || !closed_caption_dialog_->isVisible()) {
@@ -5331,48 +5366,6 @@ void MainWindow::issueClosedCaptionRequests() {
     const uint64_t request_id = render_coordinator_->requestClosedCaptionData(
         current_view_node_id_, orc::FieldID(frame * 2));
     pending_closed_caption_requests_.emplace(request_id, frame);
-  }
-}
-
-void MainWindow::issueTeletextRequests() {
-  if (!teletext_dialog_ || !current_view_node_id_.is_valid()) {
-    return;
-  }
-
-  // Drop in-flight requests whose frame has left the window; keep the rest.
-  // Stepping forward slides the window by one frame, so cancelling the whole
-  // set each time would keep re-issuing reads that never get the chance to
-  // complete, and the dialog's page list would never fill. The upper bound is
-  // what the dialog will still accept rather than where the previewer is: a
-  // backward step does not make a read already in flight useless, and
-  // abandoning it only means issuing it again when the previewer comes back.
-  const uint64_t window_start = teletext_dialog_->windowStartFrame();
-  const uint64_t retained_limit = teletext_dialog_->retainedFrameLimit();
-  std::unordered_set<uint64_t> frames_in_flight;
-  for (auto it = pending_teletext_requests_.begin();
-       it != pending_teletext_requests_.end();) {
-    if (it->second < window_start || it->second > retained_limit) {
-      it = pending_teletext_requests_.erase(it);
-    } else {
-      frames_in_flight.insert(it->second);
-      ++it;
-    }
-  }
-
-  // Request only the window frames the dialog holds no packets for and has no
-  // outstanding request for. The dialog hands these out a batch at a time —
-  // the window spans minutes of video, and queuing every unread frame of it
-  // at once would put thousands of observation reads ahead of the previewer's
-  // own rendering. Each delivery calls back here for the next batch.
-  const auto needed_frames = teletext_dialog_->framesNeedingData();
-  teletext_dialog_->showPending();
-  for (const uint64_t frame : needed_frames) {
-    if (frames_in_flight.count(frame) != 0) {
-      continue;
-    }
-    const uint64_t request_id = render_coordinator_->requestTeletextData(
-        current_view_node_id_, orc::FieldID(frame * 2));
-    pending_teletext_requests_.emplace(request_id, frame);
   }
 }
 

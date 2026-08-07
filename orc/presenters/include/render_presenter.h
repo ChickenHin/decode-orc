@@ -19,6 +19,7 @@
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
 #include <orc_preview_views.h>
+#include <orc_teletext.h>  // Teletext analysis view types
 
 #include <cstdint>
 #include <functional>
@@ -291,6 +292,18 @@ class RenderPresenter {
    */
   std::optional<BurstLevelDisplaySeries> getBurstLevelAnalysisData(
       NodeID node_id);
+
+  /**
+   * @brief Get the teletext page catalogue from an analysis sink stage
+   *
+   * The catalogue is bounded by the stage's page cap rather than by the frame
+   * range, so unlike the graph series it needs no decimation.
+   *
+   * @param node_id Node to get data from
+   * @return The catalogue and recovery summary, or std::nullopt if the node is
+   *         not a triggered teletext analysis sink
+   */
+  std::optional<TeletextAnalysisView> getTeletextAnalysisData(NodeID node_id);
 
   /**
    * @brief Request dropout analysis data from a sink node (deprecated - use

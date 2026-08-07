@@ -129,12 +129,6 @@ class MainWindow : public QMainWindow {
   void updateVideoParameterObserverDialog();
   void onShowNtscObserverDialog();
   void updateNtscObserverDialog();
-  void onShowTeletextDialog();
-  void updateTeletextDialog();
-  /// Issue the next batch of teletext observation requests for the dialog's
-  /// window. Called on every frame change and again as each delivery lands,
-  /// because the dialog paces the frames it asks for.
-  void issueTeletextRequests();
   void onShowClosedCaptionDialog();
   void updateClosedCaptionDialog();
   /// Issue the next batch of closed caption observation requests for the
@@ -168,11 +162,6 @@ class MainWindow : public QMainWindow {
       uint64_t request_id, bool available, qulonglong field_id_value,
       orc::presenters::VideoParameterObservationView video_params,
       orc::presenters::NtscFieldObservationsView ntsc);
-  void onTeletextDataReady(uint64_t request_id, bool available,
-                           qulonglong field1_id_value,
-                           orc::presenters::TeletextFieldPacketsView field1,
-                           qulonglong field2_id_value,
-                           orc::presenters::TeletextFieldPacketsView field2);
   void onClosedCaptionDataReady(
       uint64_t request_id, bool available, qulonglong field1_id_value,
       orc::presenters::ClosedCaptionFieldDataView field1,
@@ -224,6 +213,10 @@ class MainWindow : public QMainWindow {
   void onBurstLevelDataReady(uint64_t request_id,
                              orc::presenters::BurstLevelDisplaySeries series);
   void onBurstLevelProgress(size_t current, size_t total, QString message);
+  void onTeletextAnalysisDataReady(uint64_t request_id,
+                                   orc::presenters::TeletextAnalysisView data);
+  void onTeletextAnalysisProgress(size_t current, size_t total,
+                                  QString message);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
   void onCoordinatorError(uint64_t request_id, QString message);
@@ -354,12 +347,6 @@ class MainWindow : public QMainWindow {
   orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field1_;
   orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field2_;
 
-  // Teletext dialog: one request per window frame still lacking packet data
-  // (request_id -> frame index); unknown ids in responses are stale.
-  std::unordered_map<uint64_t, uint64_t> pending_teletext_requests_;
-  // View node the teletext packet cache was filled from; a change clears it.
-  orc::NodeID teletext_cache_node_id_;
-
   // Closed caption dialog: one request per window frame still lacking caption
   // data (request_id -> frame index); unknown ids in responses are stale.
   std::unordered_map<uint64_t, uint64_t> pending_closed_caption_requests_;
@@ -383,6 +370,8 @@ class MainWindow : public QMainWindow {
       pending_snr_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>
       pending_burst_level_requests_;  // request_id -> node_id
+  std::unordered_map<uint64_t, orc::NodeID>
+      pending_teletext_analysis_requests_;  // request_id -> node_id
 
   // Dropout analysis state tracking
   orc::NodeID last_dropout_node_id_;
@@ -401,13 +390,14 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;
   // Note: project_presenter_ removed - use project_.presenter() instead
   NtscObserverDialog* ntsc_observer_dialog_;
-  TeletextDialog* teletext_dialog_;
   ClosedCaptionDialog* closed_caption_dialog_;
   std::unordered_map<orc::NodeID, DropoutAnalysisDialog*>
       dropout_analysis_dialogs_;
   std::unordered_map<orc::NodeID, SNRAnalysisDialog*> snr_analysis_dialogs_;
   std::unordered_map<orc::NodeID, BurstLevelAnalysisDialog*>
       burst_level_analysis_dialogs_;
+  // Teletext page viewers, one per analysis sink node (stage tool)
+  std::unordered_map<orc::NodeID, TeletextDialog*> teletext_analysis_dialogs_;
   OrcGraphModel* dag_model_;
   OrcGraphicsView* dag_view_;
   OrcGraphicsScene* dag_scene_;
@@ -482,6 +472,8 @@ class MainWindow : public QMainWindow {
       snr_progress_dialogs_;
   std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
       burst_level_progress_dialogs_;
+  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
+      teletext_analysis_progress_dialogs_;
 };
 
 #endif  // MAINWINDOW_H

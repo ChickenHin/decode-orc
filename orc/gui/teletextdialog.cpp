@@ -1,7 +1,7 @@
 /*
  * File:        teletextdialog.cpp
  * Module:      orc-gui
- * Purpose:     Teletext page preview dialog (observer dialog)
+ * Purpose:     Teletext page viewer for the teletext analysis sink stage tool
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -16,6 +16,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QPalette>
+#include <QStringList>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -24,10 +25,6 @@
 #include "teletextpagewidget.h"
 
 namespace {
-
-// Role carrying a row's page-order key, so the table can be merged against a
-// freshly sorted catalogue without re-parsing the displayed labels.
-constexpr int kSortKeyRole = Qt::UserRole + 1;
 
 // ETSI EN 300 706 §9.3.1.1: the page number is a two-digit hexadecimal field,
 // but a receiver keypad can only select the decimal values, so viewable pages
@@ -53,9 +50,6 @@ TeletextDialog::TeletextDialog(QWidget* parent) : QDialog(parent) {
 
   // Use Qt::Window flag to allow independent positioning
   setWindowFlags(Qt::Window);
-
-  // Don't destroy on close, just hide
-  setAttribute(Qt::WA_DeleteOnClose, false);
 
   resize(720, 540);
   setMinimumSize(520, 400);
@@ -117,30 +111,30 @@ void TeletextDialog::setupUI() {
 
   auto* body_row = new QHBoxLayout();
 
-  // Left column: the pages seen since the last discontinuity. Teletext is a
+  // Left column: every page the analysed range carried. Teletext is a
   // carousel, so which pages exist is itself a discovery — the table is how
   // the user finds out, rather than having to guess page numbers.
   auto* list_column = new QVBoxLayout();
-  auto* list_heading = new QLabel(tr("Pages seen:"), this);
+  auto* list_heading = new QLabel(tr("Pages carried:"), this);
   list_column->addWidget(list_heading);
 
   pages_table_ = new QTableWidget(0, kColumnCount, this);
   pages_table_->setObjectName("teletextPagesTable");
   pages_table_->setHorizontalHeaderLabels(
-      {tr("Page"), tr("Seen"), tr("Frame")});
+      {tr("Page"), tr("Seen"), tr("Frames")});
   pages_table_->horizontalHeaderItem(kColumnSeen)
-      ->setToolTip(tr("How many times the carousel has brought this page "
-                      "round since the last seek."));
+      ->setToolTip(tr("How many times the carousel brought this page round "
+                      "over the analysed range."));
   pages_table_->horizontalHeaderItem(kColumnFrame)
-      ->setToolTip(tr("Frame carrying the most recent transmission."));
+      ->setToolTip(tr("Frames carrying the first and last transmission."));
   // The two numeric columns are right-aligned so their digits line up; their
   // headings follow them.
   for (const int column : {kColumnSeen, kColumnFrame}) {
     pages_table_->horizontalHeaderItem(column)->setTextAlignment(
         Qt::AlignRight | Qt::AlignVCenter);
   }
-  pages_table_->setMinimumWidth(200);
-  pages_table_->setMaximumWidth(280);
+  pages_table_->setMinimumWidth(220);
+  pages_table_->setMaximumWidth(320);
   pages_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
   pages_table_->setSelectionMode(QAbstractItemView::SingleSelection);
   pages_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -149,8 +143,6 @@ void TeletextDialog::setupUI() {
   pages_table_->setWordWrap(false);
   pages_table_->setCornerButtonEnabled(false);
   pages_table_->verticalHeader()->setVisible(false);
-  // Per-pixel scrolling keeps the view anchored where the user left it while
-  // rows are merged in underneath during playback.
   pages_table_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
   auto* pages_header = pages_table_->horizontalHeader();
   pages_header->setSectionResizeMode(kColumnPage,
@@ -167,14 +159,24 @@ void TeletextDialog::setupUI() {
   body_row->addWidget(page_widget_, /*stretch=*/1);
   content_layout->addLayout(body_row, /*stretch=*/1);
 
+  // How the run went as a whole, below the page display: an empty page list
+  // means something quite different on a recording that yielded no packets at
+  // all than on one whose packets never assembled into a page.
+  summary_label_ = new QLabel(this);
+  summary_label_->setObjectName("teletextSummaryLabel");
+  summary_label_->setWordWrap(true);
+  summary_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  summary_label_->setVisible(false);
+  content_layout->addWidget(summary_label_);
+
   main_layout->addLayout(content_layout, /*stretch=*/1);
 
   status_bar_ = new QStatusBar(this);
   status_bar_->setObjectName("teletextStatusBar");
   status_bar_->setSizeGripEnabled(false);
 
-  // Page status on the left, observation progress on the right; both live in
-  // the status bar so a message appearing never reflows the page display.
+  // Page status on the left, decode progress on the right; both live in the
+  // status bar so a message appearing never reflows the page display.
   seen_label_ = new QLabel(tr("No page data"), this);
   seen_label_->setObjectName("teletextSeenLabel");
   status_bar_->addWidget(seen_label_, /*stretch=*/1);
@@ -195,56 +197,37 @@ void TeletextDialog::setupUI() {
   main_layout->addWidget(status_bar_);
 }
 
-void TeletextDialog::showPending() { updatePendingStatus(); }
-
-void TeletextDialog::updatePendingStatus() {
-  // The whole outstanding count, not the capped batch, so the readout counts
-  // down towards zero instead of sitting at the batch size.
-  const std::size_t outstanding = assembler_.framesNeedingDataCount();
-  if (outstanding == 0) {
-    status_label_->setVisible(false);
-    status_label_->clear();
-    return;
-  }
-  status_label_->setText(
-      tr("Reading %1 frames…").arg(static_cast<qulonglong>(outstanding)));
+void TeletextDialog::showPending() {
+  status_label_->setText(tr("Decoding…"));
   status_label_->setVisible(true);
 }
 
 void TeletextDialog::clearContent() {
-  assembler_.clear();
+  data_ = orc::presenters::TeletextAnalysisView{};
+  has_data_ = false;
   current_page_.reset();
-  list_populated_ = false;
   status_label_->setVisible(false);
   status_label_->clear();
+  summary_label_->setVisible(false);
+  summary_label_->clear();
   refreshPageList();
   seen_label_->setText(tr("No page data"));
   recovery_label_->setVisible(false);
   page_widget_->clearPage();
 }
 
-void TeletextDialog::clearCache() {
-  assembler_.clear();
-  list_populated_ = false;
-  renderPage();
-}
+void TeletextDialog::setAnalysisData(
+    const orc::presenters::TeletextAnalysisView& data) {
+  data_ = data;
+  has_data_ = true;
+  status_label_->setVisible(false);
+  status_label_->clear();
 
-void TeletextDialog::setCurrentFrame(uint64_t frame_index) {
-  assembler_.setCurrentFrame(frame_index);
-  renderPage();
-}
+  const QString summary = formatSummary(data_.summary);
+  summary_label_->setText(summary);
+  summary_label_->setVisible(!summary.isEmpty());
 
-void TeletextDialog::deliverFrameData(
-    bool available, uint64_t field1_id_value,
-    const orc::presenters::TeletextFieldPacketsView& field1,
-    const orc::presenters::TeletextFieldPacketsView& field2) {
-  const uint64_t frame_index = field1_id_value / 2;
-  if (available) {
-    assembler_.storeFrame(frame_index, field1, field2);
-  } else {
-    assembler_.markFrameUnavailable(frame_index);
-  }
-  updatePendingStatus();
+  refreshPageList();
   renderPage();
 }
 
@@ -278,6 +261,10 @@ QString TeletextDialog::recoveryText() const {
   return recovery_label_->isVisible() ? recovery_label_->text() : QString();
 }
 
+QString TeletextDialog::summaryText() const {
+  return summary_label_->isVisible() ? summary_label_->text() : QString();
+}
+
 QString TeletextDialog::subtitleHintText() const {
   return subtitle_hint_->isVisible() ? subtitle_hint_->text() : QString();
 }
@@ -297,10 +284,8 @@ QString TeletextDialog::formatRecovery(
   // was wrong at all.
   const QString rows = tr("%n row(s)", nullptr, recovery.rows_received);
 
-  // A page part-way through its transmission looks exactly like a finished
-  // one with rows missing — teletext is sent a packet at a time, and on a
-  // sparse insertion a single page takes several frames to arrive. Saying so
-  // is the difference between "this recording is damaged" and "wait".
+  // A page whose last transmission was still arriving when the range ran out
+  // looks exactly like a finished one with rows missing.
   if (!page.transmission_complete) {
     return tr("Partial - still arriving (%1 so far)").arg(rows);
   }
@@ -322,6 +307,43 @@ QString TeletextDialog::formatRecovery(
     return tr("Complete (%1)").arg(rows);
   }
   return tr("%1, %2").arg(rows, faults.join(tr(", ")));
+}
+
+QString TeletextDialog::formatSummary(
+    const orc::presenters::TeletextRecoverySummaryView& summary) {
+  if (summary.frames_analysed == 0 && summary.packets_recovered == 0) {
+    return {};
+  }
+
+  QStringList parts;
+  parts << tr("%1 packets recovered from %2 fields over %3 frames")
+               .arg(static_cast<qulonglong>(summary.packets_recovered))
+               .arg(static_cast<qulonglong>(summary.fields_with_data))
+               .arg(static_cast<qulonglong>(summary.frames_analysed));
+  // Odd parity (ETSI EN 300 706 §8.1) is the only damage measure available
+  // without the original transmission, and it is a floor: a byte damaged in
+  // two bits passes it.
+  if (summary.characters_written > 0) {
+    parts << tr("%1 of %2 characters known damaged")
+                 .arg(static_cast<qulonglong>(summary.characters_damaged))
+                 .arg(static_cast<qulonglong>(summary.characters_written));
+  }
+  if (summary.packets_corrected > 0) {
+    parts << tr("%1 rows corrected by repeats")
+                 .arg(static_cast<qulonglong>(summary.packets_corrected));
+  }
+  if (summary.bytes_repaired > 0) {
+    parts << tr("%1 bytes parity-repaired")
+                 .arg(static_cast<qulonglong>(summary.bytes_repaired));
+  }
+  if (summary.lost_packets_estimate > 0) {
+    parts << tr("about %1 packets lost")
+                 .arg(static_cast<qulonglong>(summary.lost_packets_estimate));
+  }
+  if (summary.pages_truncated) {
+    parts << tr("page list truncated at the catalogue limit");
+  }
+  return parts.join(tr("; "));
 }
 
 void TeletextDialog::onPageSelected() {
@@ -349,20 +371,29 @@ QString TeletextDialog::formatPageLabel(int magazine, int page_number) {
       .toUpper();
 }
 
+const orc::presenters::TeletextCataloguedPageView* TeletextDialog::findPage(
+    int magazine, int page_number) const {
+  const auto match = std::find_if(
+      data_.pages.begin(), data_.pages.end(),
+      [magazine,
+       page_number](const orc::presenters::TeletextCataloguedPageView& entry) {
+        return entry.magazine == magazine && entry.page_number == page_number;
+      });
+  return match == data_.pages.end() ? nullptr : &*match;
+}
+
 void TeletextDialog::createPageRow(
-    int row, const TeletextPageAssembler::PageListing& listing) {
-  const QString label = formatPageLabel(listing.magazine, listing.page_number);
+    int row, const orc::presenters::TeletextCataloguedPageView& entry) {
+  const QString label = formatPageLabel(entry.magazine, entry.page_number);
 
   auto* page_item = new QTableWidgetItem(label);
   page_item->setData(Qt::UserRole, label);
-  page_item->setData(kSortKeyRole,
-                     pageSortKey(listing.magazine, listing.page_number));
   auto* seen_item = new QTableWidgetItem();
   seen_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
   auto* frame_item = new QTableWidgetItem();
   frame_item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
-  if (isNonSelectablePage(listing.page_number)) {
+  if (isNonSelectablePage(entry.page_number)) {
     // Kept listed — it is genuinely recovered data — but greyed, so the pages
     // a viewer could actually tune to are the ones that stand out.
     const QBrush muted = palette().brush(QPalette::Disabled, QPalette::Text);
@@ -382,95 +413,59 @@ void TeletextDialog::createPageRow(
 }
 
 void TeletextDialog::updatePageRow(
-    int row, const TeletextPageAssembler::PageListing& listing) {
+    int row, const orc::presenters::TeletextCataloguedPageView& entry) {
   auto* page_item = pages_table_->item(row, kColumnPage);
-
-  // The subtitle flag is not known when the row is created — a page can be
-  // listed from a transmission before the one that declares C6 — so the marker
-  // is written here with the volatile columns. It is spelled out rather than
-  // shown as a symbol because there is nowhere in this table to put a legend.
   const QString label = page_item->data(Qt::UserRole).toString();
-  const QString page_text = listing.subtitle ? tr("%1 subs").arg(label) : label;
-  if (page_item->text() != page_text) {
-    page_item->setText(page_text);
-    if (listing.subtitle) {
-      page_item->setToolTip(
-          tr("Page %1 is transmitted with the C6 subtitle control bit set: it "
-             "is the page this service carries its subtitles on. Use it as the "
-             "subtitle page when exporting subtitles.")
-              .arg(label));
-    }
+
+  // The subtitle marker is spelled out rather than shown as a symbol because
+  // there is nowhere in this table to put a legend.
+  page_item->setText(entry.subtitle ? tr("%1 subs").arg(label) : label);
+  if (entry.subtitle) {
+    page_item->setToolTip(
+        tr("Page %1 is transmitted with the C6 subtitle control bit set: it "
+           "is the page this service carries its subtitles on. Use it as the "
+           "subtitle page when exporting subtitles.")
+            .arg(label));
   }
 
-  // Frame numbers are 1-based in the UI (see frame_numbering.h).
-  const QString seen = QString::number(listing.times_seen);
-  // A page still arriving has no settled "last seen" frame yet; an ellipsis
-  // marks it so a row that is about to change does not read as a final
-  // answer.
-  const QString frame =
-      QString::number(static_cast<qulonglong>(listing.seen_frame) + 1) +
-      (listing.transmission_complete ? QString() : QStringLiteral("…"));
-  auto* seen_item = pages_table_->item(row, kColumnSeen);
-  auto* frame_item = pages_table_->item(row, kColumnFrame);
-  if (seen_item->text() != seen) {
-    seen_item->setText(seen);
-  }
-  if (frame_item->text() != frame) {
-    frame_item->setText(frame);
-    frame_item->setToolTip(
-        listing.transmission_complete
-            ? QString()
-            : tr("This page is still being transmitted; rows are still "
-                 "arriving."));
-  }
+  pages_table_->item(row, kColumnSeen)
+      ->setText(QString::number(static_cast<qulonglong>(entry.times_seen)));
+
+  // Frame numbers are 1-based in the UI (see frame_numbering.h). A page seen
+  // once has no range to show.
+  const qulonglong first = static_cast<qulonglong>(entry.first_seen_frame) + 1;
+  const qulonglong last = static_cast<qulonglong>(entry.last_seen_frame) + 1;
+  pages_table_->item(row, kColumnFrame)
+      ->setText(first == last ? QString::number(first)
+                              : QStringLiteral("%1-%2").arg(first).arg(last));
 }
 
 void TeletextDialog::refreshPageList() {
-  const uint64_t revision = assembler_.catalogueRevision();
-  if (list_populated_ && revision == listed_revision_) {
-    return;  // nothing new seen; leave the user's selection alone
-  }
-  listed_revision_ = revision;
-  list_populated_ = true;
-
   // The catalogue is page-address ordered; re-sort so the pages a receiver
   // could select come first and the hex-digit ones settle below them.
-  auto listings = assembler_.cataloguedPages();
-  std::sort(listings.begin(), listings.end(),
-            [](const TeletextPageAssembler::PageListing& lhs,
-               const TeletextPageAssembler::PageListing& rhs) {
+  auto entries = data_.pages;
+  std::sort(entries.begin(), entries.end(),
+            [](const orc::presenters::TeletextCataloguedPageView& lhs,
+               const orc::presenters::TeletextCataloguedPageView& rhs) {
               return pageSortKey(lhs.magazine, lhs.page_number) <
                      pageSortKey(rhs.magazine, rhs.page_number);
             });
 
-  // Rows are merged in place rather than rebuilt. Playback bumps the
-  // catalogue revision on almost every frame, and clearing the table each
-  // time would drop the scroll position and the selection out from under a
-  // user trying to click a row.
+  // One trigger run delivers the catalogue whole, so the table is built once
+  // per delivery rather than merged: there is no playback to keep it still
+  // for, and rebuilding keeps the row order and the data in step.
   updating_list_ = true;
+  pages_table_->clearContents();
+  pages_table_->setRowCount(static_cast<int>(entries.size()));
   QStringList subtitle_pages;
   int row = 0;
-  for (const auto& listing : listings) {
-    if (listing.subtitle) {
-      subtitle_pages << formatPageLabel(listing.magazine, listing.page_number);
+  for (const auto& entry : entries) {
+    if (entry.subtitle) {
+      subtitle_pages << formatPageLabel(entry.magazine, entry.page_number);
     }
-    const int key = pageSortKey(listing.magazine, listing.page_number);
-    while (row < pages_table_->rowCount() &&
-           pages_table_->item(row, kColumnPage)->data(kSortKeyRole).toInt() <
-               key) {
-      pages_table_->removeRow(row);  // page evicted from the catalogue
-    }
-    if (row >= pages_table_->rowCount() ||
-        pages_table_->item(row, kColumnPage)->data(kSortKeyRole).toInt() !=
-            key) {
-      pages_table_->insertRow(row);
-      createPageRow(row, listing);
-    }
-    updatePageRow(row, listing);
+    createPageRow(row, entry);
+    updatePageRow(row, entry);
     ++row;
-  }
-  while (pages_table_->rowCount() > row) {
-    pages_table_->removeRow(row);
   }
   updating_list_ = false;
 
@@ -502,9 +497,7 @@ void TeletextDialog::syncListSelection(const QString& page_label) {
     }
   }
   if (match == pages_table_->currentRow()) {
-    // Already current. Re-selecting would scroll the row back into view on
-    // every delivered frame, fighting a user who has scrolled elsewhere.
-    return;
+    return;  // already current; re-selecting would fight the user's scroll
   }
   updating_list_ = true;
   if (match >= 0) {
@@ -517,8 +510,6 @@ void TeletextDialog::syncListSelection(const QString& page_label) {
 }
 
 void TeletextDialog::renderPage() {
-  refreshPageList();
-
   const auto page_address = orc::TeletextPageDecoder::parse_page_number(
       page_edit_->text().toStdString());
   if (!page_address) {
@@ -532,25 +523,28 @@ void TeletextDialog::renderPage() {
 
   const QString label =
       formatPageLabel(page_address->first, page_address->second);
-  const auto* entry =
-      assembler_.findPage(page_address->first, page_address->second);
+  const auto* entry = findPage(page_address->first, page_address->second);
   if (entry != nullptr) {
-    // Carousel media make random access approximate: report where the page
-    // transmission was actually seen (1-based frame numbering in the UI).
     current_page_ = entry->page;
+    // 1-based frame numbering in the UI (see frame_numbering.h).
     seen_label_->setText(
-        tr("Page %1 last seen at frame %2 (%n transmission(s))", nullptr,
+        tr("Page %1 seen %n time(s), frames %2-%3", nullptr,
            static_cast<int>(entry->times_seen))
             .arg(label)
-            .arg(static_cast<qulonglong>(entry->seen_frame) + 1));
+            .arg(static_cast<qulonglong>(entry->first_seen_frame) + 1)
+            .arg(static_cast<qulonglong>(entry->last_seen_frame) + 1));
     recovery_label_->setText(formatRecovery(*current_page_));
     recovery_label_->setVisible(true);
     page_widget_->setPage(*current_page_);
   } else {
     current_page_.reset();
-    seen_label_->setText(pages_table_->rowCount() == 0
-                             ? tr("No teletext pages seen yet")
-                             : tr("Page %1 not seen yet").arg(label));
+    if (!has_data_) {
+      seen_label_->setText(tr("No page data"));
+    } else {
+      seen_label_->setText(pages_table_->rowCount() == 0
+                               ? tr("No teletext pages were recovered")
+                               : tr("Page %1 was not carried").arg(label));
+    }
     recovery_label_->setVisible(false);
     page_widget_->clearPage();
   }

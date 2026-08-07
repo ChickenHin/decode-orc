@@ -1,7 +1,8 @@
 /*
  * File:        orc_teletext.h
  * Module:      orc-view-types
- * Purpose:     Teletext observation and page view models for MVP architecture
+ * Purpose:     Teletext page and analysis-catalogue view models for MVP
+ *              architecture
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -14,50 +15,6 @@
 #include <vector>
 
 namespace orc::presenters {
-
-/**
- * @brief One recovered T42 teletext packet from a single VBI line
- *
- * The bytes are the MRAG plus the service's data bytes in transmission coding,
- * exactly as recovered by the teletext observer: 42 in all on 625-line systems
- * (ETSI EN 300 706 §7.1) and 34 on 525-line ones (ITU-R BT.653 Table 1b).
- */
-struct TeletextPacketView {
-  /// 0-based field line the packet was recovered from
-  int field_line = 0;
-  /// MRAG + data bytes, transmission coding. The buffer is the widest a
-  /// service transmits (matches the SDK kTeletextPacketBytes contract;
-  /// static_assert'ed in the presenter); only the leading @ref byte_count were
-  /// sent, and the rest are zero.
-  std::array<uint8_t, 42> bytes{};
-  /// Bytes of @ref bytes the service transmitted: 42 on 625-line systems, 34
-  /// on 525-line ones.
-  int byte_count = 42;
-  /// Whether the recovery chain could say how sure it was of each byte. False
-  /// for packets recovered by threshold slicing and for observations stored
-  /// before confidences existed.
-  bool has_confidence = false;
-  /// How sure it was, 0-1 per byte — 1 throughout when it could not say, so a
-  /// consumer weighting a vote by this needs no special case. Combining
-  /// repeated copies of a page row uses it to prefer the copy that was read
-  /// cleanly (see the SDK's teletext_row_squasher.h).
-  std::array<float, 42> confidence{};
-};
-
-/**
- * @brief Teletext observations for a single field
- */
-struct TeletextFieldPacketsView {
-  /// The "teletext" observation namespace exists for this field (false for
-  /// systems with no WST service, or fields that have not been observed)
-  bool observed = false;
-  /// At least one valid packet was recovered in the field
-  bool present = false;
-  /// Number of candidate VBI lines that yielded packets
-  int32_t line_count = 0;
-  /// Recovered packets in ascending field-line order
-  std::vector<TeletextPacketView> packets;
-};
 
 /**
  * @brief One character cell of a rendered Level 1 teletext page
@@ -176,6 +133,71 @@ struct TeletextPageView {
   bool transmission_complete = true;
 
   std::array<std::array<TeletextPageCellView, kColumns>, kRows> cells{};
+};
+
+/**
+ * @brief One page the analysed range carried
+ *
+ * Teletext is a carousel, so a page is not one transmission but hundreds of
+ * them: the entry holds the best assembly of the page built from every row copy
+ * the range yielded, plus how often and where the carousel brought it round.
+ */
+struct TeletextCataloguedPageView {
+  int magazine = 8;     ///< Displayed magazine number 1-8
+  int page_number = 0;  ///< Two-digit hexadecimal page number 0x00-0xFF
+  /// Frames carrying the first and the most recent header packet of the page
+  /// (0-based; the view adds one where it displays them)
+  uint64_t first_seen_frame = 0;
+  uint64_t last_seen_frame = 0;
+  /// Appearances counted over the analysed range. A header re-sent part-way
+  /// through the page's own transmission is the same appearance, not another.
+  uint64_t times_seen = 0;
+  /// Transmitted with C6 (subtitle, ETSI EN 300 706 §9.3.1.3 Table 2) set at
+  /// least once. Sticky: a service may drop C6 between captions and the page
+  /// is still the subtitle page in between.
+  bool subtitle = false;
+  /// Best assembly of the page over the whole analysed range
+  TeletextPageView page;
+};
+
+/**
+ * @brief How the recovery went over the analysed range
+ *
+ * Aggregate counts only; the per-line and per-page detail lives in the stage's
+ * own report.
+ */
+struct TeletextRecoverySummaryView {
+  uint64_t frames_analysed = 0;
+  uint64_t fields_with_data = 0;
+  uint64_t packets_recovered = 0;
+  /// Row packets whose bytes were changed by combining repeated copies
+  uint64_t packets_corrected = 0;
+  /// Display bytes whose odd parity was restored by the detector's repair
+  uint64_t bytes_repaired = 0;
+  /// Display characters written, and how many of those are known damaged
+  /// because they fail the odd parity of ETSI EN 300 706 §8.1. A floor rather
+  /// than an exact count — a byte damaged in two bits passes parity.
+  uint64_t characters_written = 0;
+  uint64_t characters_damaged = 0;
+  /// Packet slots that came back empty during a page transmission — an
+  /// estimate of what the recording lost (see the SDK dataset for the full
+  /// reasoning)
+  uint64_t lost_packets_estimate = 0;
+  /// True when the stage's page cap dropped pages, so the catalogue is not the
+  /// whole set the range carried
+  bool pages_truncated = false;
+};
+
+/**
+ * @brief Everything the teletext analysis viewer shows for one triggered node
+ *
+ * The whole analysed range, not a window around the previewer: the stage
+ * decodes the range once per trigger and the viewer reads the result.
+ */
+struct TeletextAnalysisView {
+  /// Ascending by {magazine, page number}
+  std::vector<TeletextCataloguedPageView> pages;
+  TeletextRecoverySummaryView summary;
 };
 
 }  // namespace orc::presenters

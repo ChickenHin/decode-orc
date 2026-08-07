@@ -55,6 +55,7 @@
 #include "metrics_presenter.h"
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
+#include "teletext_analysis_presenter.h"
 
 namespace orc::presenters {
 
@@ -2739,6 +2740,29 @@ RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
   series.total_frames = sink->total_frames();
   series.decimated = series_is_decimated(series.points);
   return series;
+}
+
+std::optional<TeletextAnalysisView> RenderPresenter::getTeletextAnalysisData(
+    NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
+  }
+
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
+  if (!target_node) {
+    return std::nullopt;
+  }
+
+  auto* sink =
+      dynamic_cast<orc::ITeletextAnalysisResults*>(target_node->stage.get());
+  if (!sink || !sink->has_results()) {
+    return std::nullopt;
+  }
+
+  // The catalogue is already bounded by the stage's page cap, so it is handed
+  // over whole — there is no decimation step as there is for the graph series.
+  return TeletextAnalysisPresenter::makeAnalysisView(sink->dataset());
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

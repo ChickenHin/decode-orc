@@ -18,7 +18,6 @@
 #include "logging.h"
 #include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
-#include "teletext_observation_presenter.h"
 #include "vbi_presenter.h"
 #include "video_parameter_observation_presenter.h"
 
@@ -85,6 +84,11 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(orc::NodeID node_id) override {
     return presenter_.getBurstLevelAnalysisData(node_id);
+  }
+
+  std::optional<orc::presenters::TeletextAnalysisView> getTeletextAnalysisData(
+      orc::NodeID node_id) override {
+    return presenter_.getTeletextAnalysisData(node_id);
   }
 
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
@@ -381,14 +385,6 @@ uint64_t RenderCoordinator::requestVBIData(const orc::NodeID& node_id,
   return id;
 }
 
-uint64_t RenderCoordinator::requestTeletextData(const orc::NodeID& node_id,
-                                                orc::FieldID field_id) {
-  uint64_t id = nextRequestId();
-  auto req = std::make_unique<GetTeletextDataRequest>(id, node_id, field_id);
-  enqueueRequest(std::move(req));
-  return id;
-}
-
 uint64_t RenderCoordinator::requestClosedCaptionData(const orc::NodeID& node_id,
                                                      orc::FieldID field_id) {
   uint64_t id = nextRequestId();
@@ -425,6 +421,14 @@ uint64_t RenderCoordinator::requestSNRData(const orc::NodeID& node_id,
 uint64_t RenderCoordinator::requestBurstLevelData(const orc::NodeID& node_id) {
   uint64_t id = nextRequestId();
   auto req = std::make_unique<GetBurstLevelDataRequest>(id, node_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
+uint64_t RenderCoordinator::requestTeletextAnalysisData(
+    const orc::NodeID& node_id) {
+  uint64_t id = nextRequestId();
+  auto req = std::make_unique<GetTeletextAnalysisDataRequest>(id, node_id);
   enqueueRequest(std::move(req));
   return id;
 }
@@ -661,11 +665,6 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
       handleGetVBIData(*static_cast<GetVBIDataRequest*>(request.get()));
       break;
 
-    case RenderRequestType::GetTeletextData:
-      handleGetTeletextData(
-          *static_cast<GetTeletextDataRequest*>(request.get()));
-      break;
-
     case RenderRequestType::GetClosedCaptionData:
       handleGetClosedCaptionData(
           *static_cast<GetClosedCaptionDataRequest*>(request.get()));
@@ -682,6 +681,11 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
     case RenderRequestType::GetBurstLevelData:
       handleGetBurstLevelData(
           *static_cast<GetBurstLevelDataRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetTeletextAnalysisData:
+      handleGetTeletextAnalysisData(
+          *static_cast<GetTeletextAnalysisDataRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetAvailableOutputs:
@@ -940,56 +944,6 @@ void RenderCoordinator::handleGetObservations(
       });
 }
 
-void RenderCoordinator::handleGetTeletextData(
-    const GetTeletextDataRequest& req) {
-  // One presenter request covers both fields of the field's parent frame
-  // (requestObservations() maps field -> frame), so extract both here and
-  // let the teletext dialog fill its trailing-frame-window cache at half the
-  // request rate. Temporal order is ascending derived field id.
-  const uint64_t frame_index = req.field_id.value() / 2;
-  const orc::FieldID field1_id(frame_index * 2);
-  const orc::FieldID field2_id(frame_index * 2 + 1);
-
-  if (!worker_render_presenter_) {
-    emit teletextDataReady(req.request_id, false,
-                           static_cast<qulonglong>(field1_id.value()),
-                           orc::presenters::TeletextFieldPacketsView{},
-                           static_cast<qulonglong>(field2_id.value()),
-                           orc::presenters::TeletextFieldPacketsView{});
-    return;
-  }
-
-  const uint64_t request_id = req.request_id;
-  worker_render_presenter_->requestObservations(
-      req.node_id, req.field_id,
-      [this, request_id, field1_id, field2_id](
-          uint64_t /*presenter_request_id*/, bool available,
-          const void* obs_context) noexcept {
-        // This callback may run on the scheduler's worker thread inside a
-        // completion callback that must never throw; contain everything.
-        try {
-          orc::presenters::TeletextFieldPacketsView field1_view;
-          orc::presenters::TeletextFieldPacketsView field2_view;
-          if (available && obs_context != nullptr) {
-            field1_view = orc::presenters::TeletextObservationPresenter::
-                extractFieldObservations(field1_id, obs_context);
-            field2_view = orc::presenters::TeletextObservationPresenter::
-                extractFieldObservations(field2_id, obs_context);
-          }
-          emit teletextDataReady(request_id, available,
-                                 static_cast<qulonglong>(field1_id.value()),
-                                 std::move(field1_view),
-                                 static_cast<qulonglong>(field2_id.value()),
-                                 std::move(field2_view));
-        } catch (const std::exception& e) {
-          ORC_LOG_ERROR("RenderCoordinator: teletext delivery failed: {}",
-                        e.what());
-        } catch (...) {
-          ORC_LOG_ERROR("RenderCoordinator: teletext delivery failed");
-        }
-      });
-}
-
 void RenderCoordinator::handleGetClosedCaptionData(
     const GetClosedCaptionDataRequest& req) {
   // One presenter request covers both fields of the field's parent frame
@@ -1223,6 +1177,54 @@ void RenderCoordinator::handleGetBurstLevelData(
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Burst level analysis failed: {}",
                   e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleGetTeletextAnalysisData(
+    const GetTeletextAnalysisDataRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Getting teletext analysis data for node '{}' "
+      "(request {})",
+      req.node_id.to_string(), req.request_id);
+
+  try {
+    if (!worker_render_presenter_) {
+      emit error(req.request_id, "Render presenter not initialized");
+      return;
+    }
+
+    auto data = worker_render_presenter_->getTeletextAnalysisData(req.node_id);
+    if (!data) {
+      // Stage has not been triggered yet — decode the range now so the
+      // catalogue exists to read.
+      ORC_LOG_DEBUG(
+          "RenderCoordinator: Teletext stage has no results, triggering now "
+          "(request {})",
+          req.request_id);
+      auto progress_cb = makePercentGatedProgress(
+          [this](int current, int total, const std::string& message) {
+            emit teletextAnalysisProgress(static_cast<size_t>(current),
+                                          static_cast<size_t>(total),
+                                          QString::fromStdString(message));
+          });
+      worker_render_presenter_->triggerStage(req.node_id, progress_cb);
+      data = worker_render_presenter_->getTeletextAnalysisData(req.node_id);
+      if (!data) {
+        emit error(req.request_id,
+                   "Failed to get teletext data - node may not be a "
+                   "TeletextAnalysisSinkStage or trigger failed");
+        return;
+      }
+    }
+
+    ORC_LOG_DEBUG(
+        "RenderCoordinator: Served teletext catalogue from sink ({} pages)",
+        data->pages.size());
+    emit teletextAnalysisDataReady(req.request_id, std::move(*data));
+
+  } catch (const std::exception& e) {
+    ORC_LOG_ERROR("RenderCoordinator: Teletext analysis failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
 }

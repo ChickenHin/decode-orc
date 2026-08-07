@@ -1,7 +1,7 @@
 /*
  * File:        teletextdialog.h
  * Module:      orc-gui
- * Purpose:     Teletext page preview dialog (observer dialog)
+ * Purpose:     Teletext page viewer for the teletext analysis sink stage tool
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -23,35 +23,27 @@
 #include <optional>
 #include <vector>
 
-#include "teletext_page_assembler.h"
-
 class TeletextPageWidget;
 
 /**
- * @brief Modeless preview of the teletext pages the previewer has seen
+ * @brief Viewer for the pages a teletext analysis sink recovered
  *
- * An observer dialog (owned by MainWindow, raised from the preview window's
- * Observers menu) that follows the frame previewer. Unlike its stateless
- * VBI/NTSC siblings it is stateful: it owns a trailing-frame-window packet
- * cache and a page catalogue that accumulates as the user moves through the
- * recording, because teletext is a carousel medium — a single frame carries
- * only a fragment of one page (see TeletextPageAssembler).
+ * The stage tool of one `teletext_analysis_sink` node: triggering the node
+ * decodes the whole frame range in a single pass and this dialogue shows what
+ * it found. Unlike the preview observer dialogues it replaced, it does not
+ * follow the previewer — the catalogue describes the entire source, so there is
+ * no window to slide and nothing to accumulate here.
  *
- * The catalogue is presented as a clickable table of the pages seen so far —
- * page number, how many times the carousel has brought it round, and the
- * frame it was last seen at; selecting a row renders that page. Rows are
- * merged into place rather than rebuilt, and are ordered by page address, so
- * the table stays still enough to click while the previewer is playing. Pages
- * transmitted with the C6 subtitle control bit are marked in the table and
- * named beside the page-number entry: which page carries the subtitles is a
+ * The catalogue is presented as a clickable table of the pages the range
+ * carried — page number, how many times the carousel brought it round, and the
+ * frames it was first and last seen at; selecting a row renders that page.
+ * Pages transmitted with the C6 subtitle control bit are marked in the table
+ * and named beside the page-number entry: which page carries the subtitles is a
  * property of the recording (888 is only the broadcast convention), and it is
  * what the sink stages need to be told to export them.
- * Status text lives in a status bar along the bottom edge so transient
- * messages never reflow the page display.
  *
- * MainWindow drives it: setCurrentFrame() on frame changes, then issues one
- * requestTeletextData() per frame reported by framesNeedingData() and feeds
- * the responses back through deliverFrameData().
+ * MainWindow drives it: setAnalysisData() with whatever the coordinator
+ * delivered for the node, and clearContent() when there is nothing to show.
  */
 class TeletextDialog : public QDialog {
   Q_OBJECT
@@ -60,52 +52,14 @@ class TeletextDialog : public QDialog {
   explicit TeletextDialog(QWidget* parent = nullptr);
   ~TeletextDialog();
 
-  /**
-   * @brief Show a "reading" pending state while observation requests are
-   *        in flight, cleared once every window frame has been delivered.
-   */
+  /// Show a "decoding" pending state while the stage trigger is in flight
   void showPending();
 
-  /// Clear the display, the packet cache and the page list (project closed)
+  /// Clear the display, the page list and the recovery readout
   void clearContent();
 
-  /// Drop cached packets and the page list (view node or DAG changed)
-  void clearCache();
-
-  /// Advance the trailing window to end at @p frame_index and re-render
-  void setCurrentFrame(uint64_t frame_index);
-
-  /// Next batch of frames in the current window still lacking packet data.
-  /// Deliberately capped: call again as deliveries land (see
-  /// TeletextPageAssembler::kMaxFramesPerRequest).
-  std::vector<uint64_t> framesNeedingData() const {
-    return assembler_.framesNeedingData();
-  }
-
-  /// First frame of the current trailing window
-  uint64_t windowStartFrame() const { return assembler_.windowStartFrame(); }
-
-  /// Last frame of the current trailing window (the previewer's frame)
-  uint64_t currentFrame() const { return assembler_.currentFrame(); }
-
-  /// Highest frame a delivery is still worth making for
-  /// (see TeletextPageAssembler::retainedFrameLimit())
-  uint64_t retainedFrameLimit() const {
-    return assembler_.retainedFrameLimit();
-  }
-
-  /**
-   * @brief Deliver a teletextDataReady response for one frame
-   *
-   * @param available       False when the frame could not be observed
-   * @param field1_id_value First field of the frame (FieldID::value())
-   * @param field1          Packet view for the first field
-   * @param field2          Packet view for the second field
-   */
-  void deliverFrameData(
-      bool available, uint64_t field1_id_value,
-      const orc::presenters::TeletextFieldPacketsView& field1,
-      const orc::presenters::TeletextFieldPacketsView& field2);
+  /// Show one trigger run's catalogue, replacing whatever was displayed
+  void setAnalysisData(const orc::presenters::TeletextAnalysisView& data);
 
   /// Currently rendered page (test seam; nullopt when no page is shown)
   const std::optional<orc::presenters::TeletextPageView>& currentPage() const {
@@ -126,8 +80,11 @@ class TeletextDialog : public QDialog {
   /// Recovery readout for the displayed page (test seam; empty when hidden)
   QString recoveryText() const;
 
-  /// Subtitle-page notice text (test seam; empty when no subtitle page has
-  /// been seen and the notice is hidden)
+  /// Run-wide recovery summary (test seam; empty before any data arrives)
+  QString summaryText() const;
+
+  /// Subtitle-page notice text (test seam; empty when no subtitle page was
+  /// seen and the notice is hidden)
   QString subtitleHintText() const;
 
  private slots:
@@ -139,42 +96,44 @@ class TeletextDialog : public QDialog {
   /// Seen-pages table columns
   enum PageColumn {
     kColumnPage = 0,   ///< "100"
-    kColumnSeen = 1,   ///< transmissions counted since the last discontinuity
-    kColumnFrame = 2,  ///< frame of the most recent transmission (1-based)
+    kColumnSeen = 1,   ///< transmissions counted over the analysed range
+    kColumnFrame = 2,  ///< frames the page was first and last seen at (1-based)
     kColumnCount = 3,
   };
 
   void setupUI();
-  /// Re-render the requested page and refresh the seen-pages table
+  /// Re-render the requested page from the catalogue
   void renderPage();
-  /// Merge the catalogue into the seen-pages table when it has changed
+  /// Rebuild the seen-pages table from the current catalogue
   void refreshPageList();
   /// Create the three items of a table row, styling non-selectable pages
   void createPageRow(int row,
-                     const TeletextPageAssembler::PageListing& listing);
-  /// Write the volatile columns (seen count, last frame) of an existing row
+                     const orc::presenters::TeletextCataloguedPageView& entry);
+  /// Write the volatile columns (subtitle marker, seen count, frame range)
   void updatePageRow(int row,
-                     const TeletextPageAssembler::PageListing& listing);
+                     const orc::presenters::TeletextCataloguedPageView& entry);
   /// Select the table row matching the page-number entry, if it is listed
   void syncListSelection(const QString& page_label);
-  /// Update the pending-observation notice from the outstanding frame count
-  void updatePendingStatus();
+  /// Look up a catalogue entry by page address (nullptr when not carried)
+  const orc::presenters::TeletextCataloguedPageView* findPage(
+      int magazine, int page_number) const;
 
   /// Conventional magazine + two-hex-digit page label, e.g. "100", "1F0"
   static QString formatPageLabel(int magazine, int page_number);
 
-  /// One-line summary of whether the page's transmission has finished and how
-  /// much of it came back from the recovery chain
+  /// One-line summary of how much of the displayed page came back from the
+  /// recovery chain
   static QString formatRecovery(const orc::presenters::TeletextPageView& page);
 
-  TeletextPageAssembler assembler_;
+  /// One-line summary of how the run went, for the status bar
+  static QString formatSummary(
+      const orc::presenters::TeletextRecoverySummaryView& summary);
+
+  orc::presenters::TeletextAnalysisView data_;
+  bool has_data_ = false;
   std::optional<orc::presenters::TeletextPageView> current_page_;
 
-  // Catalogue revision the page table was last built from; guards needless
-  // merges (which would fight the user's selection and scroll position).
-  uint64_t listed_revision_ = 0;
-  bool list_populated_ = false;
-  // Set while the table is being merged or programmatically selected, so
+  // Set while the table is being rebuilt or programmatically selected, so
   // selection changes do not feed back into the page-number entry.
   bool updating_list_ = false;
 
@@ -184,12 +143,15 @@ class TeletextDialog : public QDialog {
   QStatusBar* status_bar_ = nullptr;
   // "rows 23/24, 4 damaged byte(s)" for the displayed page.
   QLabel* recovery_label_ = nullptr;
-  // Pending-state notice shown while async observation requests are in flight.
+  // Pending-state notice shown while the stage trigger is in flight.
   QLabel* status_label_ = nullptr;
-  // "Page last seen at frame N" / "not seen yet" notice.
+  // "Page 100 seen 12 times (frames 5-4210)" for the displayed page.
   QLabel* seen_label_ = nullptr;
-  // "Subtitles: 190" — the pages seen carrying the C6 subtitle control bit.
+  // "Subtitles on 190" — the pages seen carrying the C6 subtitle control bit.
   QLabel* subtitle_hint_ = nullptr;
+  // Run-wide recovery figures, so a viewer can tell an empty page list from a
+  // recording that carried no teletext at all.
+  QLabel* summary_label_ = nullptr;
   TeletextPageWidget* page_widget_ = nullptr;
 };
 
