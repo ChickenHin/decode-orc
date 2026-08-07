@@ -330,7 +330,7 @@ TEST(VBINTSCSource, TheNABTSFramingCodeIsWhatThisCaptureCarries) {
 // ---------------------------------------------------------------------------
 // The recovery chain against a real 525-line capture: frame slicer -> page
 // decoder. The stage supplies the frames; what is under test is that the
-// 525-line service survives the whole path the teletext analysis sink takes it
+// 525-line service survives the whole path the teletext sink takes it
 // through.
 // ---------------------------------------------------------------------------
 
@@ -371,7 +371,7 @@ RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
     survey.pages.push_back(page);
   });
 
-  std::vector<TeletextFrameLineResult> lines;
+  TeletextFieldScan scan;
   const FrameID first = page_survey_start(representation.frame_count());
   for (uint32_t index = 0; index < kPageFrames; ++index) {
     const FrameID frame = first + index;
@@ -382,8 +382,8 @@ RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
       // slice_field() reports in ascending field-line order, which is the
       // order a real consumer feeds and the order the packets were
       // transmitted in.
-      frame_slicer.slice_field(representation, frame, field_index, lines);
-      for (const auto& line : lines) {
+      frame_slicer.slice_field(representation, frame, field_index, scan);
+      for (const auto& line : scan.lines) {
         if (!line.sliced.valid) continue;
 
         ++survey.packets;

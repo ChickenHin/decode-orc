@@ -1,6 +1,6 @@
 /*
  * File:        teletext_page_catalogue.h
- * Module:      orc-stage-plugin-teletext_analysis_sink
+ * Module:      orc-stage-plugin-teletext_sink
  * Purpose:     Bounded catalogue of the teletext pages an analysed range
  *              carried, merged from decoded page snapshots
  *

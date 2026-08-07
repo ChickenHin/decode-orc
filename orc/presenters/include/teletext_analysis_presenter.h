@@ -16,7 +16,7 @@
 namespace orc::presenters {
 
 /**
- * @brief Presenter for the teletext analysis sink's results
+ * @brief Presenter for the teletext sink's results
  *
  * Converts the SDK dataset the stage caches from its last trigger run — the
  * page catalogue and the aggregate recovery figures — into value-type view

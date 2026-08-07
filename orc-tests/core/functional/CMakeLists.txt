@@ -138,13 +138,15 @@ if(TARGET orc-vbi-source)
         stages/vbi_source/vbi_calibration_test.cpp
         stages/vbi_source/vbi_source_pipeline_test.cpp
         stages/vbi_source/vbi_ntsc_source_test.cpp
-        # The teletext analysis sink's frame slicer is what the 525-line
+        # The teletext sink's frame slicer is what the 525-line
         # recovery check drives; compiled in directly rather than linked
-        # because it is a self-contained plugin-local module.
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink/teletext_frame_slicer.cpp
+        # because it is a self-contained plugin-local module. It learns
+        # through the scan state, so that comes with it.
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink/teletext_frame_slicer.cpp
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink/teletext_scan_state.cpp
     )
     target_include_directories(orc-core-functional-tests-vbi-source PRIVATE
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source
@@ -166,35 +168,35 @@ if(TARGET orc-vbi-source)
         PROPERTIES LABELS "functional\;sources")
 endif()
 
-# The teletext analysis sink end to end: the reference 625-line and 525-line
+# The teletext sink end to end: the reference 625-line and 525-line
 # WST captures, read through the VBI source stage and decoded by the sink, with
 # the exported packet stream compared against golden data. Real media on disk,
 # so functional; the samples are not checked in (test-data/ is ignored), so the
 # tests skip when they are absent.
-if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-analysis-sink)
-    add_executable(orc-core-functional-tests-teletext-analysis-sink
-        stages/teletext_analysis_sink/teletext_analysis_pipeline_test.cpp
+if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-sink)
+    add_executable(orc-core-functional-tests-teletext-sink
+        stages/teletext_sink/teletext_sink_pipeline_test.cpp
     )
-    target_include_directories(orc-core-functional-tests-teletext-analysis-sink PRIVATE
+    target_include_directories(orc-core-functional-tests-teletext-sink PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
         ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
         ${CMAKE_SOURCE_DIR}/orc/sdk/include
     )
-    target_link_libraries(orc-core-functional-tests-teletext-analysis-sink
+    target_link_libraries(orc-core-functional-tests-teletext-sink
         orc-core
         orc-vbi-source
-        orc-stage-plugin-teletext-analysis-sink
+        orc-stage-plugin-teletext-sink
         GTest::gmock_main
     )
     if(TARGET orc-stage-plugin-vbi-source)
-        target_link_libraries(orc-core-functional-tests-teletext-analysis-sink
+        target_link_libraries(orc-core-functional-tests-teletext-sink
             orc-stage-plugin-vbi-source)
     endif()
-    target_compile_definitions(orc-core-functional-tests-teletext-analysis-sink PRIVATE
+    target_compile_definitions(orc-core-functional-tests-teletext-sink PRIVATE
         ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
     )
-    gtest_discover_tests(orc-core-functional-tests-teletext-analysis-sink
+    gtest_discover_tests(orc-core-functional-tests-teletext-sink
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "functional\;sinks")

@@ -466,7 +466,7 @@ TEST(VideoSinkStageTest, SetParameters_RoundTripsAudioChannelPairs) {
 }
 
 // Teletext subtitle embedding was removed: its only data source was the host
-// teletext observer, and recovery now lives in the teletext analysis sink.
+// teletext observer, and recovery now lives in the teletext sink.
 TEST(VideoSinkStageTest, ParameterDescriptors_OfferNoTeletextEmbedding) {
   orc::VideoSinkStage stage;
   auto descriptors = stage.get_parameter_descriptors(

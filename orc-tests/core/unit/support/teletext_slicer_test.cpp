@@ -35,10 +35,11 @@ TeletextSlicer make_slicer(TeletextSlicerOptions options = {}) {
 }
 
 TeletextLineResult slice_line(const std::vector<int16_t>& line,
-                              TeletextSlicerOptions options = {}) {
+                              TeletextSlicerOptions options = {},
+                              const TeletextPhaseHint& hint = {}) {
   return make_slicer(options).slice(line.data(), line.size(),
                                     static_cast<int16_t>(kPalBlack),
-                                    static_cast<int16_t>(kPalWhite));
+                                    static_cast<int16_t>(kPalWhite), hint);
 }
 
 // The 525-line service on an NTSC line: the constructor derives the ITU-R
@@ -1619,6 +1620,100 @@ TEST(Teletext525Hex, TheFourAcceptedLengthsAreDistinct) {
   EXPECT_FALSE(teletext_hex_to_observed_packet(good.substr(0, good.size() - 2))
                    .has_value());
   EXPECT_FALSE(teletext_hex_to_observed_packet(good + "00").has_value());
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Pinned acquisition (TeletextPhaseHint)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// The lock position is what a caller accumulates to build a hint, so it has to
+// be reported and it has to be where the burst actually is. The synthesizer
+// puts the first run-in bit centre at first_bit_centre_us.
+TEST(TeletextPhaseHint, TheReportedLockIsWhereTheBurstStarts) {
+  const auto result = slice_line(synthesize_teletext_line(make_test_payload()));
+  ASSERT_TRUE(result.valid);
+
+  TeletextLineSynthOptions opt;
+  const double expected_samples =
+      opt.first_bit_centre_us * kPalSampleRate / 1e6;
+  // Within the quarter-sample step the correlation sweep advances by.
+  EXPECT_NEAR(result.lock_sample, expected_samples, 0.3);
+}
+
+// A hint centred on the real lock recovers exactly what the full sweep does:
+// pinning is a saving, not a different decode.
+TEST(TeletextPhaseHint, APinnedSweepRecoversWhatTheFullSweepDoes) {
+  const auto payload = make_test_payload();
+  const auto line = synthesize_teletext_line(payload);
+  const TeletextLineResult unpinned = slice_line(line);
+  ASSERT_TRUE(unpinned.valid);
+
+  TeletextPhaseHint hint;
+  hint.valid = true;
+  hint.centre = unpinned.lock_sample;
+  hint.radius = 3.0;
+
+  const TeletextLineResult pinned = slice_line(line, {}, hint);
+  ASSERT_TRUE(pinned.valid);
+  EXPECT_EQ(pinned.bytes, payload);
+  EXPECT_DOUBLE_EQ(pinned.lock_sample, unpinned.lock_sample);
+}
+
+// The contract that makes pinning safe to leave on: a hint pointing at the
+// wrong end of the line costs the pinned attempt and then finds the packet
+// anyway over the full window.
+TEST(TeletextPhaseHint, AWrongHintFallsBackToTheFullSweep) {
+  const auto payload = make_test_payload();
+  const auto line = synthesize_teletext_line(payload);
+
+  TeletextPhaseHint hint;
+  hint.valid = true;
+  hint.centre = 210.0;  // Late in the §6.3 window, past the real burst
+  hint.radius = 3.0;
+
+  const TeletextLineResult result = slice_line(line, {}, hint);
+  ASSERT_TRUE(result.valid)
+      << "a wrong hint lost a packet the full sweep finds";
+  EXPECT_EQ(result.bytes, payload);
+}
+
+// A hint that lands entirely outside the timing window the system permits is
+// not a narrowing of anything, so it is dropped rather than searched.
+TEST(TeletextPhaseHint, AHintOutsideTheTimingWindowIsIgnored) {
+  const auto payload = make_test_payload();
+  const auto line = synthesize_teletext_line(payload);
+
+  TeletextPhaseHint hint;
+  hint.valid = true;
+  hint.centre = 5000.0;
+  hint.radius = 1.0;
+
+  const TeletextLineResult result = slice_line(line, {}, hint);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+}
+
+// The MLSE detector acquires its own bit phase and so has its own sweep to
+// pin; the band-limited line is the one it exists for.
+TEST(TeletextPhaseHint, PinsTheMlseAcquisitionToo) {
+  const auto payload = make_parity_coded_payload();
+
+  TeletextSlicerOptions slicer_options;
+  slicer_options.detector = TeletextDetector::kMlse;
+
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+  const TeletextLineResult unpinned = slice_line(line, slicer_options);
+  ASSERT_TRUE(unpinned.valid);
+  ASSERT_GE(unpinned.lock_sample, 0.0);
+
+  TeletextPhaseHint hint;
+  hint.valid = true;
+  hint.centre = unpinned.lock_sample;
+  hint.radius = 3.0;
+
+  const TeletextLineResult pinned = slice_line(line, slicer_options, hint);
+  ASSERT_TRUE(pinned.valid);
+  EXPECT_EQ(pinned.bytes, unpinned.bytes);
 }
 
 }  // namespace

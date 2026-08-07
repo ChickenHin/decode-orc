@@ -1,7 +1,7 @@
 /*
  * File:        teletext_page_catalogue_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the teletext analysis sink's page catalogue
+ * Purpose:     Unit tests for the teletext sink's page catalogue
  *
  * Covers: snapshot merge and content replacement, appearance counting across
  * carousel repeats and rolling headers, subtitle-flag stickiness, page

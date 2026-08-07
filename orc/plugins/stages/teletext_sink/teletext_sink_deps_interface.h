@@ -1,14 +1,14 @@
 /*
- * File:        teletext_analysis_sink_deps_interface.h
- * Module:      orc-stage-plugin-teletext_analysis_sink
- * Purpose:     Interface for TeletextAnalysisSinkStage dependencies
+ * File:        teletext_sink_deps_interface.h
+ * Module:      orc-stage-plugin-teletext_sink
+ * Purpose:     Interface for TeletextSinkStage dependencies
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#ifndef ORC_TELETEXT_ANALYSIS_SINK_DEPS_INTERFACE_H
-#define ORC_TELETEXT_ANALYSIS_SINK_DEPS_INTERFACE_H
+#ifndef ORC_TELETEXT_SINK_DEPS_INTERFACE_H
+#define ORC_TELETEXT_SINK_DEPS_INTERFACE_H
 
 #include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/triggerable_stage.h>
@@ -29,7 +29,12 @@ namespace orc {
  * lines 6-22 / 318-335 (ETSI EN 300 706 §4.1); a 525-line service uses 9-20
  * (ITU-R BT.653 §2).
  */
-struct TeletextAnalysisSinkOptions {
+struct TeletextSinkOptions {
+  // Where the packet stream goes, with the service's extension applied if it
+  // is not already there. Empty is the browse-only run: the pass recovers,
+  // squashes and catalogues exactly as it would and writes nothing. Both
+  // file-side extras below are written beside the stream, so neither is
+  // available without a path.
   std::string output_path;
   int32_t first_field_line{5};
   int32_t last_field_line{21};
@@ -46,6 +51,19 @@ struct TeletextAnalysisSinkOptions {
   bool parity_repair{true};
   // Bit detector (TeletextSlicerOptions).
   TeletextDetector detector{TeletextDetector::kAuto};
+  // Narrow the bit-phase acquisition sweep to where this recording's data
+  // lines have already been seen to start (TeletextPhaseTracker). Cannot lose
+  // a packet: a pinned attempt that fails is repeated over the full window.
+  bool pin_data_phase{true};
+  // Slice only the candidate lines this recording has been seen to carry
+  // teletext on, rechecking the full window periodically
+  // (TeletextLineTracker).
+  bool learn_active_lines{true};
+  // Threads to recover lines on; 0 asks for one per hardware thread. The
+  // recovered stream does not depend on this — see TeletextScanSnapshot for
+  // what makes that true — so it is a claim on the machine rather than a
+  // tuning knob.
+  int32_t decode_threads{0};
   // Combine repeated transmissions of each page row and write the combined
   // form ("squashing", see orc/support/teletext_row_squasher.h). Costs a
   // second pass over the recovered packets, held in memory (~50 bytes each).
@@ -63,11 +81,12 @@ struct TeletextAnalysisSinkOptions {
   bool write_report{false};
 };
 
-struct TeletextAnalysisSinkResult {
+struct TeletextSinkResult {
   bool success{false};
   std::string message;
   // Path actually written, with the service's extension applied: .t42 for the
-  // 42-byte 625-line packet stream, .t34 for the 34-byte 525-line one.
+  // 42-byte 625-line packet stream, .t34 for the 34-byte 525-line one. Empty
+  // when the run was browse-only and wrote no stream.
   std::string output_path;
   uint64_t packets_written{0};
   uint64_t fields_with_data{0};
@@ -103,9 +122,9 @@ struct TeletextAnalysisSinkResult {
   TeletextAnalysisDataset dataset;
 };
 
-class ITeletextAnalysisSinkStageDeps {
+class ITeletextSinkStageDeps {
  public:
-  virtual ~ITeletextAnalysisSinkStageDeps() = default;
+  virtual ~ITeletextSinkStageDeps() = default;
 
   virtual void init(TriggerProgressCallback progress_callback,
                     std::atomic<bool>* cancel_requested) = 0;
@@ -113,11 +132,11 @@ class ITeletextAnalysisSinkStageDeps {
   // One linear pass over the whole frame range: recovers the packets, writes
   // the stream (and, optionally, the subtitle document and the report), and
   // builds the page catalogue the stage tool displays.
-  virtual TeletextAnalysisSinkResult analyse(
+  virtual TeletextSinkResult analyse(
       const VideoFrameRepresentation* representation,
-      const TeletextAnalysisSinkOptions& options) = 0;
+      const TeletextSinkOptions& options) = 0;
 };
 
 }  // namespace orc
 
-#endif  // ORC_TELETEXT_ANALYSIS_SINK_DEPS_INTERFACE_H
+#endif  // ORC_TELETEXT_SINK_DEPS_INTERFACE_H

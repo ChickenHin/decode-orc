@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -77,6 +78,41 @@ constexpr double kRunInSearchStartUs625 = 8.0;
 constexpr double kRunInSearchEndUs625 = 12.0;
 constexpr double kRunInSearchStartUs525 = 8.0;
 constexpr double kRunInSearchEndUs525 = 11.5;
+
+// Everything above that the slicer's geometry depends on the system for,
+// gathered so that the choice is made once. A third service — NABTS is the
+// obvious candidate — is a row here plus a TeletextSystem enumerator, rather
+// than a ternary to be found in each of the places the geometry is read.
+struct SystemGeometry {
+  double bit_rate;      // Hz (ITU-R BT.653 Tables 1a and 1b)
+  size_t packet_bytes;  // framing code excluded
+  double data_one_fraction;
+  double search_start_us;  // first clock run-in bit centre, from 0H
+  double search_end_us;
+};
+
+constexpr SystemGeometry system_geometry(TeletextSystem system) {
+  if (system == TeletextSystem::kWst525) {
+    return SystemGeometry{kTeletext525BitRate, kTeletext525PacketBytes,
+                          kDataOneLevelFraction525, kRunInSearchStartUs525,
+                          kRunInSearchEndUs525};
+  }
+  return SystemGeometry{kTeletextBitRate, kTeletextPacketBytes,
+                        kDataOneLevelFraction625, kRunInSearchStartUs625,
+                        kRunInSearchEndUs625};
+}
+
+// The public accessors in the header and this table describe the same two
+// services, so they must agree; they are separate only because the header's
+// have to be usable in constant expressions by callers that never see this.
+static_assert(system_geometry(TeletextSystem::kWst625).bit_rate ==
+                  teletext_bit_rate(TeletextSystem::kWst625) &&
+              system_geometry(TeletextSystem::kWst525).bit_rate ==
+                  teletext_bit_rate(TeletextSystem::kWst525) &&
+              system_geometry(TeletextSystem::kWst625).packet_bytes ==
+                  teletext_packet_bytes(TeletextSystem::kWst625) &&
+              system_geometry(TeletextSystem::kWst525).packet_bytes ==
+                  teletext_packet_bytes(TeletextSystem::kWst525));
 
 // Correlation phase-search step in samples. At the ≈ 2.556 samples/bit of the
 // 625-line service, or the 2.5 of the 525-line one, a quarter sample bounds
@@ -989,18 +1025,12 @@ TeletextSlicer::TeletextSlicer(double sample_rate, double bit_rate,
     : sample_rate_(sample_rate),
       samples_per_bit_(sample_rate / bit_rate),
       options_(options),
-      packet_bytes_(teletext_packet_bytes(options.system)),
+      packet_bytes_(system_geometry(options.system).packet_bytes),
       payload_bits_(static_cast<int>(packet_bytes_ * 8)),
-      data_one_fraction_(options.system == TeletextSystem::kWst525
-                             ? kDataOneLevelFraction525
-                             : kDataOneLevelFraction625),
-      search_start_samples_((options.system == TeletextSystem::kWst525
-                                 ? kRunInSearchStartUs525
-                                 : kRunInSearchStartUs625) *
+      data_one_fraction_(system_geometry(options.system).data_one_fraction),
+      search_start_samples_(system_geometry(options.system).search_start_us *
                             sample_rate / 1e6),
-      search_end_samples_((options.system == TeletextSystem::kWst525
-                               ? kRunInSearchEndUs525
-                               : kRunInSearchEndUs625) *
+      search_end_samples_(system_geometry(options.system).search_end_us *
                           sample_rate / 1e6) {}
 
 TeletextSlicer::TeletextSlicer(double sample_rate, TeletextSystem system,
@@ -1017,10 +1047,35 @@ TeletextLineResult TeletextSlicer::new_result() const {
   return result;
 }
 
-TeletextLineResult TeletextSlicer::slice(const int16_t* line,
-                                         size_t sample_count,
-                                         int16_t black_level,
-                                         int16_t white_level) const {
+TeletextSlicer::AcquisitionWindow TeletextSlicer::full_window() const {
+  return AcquisitionWindow{search_start_samples_, search_end_samples_};
+}
+
+std::optional<TeletextSlicer::AcquisitionWindow> TeletextSlicer::hinted_window(
+    const TeletextPhaseHint& hint) const {
+  if (!hint.valid || hint.radius <= 0.0) {
+    return std::nullopt;
+  }
+  const AcquisitionWindow full = full_window();
+  const AcquisitionWindow narrowed{
+      std::max(full.first, hint.centre - hint.radius),
+      std::min(full.last, hint.centre + hint.radius)};
+  if (narrowed.first > narrowed.last) {
+    // The hint sits outside the window the system's timing allows, so there is
+    // nothing to try: sweep the full one and let the tracker learn better.
+    return std::nullopt;
+  }
+  // A hint that spans the whole window would cost a wasted first attempt and
+  // save nothing; anything narrower earns its retry.
+  if (narrowed.last - narrowed.first >= full.last - full.first) {
+    return std::nullopt;
+  }
+  return narrowed;
+}
+
+TeletextLineResult TeletextSlicer::slice(
+    const int16_t* line, size_t sample_count, int16_t black_level,
+    int16_t white_level, const TeletextPhaseHint& phase_hint) const {
   TeletextLineResult result = new_result();
 
   const double spb = samples_per_bit_;
@@ -1055,31 +1110,48 @@ TeletextLineResult TeletextSlicer::slice(const int16_t* line,
     return reject(result, TeletextRejectReason::kAmplitudeGate);
   }
 
-  // Step 2 — detection. The threshold detector runs unless MLSE was asked
-  // for outright; under kAuto the MLSE fallback sees only lines that carry a
-  // data burst (they passed the coarse gate) but would not lock, so a source
-  // the threshold detector handles pays nothing for the fallback.
-  if (options_.detector != TeletextDetector::kMlse) {
-    result = slice_threshold(line, sample_count, amplitude_gate);
-    if (result.valid || options_.detector == TeletextDetector::kThreshold) {
+  // Step 2 — detection over one acquisition window. The threshold detector
+  // runs unless MLSE was asked for outright; under kAuto the MLSE fallback
+  // sees only lines that carry a data burst (they passed the coarse gate) but
+  // would not lock, so a source the threshold detector handles pays nothing
+  // for the fallback.
+  const auto detect = [&](AcquisitionWindow window) {
+    if (options_.detector != TeletextDetector::kMlse) {
+      const TeletextLineResult attempt =
+          slice_threshold(line, sample_count, amplitude_gate, window);
+      if (attempt.valid || options_.detector == TeletextDetector::kThreshold) {
+        return attempt;
+      }
+    }
+    return slice_mlse(line, sample_count, nominal_amplitude, window);
+  };
+
+  // Step 3 — which window, or windows, that runs over. A valid hint is tried
+  // first and the full window only if the hinted attempt recovered nothing, so
+  // pinning changes what a line costs but never whether it can be read.
+  if (const std::optional<AcquisitionWindow> hinted = hinted_window(phase_hint);
+      hinted.has_value()) {
+    result = detect(*hinted);
+    if (result.valid) {
       return result;
     }
   }
-  return slice_mlse(line, sample_count, nominal_amplitude);
+  return detect(full_window());
 }
 
 TeletextLineResult TeletextSlicer::slice_threshold(
-    const int16_t* line, size_t sample_count, double amplitude_gate) const {
+    const int16_t* line, size_t sample_count, double amplitude_gate,
+    AcquisitionWindow window) const {
   TeletextLineResult result = new_result();
   result.detector = TeletextDetector::kThreshold;
   const double spb = samples_per_bit_;
-  const double search_start = search_start_samples_;
+  const double search_start = window.first;
 
   // Clock run-in acquisition (§6.1): correlate against a ±
   // alternating kernel at the known bit period across the §6.3 timing window.
   // The correlation peak yields the bit phase; the recovered 0/1 levels set
   // an adaptive slicing threshold local to the data burst.
-  const double search_end = search_end_samples_;
+  const double search_end = window.last;
   double best_corr = 0.0;
   double best_t0 = -1.0;
   for (double t0 = search_start; t0 <= search_end; t0 += kPhaseSearchStep) {
@@ -1096,6 +1168,7 @@ TeletextLineResult TeletextSlicer::slice_threshold(
   if (best_t0 < 0.0) {
     return reject(result, TeletextRejectReason::kNoRunInLock);
   }
+  result.lock_sample = best_t0;
 
   double ones_level = 0.0;
   double zeros_level = 0.0;
@@ -1216,12 +1289,13 @@ TeletextLineResult TeletextSlicer::slice_threshold(
 
 TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
                                               size_t sample_count,
-                                              double nominal_amplitude) const {
+                                              double nominal_amplitude,
+                                              AcquisitionWindow window) const {
   TeletextLineResult result = new_result();
   result.detector = TeletextDetector::kMlse;
   const double spb = samples_per_bit_;
-  const double search_start = search_start_samples_;
-  const double search_end = search_end_samples_;
+  const double search_start = window.first;
+  const double search_end = window.last;
   const double min_gain = kMlseMinGainFraction * nominal_amplitude;
   const int phases =
       std::clamp(options_.mlse_samples_per_bit, 1, kMaxMlseSamplesPerBit);
@@ -1261,6 +1335,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   if (best_t0 < 0.0) {
     return reject(result, TeletextRejectReason::kNoPreambleLock);
   }
+  result.lock_sample = best_t0;
 
   // Resample the whole packet span once at the locked phase, and fit the
   // fractionally-spaced channel the detector runs against. Everything from

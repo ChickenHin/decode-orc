@@ -1,7 +1,7 @@
 /*
  * File:        teletextdialog.cpp
  * Module:      orc-gui
- * Purpose:     Teletext page viewer for the teletext analysis sink stage tool
+ * Purpose:     Teletext page viewer for the teletext sink stage tool
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns

@@ -1055,7 +1055,7 @@ class RenderCoordinator : public QObject {
                                  orc::presenters::TeletextAnalysisView data);
 
   /**
-   * @brief Emitted while an untriggered teletext analysis sink is decoding
+   * @brief Emitted while an untriggered teletext sink is decoding
    */
   void teletextAnalysisProgress(size_t current, size_t total, QString message);
 

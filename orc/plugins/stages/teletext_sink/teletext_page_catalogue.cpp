@@ -1,6 +1,6 @@
 /*
  * File:        teletext_page_catalogue.cpp
- * Module:      orc-stage-plugin-teletext_analysis_sink
+ * Module:      orc-stage-plugin-teletext_sink
  * Purpose:     Bounded teletext page catalogue implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later

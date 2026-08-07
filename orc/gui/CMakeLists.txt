@@ -120,7 +120,7 @@ set(ORC_GUI_LIB_SOURCES
     ntscobserverdialog.cpp
     ntscobserverdialog.h
 
-    # Teletext page viewer (teletext_analysis_sink stage tool)
+    # Teletext page viewer (teletext_sink stage tool)
     teletextpagewidget.cpp
     teletextpagewidget.h
     teletextdialog.cpp

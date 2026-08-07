@@ -1,15 +1,15 @@
 /*
- * File:        teletext_analysis_sink_stage.h
- * Module:      orc-stage-plugin-teletext_analysis_sink
- * Purpose:     Teletext Analysis Sink Stage - recovers WST teletext, exports
+ * File:        teletext_sink_stage.h
+ * Module:      orc-stage-plugin-teletext_sink
+ * Purpose:     Teletext Sink Stage - recovers WST teletext, exports
  *              the packet stream and presents a page viewer
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#ifndef ORC_TELETEXT_ANALYSIS_SINK_STAGE_H
-#define ORC_TELETEXT_ANALYSIS_SINK_STAGE_H
+#ifndef ORC_TELETEXT_SINK_STAGE_H
+#define ORC_TELETEXT_SINK_STAGE_H
 
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
@@ -27,14 +27,14 @@
 #include <utility>
 #include <vector>
 
-#include "teletext_analysis_sink_deps_interface.h"
+#include "teletext_sink_deps_interface.h"
 
 namespace orc {
 
 class IStageServices;
 
 /**
- * @brief Teletext Analysis Sink Stage
+ * @brief Teletext Sink Stage
  *
  * Extracts World System Teletext (ITU-R BT.653 System B) data lines from the
  * VBI and writes the recovered packets as a flat, headerless packet stream in
@@ -46,22 +46,25 @@ class IStageServices;
  * host reads through ITeletextAnalysisResults and presents as the stage's
  * batch-analysis tool.
  *
- * This is an ANALYSIS_SINK stage - it has inputs but no outputs. All work
- * happens in trigger(); execute() only caches the input.
+ * This is a SINK stage - it has inputs but no outputs. All work happens in
+ * trigger(); execute() only caches the input. It is a sink rather than an
+ * analysis sink because writing the packet stream is the product; the page
+ * catalogue is a by-product of the same pass, offered through a batch-analysis
+ * stage tool, which any stage may declare regardless of its node type.
  */
-class TeletextAnalysisSinkStage : public DAGStage,
-                                  public ParameterizedStage,
-                                  public TriggerableStage,
-                                  public StageToolProvider,
-                                  public IStagePreviewCapability,
-                                  public ITeletextAnalysisResults {
+class TeletextSinkStage : public DAGStage,
+                          public ParameterizedStage,
+                          public TriggerableStage,
+                          public StageToolProvider,
+                          public IStagePreviewCapability,
+                          public ITeletextAnalysisResults {
  public:
-  explicit TeletextAnalysisSinkStage(IStageServices* stage_services);
-  ~TeletextAnalysisSinkStage() override = default;
+  explicit TeletextSinkStage(IStageServices* stage_services);
+  ~TeletextSinkStage() override = default;
 
   /// Testing seam: inject a pre-built deps instance to substitute concrete
   /// dep creation in trigger().
-  void set_deps_override(std::shared_ptr<ITeletextAnalysisSinkStageDeps> deps) {
+  void set_deps_override(std::shared_ptr<ITeletextSinkStageDeps> deps) {
     deps_override_ = std::move(deps);
   }
 
@@ -120,7 +123,7 @@ class TeletextAnalysisSinkStage : public DAGStage,
   // Parses the parameter set into deps options, converting the 1-based UI line
   // window to the 0-based field lines the slicer uses. Throws
   // std::runtime_error on missing/invalid parameters.
-  TeletextAnalysisSinkOptions parse_config(
+  TeletextSinkOptions parse_config(
       const std::map<std::string, ParameterValue>& parameters) const;
 
   std::map<std::string, ParameterValue> parameters_;
@@ -129,7 +132,7 @@ class TeletextAnalysisSinkStage : public DAGStage,
   std::atomic<bool> is_processing_{false};
   std::atomic<bool> cancel_requested_{false};
   IStageServices* stage_services_{nullptr};
-  std::shared_ptr<ITeletextAnalysisSinkStageDeps> deps_override_;
+  std::shared_ptr<ITeletextSinkStageDeps> deps_override_;
 
   // Cached results of the last trigger, read by the host through
   // ITeletextAnalysisResults.
@@ -140,4 +143,4 @@ class TeletextAnalysisSinkStage : public DAGStage,
 
 }  // namespace orc
 
-#endif  // ORC_TELETEXT_ANALYSIS_SINK_STAGE_H
+#endif  // ORC_TELETEXT_SINK_STAGE_H

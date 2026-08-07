@@ -1,6 +1,6 @@
 /*
  * File:        teletext_frame_slicer.h
- * Module:      orc-stage-plugin-teletext_analysis_sink
+ * Module:      orc-stage-plugin-teletext_sink
  * Purpose:     Per-frame WST teletext line recovery from a video frame
  *              representation
  *
@@ -12,13 +12,17 @@
 #define ORC_TELETEXT_FRAME_SLICER_H
 
 #include <orc/stage/common_types.h>
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/teletext_slicer.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
+
+#include "teletext_scan_state.h"
 
 namespace orc {
 
@@ -72,6 +76,27 @@ struct TeletextFrameLineResult {
   TeletextLineResult sliced;
 };
 
+/// What slicing one field of one frame produced.
+struct TeletextFieldScan {
+  /// One entry per candidate line that was read and yielded samples, in
+  /// ascending line order — rejected lines included, so a caller accumulating
+  /// recovery diagnostics sees every line that was looked at.
+  std::vector<TeletextFrameLineResult> lines;
+  /// Candidate lines the active-line mask skipped without reading.
+  uint64_t lines_skipped = 0;
+
+  void clear() {
+    lines.clear();
+    lines_skipped = 0;
+  }
+};
+
+// The television systems ITU-R BT.653 System B is defined on, in the order
+// this builds its slicers. Every per-system fact lives in
+// TeletextFrameSlicer::profile_for(); this is only the list of rows.
+inline constexpr std::array<VideoSystem, 3> kTeletextVideoSystems = {
+    VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M};
+
 /**
  * @brief Recovers the teletext packets of one field of a video frame
  *
@@ -92,19 +117,43 @@ class TeletextFrameSlicer {
  public:
   explicit TeletextFrameSlicer(TeletextFrameSlicerOptions options = {});
 
-  /// Whether |system| carries a WST service this can recover.
-  static bool applies_to(VideoSystem system);
-
-  /// Which teletext system a video system carries, and where in the field to
-  /// look for it.
+  /**
+   * @brief Everything about a television system that teletext recovery needs
+   *
+   * The single place a video system is turned into the facts that follow from
+   * it. Recovery reads nothing per-system anywhere else, so a service added
+   * here is a service added: no caller has to be found and updated to match.
+   */
   struct SystemProfile {
+    /// False for a system carrying no service this can recover, in which case
+    /// nothing below is meaningful.
+    bool carries_teletext = false;
     TeletextSystem teletext_system = TeletextSystem::kWst625;
     int32_t first_field_line = kTeletextFirstFieldLine625;
     int32_t last_field_line = kTeletextLastFieldLine625;
+    /// 4FSC sample rate (EBU Tech. 3280-E §1.1.1 Table 1, SMPTE 244M-2003
+    /// §4.1, ITU-R BT.1700-1 Annex 1 Part B).
+    double sample_rate = kPalSampleRate;
+    /// Levels used when the source states none of its own. The data '0'
+    /// reference is black in both systems (ETSI EN 300 706 §5.2, ITU-R BT.653
+    /// Table 1b); on a 525-line system the transmitted '0' actually sits at
+    /// blanking, below the 7,5 IRE setup black, which makes the amplitude gate
+    /// derived from these stricter than the standard requires rather than
+    /// looser — measured against a real burst it still clears by a factor of
+    /// two.
+    int16_t default_black = static_cast<int16_t>(kPalBlack);
+    int16_t default_white = static_cast<int16_t>(kPalWhite);
+    /// Index into kTeletextVideoSystems, and so into the slicers built from it.
+    size_t slicer_index = 0;
   };
 
   /// Profile of |system| before any option override is applied.
   static SystemProfile profile_for(VideoSystem system);
+
+  /// Whether |system| carries a WST service this can recover.
+  static bool applies_to(VideoSystem system) {
+    return profile_for(system).carries_teletext;
+  }
 
   /// Profile actually probed, i.e. profile_for() with this instance's window
   /// override applied.
@@ -116,30 +165,51 @@ class TeletextFrameSlicer {
    * @param representation Source of the video parameters and the line samples
    * @param frame_id       Frame to read
    * @param field_idx      0 for field 1, 1 for field 2
-   * @param results        Receives one entry per candidate line that yielded
-   *                       samples, in ascending line order — rejected lines
-   *                       included, so a caller accumulating recovery
-   *                       diagnostics sees every line that was looked at.
+   * @param frame_index    Position of this frame in the pass, 0-based, which
+   *                       is what decides whether |snapshot|'s line mask
+   *                       applies to it or stands aside
+   * @param snapshot       What the pass knows about this recording. The
+   *                       default is a pass that knows nothing: every line of
+   *                       the window is sliced and every acquisition sweeps
+   *                       the full timing window, which is what a caller
+   *                       slicing a single frame wants. A line the mask skips
+   *                       yields no entry in |out|.lines, exactly as a line
+   *                       with no samples does.
+   * @param out            Receives the sliced lines and the mask's tally.
    *                       Cleared first; reused across calls so a full-range
    *                       pass allocates once.
    *
    * Does nothing when the representation has no video parameters, carries a
    * system with no WST service, or holds no samples for the lines in question.
+   *
+   * Const and free of shared mutable state: several threads may slice
+   * different frames of one representation through one TeletextFrameSlicer at
+   * the same time, each with its own |out|. That is why what the pass has
+   * learned arrives as a frozen |snapshot| rather than as a live tracker —
+   * see TeletextScanSnapshot for why it has to.
    */
   void slice_field(const VideoFrameRepresentation& representation,
+                   FrameID frame_id, size_t field_idx, uint64_t frame_index,
+                   const TeletextScanSnapshot& snapshot,
+                   TeletextFieldScan& out) const;
+
+  /// As above for a caller with no pass behind it — one frame, everything
+  /// read, full sweep.
+  void slice_field(const VideoFrameRepresentation& representation,
                    FrameID frame_id, size_t field_idx,
-                   std::vector<TeletextFrameLineResult>& results) const;
+                   TeletextFieldScan& out) const {
+    slice_field(representation, frame_id, field_idx, /*frame_index=*/0,
+                TeletextScanSnapshot{}, out);
+  }
 
  private:
-  // Chooses the slicer built for |system|.
-  const TeletextSlicer& slicer_for(VideoSystem system) const;
-
   TeletextFrameSlicerOptions options_;
 
-  // One slicer per television system; see the class comment.
-  TeletextSlicer slicer_pal_;
-  TeletextSlicer slicer_ntsc_;
-  TeletextSlicer slicer_palm_;
+  // One slicer per entry of kTeletextVideoSystems, selected by
+  // SystemProfile::slicer_index. Each carries its own sample rate, bit rate,
+  // packet length and data-timing window, and all are cheap enough to build
+  // once here rather than per frame.
+  std::array<TeletextSlicer, kTeletextVideoSystems.size()> slicers_;
 };
 
 }  // namespace orc

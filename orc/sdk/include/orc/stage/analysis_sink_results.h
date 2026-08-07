@@ -109,7 +109,7 @@ struct TeletextRecoverySummary {
   bool pages_truncated = false;
 };
 
-/// Everything the teletext analysis sink caches from one trigger run.
+/// Everything the teletext sink caches from one trigger run.
 struct TeletextAnalysisDataset {
   /// Ascending by {magazine, page number}
   std::vector<TeletextCataloguedPage> pages;

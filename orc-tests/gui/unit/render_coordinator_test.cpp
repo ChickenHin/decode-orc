@@ -715,7 +715,7 @@ TEST(RenderCoordinatorTest, TeletextAnalysisRequest_TriggersThenRetries) {
 }
 
 // A node that yields nothing even after triggering is an error, not an empty
-// catalogue: it is not a teletext analysis sink, or the trigger failed.
+// catalogue: it is not a teletext sink, or the trigger failed.
 TEST(RenderCoordinatorTest,
      TeletextAnalysisRequest_ReportsFailureAfterTrigger) {
   (void)kMetatypesRegistered;

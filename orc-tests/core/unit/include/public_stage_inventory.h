@@ -141,10 +141,9 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
          return orc::StageRegistry::instance().create_stage(
              "burst_level_analysis_sink");
        }},
-      {"teletext_analysis_sink", PublicStageFamily::Sink, true,
+      {"teletext_sink", PublicStageFamily::Sink, true,
        [] {
-         return orc::StageRegistry::instance().create_stage(
-             "teletext_analysis_sink");
+         return orc::StageRegistry::instance().create_stage("teletext_sink");
        }},
   };
 

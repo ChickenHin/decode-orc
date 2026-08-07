@@ -22,7 +22,7 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ld_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/raw_efm_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
-                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
                 ${CMAKE_SOURCE_DIR}/orc/sdk/include
         )
@@ -81,7 +81,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-snr-analysis-sink
                         orc-stage-plugin-burst-level-analysis-sink
                         orc-stage-plugin-cvbs-sink
-                        orc-stage-plugin-teletext-analysis-sink)
+                        orc-stage-plugin-teletext-sink)
                 if(TARGET ${_orc_stage_plugin_target})
                         target_link_libraries(${target} ${_orc_stage_plugin_target})
                 endif()
@@ -181,11 +181,12 @@ orc_add_core_unit_tests(
         stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
-        stages/teletext_analysis_sink/teletext_analysis_sink_stage_test.cpp
-        stages/teletext_analysis_sink/teletext_analysis_sink_deps_test.cpp
-        stages/teletext_analysis_sink/teletext_frame_slicer_test.cpp
-        stages/teletext_analysis_sink/teletext_page_catalogue_test.cpp
-        stages/teletext_analysis_sink/teletext_squash_stats_test.cpp
+        stages/teletext_sink/teletext_sink_stage_test.cpp
+        stages/teletext_sink/teletext_sink_deps_test.cpp
+        stages/teletext_sink/teletext_frame_slicer_test.cpp
+        stages/teletext_sink/teletext_scan_state_test.cpp
+        stages/teletext_sink/teletext_page_catalogue_test.cpp
+        stages/teletext_sink/teletext_squash_stats_test.cpp
 )
 
 orc_add_core_unit_tests(

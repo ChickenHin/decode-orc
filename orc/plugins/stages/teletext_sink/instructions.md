@@ -1,4 +1,4 @@
-# Teletext Analysis Sink
+# Teletext Sink
 
 Recovers World System Teletext (WST) data lines from the VBI, writes the packets as a flat stream, and presents the pages it found in a page viewer. Both television systems ITU-R BT.653 defines System B on are covered:
 
@@ -22,7 +22,11 @@ Trigger the node and it makes one linear pass over the whole frame range. For ea
 
 The output is a flat, headerless sequence of whole packets in **transmission coding**: Hamming 8/4 on addressing bytes and odd parity on display bytes are preserved, so consumers decode the stream exactly as they would a live transmission. What the coding does not promise is that every byte is the one this copy of the line carried. By default the stage mends display bytes that fail their parity check and combines the repeated transmissions of each page row (`repair_damaged_bytes` and `squash_repeated_rows` below), which is most of what makes a tape readable; turn both off and the packets are written exactly as recovered.
 
-The same pass assembles the pages, so the run produces a catalogue of every page the recording carried — where each was first and last seen, how often the carousel brought it round, and its best assembly from every copy recovered. That is what the **Teletext Pages** tool shows.
+The same pass assembles the pages, so the run produces a catalogue of every page the recording carried — where each was first and last seen, how often the carousel brought it round, and its best assembly from every copy recovered. That is what the **Teletext Pages** tool shows. The packet stream is the stage's product and the catalogue rides along with it, which is why this is a sink rather than an analysis sink; leaving `output_path` empty makes the catalogue the only thing the run produces, and that is supported.
+
+The pass also learns about the recording as it goes, and spends less on later frames than on the first ones: where in the line this recording's data bursts start, and which of the candidate lines carry them at all (`pin_data_phase` and `learn_active_lines` below).
+
+Recovering a line reads that line's samples and nothing else, so frames are decoded on several threads at once while the packets are written from one, in the order they were transmitted (`decode_threads`). The recovered stream does not depend on how many threads were used — see that parameter for what makes that true. Learning and threading together take a pass over the 625-line reference capture from 1970 ms to 295 ms, and the 525-line one from 946 ms to 156 ms.
 
 On a 625-line source the stage can additionally decode the subtitle page (pages flagged C6 in the header control bits, conventionally page 888 in the UK) and write the recovered subtitles as a SubRip (`.srt`) file next to the packet stream. Cue timing derives from the field number at 50 fields/s, which is why the option is not offered on 525-line sources; colour, positioning, and other Level 1 presentation attributes are dropped — SRT carries the plain text. Text is written as UTF-8 through the national option sub-set the page header selects (ETSI EN 300 706 §15.6.2 Table 36), so a UK page's `£`, `½` and `¼` reach the file as themselves rather than as the ASCII the transmitted codes would be.
 
@@ -30,14 +34,16 @@ On a 625-line source the stage can additionally decode the subtitle page (pages 
 
 ### Teletext Pages
 
-Opens the page viewer for this node. Triggering the node opens it automatically; opening it on a node that has not been triggered runs the decode first, with progress and cancel.
+The page viewer for this node. Triggering the node opens it automatically, which is how the pages are reached — leave `output_path` empty and triggering is a decode-and-browse that writes no file.
 
 The viewer lists every page the range carried — page number, how many times it was seen, and the frames it was first and last seen at — and renders the selected page as a Level 1 display, together with the run's recovery summary. Because the catalogue comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel rather than whatever happened to be on screen.
 
 ## Parameters
 
 ### output_path (file path)
-Path to the output packet stream. Required. The service's extension is appended if absent: `.t42` on a 625-line source, `.t34` on a 525-line one.
+Path to the output packet stream. The service's extension is appended if absent: `.t42` on a 625-line source, `.t34` on a 525-line one.
+
+Optional. Leave it empty and the run decodes exactly as it would but writes no file, which is what to do when the pages themselves are what you are after — the **Teletext Pages** tool is filled either way. `write_report` and `export_subtitles` both write beside the packet stream, so they need a path and the run is refused if either is enabled without one.
 
 ### first_vbi_line (integer)
 First candidate field line probed for teletext, 1-based and applied to both fields. Default: `6` on a 625-line project, `10` on a 525-line one. The 625-line default window 6–22 covers broadcast lines 6–22 (field 1) and 318–335 (field 2) permitted to carry teletext by ETSI EN 300 706; the 525-line window 10–21 covers broadcast lines 10–21 and 273–284 (ITU-R BT.653 §2).
@@ -72,6 +78,35 @@ Applies only to the data bytes of parity-coded rows (0–25), and only under the
 
 Measured on the reference VHS captures, packets whose 40 data bytes all satisfy parity rise from 70.4 % to 87.9 % (LP) and from 78.7 % to 91.6 % (SP) — though on a real recording that figure is partly manufactured by the repair itself. Against synthesized lines with known payloads, where the answer can be checked, 714 repairs across 2438 recovered packets corrected 598 bytes and damaged none.
 
+### pin_data_phase (boolean)
+Narrow the search for where each line's data burst starts to where this recording's lines have already been seen to start. Default: `true`.
+
+Neither detector is told where in the line the data is. Each sweeps the whole data-timing window of ETSI EN 300 706 §6.3 looking for it — 284 candidate positions for the threshold detector at the PAL sample rate, 355 for MLSE, every one of them on every candidate line of every field. That sweep is most of what a pass costs.
+
+It is also almost entirely redundant. The position of the data burst in the line is fixed by the standard, and a time-base-corrected recording has already had the transport's timing variation taken out of it, so every data line of a recording starts within a sample or two of every other. Once 24 lines have yielded packets this takes the middle of the positions they locked at, widens it to cover their spread, and sweeps only that. The locks are kept as a running window of the last 64, so a recording whose data start moves part way through — a tape spliced from two transfers — follows it rather than averaging across it. If the locks disagree by more than about seven samples they are not describing one position, and the full sweep is used instead.
+
+This cannot lose a packet. A narrowed sweep that recovers nothing is repeated over the full window, so the worst case is the few percent the narrow sweep cost — paid on lines that carry no data, which is where a pass has time to spare. What it does change is *which* lock is chosen on a line where both windows find one, and that turns out to favour the narrow window: an exhaustive sweep can settle on a false correlation peak elsewhere in the line, and pinning rejects those by construction. On the reference captures it recovers 4 % more packets on the 625-line sample and 0.7 % more on the 525-line one, while cutting the decode time by roughly a third.
+
+The report says where the window was pinned and from how many locks, or why it was not pinned.
+
+### learn_active_lines (boolean)
+After the first frames, read only the candidate lines this recording has been seen to carry teletext on. Default: `true`.
+
+The VBI window is what a service *may* use, not what it does: 17 field lines on 625 and 12 on 525, of which a real service uses a handful. The rest are read on every frame regardless, and where one carries picture content, VITS, VITC or line-21 captions rather than nothing, that work runs the full detection chain — under the `Automatic` detector, including the MLSE fallback — to reach a rejection it reached on the frame before.
+
+The first 50 frames are read in full and what each line yielded is counted; after that only the lines that have produced a packet are read. Because a service can start part way into a recording, every 50th frame reads the full window again, so a line that comes alive is picked back up within one interval. The mask is kept per field, so a service using different lines in each field is not flattened.
+
+Unlike `pin_data_phase` this can lose a packet: a line that carries data exactly once, on a frame that is neither a learning frame nor a recheck frame, is not read. On the reference 625-line capture that cost one packet in 3,964. The saving depends entirely on what the dead lines hold — on the 625-line sample, whose unused lines are blank and rejected instantly by the amplitude gate, it is worth about 3 %; on the 525-line tape, whose unused lines carry enough signal to reach the MLSE fallback, about 20 %. Turn it off for an archival pass where every packet matters.
+
+### decode_threads (integer)
+Threads to recover lines on. Default: `0`, meaning one per processor.
+
+Each line is recovered from its own samples, so the frames of a recording are independent and are decoded several at a time. Writing the packets is not independent — a teletext stream is strictly ordered, and the page assembly and row combining downstream of it both depend on that order — so emission stays on one thread and the decoding runs ahead of it.
+
+**The recovered stream is identical whatever this is set to.** That is not something that comes for free with threading, and it is worth saying how it is arranged. The pass learns as it goes (`pin_data_phase` and `learn_active_lines` above), so what a thread is allowed to know while it works has to be fixed in advance, or a frame's packets would depend on how far ahead of it the other threads had got. Frames are therefore decoded in blocks: every frame of a block is read against one frozen view of what the pass has learned, and the block is then emitted in order, which is what advances that view for the next one. A worker never reads the live state. The functional tests decode the reference captures at one, three and eight threads and require the same SHA-256 from each.
+
+Lower it only to leave the machine free for other work. Measured on the 625-line reference capture: 1406 ms on one thread, 442 on four, 295 on eight. Beyond the processor's physical cores there is nothing further to win — the run is by then waiting on the source stage, which serves frames from a single file position and so hands them out one at a time.
+
 ### squash_repeated_rows (boolean)
 Combine repeated transmissions of each page row and write the combined form. Default: `true`.
 
@@ -84,7 +119,7 @@ The pages shown in the viewer are built from the combined rows, so this improves
 Costs a second pass over the recovered packets, which are held in memory (roughly 50 bytes each).
 
 ### write_report (boolean)
-Write the run's diagnostic report next to the packet stream, named after it with a `.txt` extension — `mydata.t42` gives `mydata.t42.txt`. Default: `false`.
+Write the run's diagnostic report next to the packet stream, named after it with a `.txt` extension — `mydata.t42` gives `mydata.t42.txt`, `mydata.t34` gives `mydata.t34.txt`. Needs `output_path` set. Default: `false`.
 
 The same report is always written to the log at debug level; this only keeps a copy somewhere a reader can go back to.
 
@@ -111,7 +146,7 @@ Teletext squashing: 264 row packets over 1 page run; 246 rewritten (93.2%),
 The copies-per-row line is what separates a run that could not correct anything from one that had nothing to correct: a row transmitted once cannot be improved however good the vote is.
 
 ### export_subtitles (boolean)
-Decode the subtitle page alongside the packet export and write timed subtitle cues to a `.srt` file next to the output (same name, `.srt` extension). A subtitle is displayed when the page arrives, replaced when its text changes, and cleared when the page is erased or loses its subtitle flag. Default: `false`. Offered on 625-line projects only.
+Decode the subtitle page alongside the packet export and write timed subtitle cues to a `.srt` file next to the output (same name, `.srt` extension), which is why `output_path` must be set. A subtitle is displayed when the page arrives, replaced when its text changes, and cleared when the page is erased or loses its subtitle flag. Default: `false`. Offered on 625-line projects only.
 
 ### subtitle_page (string)
 The teletext page carrying the subtitles: a magazine digit (1–8) followed by two hexadecimal page digits, e.g. `888` (the UK convention). Only used when `export_subtitles` is enabled. Default: `888`.

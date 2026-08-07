@@ -1213,7 +1213,7 @@ void RenderCoordinator::handleGetTeletextAnalysisData(
       if (!data) {
         emit error(req.request_id,
                    "Failed to get teletext data - node may not be a "
-                   "TeletextAnalysisSinkStage or trigger failed");
+                   "TeletextSinkStage or trigger failed");
         return;
       }
     }

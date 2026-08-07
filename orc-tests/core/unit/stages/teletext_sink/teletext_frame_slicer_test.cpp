@@ -1,7 +1,7 @@
 /*
  * File:        teletext_frame_slicer_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the teletext analysis sink's per-frame slicer
+ * Purpose:     Unit tests for the teletext sink's per-frame slicer
  *
  * Covers: which systems carry a WST service, the per-system candidate window
  * and its override, the black/white level fallback, the luma-vs-composite line
@@ -163,15 +163,15 @@ TEST_F(TeletextFrameSlicer, SliceField_ReportsEveryCandidateLineOfTheWindow) {
     put_line(0, static_cast<size_t>(line), blank);
   }
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 0, results);
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 0, scan);
 
-  ASSERT_EQ(results.size(),
+  ASSERT_EQ(scan.lines.size(),
             static_cast<size_t>(orc::kTeletextLastFieldLine625 -
                                 orc::kTeletextFirstFieldLine625 + 1));
-  EXPECT_EQ(results.front().field_line, orc::kTeletextFirstFieldLine625);
-  EXPECT_EQ(results.back().field_line, orc::kTeletextLastFieldLine625);
-  for (const auto& result : results) {
+  EXPECT_EQ(scan.lines.front().field_line, orc::kTeletextFirstFieldLine625);
+  EXPECT_EQ(scan.lines.back().field_line, orc::kTeletextLastFieldLine625);
+  for (const auto& result : scan.lines) {
     EXPECT_FALSE(result.sliced.valid);
     EXPECT_EQ(result.sliced.packet_bytes, orc::kTeletextPacketBytes);
   }
@@ -189,14 +189,14 @@ TEST_F(TeletextFrameSlicer, SliceField_RecoversA625LinePacketFromField1) {
   options.last_field_line = 7;
   const orc::TeletextFrameSlicer slicer(options);
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 3, 0, results);
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 3, 0, scan);
 
-  ASSERT_EQ(results.size(), 1u);
-  EXPECT_EQ(results[0].flat_line, 7u);
-  ASSERT_TRUE(results[0].sliced.valid);
-  EXPECT_EQ(results[0].sliced.packet_bytes, orc::kTeletextPacketBytes);
-  EXPECT_EQ(results[0].sliced.bytes, payload);
+  ASSERT_EQ(scan.lines.size(), 1u);
+  EXPECT_EQ(scan.lines[0].flat_line, 7u);
+  ASSERT_TRUE(scan.lines[0].sliced.valid);
+  EXPECT_EQ(scan.lines[0].sliced.packet_bytes, orc::kTeletextPacketBytes);
+  EXPECT_EQ(scan.lines[0].sliced.bytes, payload);
 }
 
 // Field 2's candidate lines sit one field-1 line count further into the
@@ -214,13 +214,13 @@ TEST_F(TeletextFrameSlicer, SliceField_OffsetsField2ByTheField1LineCount) {
   options.last_field_line = 7;
   const orc::TeletextFrameSlicer slicer(options);
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 1, results);
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 1, scan);
 
-  ASSERT_EQ(results.size(), 1u);
-  EXPECT_EQ(results[0].flat_line, expected_flat);
-  ASSERT_TRUE(results[0].sliced.valid);
-  EXPECT_EQ(results[0].sliced.bytes, payload);
+  ASSERT_EQ(scan.lines.size(), 1u);
+  EXPECT_EQ(scan.lines[0].flat_line, expected_flat);
+  ASSERT_TRUE(scan.lines[0].sliced.valid);
+  EXPECT_EQ(scan.lines[0].sliced.bytes, payload);
 }
 
 TEST_F(TeletextFrameSlicer, SliceField_RecoversThe525LineServiceOnNtsc) {
@@ -236,16 +236,16 @@ TEST_F(TeletextFrameSlicer, SliceField_RecoversThe525LineServiceOnNtsc) {
   options.detector = orc::TeletextDetector::kThreshold;
   const orc::TeletextFrameSlicer slicer(options);
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 0, results);
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 0, scan);
 
   // Only the line that carried samples is reported; the 525-line window of
   // ITU-R BT.653 §2 (field lines 9-20) is where it was looked for.
-  ASSERT_EQ(results.size(), 1u);
-  EXPECT_EQ(results[0].field_line, 10);
-  ASSERT_TRUE(results[0].sliced.valid);
-  EXPECT_EQ(results[0].sliced.packet_bytes, orc::kTeletext525PacketBytes);
-  EXPECT_EQ(results[0].sliced.bytes, payload);
+  ASSERT_EQ(scan.lines.size(), 1u);
+  EXPECT_EQ(scan.lines[0].field_line, 10);
+  ASSERT_TRUE(scan.lines[0].sliced.valid);
+  EXPECT_EQ(scan.lines[0].sliced.packet_bytes, orc::kTeletext525PacketBytes);
+  EXPECT_EQ(scan.lines[0].sliced.bytes, payload);
 }
 
 // A source that states no levels is sliced against the spec constants, which
@@ -264,12 +264,12 @@ TEST_F(TeletextFrameSlicer, SliceField_FallsBackToTheSpecDataLevels) {
   options.last_field_line = 7;
   const orc::TeletextFrameSlicer slicer(options);
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 0, results);
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 0, scan);
 
-  ASSERT_EQ(results.size(), 1u);
-  ASSERT_TRUE(results[0].sliced.valid);
-  EXPECT_EQ(results[0].sliced.bytes, payload);
+  ASSERT_EQ(scan.lines.size(), 1u);
+  ASSERT_TRUE(scan.lines[0].sliced.valid);
+  EXPECT_EQ(scan.lines[0].sliced.bytes, payload);
 }
 
 // YC sources carry the data burst in the luma channel; reading them through
@@ -286,12 +286,12 @@ TEST_F(TeletextFrameSlicer, SliceField_ReadsLumaOnSeparateChannelSources) {
   options.last_field_line = 7;
   const orc::TeletextFrameSlicer slicer(options);
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 0, results);
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 0, scan);
 
-  ASSERT_EQ(results.size(), 1u);
-  ASSERT_TRUE(results[0].sliced.valid);
-  EXPECT_EQ(results[0].sliced.bytes, payload);
+  ASSERT_EQ(scan.lines.size(), 1u);
+  ASSERT_TRUE(scan.lines[0].sliced.valid);
+  EXPECT_EQ(scan.lines[0].sliced.bytes, payload);
 }
 
 // A window reaching past the frame is clamped rather than reading off the end.
@@ -304,9 +304,9 @@ TEST_F(TeletextFrameSlicer, SliceField_SkipsLinesBeyondTheFrame) {
   options.detector = orc::TeletextDetector::kThreshold;
   const orc::TeletextFrameSlicer slicer(options);
 
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 1, results);
-  EXPECT_TRUE(results.empty());
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 1, scan);
+  EXPECT_TRUE(scan.lines.empty());
 }
 
 TEST_F(TeletextFrameSlicer, SliceField_YieldsNothingWithoutVideoParameters) {
@@ -314,10 +314,10 @@ TEST_F(TeletextFrameSlicer, SliceField_YieldsNothingWithoutVideoParameters) {
       .WillRepeatedly(Return(std::nullopt));
 
   const orc::TeletextFrameSlicer slicer;
-  std::vector<orc::TeletextFrameLineResult> results;
-  results.emplace_back();  // must be cleared even on the early return
-  slicer.slice_field(mockRepresentation_, 0, 0, results);
-  EXPECT_TRUE(results.empty());
+  orc::TeletextFieldScan scan;
+  scan.lines.emplace_back();  // must be cleared even on the early return
+  slicer.slice_field(mockRepresentation_, 0, 0, scan);
+  EXPECT_TRUE(scan.lines.empty());
 }
 
 TEST_F(TeletextFrameSlicer, SliceField_YieldsNothingForASystemWithoutWst) {
@@ -327,9 +327,9 @@ TEST_F(TeletextFrameSlicer, SliceField_YieldsNothingForASystemWithoutWst) {
       .WillRepeatedly(Return(params));
 
   const orc::TeletextFrameSlicer slicer;
-  std::vector<orc::TeletextFrameLineResult> results;
-  slicer.slice_field(mockRepresentation_, 0, 0, results);
-  EXPECT_TRUE(results.empty());
+  orc::TeletextFieldScan scan;
+  slicer.slice_field(mockRepresentation_, 0, 0, scan);
+  EXPECT_TRUE(scan.lines.empty());
 }
 
 }  // namespace orc_unit_test

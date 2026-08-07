@@ -301,7 +301,7 @@ class RenderPresenter {
    *
    * @param node_id Node to get data from
    * @return The catalogue and recovery summary, or std::nullopt if the node is
-   *         not a triggered teletext analysis sink
+   *         not a triggered teletext sink
    */
   std::optional<TeletextAnalysisView> getTeletextAnalysisData(NodeID node_id);
 

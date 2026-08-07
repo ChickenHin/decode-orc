@@ -1,4 +1,4 @@
-# Teletext analysis sink — implementation plan
+# Teletext sink — implementation plan
 
 Refactors teletext recovery from the current split design — a background
 `TeletextObserver` in `orc/core/observers/` plus a `teletext_sink` export stage —
@@ -342,3 +342,209 @@ Full validation per AGENTS.md §4.6: clean build with
 **Acceptance criteria**
 - All suites green; no new MVP or SDK-gate violations; stage loads and
   triggers in a live GUI sanity pass on a real capture.
+
+---
+
+## Phase 4 — Recategorisation and learned scan (2026-08-07)
+
+A follow-on to the phases above, after the reworked stage had been used on real
+captures. Two unrelated changes that touch the same files.
+
+### Task 4.1 — Back to a sink, and named to match
+
+Phase 1 made the stage an analysis sink because it grew a batch-analysis
+dialog. That was the wrong reading of the category: a batch-analysis stage tool
+is `StageToolProvider` surface and any node type may declare one, while
+`NodeType` describes what the node is *for*. This one writes a packet stream —
+that is its product, and the page catalogue is a by-product of the same pass.
+
+`orc/plugins/stages/teletext_analysis_sink/` returns to
+`orc/plugins/stages/teletext_sink/`; stage id `teletext_sink`, plugin id
+`decode-orc.stage.teletext_sink`, target
+`orc-stage-plugin-teletext-sink`, `NodeType::SINK`,
+`TeletextAnalysisSinkStage` → `TeletextSinkStage` and its deps types with it.
+`TeletextAnalysisDataset` and `ITeletextAnalysisResults` keep their names:
+they describe analysis results, which is still what they are.
+
+Two consequences had to be handled rather than accepted:
+
+- **Saved projects.** Unlike the Phase 1 rename this one is not pre-release, so
+  `Project::load` migrates `teletext_analysis_sink` nodes to `teletext_sink`,
+  their display name with them, and rewrites the stored `node_type` from
+  `ANALYSIS_SINK` to `SINK` — the stored type is what decides which nodes the
+  DAG treats as outputs, so leaving it would quietly drop the migrated node
+  from that set.
+- **Browse-only triggering.** `can_trigger_node` refuses to trigger a
+  `NodeType::SINK` node with no `output_path`, and a run with no output path is
+  a documented, supported use of this stage. The gate now exempts any sink that
+  declares a `BatchAnalysis` stage tool, which is exactly the statement that a
+  run of it produces something besides a file.
+
+The stage's user-guide page moves from `sink-analysis-stages.md` to
+`sink-core-stages.md`.
+
+### Task 4.2 — What a pass learns about its recording
+
+Profiling a pass showed the cost is not where the design assumed. Nothing about
+*which* teletext service to decode is determined at runtime — `VideoSystem`
+selects it outright, and with it the bit rate, packet length, data-'1' level,
+timing window and line window — so there is no format detection to make cheaper.
+What is determined at runtime, on every candidate line of every field of every
+frame, is where in the line the data burst starts and whether the line carries
+one at all.
+
+Two additions, both learning from the pass rather than from configuration, and
+both held in a new plugin-local `TeletextScanState` passed into
+`TeletextFrameSlicer::slice_field()` so the frame slicer and the SDK slicer stay
+const and shareable:
+
+- **`TeletextPhaseHint` (SDK) + `TeletextPhaseTracker` (plugin).** The slicer
+  gains an optional hint narrowing the acquisition sweep, and reports the phase
+  it locked at (`TeletextLineResult::lock_sample`) so a caller can accumulate
+  them. The tracker offers a hint once 24 lines have yielded packets, centred on
+  the trimmed middle of the last 64 locks and widened to cover their spread;
+  locks scattered wider than 7 samples withhold it. **A hinted attempt that
+  recovers nothing is repeated over the full window**, which is what makes the
+  hint impossible to lose a packet to.
+- **`TeletextLineTracker` (plugin).** Reads every line for the first 50 frames,
+  then only lines that have produced a packet, re-reading the full window every
+  50th frame. Per field. This one *can* lose a packet — a line carrying data
+  exactly once, on neither a learning nor a recheck frame — measured at one
+  packet in 3,964 on the 625-line reference.
+
+Both are exposed as `pin_data_phase` and `learn_active_lines`, default true,
+and the run's report states where the window was pinned and how many lines the
+mask skipped.
+
+**Measured on the reference captures** (625: 200 frames of the bt8x8 sample;
+525: 300 frames of the TBS Electra tape), decode wall time and packets:
+
+| | 625 time | 625 packets | 525 time | 525 packets |
+|-|-|-|-|-|
+| neither | 1977 ms | 3964 | 946 ms | 2652 |
+| pin only | 1415 ms | 4124 | 754 ms | 2670 |
+| mask only | 1913 ms | 3963 | 758 ms | 2652 |
+| both (default) | 1378 ms | 4119 | 534 ms | 2670 |
+
+Pinning *recovers* packets as well as time: an exhaustive sweep can settle on a
+false correlation peak, and a window pinned to where the data actually is
+cannot. The mask's value depends entirely on what the unused lines hold — blank
+on the 625-line sample (rejected by the amplitude gate for almost nothing),
+signal-bearing on the 525-line tape (reaching the MLSE fallback every frame),
+which is the whole of the difference between its 3 % and its 20 %.
+
+**Acceptance criteria**
+- The functional goldens are unchanged with both options off, which is what
+  establishes that the acquisition refactor is bit-exact; a second pair of
+  goldens covers the default configuration, asserting alongside them that the
+  learned scan recovers no fewer packets than the exhaustive decode.
+- Slicer-level tests cover the hint contract: the reported lock is where the
+  burst is, a correct hint decodes identically to the full sweep, a wrong hint
+  falls back and still recovers the packet, a hint outside the timing window is
+  ignored, and the MLSE acquisition is pinned too.
+- Tracker unit tests cover the hint threshold, the spread widening, the
+  disagreement cutoff, the running window, per-field masking, recheck
+  readmission, and the untrackable-line guard.
+
+---
+
+## Phase 5 — Parallel decode, and one table per system (2026-08-07)
+
+### Task 5.1 — Recover on several threads
+
+Slicing is nearly all of what a pass costs and every line is recovered from its
+own samples, so the frames are independent. Emission is not: a teletext stream
+is strictly ordered, and the page catalogue, the row squasher and the recovery
+statistics all depend on that order. So the pass splits — workers slice ahead,
+this thread emits behind them.
+
+What makes that harder than a parallel-for is Phase 4's learning. It is
+feedback: what a frame costs depends on what earlier frames produced. Left as
+it was, a frame's packets would have depended on how far ahead of it the other
+threads had got, and no two runs would have agreed.
+
+The fix is to make what a worker may know a **value**, frozen for a span of
+frames:
+
+- `TeletextScanSnapshot` — pinning on/off, the phase hint, the per-(field,line)
+  mask and the mask's timing options, with `reads_full_window()` and
+  `should_probe()` as pure functions of it and a frame index. This is all a
+  worker sees.
+- `TeletextScanState` — the live trackers, advanced only by the ordered
+  emission pass, and frozen into a snapshot per block.
+- `TeletextFrameSlicer::slice_field()` is now const with no mutable argument at
+  all: snapshot and frame index in, `TeletextFieldScan` out.
+
+Frames are taken in blocks, sliced against one snapshot, then emitted in order,
+which advances the state for the next block. Blocks start at 16 frames and
+double to 128: small early, when there is most to learn and the pinning has yet
+to engage, larger later, where the size amortises thread creation and keeps the
+workers busy to the block's tail. The ceiling is memory — a block holds every
+line it sliced, ~1,6 kB each, so 128 frames of a 625-line window is ~7 MB.
+
+The work unit is a **whole frame**, not a field. Both fields read the same
+frame from the source, and splitting them across threads made each frame be
+fetched twice: going to whole frames took the 625-line reference at 8 threads
+from 660 ms to 295.
+
+`decode_threads` (0 = one per processor) is exposed, mostly so a user can leave
+the machine free for other work — and so the determinism claim can be tested.
+
+**Measured** (625: 200 frames of the bt8x8 sample; 525: 300 of the TBS Electra
+tape), decode wall time:
+
+| | 625 | 525 |
+|-|-|-|
+| exhaustive, 1 thread (pre-Phase 4) | 1970 ms | 946 ms |
+| learned scan, 1 thread | 1406 ms | 535 ms |
+| learned scan, 2 threads | 760 ms | 300 ms |
+| learned scan, 4 threads | 442 ms | 178 ms |
+| learned scan, 8 threads | **295 ms** | **156 ms** |
+| learned scan, 16 threads | 303 ms | 178 ms |
+
+6,7× and 6,1× end to end. It stops scaling at the physical core count: past
+that the pass is waiting on the source, which serves frames from one file
+position under a lock (`VBIFrameRepresentation::io_mutex_`) and so hands them
+out one at a time. Making that concurrent is a change to the source stages, not
+to this one.
+
+The learned-scan goldens moved again, because the learning is now quantised to
+blocks rather than applied per line. On the 625-line capture it recovers 4097
+packets against the previous 4119 and 105 pages against 103, with data loss
+0,73 % → 0,67 %.
+
+**Acceptance criteria**
+- Functional tests decode both reference captures at one, three and eight
+  threads and require the same SHA-256, byte count and packet count from each,
+  compared against the golden as well as against one another — so a change that
+  made every thread count agree on the wrong answer still fails.
+- A worker that throws does not take the process with it: the exception is
+  held, the queue drained, and it is rethrown once the threads are joined.
+- A cancelled block is discarded whole, so the stream stays a prefix of the run
+  rather than gaining a hole where the workers stopped taking jobs.
+
+### Task 5.2 — One table per system, not four
+
+Recovery decided things per television system in four places: the slicer's
+constructor (four parallel ternaries on `TeletextSystem`), the frame slicer's
+`applies_to()`, `profile_for()` and `slicer_for()`, its default black/white
+levels, and the stage's own copies of the UI line windows.
+
+Now:
+
+- `system_geometry()` in `teletext_slicer.cpp` holds the bit rate, packet
+  length, data-'1' fraction and acquisition window of each service. The header's
+  `teletext_bit_rate()` and `teletext_packet_bytes()` stay — they must be usable
+  in constant expressions by callers that never see the table — and a
+  `static_assert` ties the two together.
+- `TeletextFrameSlicer::SystemProfile` gains `carries_teletext`, the 4FSC sample
+  rate, the default levels and a slicer index, so `profile_for()` is the only
+  place a `VideoSystem` is turned into anything. `applies_to()` and the slicer
+  lookup read it; `slicer_for()` is gone, and the slicers are an array built
+  from `kTeletextVideoSystems`.
+- The stage derives its UI defaults from `profile_for()` through
+  `profile_for_project()` rather than restating the windows, so the lines the UI
+  offers and the lines recovery probes cannot drift.
+
+Adding a service — NABTS is the obvious candidate — is now a row in each of
+those two tables plus an enumerator, rather than a hunt for the ternaries.

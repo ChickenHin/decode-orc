@@ -84,6 +84,28 @@ dag:
   edges: []
 )yaml";
 
+// A project saved while the teletext sink was an analysis sink. Everything
+// about the node has to be brought forward: the stage id, the display name it
+// was saved under, and the node_type — which is what decides whether the DAG
+// treats the node as an output.
+constexpr const char* kLegacyTeletextAnalysisSinkProject = R"yaml(
+project:
+  name: legacy-teletext-project
+  version: "2.0"
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: mV
+dag:
+  nodes:
+    - id: 1
+      stage: teletext_analysis_sink
+      display_name: Teletext Analysis Sink
+      node_type: ANALYSIS_SINK
+      x: 0.0
+      y: 0.0
+  edges: []
+)yaml";
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -935,6 +957,24 @@ TEST(ProjectFormatTest, SaveProject_SaveAsElsewhere_UpdatesRoot) {
   EXPECT_EQ(project.get_project_root(), second.string());
 
   std::filesystem::remove_all(base);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy stage migration
+// ---------------------------------------------------------------------------
+
+TEST(ProjectFormatTest, LegacyTeletextAnalysisSink_MigratesToTeletextSink) {
+  const auto project = orc::project_io::load_project_from_yaml(
+      kLegacyTeletextAnalysisSinkProject, "/tmp/legacy-teletext.orcprj");
+
+  ASSERT_EQ(project.get_nodes().size(), 1u);
+  const auto& node = project.get_nodes().front();
+  EXPECT_EQ(node.stage_name, "teletext_sink");
+  EXPECT_EQ(node.display_name, "Teletext Sink");
+
+  // The stored ANALYSIS_SINK is corrected, not carried forward: it is what
+  // project_to_dag reads to decide the DAG's output nodes.
+  EXPECT_EQ(node.node_type, orc::NodeType::SINK);
 }
 
 }  // namespace orc_unit_test

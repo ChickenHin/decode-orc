@@ -1,7 +1,7 @@
 /*
  * File:        teletextdialog.h
  * Module:      orc-gui
- * Purpose:     Teletext page viewer for the teletext analysis sink stage tool
+ * Purpose:     Teletext page viewer for the teletext sink stage tool
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -26,9 +26,9 @@
 class TeletextPageWidget;
 
 /**
- * @brief Viewer for the pages a teletext analysis sink recovered
+ * @brief Viewer for the pages a teletext sink recovered
  *
- * The stage tool of one `teletext_analysis_sink` node: triggering the node
+ * The stage tool of one `teletext_sink` node: triggering the node
  * decodes the whole frame range in a single pass and this dialogue shows what
  * it found. Unlike the preview observer dialogues it replaced, it does not
  * follow the previewer — the catalogue describes the entire source, so there is

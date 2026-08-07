@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 
+#include "../../../orc/core/include/dag_executor.h"
 #include "../../../orc/core/include/project.h"
 #include "../../../orc/core/include/project_to_dag.h"
 #include "../include/public_stage_inventory.h"
@@ -159,6 +160,83 @@ TEST(ProjectToDagContractTest, UnknownStageInProject_FailsCleanly) {
   orc::project_io::update_project_dag(project, nodes, {});
 
   EXPECT_THROW(orc::project_to_dag(project), orc::ProjectConversionError);
+}
+
+// ── DAG cloning for per-thread execution ─────────────────────────────────
+//
+// Stages are stateful and several re-apply their parameter map from
+// execute(), so a consumer that executes a shared DAG on its own thread
+// (every background observation worker) takes a clone first. The clone must
+// be the same pipeline, configured identically, with nothing shared behind
+// it — anything less puts two threads back inside one stage object.
+
+TEST(DagCloneContractTest, Clone_ReproducesTheDagWithItsOwnStages) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+
+  auto project = orc::project_io::create_empty_project(
+      "clone-test-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto source_id =
+      orc::project_io::add_node(project, chain->source, 0.0, 0.0);
+  const auto middle_id =
+      orc::project_io::add_node(project, chain->middle, 100.0, 0.0);
+  const auto sink_id =
+      orc::project_io::add_node(project, chain->sink, 200.0, 0.0);
+  orc::project_io::add_edge(project, source_id, middle_id);
+  orc::project_io::add_edge(project, middle_id, sink_id);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+
+  const auto clone = orc::clone_dag_with_fresh_stages(*dag);
+  ASSERT_NE(clone, nullptr);
+
+  EXPECT_TRUE(clone->validate());
+  ASSERT_EQ(clone->nodes().size(), dag->nodes().size());
+  EXPECT_EQ(clone->output_nodes(), dag->output_nodes());
+
+  for (size_t i = 0; i < clone->nodes().size(); ++i) {
+    const auto& original = dag->nodes()[i];
+    const auto& copy = clone->nodes()[i];
+
+    EXPECT_EQ(copy.node_id, original.node_id);
+    EXPECT_EQ(copy.input_node_ids, original.input_node_ids);
+    EXPECT_EQ(copy.input_indices, original.input_indices);
+    EXPECT_EQ(copy.parameters, original.parameters);
+
+    ASSERT_NE(copy.stage, nullptr);
+    // The point of the exercise: a different object of the same stage.
+    EXPECT_NE(copy.stage.get(), original.stage.get());
+    EXPECT_EQ(copy.stage->get_node_type_info().stage_name,
+              original.stage->get_node_type_info().stage_name);
+  }
+}
+
+// A clone that came up with default parameters would quietly render something
+// other than the pipeline the user configured.
+TEST(DagCloneContractTest, Clone_CarriesTheConfiguredParameters) {
+  auto project = orc::project_io::create_empty_project(
+      "clone-params-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto node_id =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  orc::project_io::set_node_parameters(
+      project, node_id, {{"ranges", orc::ParameterValue{std::string("3-7")}}});
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+  const auto clone = orc::clone_dag_with_fresh_stages(*dag);
+  ASSERT_NE(clone, nullptr);
+  ASSERT_EQ(clone->nodes().size(), 1u);
+
+  auto* parameterized =
+      dynamic_cast<orc::ParameterizedStage*>(clone->nodes()[0].stage.get());
+  ASSERT_NE(parameterized, nullptr);
+  const auto params = parameterized->get_parameters();
+  const auto it = params.find("ranges");
+  ASSERT_NE(it, params.end());
+  EXPECT_EQ(std::get<std::string>(it->second), "3-7");
 }
 
 // ── Format-aware default parameter tests ─────────────────────────────────

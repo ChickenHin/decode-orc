@@ -1,6 +1,6 @@
 /*
  * File:        teletext_squash_stats.cpp
- * Module:      orc-stage-plugin-teletext_analysis_sink
+ * Module:      orc-stage-plugin-teletext_sink
  * Purpose:     Accumulates what combining repeated page rows ("squashing")
  *              changed, as a diagnostic profile of the rewrite pass
  *

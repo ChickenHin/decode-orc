@@ -1,54 +1,63 @@
 /*
- * File:        teletext_analysis_sink_stage.cpp
- * Module:      orc-stage-plugin-teletext_analysis_sink
- * Purpose:     Teletext Analysis Sink Stage implementation
+ * File:        teletext_sink_stage.cpp
+ * Module:      orc-stage-plugin-teletext_sink
+ * Purpose:     Teletext Sink Stage implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "teletext_analysis_sink_stage.h"
+#include "teletext_sink_stage.h"
 
 #include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 #include <orc/support/teletext_page_decoder.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <variant>
 
-#include "teletext_analysis_sink_deps.h"
 #include "teletext_frame_slicer.h"
+#include "teletext_sink_deps.h"
 
 namespace orc {
 
 namespace {
 
-// The candidate VBI windows, as the 1-based field lines the UI presents.
-// 625 lines — ETSI EN 300 706 §4.1: broadcast lines 6-22 (field 1) / 318-335
-// (field 2), i.e. 1-based field lines 6-22 in both fields.
-// 525 lines — ITU-R BT.653 §2: broadcast lines 10-21 / 273-284, i.e. 1-based
-// field lines 10-21.
-constexpr int32_t kFirstUiLine625 = kTeletextFirstFieldLine625 + 1;
-constexpr int32_t kLastUiLine625 = kTeletextLastFieldLine625 + 1;
-constexpr int32_t kFirstUiLine525 = kTeletextFirstFieldLine525 + 1;
-constexpr int32_t kLastUiLine525 = kTeletextLastFieldLine525 + 1;
+// Upper bound on the decoding-thread parameter. Not a limit the decoder needs
+// — it is bounded by the work available — but a parameter with no maximum is
+// one a typo can turn into thousands of threads.
+constexpr int32_t kMaxDecodeThreads = 256;
 
 // The widest window either service uses bounds the parameters, so a project
 // whose format is not yet known can still be configured.
 constexpr int32_t kFirstAllowedUiLine = 1;
 constexpr int32_t kLastAllowedUiLine = 22;
 
-// Whether |project_format| is a 525-line system. Unknown is treated as 625:
-// it is the service the stage was written for, and the parameters it produces
-// are a superset of the 525-line window.
-bool is_525_line(VideoSystem project_format) {
-  return project_format == VideoSystem::NTSC ||
-         project_format == VideoSystem::PAL_M;
+// The service a project's format carries, and the candidate VBI window that
+// goes with it — taken from TeletextFrameSlicer rather than restated, so the
+// lines the UI offers and the lines recovery probes cannot drift apart.
+//
+// An unknown format is described as the 625-line service: it is what the stage
+// was written for, and its window is a superset of the 525-line one, so a
+// project configured before its format is known is configured widely rather
+// than narrowly.
+TeletextFrameSlicer::SystemProfile profile_for_project(
+    VideoSystem project_format) {
+  const auto profile = TeletextFrameSlicer::profile_for(project_format);
+  return profile.carries_teletext
+             ? profile
+             : TeletextFrameSlicer::profile_for(VideoSystem::PAL);
 }
+
+// Field lines are 0-based everywhere in recovery and 1-based everywhere the
+// user sees them (see frame_numbering.h for the project-wide convention).
+constexpr int32_t to_ui_line(int32_t field_line) { return field_line + 1; }
+constexpr int32_t to_field_line(int32_t ui_line) { return ui_line - 1; }
 
 int32_t get_int32_or(const std::map<std::string, ParameterValue>& parameters,
                      const std::string& name, int32_t fallback) {
@@ -81,19 +90,18 @@ std::string get_string_or(
 
 }  // namespace
 
-TeletextAnalysisSinkStage::TeletextAnalysisSinkStage(
-    IStageServices* stage_services)
+TeletextSinkStage::TeletextSinkStage(IStageServices* stage_services)
     : stage_services_(stage_services) {
-  set_configuration_status(orc::ConfigurationStatus::Red);
+  set_configuration_status(orc::ConfigurationStatus::Yellow);
 }
 
-NodeTypeInfo TeletextAnalysisSinkStage::get_node_type_info() const {
+NodeTypeInfo TeletextSinkStage::get_node_type_info() const {
   return NodeTypeInfo{
-      NodeType::ANALYSIS_SINK,
-      "teletext_analysis_sink",
-      "Teletext Analysis Sink",
+      NodeType::SINK,
+      "teletext_sink",
+      "Teletext Sink",
       "Recovers teletext from the VBI, exports the packet stream and browses "
-      "the pages. Trigger to update the page catalogue.",
+      "the pages. Trigger to write the stream and update the page catalogue.",
       1,
       1,  // One input
       0,
@@ -101,7 +109,7 @@ NodeTypeInfo TeletextAnalysisSinkStage::get_node_type_info() const {
       VideoFormatCompatibility::ALL};
 }
 
-std::vector<ArtifactPtr> TeletextAnalysisSinkStage::execute(
+std::vector<ArtifactPtr> TeletextSinkStage::execute(
     const std::vector<ArtifactPtr>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
     ObservationContext& observation_context) {
@@ -118,28 +126,34 @@ std::vector<ArtifactPtr> TeletextAnalysisSinkStage::execute(
   return {};
 }
 
-StagePreviewCapability TeletextAnalysisSinkStage::get_preview_capability()
-    const {
+StagePreviewCapability TeletextSinkStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_input_);
 }
 
-std::vector<ParameterDescriptor>
-TeletextAnalysisSinkStage::get_parameter_descriptors(
+std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
     VideoSystem project_format, SourceType source_type) const {
   (void)source_type;
-  const bool line_525 = is_525_line(project_format);
+  const auto profile = profile_for_project(project_format);
+  const bool line_525 = (profile.teletext_system == TeletextSystem::kWst525);
   std::vector<ParameterDescriptor> descriptors;
 
   {
     ParameterDescriptor desc;
     desc.name = "output_path";
     desc.display_name = "Output File";
+    // Optional: the run's other product is the page catalogue the viewer
+    // shows, and browsing a recording's teletext is a reason to trigger the
+    // stage on its own. Left empty, the pass runs exactly as it would and
+    // simply writes no stream.
     desc.description =
-        line_525
-            ? "Path to the output T34 packet stream (34-byte 525-line packets)"
-            : "Path to the output T42 packet stream (42-byte 625-line packets)";
+        std::string(line_525 ? "Path to the output T34 packet stream (34-byte "
+                               "525-line packets)"
+                             : "Path to the output T42 packet stream (42-byte "
+                               "625-line packets)") +
+        ". Leave it empty to decode and browse the pages without writing a "
+        "packet stream";
     desc.type = ParameterType::FILE_PATH;
-    desc.constraints.required = true;
+    desc.constraints.required = false;
     desc.constraints.default_value = std::string("");
     desc.file_extension_hint = line_525 ? ".t34" : ".t42";
     descriptors.push_back(desc);
@@ -155,8 +169,7 @@ TeletextAnalysisSinkStage::get_parameter_descriptors(
     desc.type = ParameterType::INT32;
     desc.constraints.min_value = kFirstAllowedUiLine;
     desc.constraints.max_value = kLastAllowedUiLine;
-    desc.constraints.default_value =
-        line_525 ? int32_t{kFirstUiLine525} : int32_t{kFirstUiLine625};
+    desc.constraints.default_value = to_ui_line(profile.first_field_line);
     descriptors.push_back(desc);
   }
 
@@ -169,8 +182,7 @@ TeletextAnalysisSinkStage::get_parameter_descriptors(
     desc.type = ParameterType::INT32;
     desc.constraints.min_value = kFirstAllowedUiLine;
     desc.constraints.max_value = kLastAllowedUiLine;
-    desc.constraints.default_value =
-        line_525 ? int32_t{kLastUiLine525} : int32_t{kLastUiLine625};
+    desc.constraints.default_value = to_ui_line(profile.last_field_line);
     descriptors.push_back(desc);
   }
 
@@ -248,6 +260,54 @@ TeletextAnalysisSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "pin_data_phase";
+    desc.display_name = "Pin Data Phase";
+    desc.description =
+        "Most of the cost of reading a line is searching the whole of the "
+        "standard's data-timing window for where the data burst starts. Every "
+        "line of a time-base-corrected recording starts at very nearly the "
+        "same place, so once enough lines have been read the search narrows to "
+        "where they agreed. A narrowed search that finds nothing is repeated "
+        "over the full window, so this costs a few percent on lines that carry "
+        "no data and cannot lose a packet";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "learn_active_lines";
+    desc.display_name = "Learn Active Lines";
+    desc.description =
+        "A service uses a few of the lines its standard permits, but every "
+        "line of the window is read on every frame. Read them all for the "
+        "first frames, then only the lines that have carried a packet. The "
+        "full window is rechecked periodically, so a service that starts part "
+        "way into a recording is still picked up";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "decode_threads";
+    desc.display_name = "Decoding Threads";
+    desc.description =
+        "Threads to recover lines on. Each line is read from its own samples "
+        "alone, so frames are decoded several at a time; 0 uses one thread per "
+        "processor. The recovered stream is the same whatever this is set to, "
+        "so lower it only to leave the machine free for other work";
+    desc.type = ParameterType::INT32;
+    desc.constraints.min_value = 0;
+    desc.constraints.max_value = kMaxDecodeThreads;
+    desc.constraints.default_value = int32_t{0};
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "squash_repeated_rows";
     desc.display_name = "Combine Repeated Rows";
     desc.description =
@@ -266,12 +326,16 @@ TeletextAnalysisSinkStage::get_parameter_descriptors(
     desc.name = "write_report";
     desc.display_name = "Write Report File";
     desc.description =
-        "Write the run's diagnostic report next to the packet stream, named "
-        "after it with a .txt extension (mydata.t42 gives mydata.t42.txt). "
-        "The report says how many candidate lines yielded packets, how the "
+        std::string(
+            "Write the run's diagnostic report next to the packet stream, "
+            "named after it with a .txt extension (") +
+        (line_525 ? "mydata.t34 gives mydata.t34.txt"
+                  : "mydata.t42 gives mydata.t42.txt") +
+        "). The report says how many candidate lines yielded packets, how the "
         "odd-parity failures of the recovered packets are spread across the "
         "display-byte positions, and what combining repeated rows changed. "
-        "The same report is always written to the log at debug level";
+        "Needs an output file to sit beside; the same report is always "
+        "written to the log at debug level";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = false;
     descriptors.push_back(desc);
@@ -286,7 +350,8 @@ TeletextAnalysisSinkStage::get_parameter_descriptors(
       desc.display_name = "Export Subtitles";
       desc.description =
           "Decode the subtitle page (C6-flagged, conventionally 888) and "
-          "write timed subtitle cues next to the T42 output";
+          "write timed subtitle cues next to the T42 output. Needs an output "
+          "file to sit beside";
       desc.type = ParameterType::BOOL;
       desc.constraints.default_value = false;
       descriptors.push_back(desc);
@@ -325,12 +390,12 @@ TeletextAnalysisSinkStage::get_parameter_descriptors(
   return descriptors;
 }
 
-std::map<std::string, ParameterValue>
-TeletextAnalysisSinkStage::get_parameters() const {
+std::map<std::string, ParameterValue> TeletextSinkStage::get_parameters()
+    const {
   return parameters_;
 }
 
-bool TeletextAnalysisSinkStage::set_parameters(
+bool TeletextSinkStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
   parameters_ = params;
 
@@ -339,37 +404,40 @@ bool TeletextAnalysisSinkStage::set_parameters(
       (it != params.end() && std::holds_alternative<std::string>(it->second) &&
        !std::get<std::string>(it->second).empty());
 
+  // Without an output file the stage still runs and still fills the page
+  // viewer — it just exports nothing — so an empty path is the reduced
+  // behaviour Yellow stands for rather than a missing requirement.
   set_configuration_status(has_path ? orc::ConfigurationStatus::Green
-                                    : orc::ConfigurationStatus::Red);
+                                    : orc::ConfigurationStatus::Yellow);
   return true;
 }
 
-TeletextAnalysisSinkOptions TeletextAnalysisSinkStage::parse_config(
+TeletextSinkOptions TeletextSinkStage::parse_config(
     const std::map<std::string, ParameterValue>& parameters) const {
-  TeletextAnalysisSinkOptions options;
+  TeletextSinkOptions options;
 
+  // An absent or empty path is the browse-only configuration: the pass runs
+  // unchanged and writes no packet stream.
   const auto path_it = parameters.find("output_path");
-  if (path_it == parameters.end() ||
-      !std::holds_alternative<std::string>(path_it->second)) {
-    throw std::runtime_error("No output path specified");
-  }
-  options.output_path = std::get<std::string>(path_it->second);
-  if (options.output_path.empty()) {
-    throw std::runtime_error("Output path is empty");
+  if (path_it != parameters.end() &&
+      std::holds_alternative<std::string>(path_it->second)) {
+    options.output_path = std::get<std::string>(path_it->second);
   }
 
   // UI lines are 1-based (frame_numbering presentation convention); the slicer
-  // window is 0-based field lines.
-  const int32_t first_ui =
-      get_int32_or(parameters, "first_vbi_line", kFirstUiLine625);
-  const int32_t last_ui =
-      get_int32_or(parameters, "last_vbi_line", kLastUiLine625);
+  // window is 0-based field lines. A parameter set that names neither falls
+  // back to the 625-line window, as an unset project format does.
+  const auto fallback = profile_for_project(VideoSystem::Unknown);
+  const int32_t first_ui = get_int32_or(parameters, "first_vbi_line",
+                                        to_ui_line(fallback.first_field_line));
+  const int32_t last_ui = get_int32_or(parameters, "last_vbi_line",
+                                       to_ui_line(fallback.last_field_line));
   if (first_ui < kFirstAllowedUiLine || last_ui > kLastAllowedUiLine ||
       first_ui > last_ui) {
     throw std::runtime_error("Invalid VBI line window");
   }
-  options.first_field_line = first_ui - 1;
-  options.last_field_line = last_ui - 1;
+  options.first_field_line = to_field_line(first_ui);
+  options.last_field_line = to_field_line(last_ui);
 
   options.keep_empty_packets =
       get_bool_or(parameters, "keep_empty_packets", false);
@@ -377,6 +445,11 @@ TeletextAnalysisSinkOptions TeletextAnalysisSinkStage::parse_config(
   options.require_valid_mrag =
       get_bool_or(parameters, "require_valid_mrag", true);
   options.parity_repair = get_bool_or(parameters, "repair_damaged_bytes", true);
+  options.pin_data_phase = get_bool_or(parameters, "pin_data_phase", true);
+  options.learn_active_lines =
+      get_bool_or(parameters, "learn_active_lines", true);
+  options.decode_threads = std::clamp(
+      get_int32_or(parameters, "decode_threads", 0), 0, kMaxDecodeThreads);
 
   const std::string detector =
       get_string_or(parameters, "detector", "Automatic");
@@ -409,10 +482,26 @@ TeletextAnalysisSinkOptions TeletextAnalysisSinkStage::parse_config(
     }
   }
 
+  // Both file-side extras are named after the packet stream and written beside
+  // it, so neither has anywhere to go on a browse-only run. Refused rather
+  // than dropped: an export silently not happening is the worse outcome.
+  if (options.output_path.empty()) {
+    if (options.export_subtitles) {
+      throw std::runtime_error(
+          "Subtitle export needs an output file (the cues are written beside "
+          "the packet stream)");
+    }
+    if (options.write_report) {
+      throw std::runtime_error(
+          "The report file needs an output file (it is written beside the "
+          "packet stream)");
+    }
+  }
+
   return options;
 }
 
-bool TeletextAnalysisSinkStage::trigger(
+bool TeletextSinkStage::trigger(
     const std::vector<ArtifactPtr>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
     IObservationContext& observation_context) {
@@ -443,21 +532,21 @@ bool TeletextAnalysisSinkStage::trigger(
       return fail_trigger("Error: Input is not a video frame representation");
     }
 
-    TeletextAnalysisSinkOptions options;
+    TeletextSinkOptions options;
     try {
       options = parse_config(parameters);
     } catch (const std::exception& e) {
       return fail_trigger(std::string("Error: ") + e.what());
     }
 
-    std::shared_ptr<ITeletextAnalysisSinkStageDeps> deps = deps_override_;
+    std::shared_ptr<ITeletextSinkStageDeps> deps = deps_override_;
     if (!deps) {
-      deps = std::make_shared<TeletextAnalysisSinkDeps>(stage_services_);
+      deps = std::make_shared<TeletextSinkDeps>(stage_services_);
     }
 
     deps->init(progress_callback_, &cancel_requested_);
 
-    const TeletextAnalysisSinkResult result =
+    const TeletextSinkResult result =
         deps->analyse(representation.get(), options);
 
     is_processing_.store(false);
@@ -474,7 +563,7 @@ bool TeletextAnalysisSinkStage::trigger(
     // cancelled run leaves — at debug level, because it is many lines and the
     // answer most runs need is the one-line status below.
     if (!result.report.empty()) {
-      ORC_LOG_DEBUG("TeletextAnalysisSink:\n{}", result.report);
+      ORC_LOG_DEBUG("TeletextSink:\n{}", result.report);
     }
 
     if (!result.success) {
@@ -482,14 +571,19 @@ bool TeletextAnalysisSinkStage::trigger(
           "Error: " + (result.message.empty()
                            ? std::string("Teletext analysis failed")
                            : result.message);
-      ORC_LOG_ERROR("TeletextAnalysisSink: {}", trigger_status_);
+      ORC_LOG_ERROR("TeletextSink: {}", trigger_status_);
       return false;
     }
 
     trigger_status_ = "Recovered " + std::to_string(result.packets_written) +
                       " teletext packets (" +
                       std::to_string(result.fields_with_data) +
-                      " fields with data) to " + result.output_path;
+                      " fields with data)";
+    // A browse-only run has no file to name, and a status that simply omitted
+    // it would read as an export that quietly failed.
+    trigger_status_ += result.output_path.empty()
+                           ? "; no packet stream written (no output file set)"
+                           : " to " + result.output_path;
     trigger_status_ += "; " + std::to_string(result.dataset.pages.size()) +
                        (result.dataset.pages.size() == 1 ? " page" : " pages");
     if (result.bytes_repaired > 0) {
@@ -520,16 +614,16 @@ bool TeletextAnalysisSinkStage::trigger(
     if (!result.report_path.empty()) {
       trigger_status_ += "; report to " + result.report_path;
     }
-    ORC_LOG_INFO("TeletextAnalysisSink: {}", trigger_status_);
+    ORC_LOG_INFO("TeletextSink: {}", trigger_status_);
     return true;
 
   } catch (const std::exception& e) {
-    ORC_LOG_ERROR("TeletextAnalysisSink: {}", e.what());
+    ORC_LOG_ERROR("TeletextSink: {}", e.what());
     return fail_trigger(std::string("Error: ") + e.what());
   }
 }
 
-std::string TeletextAnalysisSinkStage::get_trigger_status() const {
+std::string TeletextSinkStage::get_trigger_status() const {
   return trigger_status_;
 }
 

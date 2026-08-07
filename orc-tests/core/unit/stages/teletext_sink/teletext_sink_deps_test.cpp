@@ -1,7 +1,7 @@
 /*
- * File:        teletext_analysis_sink_deps_test.cpp
+ * File:        teletext_sink_deps_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the teletext analysis sink stage dependencies
+ * Purpose:     Unit tests for the teletext sink stage dependencies
  *
  * Covers: service gating, packet bytes and temporal ordering on both the
  * 625-line (.t42) and 525-line (.t34) services, keep-empty padding, row
@@ -13,7 +13,7 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "teletext_analysis_sink_deps.h"
+#include "teletext_sink_deps.h"
 
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
@@ -140,7 +140,7 @@ std::array<uint8_t, orc::kTeletextPacketBytes> make_row_packet(
 
 }  // namespace
 
-class TeletextAnalysisSinkDeps : public ::testing::Test {
+class TeletextSinkDeps : public ::testing::Test {
  public:
   void SetUp() override {
     pMockFileWriterUint8_ = std::make_shared<StrictMock<MockFileWriterUint8>>();
@@ -191,17 +191,16 @@ class TeletextAnalysisSinkDeps : public ::testing::Test {
            static_cast<size_t>(field_line);
   }
 
-  orc::TeletextAnalysisSinkDeps make_deps() {
-    orc::TeletextAnalysisSinkDeps deps(&mockStageServices_);
+  orc::TeletextSinkDeps make_deps() {
+    orc::TeletextSinkDeps deps(&mockStageServices_);
     deps.init({}, &cancelRequested_);
     return deps;
   }
 
   // Default options: one candidate line per field, so a test places exactly
   // the lines it means to be read.
-  static orc::TeletextAnalysisSinkOptions single_line_options(
-      int32_t field_line) {
-    orc::TeletextAnalysisSinkOptions options;
+  static orc::TeletextSinkOptions single_line_options(int32_t field_line) {
+    orc::TeletextSinkOptions options;
     options.output_path = "out";
     options.first_field_line = field_line;
     options.last_field_line = field_line;
@@ -219,7 +218,7 @@ class TeletextAnalysisSinkDeps : public ::testing::Test {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenSystemCarriesNoWstService) {
+TEST_F(TeletextSinkDeps, Analyse_FailsWhenSystemCarriesNoWstService) {
   EXPECT_CALL(mockRepresentation_, get_video_parameters())
       .WillRepeatedly(Return(make_unknown_params()));
 
@@ -234,7 +233,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenSystemCarriesNoWstService) {
       << result.message;
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenInputHasNoFrames) {
+TEST_F(TeletextSinkDeps, Analyse_FailsWhenInputHasNoFrames) {
   EXPECT_CALL(mockRepresentation_, get_video_parameters())
       .WillRepeatedly(Return(make_pal_params()));
   // Empty range: last < first → count() == 0
@@ -250,13 +249,13 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenInputHasNoFrames) {
   EXPECT_EQ(result.message, "Input has no frames");
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenWriterServiceUnavailable) {
+TEST_F(TeletextSinkDeps, Analyse_FailsWhenWriterServiceUnavailable) {
   EXPECT_CALL(mockRepresentation_, get_video_parameters())
       .WillRepeatedly(Return(make_pal_params()));
   EXPECT_CALL(mockRepresentation_, frame_range())
       .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
 
-  orc::TeletextAnalysisSinkDeps deps(nullptr);
+  orc::TeletextSinkDeps deps(nullptr);
   deps.init({}, &cancelRequested_);
   auto options = single_line_options(7);
 
@@ -266,7 +265,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenWriterServiceUnavailable) {
   EXPECT_EQ(result.message, "Failed to create output writer service");
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenOpenFails) {
+TEST_F(TeletextSinkDeps, Analyse_FailsWhenOpenFails) {
   EXPECT_CALL(mockRepresentation_, get_video_parameters())
       .WillRepeatedly(Return(make_pal_params()));
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -290,7 +289,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_FailsWhenOpenFails) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_WritesPacketsInTemporalOrder) {
+TEST_F(TeletextSinkDeps, Analyse_WritesPacketsInTemporalOrder) {
   const auto params = make_pal_params();
   const auto payload_a = make_payload(0x11);  // frame 0, field 1, line 7
   const auto payload_b = make_payload(0x23);  // frame 0, field 2, line 8
@@ -330,7 +329,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_WritesPacketsInTemporalOrder) {
 // The 525-line service transmits 34-byte packets, so the stream is named .t34
 // and carries exactly those bytes — the eight the 625-line packet buffer holds
 // past them were never transmitted and must not reach the file.
-TEST_F(TeletextAnalysisSinkDeps, Analyse_Writes525LinePacketsAsT34) {
+TEST_F(TeletextSinkDeps, Analyse_Writes525LinePacketsAsT34) {
   const auto params = make_ntsc_params();
   const auto payload = orc::tests::make_525_test_payload();
   const auto synth = orc::tests::ntsc_wst_synth_options();
@@ -367,7 +366,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_Writes525LinePacketsAsT34) {
 
 // The cue timing assumes 50 fields per second, which a 525-line service is
 // not; refusing beats writing cues that drift by a fifth.
-TEST_F(TeletextAnalysisSinkDeps, Analyse_RefusesSubtitleExportOn525Lines) {
+TEST_F(TeletextSinkDeps, Analyse_RefusesSubtitleExportOn525Lines) {
   const auto params = make_ntsc_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -391,8 +390,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_RefusesSubtitleExportOn525Lines) {
       << result.message;
 }
 
-TEST_F(TeletextAnalysisSinkDeps,
-       Analyse_KeepEmptyPacketsPadsAllCandidateLines) {
+TEST_F(TeletextSinkDeps, Analyse_KeepEmptyPacketsPadsAllCandidateLines) {
   const auto params = make_pal_params();
   const auto payload = make_payload(0x11);
   put_line(0, flat_line(params, 0, 7),
@@ -423,7 +421,7 @@ TEST_F(TeletextAnalysisSinkDeps,
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_SquashingRepairsADamagedRowByte) {
+TEST_F(TeletextSinkDeps, Analyse_SquashingRepairsADamagedRowByte) {
   const auto params = make_pal_params();
   const auto header = make_header_packet(0x00, /*subtitle=*/false,
                                          /*erase=*/false);
@@ -463,7 +461,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_SquashingRepairsADamagedRowByte) {
 
 // A header with C4 set says the page's content is being replaced, so copies
 // either side of it are copies of different pages and must not be combined.
-TEST_F(TeletextAnalysisSinkDeps, Analyse_SquashingSurvivesErasePageHeaders) {
+TEST_F(TeletextSinkDeps, Analyse_SquashingSurvivesErasePageHeaders) {
   const auto params = make_pal_params();
   const auto header = make_header_packet(0x00, /*subtitle=*/false,
                                          /*erase=*/true);
@@ -500,7 +498,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_SquashingSurvivesErasePageHeaders) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_CataloguesEveryPageTheRangeCarried) {
+TEST_F(TeletextSinkDeps, Analyse_CataloguesEveryPageTheRangeCarried) {
   const auto params = make_pal_params();
   const auto header_100 = make_header_packet(0x00, /*subtitle=*/false,
                                              /*erase=*/false);
@@ -557,9 +555,70 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_CataloguesEveryPageTheRangeCarried) {
   EXPECT_FALSE(result.dataset.summary.pages_truncated);
 }
 
+// No output path is the browse-only run: the pass still recovers and
+// catalogues, and no writer is asked for at all.
+TEST_F(TeletextSinkDeps, Analyse_CataloguesWithoutWritingWhenNoPath) {
+  const auto params = make_pal_params();
+  const auto header = make_header_packet(0x00, /*subtitle=*/false,
+                                         /*erase=*/false);
+  const auto row = make_row_packet(1, "HELLO");
+
+  put_line(0, flat_line(params, 0, 7),
+           orc::tests::synthesize_teletext_line(header));
+  put_line(0, flat_line(params, 1, 7),
+           orc::tests::synthesize_teletext_line(row));
+
+  serve_lines(params);
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockStageServices_, create_buffered_file_writer_uint8(_))
+      .Times(0);
+
+  auto deps = make_deps();
+  auto options = single_line_options(7);
+  options.output_path.clear();
+
+  const auto result = deps.analyse(&mockRepresentation_, options);
+
+  ASSERT_TRUE(result.success) << result.message;
+  EXPECT_TRUE(result.output_path.empty());
+  EXPECT_TRUE(written_.empty());
+  EXPECT_EQ(result.packets_written, 2u);
+  ASSERT_EQ(result.dataset.pages.size(), 1u);
+  EXPECT_EQ(result.dataset.pages[0].page_number, 0x00);
+  EXPECT_TRUE(result.dataset.pages[0].page.row_received[1]);
+  EXPECT_NE(result.message.find("no packet stream written"), std::string::npos)
+      << result.message;
+  EXPECT_NE(result.report.find("(none; pages browsed only)"), std::string::npos)
+      << result.report;
+}
+
+// The cues are named after the packet stream and written beside it, so a
+// browse-only run has nowhere to put them: refused, not silently dropped.
+TEST_F(TeletextSinkDeps, Analyse_RefusesSubtitleExportWithoutPath) {
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockStageServices_, create_buffered_file_writer_uint8(_))
+      .Times(0);
+
+  auto deps = make_deps();
+  auto options = single_line_options(7);
+  options.output_path.clear();
+  options.export_subtitles = true;
+
+  const auto result = deps.analyse(&mockRepresentation_, options);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.message.find("Subtitle export needs an output file"),
+            std::string::npos)
+      << result.message;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_CancelAbortsWithTruthfulStatus) {
+TEST_F(TeletextSinkDeps, Analyse_CancelAbortsWithTruthfulStatus) {
   const auto params = make_pal_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -587,7 +646,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_CancelAbortsWithTruthfulStatus) {
   EXPECT_FALSE(result.report.empty());
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_ThrottlesProgressReporting) {
+TEST_F(TeletextSinkDeps, Analyse_ThrottlesProgressReporting) {
   const auto params = make_pal_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -595,7 +654,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_ThrottlesProgressReporting) {
   expect_writer("out.t42");
 
   std::vector<uint64_t> progress_at;
-  orc::TeletextAnalysisSinkDeps deps(&mockStageServices_);
+  orc::TeletextSinkDeps deps(&mockStageServices_);
   deps.init(
       [&progress_at](uint64_t current, uint64_t, const std::string&) {
         progress_at.push_back(current);
@@ -614,7 +673,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_ThrottlesProgressReporting) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_WritesSubtitleSrtWhenEnabled) {
+TEST_F(TeletextSinkDeps, Analyse_WritesSubtitleSrtWhenEnabled) {
   const auto params = make_pal_params();
   const auto header_on = make_header_packet(0x88, /*subtitle=*/true,
                                             /*erase=*/false);
@@ -668,7 +727,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_WritesSubtitleSrtWhenEnabled) {
   EXPECT_NE(srt.find(" --> "), std::string::npos) << srt;
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_RejectsMalformedSubtitlePage) {
+TEST_F(TeletextSinkDeps, Analyse_RejectsMalformedSubtitlePage) {
   const auto params = make_pal_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -694,7 +753,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_RejectsMalformedSubtitlePage) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_ReportProfilesWhatSquashingChanged) {
+TEST_F(TeletextSinkDeps, Analyse_ReportProfilesWhatSquashingChanged) {
   const auto params = make_pal_params();
   const auto header = make_header_packet(0x00, false, false);
   const auto row = make_row_packet(1, "HELLO");
@@ -725,7 +784,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_ReportProfilesWhatSquashingChanged) {
   EXPECT_TRUE(result.report_path.empty());
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_SquashingDisabledSaysSoInTheReport) {
+TEST_F(TeletextSinkDeps, Analyse_SquashingDisabledSaysSoInTheReport) {
   const auto params = make_pal_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -744,7 +803,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_SquashingDisabledSaysSoInTheReport) {
       << result.report;
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_WritesTheReportBesideThePacketStream) {
+TEST_F(TeletextSinkDeps, Analyse_WritesTheReportBesideThePacketStream) {
   const auto params = make_pal_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -783,7 +842,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_WritesTheReportBesideThePacketStream) {
 
 // The packet stream is the product; a report that could not be written is a
 // warning, not a failed run.
-TEST_F(TeletextAnalysisSinkDeps, Analyse_ReportWriteFailureDoesNotFailTheRun) {
+TEST_F(TeletextSinkDeps, Analyse_ReportWriteFailureDoesNotFailTheRun) {
   const auto params = make_pal_params();
   serve_lines(params);
   EXPECT_CALL(mockRepresentation_, frame_range())
@@ -813,7 +872,7 @@ TEST_F(TeletextAnalysisSinkDeps, Analyse_ReportWriteFailureDoesNotFailTheRun) {
   EXPECT_FALSE(result.report.empty());
 }
 
-TEST_F(TeletextAnalysisSinkDeps, Analyse_ReportsARecoveryProfile) {
+TEST_F(TeletextSinkDeps, Analyse_ReportsARecoveryProfile) {
   const auto params = make_pal_params();
   const auto payload = make_payload(0x11);
   put_line(0, flat_line(params, 0, 7),

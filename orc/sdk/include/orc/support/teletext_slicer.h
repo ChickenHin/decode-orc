@@ -266,6 +266,34 @@ constexpr size_t kTeletextRejectReasonCount = 12;
 // diagnostics summaries and log messages.
 std::string_view teletext_reject_reason_name(TeletextRejectReason reason);
 
+/**
+ * @brief A narrowed acquisition window, learned from lines that already locked
+ *
+ * Both detectors acquire the bit phase by sweeping the whole §6.3 data-timing
+ * window, which is where most of the cost of slicing a line sits: 284 candidate
+ * positions for the threshold detector on PAL and 355 for MLSE. On a
+ * time-base-corrected source every data line of the recording starts at
+ * essentially the same sample, so once a few lines have locked there is no
+ * reason to keep searching the whole window.
+ *
+ * A hint narrows the sweep to |centre| ± |radius| samples. It cannot lose a
+ * packet: when a hinted attempt yields nothing the slicer repeats the attempt
+ * over the full window, which costs the few percent the narrow sweep took. It
+ * can, on a line where both windows would recover a packet, return the lock the
+ * narrow window liked best rather than the global one — so a hint must be
+ * centred on locks actually observed rather than on an assumption, and must be
+ * wide enough to hold the spread of them.
+ */
+struct TeletextPhaseHint {
+  // False means "no opinion": the slicer sweeps the full window as it always
+  // has. This is the default, so an unhinted caller is unaffected.
+  bool valid = false;
+  // Sample position the observed locks agree on.
+  double centre = 0.0;
+  // Half-width of the window to sweep around |centre|, in samples.
+  double radius = 0.0;
+};
+
 // Result of slicing one candidate VBI line.
 struct TeletextLineResult {
   // True when the clock run-in and framing code were found and the payload
@@ -293,6 +321,14 @@ struct TeletextLineResult {
   // Sample position (fractional) where the framing code ended and the payload
   // began. Diagnostics only.
   double data_start_sample = 0.0;
+
+  // Sample position (fractional) the detector acquired the bit phase at, i.e.
+  // the centre of run-in bit 0. Negative when acquisition failed.
+  //
+  // Unlike data_start_sample this is free of the framing-code alignment shift,
+  // so it is directly comparable between lines: it is what a caller pinning the
+  // acquisition window accumulates (see TeletextPhaseHint).
+  double lock_sample = -1.0;
 
   // Which detector recovered these bytes — or, when valid is false, which one
   // rejected the line (the detector-independent gates of slice() report
@@ -488,20 +524,47 @@ class TeletextSlicer {
   // black-to-white; ITU-R BT.653 Table 1b on 525: 70 % of the same excursion).
   // Returns a result with valid == false when the line carries no recoverable
   // teletext packet.
+  //
+  // |phase_hint|, when valid, narrows the bit-phase acquisition sweep of
+  // whichever detector runs; a hinted attempt that recovers nothing is repeated
+  // over the full window, so a hint can only cost time, never packets.
   TeletextLineResult slice(const int16_t* line, size_t sample_count,
-                           int16_t black_level, int16_t white_level) const;
+                           int16_t black_level, int16_t white_level,
+                           const TeletextPhaseHint& phase_hint = {}) const;
 
   // Packet length of the configured system, in bytes.
   size_t packet_bytes() const { return packet_bytes_; }
 
+  // Sample positions per transmitted bit, from the sample rate and the
+  // system's bit rate. Exposed because a caller pinning the acquisition window
+  // sizes its tolerance in bit periods.
+  double samples_per_bit() const { return samples_per_bit_; }
+
  private:
+  // The acquisition sweep, as first and last candidate sample position. Full
+  // is the §6.3 data-timing window of the configured system; a valid hint
+  // narrows it, clamped to stay inside the full one.
+  struct AcquisitionWindow {
+    double first = 0.0;
+    double last = 0.0;
+  };
+  AcquisitionWindow full_window() const;
+  // The hinted window, or std::nullopt when |hint| is unset, or narrows to
+  // nothing, or is no narrower than the full sweep and so would only cost a
+  // wasted first attempt.
+  std::optional<AcquisitionWindow> hinted_window(
+      const TeletextPhaseHint& hint) const;
+
   // Both detectors share the caller's level domain, so slice() computes the
   // nominal '1' amplitude and the empty-line rejection gate once and hands
-  // them down.
+  // them down. Each runs its detection over one acquisition window; slice()
+  // owns the hinted-then-full retry.
   TeletextLineResult slice_threshold(const int16_t* line, size_t sample_count,
-                                     double amplitude_gate) const;
+                                     double amplitude_gate,
+                                     AcquisitionWindow window) const;
   TeletextLineResult slice_mlse(const int16_t* line, size_t sample_count,
-                                double nominal_amplitude) const;
+                                double nominal_amplitude,
+                                AcquisitionWindow window) const;
 
   // A blank result already stamped with the configured packet length, so no
   // path can return one that misreports what it was looking for.
