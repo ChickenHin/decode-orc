@@ -43,8 +43,7 @@ using ::testing::Return;
 const std::set<std::string> kExpectedObserverIds{
     "white_snr",      "black_psnr", "burst_level",
     "closed_caption", "biphase",    "colour_frame_phase",
-    "disc_quality",   "fm_code",    "white_flag",
-    "teletext"};
+    "disc_quality",   "fm_code",    "white_flag"};
 
 TEST(CoreObservationService, AvailableObservers_ExposesEveryStandardObserver) {
   CoreObservationService service;
@@ -72,7 +71,7 @@ const std::map<std::string, bool> kExpectedStateless{
     {"burst_level", true},  {"closed_caption", false},
     {"biphase", true},      {"colour_frame_phase", false},
     {"disc_quality", true}, {"fm_code", true},
-    {"white_flag", true},   {"teletext", true}};
+    {"white_flag", true}};
 
 TEST(CoreObservationService, AvailableObservers_ClassifiesStatefulness) {
   CoreObservationService service;
@@ -155,9 +154,8 @@ SourceParameters params_for(VideoSystem system) {
 }
 
 // Independent restatement of the applicability contract (Observer::applies_to
-// per observer): fm_code/white_flag are NTSC-only, everything else — teletext
-// included, ITU-R BT.653 defining System B on both 625- and 525-line systems —
-// applies to every system. A drift in either direction fails this test.
+// per observer): fm_code/white_flag are NTSC-only, everything else applies to
+// every system. A drift in either direction fails this test.
 const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
     {"white_snr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"black_psnr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
@@ -170,7 +168,6 @@ const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
     {"disc_quality", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"fm_code", {VideoSystem::NTSC}},
     {"white_flag", {VideoSystem::NTSC}},
-    {"teletext", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
 };
 
 TEST(StandardObserverApplies, MatchesApplicabilityContract) {

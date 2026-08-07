@@ -1,7 +1,7 @@
 /*
- * File:        teletext_sink_stage_test.cpp
+ * File:        teletext_analysis_sink_stage_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the teletext sink stage
+ * Purpose:     Unit tests for the teletext analysis sink stage
  *
  * Covers: parameter descriptors and parsing (including the 1-based UI to
  * 0-based field-line conversion), configuration-status transitions, trigger
@@ -12,7 +12,7 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "teletext_sink_stage.h"
+#include "teletext_analysis_sink_stage.h"
 
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
@@ -29,7 +29,7 @@
 
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
-#include "teletext_sink_stage_deps_interface_mock.h"
+#include "teletext_analysis_sink_deps_interface_mock.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Ref;
@@ -71,14 +71,15 @@ class LogCapture {
   spdlog::level::level_enum previous_level_{spdlog::level::info};
 };
 
-class TeletextSinkStage : public ::testing::Test {
+class TeletextAnalysisSinkStage : public ::testing::Test {
  public:
   void SetUp() override {
-    pMockDeps_ = std::make_shared<StrictMock<MockTeletextSinkStageDeps>>();
+    pMockDeps_ =
+        std::make_shared<StrictMock<MockTeletextAnalysisSinkStageDeps>>();
     pMockRepresentation_ =
         std::make_shared<StrictMock<MockVideoFrameRepresentationArtifact>>();
 
-    instance_ = std::make_unique<orc::TeletextSinkStage>(
+    instance_ = std::make_unique<orc::TeletextAnalysisSinkStage>(
         static_cast<orc::IStageServices*>(nullptr));
   }
 
@@ -90,43 +91,67 @@ class TeletextSinkStage : public ::testing::Test {
   }
 
   // Expect a dispatch to the deps seam and capture the options it receives.
-  void expect_export(const orc::TeletextSinkResult& result,
-                     orc::TeletextSinkOptions& captured_options) {
+  void expect_export(const orc::TeletextAnalysisSinkResult& result,
+                     orc::TeletextAnalysisSinkOptions& captured_options) {
     instance_->set_deps_override(pMockDeps_);
     EXPECT_CALL(*pMockDeps_, init(_, _)).Times(1);
-    EXPECT_CALL(*pMockDeps_, export_t42(pMockRepresentation_.get(),
-                                        Ref(mockObservationContext_), _))
+    EXPECT_CALL(*pMockDeps_, analyse(pMockRepresentation_.get(), _))
         .Times(1)
         .WillOnce(
-            testing::DoAll(SaveArg<2>(&captured_options), Return(result)));
+            testing::DoAll(SaveArg<1>(&captured_options), Return(result)));
   }
 
-  std::shared_ptr<StrictMock<MockTeletextSinkStageDeps>> pMockDeps_;
+  std::shared_ptr<StrictMock<MockTeletextAnalysisSinkStageDeps>> pMockDeps_;
   std::shared_ptr<StrictMock<MockVideoFrameRepresentationArtifact>>
       pMockRepresentation_;
   MockObservationContext mockObservationContext_;
 
-  std::unique_ptr<orc::TeletextSinkStage> instance_;
+  std::unique_ptr<orc::TeletextAnalysisSinkStage> instance_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextSinkStage, NodeTypeInfo_MatchesDesign) {
+TEST_F(TeletextAnalysisSinkStage, NodeTypeInfo_MatchesDesign) {
   const auto info = instance_->get_node_type_info();
 
-  EXPECT_EQ(info.type, orc::NodeType::SINK);
-  EXPECT_EQ(info.stage_name, "teletext_sink");
-  EXPECT_EQ(info.display_name, "Teletext Sink");
-  EXPECT_EQ(info.description,
-            "Extracts teletext from the VBI and exports a T42 packet stream");
+  EXPECT_EQ(info.type, orc::NodeType::ANALYSIS_SINK);
+  EXPECT_EQ(info.stage_name, "teletext_analysis_sink");
+  EXPECT_EQ(info.display_name, "Teletext Analysis Sink");
   EXPECT_EQ(info.min_inputs, 1u);
   EXPECT_EQ(info.max_inputs, 1u);
   EXPECT_EQ(info.min_outputs, 0u);
   EXPECT_EQ(info.max_outputs, 0u);
-  EXPECT_EQ(info.compatible_formats, orc::VideoFormatCompatibility::PAL_ONLY);
+  // ITU-R BT.653 System B is defined on 625- and 525-line systems alike, which
+  // between them are every system the project models.
+  EXPECT_EQ(info.compatible_formats, orc::VideoFormatCompatibility::ALL);
 }
 
-TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
+// The host routes the viewer on the contract string, and it must be the batch
+// analysis kind so the trigger-then-open flow applies.
+TEST_F(TeletextAnalysisSinkStage, StageTools_AdvertiseTheAnalysisContract) {
+  const auto tools = instance_->get_stage_tools();
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools[0].tool_id, "teletext_analysis");
+  EXPECT_EQ(tools[0].kind, orc::StageToolKind::BatchAnalysis);
+  EXPECT_EQ(tools[0].contract_id,
+            "decode-orc.stage-tools.teletext-analysis.v1");
+}
+
+// The host discovers the viewer through StageToolProvider; AnalysisToolProvider
+// is the other, unrelated seam and must not resolve.
+TEST_F(TeletextAnalysisSinkStage, Mixins_ExposeStageToolProviderOnly) {
+  EXPECT_NE(dynamic_cast<orc::StageToolProvider*>(instance_.get()), nullptr);
+  EXPECT_NE(dynamic_cast<orc::ITeletextAnalysisResults*>(instance_.get()),
+            nullptr);
+  EXPECT_EQ(dynamic_cast<orc::AnalysisToolProvider*>(instance_.get()), nullptr);
+}
+
+TEST_F(TeletextAnalysisSinkStage, Results_AreEmptyUntilTriggered) {
+  EXPECT_FALSE(instance_->has_results());
+  EXPECT_TRUE(instance_->dataset().pages.empty());
+}
+
+TEST_F(TeletextAnalysisSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
   ASSERT_EQ(descriptors.size(), 13u);
 
@@ -211,7 +236,7 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
             "export_subtitles");
 }
 
-TEST_F(TeletextSinkStage, ConfigurationStatus_RedUntilOutputPathSet) {
+TEST_F(TeletextAnalysisSinkStage, ConfigurationStatus_RedUntilOutputPathSet) {
   EXPECT_EQ(instance_->get_configuration_status(),
             orc::ConfigurationStatus::Red);
 
@@ -225,7 +250,7 @@ TEST_F(TeletextSinkStage, ConfigurationStatus_RedUntilOutputPathSet) {
             orc::ConfigurationStatus::Red);
 }
 
-TEST_F(TeletextSinkStage, SetParameters_RoundTripsValues) {
+TEST_F(TeletextAnalysisSinkStage, SetParameters_RoundTripsValues) {
   const std::map<std::string, orc::ParameterValue> params = {
       {"output_path", std::string("out.t42")},
       {"first_vbi_line", int32_t{7}},
@@ -235,14 +260,14 @@ TEST_F(TeletextSinkStage, SetParameters_RoundTripsValues) {
   EXPECT_EQ(instance_->get_parameters(), params);
 }
 
-TEST_F(TeletextSinkStage, Execute_ReturnsNoArtifacts) {
+TEST_F(TeletextAnalysisSinkStage, Execute_ReturnsNoArtifacts) {
   orc::ObservationContext context;
   EXPECT_TRUE(instance_->execute(make_valid_input(), {}, context).empty());
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenNoInputConnected) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReturnsFalseWhenNoInputConnected) {
   const bool result = instance_->trigger(
       {}, {{"output_path", std::string("out")}}, mockObservationContext_);
 
@@ -251,7 +276,8 @@ TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenNoInputConnected) {
   EXPECT_FALSE(instance_->is_trigger_in_progress());
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenInputNotRepresentation) {
+TEST_F(TeletextAnalysisSinkStage,
+       Trigger_ReturnsFalseWhenInputNotRepresentation) {
   const std::vector<orc::ArtifactPtr> inputs = {nullptr};
 
   const bool result = instance_->trigger(
@@ -262,7 +288,7 @@ TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenInputNotRepresentation) {
             "Error: Input is not a video frame representation");
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenOutputPathMissing) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReturnsFalseWhenOutputPathMissing) {
   const bool result =
       instance_->trigger(make_valid_input(), {}, mockObservationContext_);
 
@@ -270,7 +296,7 @@ TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenOutputPathMissing) {
   EXPECT_EQ(instance_->get_trigger_status(), "Error: No output path specified");
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenOutputPathEmpty) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReturnsFalseWhenOutputPathEmpty) {
   const bool result =
       instance_->trigger(make_valid_input(), {{"output_path", std::string("")}},
                          mockObservationContext_);
@@ -279,7 +305,7 @@ TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenOutputPathEmpty) {
   EXPECT_EQ(instance_->get_trigger_status(), "Error: Output path is empty");
 }
 
-TEST_F(TeletextSinkStage, Trigger_RejectsInvalidLineWindows) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_RejectsInvalidLineWindows) {
   const std::vector<std::map<std::string, orc::ParameterValue>> bad_params = {
       // first > last
       {{"output_path", std::string("out")},
@@ -300,11 +326,12 @@ TEST_F(TeletextSinkStage, Trigger_RejectsInvalidLineWindows) {
   }
 }
 
-TEST_F(TeletextSinkStage, Trigger_ConvertsUiLinesToZeroBasedFieldLines) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage,
+       Trigger_ConvertsUiLinesToZeroBasedFieldLines) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   const std::map<std::string, orc::ParameterValue> params = {
@@ -323,10 +350,10 @@ TEST_F(TeletextSinkStage, Trigger_ConvertsUiLinesToZeroBasedFieldLines) {
   EXPECT_FALSE(captured.require_valid_mrag);
 }
 
-TEST_F(TeletextSinkStage, Trigger_PassesParityRepairChoiceToDeps) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_PassesParityRepairChoiceToDeps) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   instance_->trigger(
@@ -337,11 +364,12 @@ TEST_F(TeletextSinkStage, Trigger_PassesParityRepairChoiceToDeps) {
   EXPECT_FALSE(captured.parity_repair);
 }
 
-TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage,
+       Trigger_UsesSpecDefaultsWhenParametersAbsent) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(make_valid_input(),
@@ -355,21 +383,19 @@ TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
   EXPECT_FALSE(captured.tolerant_framing);
   EXPECT_TRUE(captured.require_valid_mrag);
   EXPECT_TRUE(captured.parity_repair);
-  // The default has to match the host observer's fixed configuration, or a
-  // default run cannot consume its cached observations.
   EXPECT_EQ(captured.detector, orc::TeletextDetector::kAuto);
 }
 
-TEST_F(TeletextSinkStage, Trigger_PassesDetectorChoiceToDeps) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_PassesDetectorChoiceToDeps) {
   for (const auto& [name, detector] :
        std::vector<std::pair<std::string, orc::TeletextDetector>>{
            {"Automatic", orc::TeletextDetector::kAuto},
            {"Threshold", orc::TeletextDetector::kThreshold},
            {"MLSE", orc::TeletextDetector::kMlse}}) {
-    orc::TeletextSinkResult deps_result;
+    orc::TeletextAnalysisSinkResult deps_result;
     deps_result.success = true;
     deps_result.output_path = "out.t42";
-    orc::TeletextSinkOptions captured;
+    orc::TeletextAnalysisSinkOptions captured;
     expect_export(deps_result, captured);
 
     EXPECT_TRUE(instance_->trigger(
@@ -380,7 +406,7 @@ TEST_F(TeletextSinkStage, Trigger_PassesDetectorChoiceToDeps) {
   }
 }
 
-TEST_F(TeletextSinkStage, Trigger_RejectsUnknownDetector) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_RejectsUnknownDetector) {
   const std::map<std::string, orc::ParameterValue> params = {
       {"output_path", std::string("out")}, {"detector", std::string("Magic")}};
 
@@ -390,13 +416,13 @@ TEST_F(TeletextSinkStage, Trigger_RejectsUnknownDetector) {
             "Error: Unknown bit detector: Magic");
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReportsCountsFromDepsResult) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReportsCountsFromDepsResult) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
   deps_result.packets_written = 84;
   deps_result.fields_with_data = 2;
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(make_valid_input(),
@@ -404,18 +430,19 @@ TEST_F(TeletextSinkStage, Trigger_ReportsCountsFromDepsResult) {
                                  mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages");
   EXPECT_FALSE(instance_->is_trigger_in_progress());
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReportsRepairedBytesFromDepsResult) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReportsRepairedBytesFromDepsResult) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
   deps_result.packets_written = 84;
   deps_result.fields_with_data = 2;
   deps_result.bytes_repaired = 17;
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(
@@ -424,15 +451,15 @@ TEST_F(TeletextSinkStage, Trigger_ReportsRepairedBytesFromDepsResult) {
       mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "repaired 17 damaged bytes");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; repaired 17 damaged bytes");
 }
 
-TEST_F(TeletextSinkStage, Trigger_PassesSubtitleOptionsToDeps) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_PassesSubtitleOptionsToDeps) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   const std::map<std::string, orc::ParameterValue> params = {
@@ -448,11 +475,11 @@ TEST_F(TeletextSinkStage, Trigger_PassesSubtitleOptionsToDeps) {
   EXPECT_EQ(captured.subtitle_page, "150");
 }
 
-TEST_F(TeletextSinkStage, Trigger_SubtitleExportDisabledByDefault) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_SubtitleExportDisabledByDefault) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(make_valid_input(),
@@ -462,7 +489,7 @@ TEST_F(TeletextSinkStage, Trigger_SubtitleExportDisabledByDefault) {
   EXPECT_FALSE(captured.export_subtitles);
 }
 
-TEST_F(TeletextSinkStage, Trigger_RejectsMalformedSubtitlePage) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_RejectsMalformedSubtitlePage) {
   const std::map<std::string, orc::ParameterValue> params = {
       {"output_path", std::string("out")},
       {"export_subtitles", true},
@@ -475,7 +502,7 @@ TEST_F(TeletextSinkStage, Trigger_RejectsMalformedSubtitlePage) {
             "1-8 plus two hex digits, e.g. 888)");
 }
 
-TEST_F(TeletextSinkStage, Trigger_RejectsUnsupportedSubtitleFormat) {
+TEST_F(TeletextAnalysisSinkStage, Trigger_RejectsUnsupportedSubtitleFormat) {
   const std::map<std::string, orc::ParameterValue> params = {
       {"output_path", std::string("out")},
       {"export_subtitles", true},
@@ -487,15 +514,15 @@ TEST_F(TeletextSinkStage, Trigger_RejectsUnsupportedSubtitleFormat) {
             "Error: Unsupported subtitle format: VTT");
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReportsSubtitleCountsFromDepsResult) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReportsSubtitleCountsFromDepsResult) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
   deps_result.packets_written = 84;
   deps_result.fields_with_data = 2;
   deps_result.subtitle_path = "out.srt";
   deps_result.subtitle_cues_written = 3;
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   const std::map<std::string, orc::ParameterValue> params = {
@@ -505,17 +532,17 @@ TEST_F(TeletextSinkStage, Trigger_ReportsSubtitleCountsFromDepsResult) {
       instance_->trigger(make_valid_input(), params, mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "3 subtitle cues to out.srt");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; 3 subtitle cues to out.srt");
 }
 
-TEST_F(TeletextSinkStage, Trigger_EmitsTheReportFromDeps) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_EmitsTheReportFromDeps) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
   deps_result.report =
       "Teletext recovery: 12 candidate lines, 4 with a data burst";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   LogCapture log;
@@ -530,11 +557,11 @@ TEST_F(TeletextSinkStage, Trigger_EmitsTheReportFromDeps) {
             std::string::npos);
 }
 
-TEST_F(TeletextSinkStage, Trigger_EmitsNothingWhenDepsReportNoProfile) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_EmitsNothingWhenDepsReportNoProfile) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   LogCapture log;
@@ -548,15 +575,16 @@ TEST_F(TeletextSinkStage, Trigger_EmitsNothingWhenDepsReportNoProfile) {
 
 // The report file is the sink's own product, so the path it lands at is worth
 // saying in the status: a reader who asked for it needs to know where it went.
-TEST_F(TeletextSinkStage, Trigger_ReportsTheSquashAndReportPathInTheStatus) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage,
+       Trigger_ReportsTheSquashAndReportPathInTheStatus) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
   deps_result.packets_written = 84;
   deps_result.fields_with_data = 2;
   deps_result.packets_corrected = 31;
   deps_result.report_path = "out.t42.txt";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(
@@ -565,23 +593,23 @@ TEST_F(TeletextSinkStage, Trigger_ReportsTheSquashAndReportPathInTheStatus) {
       mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "combined repeated rows corrected 31 packets; report to "
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; combined repeated rows corrected 31 packets; report to "
             "out.t42.txt");
   EXPECT_TRUE(captured.write_report);
 }
 
 // The result in the terms a reader thinks in: characters, and how many of them
 // are known damaged.
-TEST_F(TeletextSinkStage, Trigger_ReportsDataLossInTheStatus) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReportsDataLossInTheStatus) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
   deps_result.packets_written = 84;
   deps_result.fields_with_data = 2;
   deps_result.characters_written = 10234;
   deps_result.characters_damaged = 111;
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(make_valid_input(),
@@ -589,17 +617,18 @@ TEST_F(TeletextSinkStage, Trigger_ReportsDataLossInTheStatus) {
                                  mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "data loss 1.08% (111 of 10234 characters damaged)");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; data loss 1.08% (111 of 10234 characters damaged)");
 }
 
 // A run that wrote no display row has no denominator, so it claims no figure
 // rather than reporting a loss of zero out of zero.
-TEST_F(TeletextSinkStage, Trigger_OmitsDataLossWhenNoCharactersWereWritten) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage,
+       Trigger_OmitsDataLossWhenNoCharactersWereWritten) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = true;
   deps_result.output_path = "out.t42";
-  orc::TeletextSinkOptions captured;
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_TRUE(instance_->trigger(make_valid_input(),
@@ -611,20 +640,105 @@ TEST_F(TeletextSinkStage, Trigger_OmitsDataLossWhenNoCharactersWereWritten) {
       << instance_->get_trigger_status();
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReportsDepsFailure) {
-  orc::TeletextSinkResult deps_result;
+TEST_F(TeletextAnalysisSinkStage, Trigger_ReportsDepsFailure) {
+  orc::TeletextAnalysisSinkResult deps_result;
   deps_result.success = false;
-  deps_result.message = "Input is not PAL (teletext sink is PAL WST only)";
-  orc::TeletextSinkOptions captured;
+  deps_result.message = "Input has no frames";
+  orc::TeletextAnalysisSinkOptions captured;
   expect_export(deps_result, captured);
 
   EXPECT_FALSE(instance_->trigger(make_valid_input(),
                                   {{"output_path", std::string("out")}},
                                   mockObservationContext_));
 
-  EXPECT_EQ(instance_->get_trigger_status(),
-            "Error: Input is not PAL (teletext sink is PAL WST only)");
+  EXPECT_EQ(instance_->get_trigger_status(), "Error: Input has no frames");
   EXPECT_FALSE(instance_->is_trigger_in_progress());
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// A 525-line project carries the 34-byte service, whose stream is named .t34,
+// on the window ITU-R BT.653 §2 defines. Subtitle export is not offered: the
+// cue timing assumes 50 fields per second.
+TEST_F(TeletextAnalysisSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
+  for (const auto system : {orc::VideoSystem::NTSC, orc::VideoSystem::PAL_M}) {
+    const auto descriptors =
+        instance_->get_parameter_descriptors(system, orc::SourceType::Unknown);
+    ASSERT_EQ(descriptors.size(), 10u) << static_cast<int>(system);
+
+    EXPECT_EQ(descriptors[0].name, "output_path");
+    EXPECT_EQ(descriptors[0].file_extension_hint, ".t34");
+
+    EXPECT_EQ(descriptors[1].name, "first_vbi_line");
+    ASSERT_TRUE(descriptors[1].constraints.default_value.has_value());
+    EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 10);
+
+    EXPECT_EQ(descriptors[2].name, "last_vbi_line");
+    ASSERT_TRUE(descriptors[2].constraints.default_value.has_value());
+    EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 21);
+
+    for (const auto& descriptor : descriptors) {
+      EXPECT_EQ(descriptor.name.find("subtitle"), std::string::npos)
+          << descriptor.name;
+    }
+  }
+}
+
+TEST_F(TeletextAnalysisSinkStage, ParameterDescriptors_DefaultToThe625Service) {
+  const auto descriptors = instance_->get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Unknown);
+  ASSERT_EQ(descriptors.size(), 13u);
+  EXPECT_EQ(descriptors[0].file_extension_hint, ".t42");
+  EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 6);
+  EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 22);
+}
+
+// The viewer reads the catalogue off the stage after the trigger, so a
+// successful run has to leave it there.
+TEST_F(TeletextAnalysisSinkStage, Trigger_CachesTheDatasetForTheViewer) {
+  orc::TeletextAnalysisSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  orc::TeletextCataloguedPage page;
+  page.magazine = 1;
+  page.page_number = 0x00;
+  page.times_seen = 4;
+  page.first_seen_frame = 12;
+  page.last_seen_frame = 900;
+  deps_result.dataset.pages.push_back(page);
+  deps_result.dataset.summary.packets_recovered = 84;
+  orc::TeletextAnalysisSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_TRUE(instance_->has_results());
+  ASSERT_EQ(instance_->dataset().pages.size(), 1u);
+  EXPECT_EQ(instance_->dataset().pages[0].magazine, 1);
+  EXPECT_EQ(instance_->dataset().pages[0].times_seen, 4u);
+  EXPECT_EQ(instance_->dataset().summary.packets_recovered, 84u);
+  EXPECT_NE(instance_->get_trigger_status().find("; 1 page"), std::string::npos)
+      << instance_->get_trigger_status();
+}
+
+// A failed run has no results to show, but what it did recover is still worth
+// keeping: the pages are why the user triggered it.
+TEST_F(TeletextAnalysisSinkStage, Trigger_KeepsThePartialDatasetOnFailure) {
+  orc::TeletextAnalysisSinkResult deps_result;
+  deps_result.success = false;
+  deps_result.message = "Cancelled after 10 of 100 frames";
+  deps_result.dataset.pages.emplace_back();
+  orc::TeletextAnalysisSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_FALSE(instance_->trigger(make_valid_input(),
+                                  {{"output_path", std::string("out")}},
+                                  mockObservationContext_));
+
+  EXPECT_FALSE(instance_->has_results());
+  EXPECT_EQ(instance_->dataset().pages.size(), 1u);
 }
 
 }  // namespace orc_unit_test

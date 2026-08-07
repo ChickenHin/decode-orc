@@ -1,16 +1,16 @@
 /*
- * File:        teletext_sink_stage_deps_interface.h
- * Module:      orc-stage-plugin-teletext_sink
- * Purpose:     Interface for TeletextSinkStage dependencies
+ * File:        teletext_analysis_sink_deps_interface.h
+ * Module:      orc-stage-plugin-teletext_analysis_sink
+ * Purpose:     Interface for TeletextAnalysisSinkStage dependencies
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#ifndef ORC_TELETEXT_SINK_STAGE_DEPS_INTERFACE_H
-#define ORC_TELETEXT_SINK_STAGE_DEPS_INTERFACE_H
+#ifndef ORC_TELETEXT_ANALYSIS_SINK_DEPS_INTERFACE_H
+#define ORC_TELETEXT_ANALYSIS_SINK_DEPS_INTERFACE_H
 
-#include <orc/stage/observation/observation_context_interface.h>
+#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/teletext_slicer.h>
@@ -22,17 +22,18 @@
 namespace orc {
 
 /**
- * @brief Options for a T42 export run.
+ * @brief Options for one teletext analysis run.
  *
  * Field lines are 0-based and identical in both fields (the stage converts
  * from the 1-based UI parameters). The default window 5-21 covers broadcast
- * lines 6-22 / 318-335 (ETSI EN 300 706 §4.1).
+ * lines 6-22 / 318-335 (ETSI EN 300 706 §4.1); a 525-line service uses 9-20
+ * (ITU-R BT.653 §2).
  */
-struct TeletextSinkOptions {
+struct TeletextAnalysisSinkOptions {
   std::string output_path;
   int32_t first_field_line{5};
   int32_t last_field_line{21};
-  // Emit 42 zero bytes for every candidate line with no data so packet
+  // Emit a whole zero packet for every candidate line with no data so packet
   // position maps 1:1 to (frame, field, line) — the vhs-decode convention.
   bool keep_empty_packets{false};
   // Accept framing codes with one bit error (TeletextSlicerOptions).
@@ -41,21 +42,17 @@ struct TeletextSinkOptions {
   // (TeletextSlicerOptions).
   bool require_valid_mrag{true};
   // Restore odd parity on damaged display bytes by flipping the bit the MLSE
-  // detector was least sure of (TeletextSlicerOptions::parity_repair). The
-  // default matches the host observer's configuration, which is what lets a
-  // default run consume its cacheable observations; turning it off forces this
-  // stage to slice for itself, because those observations are repaired.
+  // detector was least sure of (TeletextSlicerOptions::parity_repair).
   bool parity_repair{true};
-  // Bit detector (TeletextSlicerOptions). The default matches the host
-  // observer's configuration, which is what lets a default run consume the
-  // observer's cacheable observations instead of slicing here.
+  // Bit detector (TeletextSlicerOptions).
   TeletextDetector detector{TeletextDetector::kAuto};
   // Combine repeated transmissions of each page row and write the combined
   // form ("squashing", see orc/support/teletext_row_squasher.h). Costs a
   // second pass over the recovered packets, held in memory (~50 bytes each).
   bool squash_repeated_rows{true};
-  // Decode the subtitle page alongside the T42 export and write SubRip cues
-  // next to the packet stream (design §6.1).
+  // Decode the subtitle page alongside the packet export and write SubRip cues
+  // next to the packet stream. 625-line services only: the cue timing derives
+  // from the 50 fields/s of ITU-R BT.1700 Annex 1 Part B Table 1 item 2.
   bool export_subtitles{false};
   // Watched subtitle page in the conventional magazine + two-hex-digit form
   // (validated by the stage via TeletextPageDecoder::parse_page_number).
@@ -66,10 +63,11 @@ struct TeletextSinkOptions {
   bool write_report{false};
 };
 
-struct TeletextSinkResult {
+struct TeletextAnalysisSinkResult {
   bool success{false};
   std::string message;
-  // Path actually written (with the .t42 extension applied).
+  // Path actually written, with the service's extension applied: .t42 for the
+  // 42-byte 625-line packet stream, .t34 for the 34-byte 525-line one.
   std::string output_path;
   uint64_t packets_written{0};
   uint64_t fields_with_data{0};
@@ -96,23 +94,30 @@ struct TeletextSinkResult {
   // debug level, and written to report_path when write_report is set.
   std::string report;
   // Path the report was written to, empty when write_report is off or the
-  // write failed (which never fails the export — the .t42 is the product).
+  // write failed (which never fails the export — the packet stream is the
+  // product).
   std::string report_path;
+  // The viewer's half of the run: every page the range carried, plus the
+  // aggregate recovery figures. Populated for a cancelled run too — what it
+  // got to is exactly what a cancelled run leaves a reader asking about.
+  TeletextAnalysisDataset dataset;
 };
 
-class ITeletextSinkStageDeps {
+class ITeletextAnalysisSinkStageDeps {
  public:
-  virtual ~ITeletextSinkStageDeps() = default;
+  virtual ~ITeletextAnalysisSinkStageDeps() = default;
 
   virtual void init(TriggerProgressCallback progress_callback,
                     std::atomic<bool>* cancel_requested) = 0;
 
-  virtual TeletextSinkResult export_t42(
+  // One linear pass over the whole frame range: recovers the packets, writes
+  // the stream (and, optionally, the subtitle document and the report), and
+  // builds the page catalogue the stage tool displays.
+  virtual TeletextAnalysisSinkResult analyse(
       const VideoFrameRepresentation* representation,
-      IObservationContext& observation_context,
-      const TeletextSinkOptions& options) = 0;
+      const TeletextAnalysisSinkOptions& options) = 0;
 };
 
 }  // namespace orc
 
-#endif  // ORC_TELETEXT_SINK_STAGE_DEPS_INTERFACE_H
+#endif  // ORC_TELETEXT_ANALYSIS_SINK_DEPS_INTERFACE_H

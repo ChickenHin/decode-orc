@@ -57,7 +57,7 @@ inline constexpr char kPaddingObservationKey[] = "is_pad";
 // record that measured the synthetic padding content.
 //
 // Observers structurally inapplicable to the source's video system (per
-// standard_observer_applies(), e.g. teletext outside PAL) are skipped
+// standard_observer_applies(), e.g. fm_code outside NTSC) are skipped
 // outright — no run, no store probes and no records, padding markers
 // included. Coverage probes must filter by the same predicate; see
 // filter_applicable_observers().

@@ -62,8 +62,8 @@ void run_frame_observer_pass(const IObservationService& service,
   const FieldID field_top(frame_id * kFieldsPerFrame);
   const FieldID field_bottom(frame_id * kFieldsPerFrame + 1);
 
-  // Observers structurally inapplicable to this source (e.g. teletext on
-  // NTSC, fm_code/white_flag on PAL) are skipped outright: no run, no store
+  // Observers structurally inapplicable to this source (e.g.
+  // fm_code/white_flag on PAL) are skipped outright: no run, no store
   // probes, no records. Every coverage probe (runner fast path, presenter
   // store_has_frame/sweep markers) filters by the same predicate, so the
   // absent records never read as missing coverage. Applicability fails open

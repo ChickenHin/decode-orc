@@ -138,6 +138,13 @@ if(TARGET orc-vbi-source)
         stages/vbi_source/vbi_calibration_test.cpp
         stages/vbi_source/vbi_source_pipeline_test.cpp
         stages/vbi_source/vbi_ntsc_source_test.cpp
+        # The teletext analysis sink's frame slicer is what the 525-line
+        # recovery check drives; compiled in directly rather than linked
+        # because it is a self-contained plugin-local module.
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink/teletext_frame_slicer.cpp
+    )
+    target_include_directories(orc-core-functional-tests-vbi-source PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_analysis_sink
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source

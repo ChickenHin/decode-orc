@@ -1,6 +1,6 @@
 /*
  * File:        teletext_squash_stats.cpp
- * Module:      orc-stage-plugin-teletext_sink
+ * Module:      orc-stage-plugin-teletext_analysis_sink
  * Purpose:     Accumulates what combining repeated page rows ("squashing")
  *              changed, as a diagnostic profile of the rewrite pass
  *
@@ -12,6 +12,8 @@
 
 #include <orc/support/teletext_page_decoder.h>
 #include <spdlog/fmt/fmt.h>
+
+#include <algorithm>
 
 namespace orc {
 
@@ -62,16 +64,17 @@ std::string grouped(uint64_t value) {
 }  // namespace
 
 void TeletextSquashStats::add_row(const TeletextRowBytes& before,
-                                  const TeletextRowBytes& after,
-                                  size_t copies) {
+                                  const TeletextRowBytes& after, size_t copies,
+                                  size_t columns) {
   ++rows_;
   if (copies > 0) {
     ++rows_attributed_;
     ++copies_[copy_bucket(copies)];
   }
 
+  const size_t examined = std::min(columns, kTeletextRowBytes);
   bool rewritten = false;
-  for (size_t position = 0; position < kTeletextRowBytes; ++position) {
+  for (size_t position = 0; position < examined; ++position) {
     ++bytes_total_;
     if (before[position] != after[position]) {
       ++bytes_changed_;

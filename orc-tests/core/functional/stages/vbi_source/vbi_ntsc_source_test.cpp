@@ -16,7 +16,6 @@
 #include <orc/support/teletext_page_decoder.h>
 #include <orc/support/teletext_row_squasher.h>
 #include <orc/support/teletext_slicer.h>
-#include <teletext_observer.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -27,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "teletext_frame_slicer.h"
 #include "vbi_cri_correlator.h"
 #include "vbi_cri_template.h"
 #include "vbi_output_frame.h"
@@ -328,10 +328,10 @@ TEST(VBINTSCSource, TheNABTSFramingCodeIsWhatThisCaptureCarries) {
 }
 
 // ---------------------------------------------------------------------------
-// The recovery chain against a real 525-line capture: observer -> observation
-// strings -> page decoder. The stage supplies the frames; what is under test
-// is that the 525-line service survives the whole path a project takes it
-// through, which is the path the preview dialog reads.
+// The recovery chain against a real 525-line capture: frame slicer -> page
+// decoder. The stage supplies the frames; what is under test is that the
+// 525-line service survives the whole path the teletext analysis sink takes it
+// through.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -349,7 +349,7 @@ FrameID page_survey_start(uint64_t frame_count) {
 
 struct RecoverySurvey {
   int packets = 0;
-  // Packets whose observation string was the 34-byte one the 525-line service
+  // Packets the slicer read at the 34-byte length the 525-line service
   // transmits, rather than the 42-byte 625-line packet.
   int packets_at_525_length = 0;
   // Odd-parity display bytes per recovered packet, as a fraction of the 32 the
@@ -361,9 +361,9 @@ struct RecoverySurvey {
 
 RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
   RecoverySurvey survey;
-  TeletextObserver observer;
+  TeletextFrameSlicer frame_slicer;
   TeletextPageDecoder decoder;
-  // As the preview dialog reads it: with a squasher, so repeated copies of a
+  // As the analysis sink reads it: with a squasher, so repeated copies of a
   // row — and of the packets that extend it — correct each other.
   TeletextRowSquasher squasher;
   decoder.set_row_squasher(&squasher);
@@ -371,47 +371,43 @@ RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
     survey.pages.push_back(page);
   });
 
+  std::vector<TeletextFrameLineResult> lines;
   const FrameID first = page_survey_start(representation.frame_count());
   for (uint32_t index = 0; index < kPageFrames; ++index) {
     const FrameID frame = first + index;
     if (!representation.has_frame(frame)) break;
 
-    ObservationContext context;
-    observer.process_frame(representation, frame, context);
-
-    for (uint64_t field_index = 0; field_index < 2; ++field_index) {
+    for (size_t field_index = 0; field_index < 2; ++field_index) {
       const FieldID field(frame * 2 + field_index);
-      // Ascending field-line order, which is the order a real consumer feeds
-      // and the order the packets were transmitted in.
-      for (int field_line = 5; field_line <= 21; ++field_line) {
-        const auto value =
-            context.get(field, "teletext", "t42_" + std::to_string(field_line));
-        if (!value || !std::holds_alternative<std::string>(*value)) continue;
-        const auto observed =
-            teletext_hex_to_observed_packet(std::get<std::string>(*value));
-        if (!observed) continue;
+      // slice_field() reports in ascending field-line order, which is the
+      // order a real consumer feeds and the order the packets were
+      // transmitted in.
+      frame_slicer.slice_field(representation, frame, field_index, lines);
+      for (const auto& line : lines) {
+        if (!line.sliced.valid) continue;
 
         ++survey.packets;
-        if (observed->byte_count == kTeletext525PacketBytes) {
+        if (line.sliced.packet_bytes == kTeletext525PacketBytes) {
           ++survey.packets_at_525_length;
         }
 
         int odd = 0;
-        for (size_t i = 2; i < observed->byte_count; ++i) {
-          odd += teletext_odd_parity_valid(observed->bytes[i]) ? 1 : 0;
+        for (size_t i = 2; i < line.sliced.packet_bytes; ++i) {
+          odd += teletext_odd_parity_valid(line.sliced.bytes[i]) ? 1 : 0;
         }
         survey.parity_fractions.push_back(
             static_cast<double>(odd) /
-            static_cast<double>(observed->byte_count - 2));
+            static_cast<double>(line.sliced.packet_bytes - 2));
 
         // A stable source id per recovered line, which is what a consumer
         // re-reading the same line has to supply for the squasher to replace
         // rather than recount it.
         decoder.process_packet(
-            observed->bytes, static_cast<int64_t>(field.value()),
-            static_cast<int64_t>(field.value()) * 32 + field_line,
-            observed->has_confidence ? &observed->confidence : nullptr,
-            observed->byte_count);
+            line.sliced.bytes, static_cast<int64_t>(field.value()),
+            static_cast<int64_t>(field.value()) * 32 + line.field_line,
+            line.sliced.has_byte_confidence ? &line.sliced.byte_confidence
+                                            : nullptr,
+            line.sliced.packet_bytes);
       }
     }
   }

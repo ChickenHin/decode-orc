@@ -275,7 +275,7 @@ TEST(RunFrameObserverPassApplicability, InapplicableObserverNeverRunsOrStores) {
 
 TEST(RunFrameObserverPassApplicability, NoVideoParametersFailsOpen) {
   SpyObservationService spy;
-  spy.observers = {make_observer_info("teletext", "1.0.0")};
+  spy.observers = {make_observer_info("black_psnr", "1.0.0")};
   ObservationStore store;
   FakeVideoFrameRepresentation vfr;  // video_parameters unset
   const NodeFingerprint fp{"fp"};
@@ -287,7 +287,7 @@ TEST(RunFrameObserverPassApplicability, NoVideoParametersFailsOpen) {
 
 TEST(RunFrameObserverPassApplicability, ApplicableSystemStillRuns) {
   SpyObservationService spy;
-  spy.observers = {make_observer_info("teletext", "1.0.0")};
+  spy.observers = {make_observer_info("black_psnr", "1.0.0")};
   ObservationStore store;
   FakeVideoFrameRepresentation vfr;
   SourceParameters params;
@@ -298,7 +298,7 @@ TEST(RunFrameObserverPassApplicability, ApplicableSystemStillRuns) {
   ObservationContext ctx;
   run_frame_observer_pass(spy, spy.observers, vfr, 0, &fp, &store, ctx);
   EXPECT_EQ(spy.total_runs, 1);
-  EXPECT_TRUE(store.has({fp, FieldID(0), "teletext", "1.0.0"}));
+  EXPECT_TRUE(store.has({fp, FieldID(0), "black_psnr", "1.0.0"}));
 }
 
 TEST(RunFrameObserverPassApplicability, PaddingStoresNoPadRecordWhenSkipped) {

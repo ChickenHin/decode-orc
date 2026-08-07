@@ -1,13 +1,13 @@
 /*
- * File:        teletext_sink_stage_deps.cpp
- * Module:      orc-stage-plugin-teletext_sink
- * Purpose:     TeletextSinkStage dependency implementation
+ * File:        teletext_analysis_sink_deps.cpp
+ * Module:      orc-stage-plugin-teletext_analysis_sink
+ * Purpose:     TeletextAnalysisSinkStage dependency implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "teletext_sink_stage_deps.h"
+#include "teletext_analysis_sink_deps.h"
 
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/stage/cvbs_signal_constants.h>
@@ -25,9 +25,10 @@
 #include <optional>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
+#include "teletext_frame_slicer.h"
+#include "teletext_page_catalogue.h"
 #include "teletext_squash_stats.h"
 
 namespace orc {
@@ -47,15 +48,21 @@ constexpr size_t kSquashPageRunBound = 4096;
 // frame) so tight loops do not flood the UI.
 constexpr uint64_t kProgressThrottleFrames = 10;
 
-// 42 zero bytes emitted for a candidate line with no data when
+// A whole zero packet, emitted for a candidate line with no data when
 // keep_empty_packets is enabled — the vhs-decode convention giving a 1:1
-// packet-to-(frame, field, line) mapping (design §2.2).
+// packet-to-(frame, field, line) mapping. Only the service's packet length is
+// written from it.
 constexpr std::array<uint8_t, kTeletextPacketBytes> kEmptyPacket{};
 
 // ITU-R BT.1700 Annex 1 Part B Table 1 item 2: 625-line PAL scans 50 fields
 // per second; subtitle cue timing derives from the field index (the same
 // field-number/field-rate derivation as the closed-caption sink).
 constexpr double kPalFieldsPerSecond = 50.0;
+
+// Candidate lines one field can yield, which sizes the packets-per-field
+// histogram behind the lost-packet estimate. One more than the widest window
+// this stage will probe, so every possible count has a bucket.
+constexpr size_t kMaxPacketsPerFieldTracked = 40;
 
 // Format a field index as an SRT timestamp (HH:MM:SS,mmm).
 std::string srt_timestamp(int64_t field_index) {
@@ -91,16 +98,14 @@ struct StreamEntry {
   uint32_t confidence_slot;
 };
 
-// Pooled per-byte confidence, quantised to 8 bits (value × 255). Lossless for
-// the observer path, whose stored observations already quantise to 16 levels
-// (level/15 × 255 = 17 × level exactly); the direct-slicer path loses at most
-// 1/255 of a vote weight per byte.
+// Pooled per-byte confidence, quantised to 8 bits (value × 255). The direct
+// slicer path loses at most 1/255 of a vote weight per byte.
 using QuantizedPacketConfidence = std::array<uint8_t, kTeletextPacketBytes>;
 
 // Display row a packet is addressed to (X/1 to X/24, ETSI EN 300 706 §9.3.2),
 // or 0 when the MRAG does not decode or the packet is not a displayable row.
-// The character figures are counted over these: they are the packets whose 40
-// bytes carry byte-wise odd parity and are shown on screen.
+// The character figures are counted over these: they are the packets whose
+// data bytes carry byte-wise odd parity and are shown on screen.
 int display_row_of(const std::array<uint8_t, kTeletextPacketBytes>& packet) {
   const int mrag_low = teletext_hamming84_decode(packet[0]);
   const int mrag_high = teletext_hamming84_decode(packet[1]);
@@ -111,8 +116,9 @@ int display_row_of(const std::array<uint8_t, kTeletextPacketBytes>& packet) {
   return (row >= 1 && row < TeletextPageSnapshot::kRows) ? row : 0;
 }
 
-// The 40 display bytes of a packet (§9.3.2: the payload after the 2 MRAG
-// bytes).
+// The display bytes of a packet (§9.3.2: the payload after the 2 MRAG bytes),
+// in a 40-byte row buffer. A 525-line packet carries 32 of them and the rest
+// stay zero — see TeletextSquashStats::add_row()'s column count.
 TeletextRowBytes display_bytes_of(
     const std::array<uint8_t, kTeletextPacketBytes>& packet) {
   TeletextRowBytes row{};
@@ -151,15 +157,54 @@ std::string format_srt(const std::vector<TeletextSubtitleCue>& cues) {
   return srt;
 }
 
+/**
+ * @brief Packets a recording lost, estimated from the packets-per-field spread
+ *
+ * A service part-way through a page fills every VBI line it is inserting on,
+ * in every field it uses, so the *usual* packets-per-field count says how many
+ * lines the service is using and every field short of it is short by packets
+ * the recording lost.
+ *
+ * The usual count is taken as the mode of the non-zero counts rather than the
+ * maximum: a single field where the slicer false-locked an extra line would
+ * otherwise accuse every other field of a loss. Fields that yielded nothing at
+ * all are left out — plenty of services insert into one field of each frame
+ * only, and calling the other one a total loss would put a fault on every
+ * page. That under-reports a field where every line was lost, which is the
+ * right way to be wrong: the point of the figure is to stop claiming faults
+ * that are not there.
+ */
+uint64_t estimate_lost_packets(
+    const std::array<uint64_t, kMaxPacketsPerFieldTracked + 1>& histogram) {
+  size_t mode = 0;
+  uint64_t mode_fields = 0;
+  for (size_t count = 1; count <= kMaxPacketsPerFieldTracked; ++count) {
+    if (histogram[count] > mode_fields) {
+      mode_fields = histogram[count];
+      mode = count;
+    }
+  }
+  if (mode == 0) {
+    return 0;
+  }
+
+  uint64_t lost = 0;
+  for (size_t count = 1; count < mode; ++count) {
+    lost += histogram[count] * static_cast<uint64_t>(mode - count);
+  }
+  return lost;
+}
+
 }  // namespace
 
-std::string TeletextSinkStageDeps::build_report(
-    const TeletextSinkOptions& options, const TeletextSinkResult& result,
-    uint64_t total_frames, const TeletextRecoveryStats& stats,
+std::string TeletextAnalysisSinkDeps::build_report(
+    const TeletextAnalysisSinkOptions& options,
+    const TeletextAnalysisSinkResult& result, uint64_t total_frames,
+    const TeletextRecoveryStats& stats,
     const TeletextSquashStats& squash_stats) {
   // The headline first: the one figure a reader wants before deciding whether
   // any of the detail below is worth their time.
-  std::string report = "Teletext export report\n";
+  std::string report = "Teletext analysis report\n";
   const std::string loss = squash_stats.character_loss_summary();
   if (!loss.empty()) {
     report += "  " + loss + "\n\n";
@@ -185,6 +230,17 @@ std::string TeletextSinkStageDeps::build_report(
                           result.subtitle_cues_written, options.subtitle_page,
                           result.subtitle_path);
   }
+  report += fmt::format("\n  Pages:         {} catalogued{}",
+                        result.dataset.pages.size(),
+                        result.dataset.summary.pages_truncated
+                            ? " (page cap reached; oldest pages dropped)"
+                            : "");
+  if (result.dataset.summary.lost_packets_estimate > 0) {
+    report += fmt::format(
+        "\n  Lost packets:  {} estimated from the spread of "
+        "packets per field",
+        result.dataset.summary.lost_packets_estimate);
+  }
 
   if (stats.lines_seen() > 0) {
     report += "\n\n" + stats.summary();
@@ -197,8 +253,9 @@ std::string TeletextSinkStageDeps::build_report(
   return report;
 }
 
-void TeletextSinkStageDeps::write_report(const TeletextSinkOptions& options,
-                                         TeletextSinkResult& result) const {
+void TeletextAnalysisSinkDeps::write_report(
+    const TeletextAnalysisSinkOptions& options,
+    TeletextAnalysisSinkResult& result) const {
   if (!options.write_report || stage_services_ == nullptr) {
     return;
   }
@@ -209,7 +266,8 @@ void TeletextSinkStageDeps::write_report(const TeletextSinkOptions& options,
   std::shared_ptr<IFileWriterUint8> report_writer =
       stage_services_->create_buffered_file_writer_uint8(kWriterBufferBytes);
   if (!report_writer || !report_writer->open(path)) {
-    ORC_LOG_WARN("TeletextSinkDeps: could not open report file: {}", path);
+    ORC_LOG_WARN("TeletextAnalysisSinkDeps: could not open report file: {}",
+                 path);
     return;
   }
   const std::string text = result.report + "\n";
@@ -219,41 +277,50 @@ void TeletextSinkStageDeps::write_report(const TeletextSinkOptions& options,
   result.report_path = path;
 }
 
-void TeletextSinkStageDeps::init(TriggerProgressCallback progress_callback,
-                                 std::atomic<bool>* cancel_requested) {
+void TeletextAnalysisSinkDeps::init(TriggerProgressCallback progress_callback,
+                                    std::atomic<bool>* cancel_requested) {
   progress_callback_ = std::move(progress_callback);
   cancel_requested_ = cancel_requested;
 }
 
-TeletextSinkResult TeletextSinkStageDeps::export_t42(
+TeletextAnalysisSinkResult TeletextAnalysisSinkDeps::analyse(
     const VideoFrameRepresentation* representation,
-    IObservationContext& observation_context,
-    const TeletextSinkOptions& options) {
-  TeletextSinkResult result;
+    const TeletextAnalysisSinkOptions& options) {
+  TeletextAnalysisSinkResult result;
 
   if (!representation) {
     result.message = "Input representation is null";
     return result;
   }
 
-  std::string output_path = options.output_path;
-  const std::string t42_ext = ".t42";
-  if (output_path.length() < t42_ext.length() ||
-      output_path.compare(output_path.length() - t42_ext.length(),
-                          t42_ext.length(), t42_ext) != 0) {
-    output_path += t42_ext;
-    ORC_LOG_DEBUG("TeletextSinkDeps: Added .t42 extension: {}", output_path);
-  }
-  result.output_path = output_path;
-
-  // ETSI EN 300 706 System B on 625-line PAL is the only supported system
-  // (design §1.3).
   const auto vp_opt = representation->get_video_parameters();
-  if (!vp_opt.has_value() || vp_opt->system != VideoSystem::PAL) {
-    result.message = "Input is not PAL (teletext sink is PAL WST only)";
+  if (!vp_opt.has_value() || !TeletextFrameSlicer::applies_to(vp_opt->system)) {
+    result.message =
+        "Input carries no World System Teletext service (ITU-R BT.653 System "
+        "B is defined on PAL, NTSC and PAL-M only)";
     return result;
   }
   const auto& vp = vp_opt.value();
+
+  // The service decides the packet length, and with it the stream's extension:
+  // the flat file is a run of whole packets with no header, so a reader can
+  // only tell 42-byte packets from 34-byte ones by what the file is called.
+  const TeletextFrameSlicer::SystemProfile profile =
+      TeletextFrameSlicer::profile_for(vp.system);
+  const size_t packet_bytes = teletext_packet_bytes(profile.teletext_system);
+  const size_t display_bytes = packet_bytes - 2;
+  const std::string extension =
+      (packet_bytes == kTeletextPacketBytes) ? ".t42" : ".t34";
+
+  std::string output_path = options.output_path;
+  if (output_path.length() < extension.length() ||
+      output_path.compare(output_path.length() - extension.length(),
+                          extension.length(), extension) != 0) {
+    output_path += extension;
+    ORC_LOG_DEBUG("TeletextAnalysisSinkDeps: Added {} extension: {}", extension,
+                  output_path);
+  }
+  result.output_path = output_path;
 
   const auto frame_rng = representation->frame_range();
   const uint64_t total_frames = frame_rng.count();
@@ -261,6 +328,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     result.message = "Input has no frames";
     return result;
   }
+  result.dataset.summary.frames_analysed = total_frames;
 
   std::shared_ptr<IFileWriterUint8> writer;
   if (stage_services_) {
@@ -276,46 +344,27 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     return result;
   }
 
-  // The default slicer options match the host observer's fixed configuration,
-  // so its (cacheable) observations can be consumed directly. Non-default
-  // options require slicing here with a locally configured TeletextSlicer.
-  const bool use_observer_path =
-      !options.tolerant_framing && options.require_valid_mrag &&
-      options.parity_repair && options.detector == TeletextDetector::kAuto;
+  TeletextFrameSlicerOptions slicer_options;
+  slicer_options.detector = options.detector;
+  slicer_options.parity_repair = options.parity_repair;
+  slicer_options.tolerant_framing = options.tolerant_framing;
+  slicer_options.require_valid_mrag = options.require_valid_mrag;
+  slicer_options.first_field_line = options.first_field_line;
+  slicer_options.last_field_line = options.last_field_line;
+  const TeletextFrameSlicer frame_slicer(slicer_options);
 
-  std::unique_ptr<IObserverHandle> observer;
-  if (use_observer_path && observation_service_) {
-    observer = observation_service_->create_observer("teletext");
-  }
-  if (use_observer_path && !observer) {
-    ORC_LOG_WARN(
-        "TeletextSinkDeps: observation service unavailable; teletext data "
-        "will be read from the context only");
-  }
-
-  std::optional<TeletextSlicer> slicer;
-  if (!use_observer_path) {
-    TeletextSlicerOptions slicer_options;
-    slicer_options.tolerant_framing = options.tolerant_framing;
-    slicer_options.require_valid_mrag = options.require_valid_mrag;
-    slicer_options.parity_repair = options.parity_repair;
-    slicer_options.detector = options.detector;
-    // EBU Tech. 3280-E §1.1.1 Table 1: 4FSC PAL sample rate; bit rate fixed
-    // at 444 × fH by ETSI EN 300 706 §5.3 (TeletextSlicer default).
-    slicer.emplace(kPalSampleRate, kTeletextBitRate, slicer_options);
-  }
-
-  // Recovery diagnostics. Accumulated on both paths: where this stage slices,
-  // from the full line results; where it reads the observer's stored
-  // observations, from the packets those carry (the observer's own per-field
-  // profile says how each field went, and this says how the run went).
+  // Recovery diagnostics over the whole run, from the full line results.
   TeletextRecoveryStats stats;
   // What combining repeated rows changed, accumulated in the rewrite pass.
   TeletextSquashStats squash_stats;
+  // Packets recovered per field, bucketed by count — the lost-packet estimate
+  // reads the shape of this rather than holding one entry per field, so a
+  // ten-hour capture costs the same as a ten-second one.
+  std::array<uint64_t, kMaxPacketsPerFieldTracked + 1> packets_per_field{};
 
   // Squashing needs every copy of a row before it can combine them, so the
   // recovered stream is held and rewritten in a second pass. Without it the
-  // stream is written straight out and subtitles decode inline, as before.
+  // stream is written straight out and pages assemble inline.
   const bool squash = options.squash_repeated_rows;
   // The rewrite pass asks about runs of a page that were transmitted long
   // before the packet it is rewriting, so the squasher's page bound has to
@@ -337,57 +386,67 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     squash_pass->set_row_squasher(&squasher);
   }
 
-  // Subtitle export: every recovered packet is additionally fed, in the
-  // same temporal order, into a page decoder watching the subtitle page
-  // (design §6.1). The page string was validated by the stage. When squashing
-  // is on this runs in the rewrite pass instead, so cues come from the
-  // corrected rows.
-  std::optional<TeletextPageDecoder> page_decoder;
-  if (options.export_subtitles) {
-    page_decoder.emplace();
-    if (!page_decoder->set_subtitle_page(options.subtitle_page)) {
-      result.message = "Invalid subtitle page: " + options.subtitle_page;
-      writer->close();
-      return result;
-    }
-    if (squash) {
-      page_decoder->set_row_squasher(&squasher);
-    }
+  // Every packet the run emits is fed, in emission order, to one decoder: it
+  // catalogues the pages for the viewer, attributes the rows the rewrite pass
+  // corrects, and — when asked — watches the subtitle page. One decoder for
+  // all three because they want the same stream in the same order, and a
+  // second one would re-derive page assembly from scratch to no purpose.
+  TeletextPageCatalogue catalogue;
+  TeletextPageDecoder output_decoder;
+  if (squash) {
+    output_decoder.set_row_squasher(&squasher);
+  }
+  output_decoder.set_page_callback([&](const TeletextPageSnapshot& snapshot) {
+    // Snapshot field indices are relative to the start of the export range.
+    const uint64_t frame_id =
+        frame_rng.first + static_cast<uint64_t>(std::max<int64_t>(
+                              0, snapshot.header_field_index)) /
+                              2;
+    catalogue.merge(snapshot, frame_id);
+  });
+
+  // Subtitle export: the SubRip timing derives from the 50 fields/s of a
+  // 625-line service, so a 525-line source is refused rather than given cues
+  // that drift by a fifth.
+  const bool export_subtitles =
+      options.export_subtitles && packet_bytes == kTeletextPacketBytes;
+  if (options.export_subtitles && !export_subtitles) {
+    writer->close();
+    result.message =
+        "Subtitle export is 625-line only (the cue timing assumes 50 fields "
+        "per second)";
+    return result;
+  }
+  if (export_subtitles &&
+      !output_decoder.set_subtitle_page(options.subtitle_page)) {
+    writer->close();
+    result.message = "Invalid subtitle page: " + options.subtitle_page;
+    return result;
   }
 
-  // Observation namespace and per-line keys, built once: the loop below runs
-  // per candidate line of every field of the recording, and building the key
-  // strings there would be tens of millions of small allocations.
-  const std::string teletext_namespace = "teletext";
-  std::vector<std::string> t42_keys;
-  if (!slicer) {
-    t42_keys.reserve(static_cast<size_t>(options.last_field_line -
-                                         options.first_field_line) +
-                     1);
-    for (int32_t field_line = options.first_field_line;
-         field_line <= options.last_field_line; ++field_line) {
-      t42_keys.push_back("t42_" + std::to_string(field_line));
-    }
-  }
-
-  // Data levels from the source, with the spec constants as fallback (the
-  // observer applies the same rule).
-  const int16_t black_level =
-      static_cast<int16_t>(vp.black_level >= 0 ? vp.black_level : kPalBlack);
-  const int16_t white_level =
-      static_cast<int16_t>(vp.white_level >= 0 ? vp.white_level : kPalWhite);
-  const size_t f1_lines = field1_lines(vp.system);
-  const size_t line_width = static_cast<size_t>(vp.frame_width_nominal);
-  const size_t frame_height = static_cast<size_t>(vp.frame_height);
-
-  // A cancelled run still recovered whatever it got to, and that is exactly
-  // when a reader wants to know how it was going. The report file is not
-  // written for one: it describes a run that did not finish, and the option
-  // asks for a record of the export beside the export.
-  const auto report_partial_run = [&](TeletextSinkResult& partial) {
+  // Data levels come from the source inside the frame slicer; the geometry
+  // here is only what the loop needs to report progress.
+  const auto finish_dataset = [&](TeletextAnalysisSinkResult& partial) {
+    partial.dataset.pages = catalogue.pages();
+    partial.dataset.summary.pages_truncated = catalogue.truncated();
+    partial.dataset.summary.packets_recovered = partial.packets_written;
+    partial.dataset.summary.fields_with_data = partial.fields_with_data;
+    partial.dataset.summary.packets_corrected = partial.packets_corrected;
+    partial.dataset.summary.bytes_repaired = partial.bytes_repaired;
+    partial.dataset.summary.characters_written = squash_stats.bytes_total();
+    partial.dataset.summary.characters_damaged =
+        squash_stats.parity_failures_after();
+    partial.dataset.summary.lost_packets_estimate =
+        estimate_lost_packets(packets_per_field);
+    // A cancelled run still recovered whatever it got to, and that is exactly
+    // when a reader wants to know how it was going. The report file is not
+    // written for one: it describes a run that did not finish, and the option
+    // asks for a record of the export beside the export.
     partial.report =
         build_report(options, partial, total_frames, stats, squash_stats);
   };
+
+  std::vector<TeletextFrameLineResult> line_results;
 
   try {
     uint64_t frames_processed = 0;
@@ -398,8 +457,8 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
         result.message = "Cancelled after " + std::to_string(frames_processed) +
                          " of " + std::to_string(total_frames) +
                          " frames; partial output left at " + output_path;
-        ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
-        report_partial_run(result);
+        ORC_LOG_WARN("TeletextAnalysisSinkDeps: {}", result.message);
+        finish_dataset(result);
         return result;
       }
 
@@ -408,106 +467,51 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
           (frames_processed % kProgressThrottleFrames == 0 ||
            frames_processed == total_frames)) {
         progress_callback_(frames_processed, total_frames,
-                           "Exporting teletext frame " +
+                           "Decoding teletext frame " +
                                std::to_string(frames_processed) + "/" +
                                std::to_string(total_frames));
       }
 
-      const FieldID field0(frame_id * 2);
-      const FieldID field1(frame_id * 2 + 1);
-
-      // Per-frame coverage skip: the observer is stateless, so a frame whose
-      // observations were pre-loaded from the host's provenance store need
-      // not be sliced again.
-      if (observer) {
-        const bool frame_covered =
-            observation_context.has(field0, "teletext", "present") &&
-            observation_context.has(field1, "teletext", "present");
-        if (!frame_covered && representation->has_frame(frame_id)) {
-          observer->process_frame(*representation, frame_id,
-                                  observation_context);
-        }
-      }
-
       // Packet emission is strictly temporal: frame → field (1 then 2) →
       // ascending line — the order carousel-reassembling consumers expect.
-      for (int field_idx = 0; field_idx < 2; ++field_idx) {
-        const FieldID field_id(frame_id * 2 + static_cast<uint64_t>(field_idx));
-        bool field_has_data = false;
+      for (size_t field_idx = 0; field_idx < 2; ++field_idx) {
+        frame_slicer.slice_field(*representation, frame_id, field_idx,
+                                 line_results);
 
+        // Cue and squash timing is relative to the start of the export range.
+        const int64_t relative_field_index =
+            static_cast<int64_t>(frame_id - frame_rng.first) * 2 +
+            static_cast<int64_t>(field_idx);
+
+        // Walked over the configured window rather than over the results,
+        // because keep_empty_packets promises a packet position per (frame,
+        // field, line) and the slicer reports only the lines it could read.
+        // Both are ascending, so the results are consumed in step.
+        size_t field_packets = 0;
+        size_t next_result = 0;
         for (int32_t field_line = options.first_field_line;
              field_line <= options.last_field_line; ++field_line) {
-          std::optional<std::array<uint8_t, kTeletextPacketBytes>> packet;
-          // Per-byte confidence, where whichever path produced the packet
-          // could measure it (see orc/support/teletext_slicer.h).
-          bool has_confidence = false;
-          TeletextPacketConfidence confidence{};
-
-          if (slicer) {
-            // Direct slicing (non-default slicer options). Same line fetch
-            // idiom as the observer: luma channel for YC sources, buffered
-            // per-line reads otherwise.
-            const size_t flat_line = (field_idx == 0 ? 0 : f1_lines) +
-                                     static_cast<size_t>(field_line);
-            if (flat_line < frame_height) {
-              const int16_t* line_data = nullptr;
-              size_t sample_count = 0;
-              std::vector<int16_t> line_copy;
-              if (representation->has_separate_channels()) {
-                line_data = representation->get_line_luma(frame_id, flat_line);
-                sample_count = line_width;
-              } else {
-                line_copy =
-                    representation->get_line_samples(frame_id, flat_line);
-                line_data = line_copy.data();
-                sample_count = line_copy.size();
-              }
-              if (line_data != nullptr && sample_count > 0) {
-                const TeletextLineResult sliced = slicer->slice(
-                    line_data, sample_count, black_level, white_level);
-                stats.add_line(field_line, sliced);
-                if (sliced.valid) {
-                  packet = sliced.bytes;
-                  has_confidence = sliced.has_byte_confidence;
-                  confidence = sliced.byte_confidence;
-                  result.bytes_repaired +=
-                      static_cast<uint64_t>(sliced.repaired_bytes);
-                }
-              }
-            }
-          } else {
-            const auto obs = observation_context.get(
-                field_id, teletext_namespace,
-                t42_keys[static_cast<size_t>(field_line -
-                                             options.first_field_line)]);
-            if (obs && std::holds_alternative<std::string>(*obs)) {
-              const auto observed =
-                  teletext_hex_to_observed_packet(std::get<std::string>(*obs));
-              // 625-line packets only. The observer also records the 34-byte
-              // packet of the 525-line service (ITU-R BT.653 Table 1b), whose
-              // 32-byte rows this stage's .t42 output, page decoding and
-              // squashing are all not written for; taking one here would emit
-              // eight bytes per packet that were never transmitted.
-              if (observed.has_value() &&
-                  observed->byte_count == kTeletextPacketBytes) {
-                packet = observed->bytes;
-                has_confidence = observed->has_confidence;
-                confidence = observed->confidence;
-              }
-            }
-            stats.add_observed_line(field_line,
-                                    packet.has_value() ? &*packet : nullptr,
-                                    has_confidence ? &confidence : nullptr);
+          const TeletextFrameLineResult* line = nullptr;
+          if (next_result < line_results.size() &&
+              line_results[next_result].field_line == field_line) {
+            line = &line_results[next_result++];
+            stats.add_line(line->field_line, line->sliced);
           }
 
-          // Cue and squash timing is relative to the start of the export
-          // range.
-          const int64_t relative_field_index =
-              static_cast<int64_t>(frame_id - frame_rng.first) * 2 + field_idx;
+          std::optional<std::array<uint8_t, kTeletextPacketBytes>> packet;
+          bool has_confidence = false;
+          TeletextPacketConfidence confidence{};
+          if (line != nullptr && line->sliced.valid) {
+            packet = line->sliced.bytes;
+            has_confidence = line->sliced.has_byte_confidence;
+            confidence = line->sliced.byte_confidence;
+            result.bytes_repaired +=
+                static_cast<uint64_t>(line->sliced.repaired_bytes);
+          }
 
           if (packet.has_value()) {
             ++result.packets_written;
-            field_has_data = true;
+            ++field_packets;
             if (squash) {
               // Quantise the confidence for the pool, then vote on the
               // dequantised values in both passes so the rewrite re-feeds
@@ -529,21 +533,20 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
               squash_pass->process_packet(
                   *packet, relative_field_index,
                   static_cast<int64_t>(stream.size()),
-                  has_confidence ? &confidence : nullptr);
+                  has_confidence ? &confidence : nullptr, packet_bytes);
               stream.push_back(StreamEntry{*packet, relative_field_index, false,
                                            has_confidence, confidence_slot});
             } else {
               const TeletextPacketConfidence* weights =
                   has_confidence ? &confidence : nullptr;
-              writer->write(packet->data(), packet->size());
+              writer->write(packet->data(), packet_bytes);
               if (display_row_of(*packet) != 0) {
-                squash_stats.add_written_row(display_bytes_of(*packet));
+                squash_stats.add_written_row(display_bytes_of(*packet),
+                                             display_bytes);
               }
-              if (page_decoder.has_value()) {
-                page_decoder->process_packet(*packet, relative_field_index,
-                                             TeletextPageDecoder::kAutoSource,
-                                             weights);
-              }
+              output_decoder.process_packet(*packet, relative_field_index,
+                                            TeletextPageDecoder::kAutoSource,
+                                            weights, packet_bytes);
             }
           } else if (options.keep_empty_packets) {
             ++result.packets_written;
@@ -551,20 +554,16 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
               stream.push_back(StreamEntry{kEmptyPacket, relative_field_index,
                                            true, false, 0});
             } else {
-              writer->write(kEmptyPacket.data(), kEmptyPacket.size());
+              writer->write(kEmptyPacket.data(), packet_bytes);
             }
           }
         }
 
-        if (field_has_data) {
+        if (field_packets > 0) {
           ++result.fields_with_data;
         }
-      }
-
-      // Memory hygiene: drop this frame's observations once consumed.
-      if (observer) {
-        observation_context.clear_field(field0);
-        observation_context.clear_field(field1);
+        ++packets_per_field[std::min(field_packets,
+                                     kMaxPacketsPerFieldTracked)];
       }
     }
 
@@ -574,14 +573,6 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     // move. Headers and enhancement packets pass through untouched (their
     // display bytes carry a clock that differs between transmissions).
     if (squash) {
-      // A fresh decoder re-derives which page each row belongs to. It shares
-      // the squasher, and re-feeds each copy under its original stream index,
-      // so the table it consults is the one built above, unchanged.
-      TeletextPageDecoder rewrite;
-      rewrite.set_row_squasher(&squasher);
-      TeletextPageDecoder* attributor =
-          page_decoder.has_value() ? &*page_decoder : &rewrite;
-
       for (size_t index = 0; index < stream.size(); ++index) {
         if (cancel_requested_ && cancel_requested_->load()) {
           writer->close();
@@ -589,9 +580,9 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
               "Cancelled while writing squashed output; partial "
               "output left at " +
               output_path;
-          ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
+          ORC_LOG_WARN("TeletextAnalysisSinkDeps: {}", result.message);
           squash_stats.set_page_runs(squasher.page_count());
-          report_partial_run(result);
+          finish_dataset(result);
           return result;
         }
         if (progress_callback_ &&
@@ -605,7 +596,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
 
         const StreamEntry& entry = stream[index];
         if (entry.empty) {
-          writer->write(kEmptyPacket.data(), kEmptyPacket.size());
+          writer->write(kEmptyPacket.data(), packet_bytes);
           continue;
         }
 
@@ -619,19 +610,28 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
                 static_cast<float>(quantized[i]) * (1.0F / 255.0F);
           }
         }
-        attributor->process_packet(
+        // The decoder re-derives which page each row belongs to. It shares the
+        // squasher, and each copy is re-fed under its original stream index,
+        // so the table it consults is the one built above, unchanged.
+        output_decoder.process_packet(
             entry.bytes, entry.field_index, static_cast<int64_t>(index),
-            entry.has_confidence ? &entry_confidence : nullptr);
-        const auto& attribution = attributor->last_row_attribution();
+            entry.has_confidence ? &entry_confidence : nullptr, packet_bytes);
+        const auto& attribution = output_decoder.last_row_attribution();
         if (attribution.has_value()) {
-          const int row = attributor->last_row_number();
+          const int row = output_decoder.last_row_number();
           const auto squashed = squasher.squashed_row(*attribution, row);
           if (squashed.has_value()) {
             squash_stats.add_row(display_bytes_of(entry.bytes), *squashed,
-                                 squasher.copy_count(*attribution, row));
-            if (!std::equal(squashed->begin(), squashed->end(),
+                                 squasher.copy_count(*attribution, row),
+                                 display_bytes);
+            // Only the display bytes this packet carries are rewritten: on a
+            // 525-line service the remaining columns of the row arrive in a
+            // separate extension packet and belong to that packet's bytes.
+            if (!std::equal(squashed->begin(),
+                            squashed->begin() + display_bytes,
                             out.begin() + 2)) {
-              std::copy(squashed->begin(), squashed->end(), out.begin() + 2);
+              std::copy(squashed->begin(), squashed->begin() + display_bytes,
+                        out.begin() + 2);
               ++result.packets_corrected;
             }
           }
@@ -639,24 +639,27 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
           // A display row that belonged to no open page is written as it was
           // recovered. It carries characters the reader will see, so its
           // damage belongs in the loss figure even though no vote reached it.
-          squash_stats.add_written_row(display_bytes_of(entry.bytes));
+          squash_stats.add_written_row(display_bytes_of(entry.bytes),
+                                       display_bytes);
         }
-        writer->write(out.data(), out.size());
+        writer->write(out.data(), packet_bytes);
       }
       squash_stats.set_page_runs(squasher.page_count());
     }
 
     writer->close();
 
-    if (page_decoder.has_value()) {
-      // Close any cue still on screen at the end of the export range.
-      page_decoder->finalize(static_cast<int64_t>(total_frames) * 2);
-      const auto& cues = page_decoder->subtitle_cues();
+    // Close the pages still open at the end of the range, and any cue still on
+    // screen, so the last transmission of the recording is catalogued too.
+    output_decoder.finalize(static_cast<int64_t>(total_frames) * 2);
 
-      // The .t42 extension was applied above; the SubRip document sits next
+    if (export_subtitles) {
+      const auto& cues = output_decoder.subtitle_cues();
+
+      // The stream extension was applied above; the SubRip document sits next
       // to the packet stream.
       std::string subtitle_path =
-          output_path.substr(0, output_path.length() - t42_ext.length()) +
+          output_path.substr(0, output_path.length() - extension.length()) +
           ".srt";
       std::shared_ptr<IFileWriterUint8> subtitle_writer =
           stage_services_->create_buffered_file_writer_uint8(
@@ -666,7 +669,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
             "Exported " + std::to_string(result.packets_written) +
             " teletext packets to " + output_path +
             " but failed to open subtitle output: " + subtitle_path;
-        ORC_LOG_ERROR("TeletextSinkDeps: {}", result.message);
+        ORC_LOG_ERROR("TeletextAnalysisSinkDeps: {}", result.message);
         return result;
       }
       const std::string srt = format_srt(cues);
@@ -681,7 +684,7 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
     result.characters_damaged = squash_stats.parity_failures_after();
 
     result.success = true;
-    result.message = "Exported " + std::to_string(result.packets_written) +
+    result.message = "Recovered " + std::to_string(result.packets_written) +
                      " teletext packets (" +
                      std::to_string(result.fields_with_data) +
                      " fields with data) to " + output_path;
@@ -689,18 +692,19 @@ TeletextSinkResult TeletextSinkStageDeps::export_t42(
       result.message += "; " + std::to_string(result.subtitle_cues_written) +
                         " subtitle cues to " + result.subtitle_path;
     }
-    ORC_LOG_INFO("TeletextSinkDeps: {}", result.message);
+    ORC_LOG_INFO("TeletextAnalysisSinkDeps: {}", result.message);
 
-    result.report =
-        build_report(options, result, total_frames, stats, squash_stats);
+    // Both consumers of the pass are filled from the same counters, so the
+    // viewer and the file exports can never disagree about the run.
+    finish_dataset(result);
     write_report(options, result);
     return result;
 
   } catch (const std::exception& e) {
     writer->close();
     result.success = false;
-    result.message = std::string("Error during teletext export: ") + e.what();
-    ORC_LOG_ERROR("TeletextSinkDeps: {}", result.message);
+    result.message = std::string("Error during teletext analysis: ") + e.what();
+    ORC_LOG_ERROR("TeletextAnalysisSinkDeps: {}", result.message);
     return result;
   }
 }

@@ -33,7 +33,6 @@ add_library(orc-core SHARED
     observers/white_flag_observer.cpp
     observers/colour_frame_phase_observer.cpp
     observers/field_quality_observer.cpp
-    observers/teletext_observer.cpp
 
     # Analysis framework
     analysis/analysis_registry.cpp
