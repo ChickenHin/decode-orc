@@ -22,10 +22,16 @@ namespace orc {
 
 void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
                                   const TeletextRowBytes& bytes, int64_t source,
-                                  const TeletextRowConfidence* confidence) {
+                                  const TeletextRowConfidence* confidence,
+                                  size_t first_column, size_t column_count) {
   if (row < 1 || row >= static_cast<int>(
                             std::tuple_size<decltype(PageRows::rows)>::value)) {
     return;  // header row and enhancement packets are not squashed
+  }
+  first_column = std::min(first_column, kTeletextRowBytes);
+  column_count = std::min(column_count, kTeletextRowBytes - first_column);
+  if (column_count == 0) {
+    return;
   }
 
   auto it = pages_.find(key);
@@ -46,40 +52,59 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
 
   // Re-reading the same recovered line replaces its earlier copy: a previewer
   // that rebuilds a sliding window would otherwise let a long-resident frame
-  // outvote the rest purely by being read more often.
-  const auto existing =
-      std::find(copies.sources.begin(), copies.sources.end(), source);
-  if (existing != copies.sources.end()) {
-    const auto index =
-        static_cast<size_t>(std::distance(copies.sources.begin(), existing));
+  // outvote the rest purely by being read more often. A source is only the same
+  // copy when it speaks for the same columns — one packet of a service that
+  // splits a row across two contributes to both halves under the same id.
+  for (size_t index = 0; index < copies.sources.size(); ++index) {
+    if (copies.sources[index] != source ||
+        copies.first_column[index] != first_column) {
+      continue;
+    }
     copies.copies[index] = bytes;
     copies.confidences[index] = weights;
+    copies.column_count[index] = static_cast<uint8_t>(column_count);
     return;  // recency deliberately unchanged: a re-read, not a transmission
   }
 
   if (copies.sources.size() >= options_.max_copies_per_row &&
       !copies.sources.empty()) {
-    // Overwrite the oldest slot in place (see RowCopies::seq).
-    size_t oldest = 0;
-    for (size_t i = 1; i < copies.seq.size(); ++i) {
-      if (copies.seq[i] < copies.seq[oldest]) {
+    // Overwrite the oldest slot in place (see RowCopies::seq), among the copies
+    // speaking for these columns: the two halves of a split row each keep their
+    // own history, so a busy half cannot evict the other's only copy.
+    size_t oldest = copies.seq.size();
+    for (size_t i = 0; i < copies.seq.size(); ++i) {
+      if (copies.first_column[i] != first_column) {
+        continue;
+      }
+      if (oldest == copies.seq.size() || copies.seq[i] < copies.seq[oldest]) {
         oldest = i;
       }
     }
-    copies.sources[oldest] = source;
-    copies.copies[oldest] = bytes;
-    copies.confidences[oldest] = weights;
-    copies.seq[oldest] = copies.next_seq++;
-    return;
+    if (oldest < copies.seq.size()) {
+      copies.sources[oldest] = source;
+      copies.copies[oldest] = bytes;
+      copies.confidences[oldest] = weights;
+      copies.first_column[oldest] = static_cast<uint8_t>(first_column);
+      copies.column_count[oldest] = static_cast<uint8_t>(column_count);
+      copies.seq[oldest] = copies.next_seq++;
+      return;
+    }
+    // No copy of these columns yet; let the row grow by one rather than drop
+    // the contribution, so a half that arrives late is not locked out.
   }
   copies.sources.push_back(source);
   copies.copies.push_back(bytes);
   copies.confidences.push_back(weights);
+  copies.first_column.push_back(static_cast<uint8_t>(first_column));
+  copies.column_count.push_back(static_cast<uint8_t>(column_count));
   copies.seq.push_back(copies.next_seq++);
 }
 
 std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
-    const TeletextPageKey& key, int row) const {
+    const TeletextPageKey& key, int row, TeletextRowCoverage* covered) const {
+  if (covered != nullptr) {
+    covered->fill(false);
+  }
   const auto it = pages_.find(key);
   if (it == pages_.end() || row < 1 ||
       row >=
@@ -91,7 +116,15 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
     return std::nullopt;
   }
   if (copies.copies.size() == 1) {
-    return copies.copies.front();  // a vote of one is the copy itself
+    // A vote of one is the copy itself.
+    if (covered != nullptr) {
+      const size_t first = copies.first_column.front();
+      const size_t count = copies.column_count.front();
+      std::fill(covered->begin() + static_cast<std::ptrdiff_t>(first),
+                covered->begin() + static_cast<std::ptrdiff_t>(first + count),
+                true);
+    }
+    return copies.copies.front();
   }
 
   // Pick the winning value at each byte position across the copies.
@@ -123,6 +156,13 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
     const uint8_t epoch = static_cast<uint8_t>(position + 1);
     size_t distinct_count = 0;
     for (size_t j = 0; j < copy_count; ++j) {
+      // A copy votes only within the columns it spoke for: the two halves of a
+      // split row are combined independently.
+      if (position < copies.first_column[j] ||
+          position >= static_cast<size_t>(copies.first_column[j]) +
+                          copies.column_count[j]) {
+        continue;
+      }
       const uint8_t value = copies.copies[j][position];
       if (seen_at[value] != epoch) {
         seen_at[value] = epoch;
@@ -159,6 +199,9 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
       best_newest = newest_of[value];
     }
     result[position] = best;
+    if (covered != nullptr) {
+      (*covered)[position] = found;
+    }
   }
   return result;
 }
@@ -175,7 +218,12 @@ size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key,
           static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
     return 0;
   }
-  return it->second.rows[static_cast<size_t>(row)].copies.size();
+  const RowCopies& copies = it->second.rows[static_cast<size_t>(row)];
+  size_t count = 0;
+  for (const uint8_t first : copies.first_column) {
+    count += (first == 0) ? 1 : 0;
+  }
+  return count;
 }
 
 void TeletextRowSquasher::clear() {

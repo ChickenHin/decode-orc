@@ -287,6 +287,108 @@ TEST(TeletextRowSquasher, ReplacedCopyBringsItsNewConfidence) {
   EXPECT_EQ(squasher.copy_count(kPage, 1), 2u);
 }
 
+// ---------------------------------------------------------------------------
+// Column ranges: a service that carries one display row in more than one packet
+// (525-line WST sends columns 32-39 separately) records each part on its own
+// ---------------------------------------------------------------------------
+
+// A copy of columns 32-39 only, holding |text| there.
+TeletextRowBytes tail_of(const std::string& text) {
+  TeletextRowBytes bytes{};
+  for (size_t i = 0; i < 8; ++i) {
+    const char c = i < text.size() ? text[i] : ' ';
+    bytes[32 + i] = teletext_odd_parity_encode(static_cast<uint8_t>(c));
+  }
+  return bytes;
+}
+
+TEST(TeletextRowSquasher, PartialCopiesVoteOnlyWithinTheirColumns) {
+  TeletextRowSquasher squasher;
+  // Two copies of the row's own columns and two of its extension columns. The
+  // extension copies hold zero everywhere else and must not drag those columns
+  // down; the row copies hold zero from 32 on and must not reach the tail.
+  squasher.add_row(kPage, 1, row_of("HEAD"), 0, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, row_of("HEAD"), 1, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 2, nullptr, 32, 8);
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 3, nullptr, 32, 8);
+
+  TeletextRowCoverage covered{};
+  const auto squashed = squasher.squashed_row(kPage, 1, &covered);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed), "HEAD" + std::string(28, ' ') + "TAIL");
+  for (size_t column = 0; column < kTeletextRowBytes; ++column) {
+    EXPECT_TRUE(covered[column]) << "column " << column;
+  }
+}
+
+TEST(TeletextRowSquasher, ColumnsNoCopySpokeForAreReportedUncovered) {
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of("HEAD"), 0, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, row_of("HEAD"), 1, nullptr, 0, 32);
+
+  TeletextRowCoverage covered{};
+  ASSERT_TRUE(squasher.squashed_row(kPage, 1, &covered).has_value());
+  for (size_t column = 0; column < 32; ++column) {
+    EXPECT_TRUE(covered[column]) << "column " << column;
+  }
+  for (size_t column = 32; column < kTeletextRowBytes; ++column) {
+    EXPECT_FALSE(covered[column]) << "column " << column;
+  }
+}
+
+TEST(TeletextRowSquasher, ASingleCopyReportsOnlyItsOwnColumns) {
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 0, nullptr, 32, 8);
+
+  TeletextRowCoverage covered{};
+  ASSERT_TRUE(squasher.squashed_row(kPage, 1, &covered).has_value());
+  EXPECT_FALSE(covered[0]);
+  EXPECT_TRUE(covered[32]);
+  EXPECT_TRUE(covered[39]);
+}
+
+TEST(TeletextRowSquasher, ADamagedPartialCopyLosesToTheCleanOnes) {
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, tail_of("RECOVERY"), 0, nullptr, 32, 8);
+  TeletextRowBytes damaged = tail_of("RECOVERY");
+  damaged[32] ^= 0x01;  // breaks odd parity
+  damaged[33] ^= 0x01;
+  squasher.add_row(kPage, 1, damaged, 1, nullptr, 32, 8);
+  squasher.add_row(kPage, 1, tail_of("RECOVERY"), 2, nullptr, 32, 8);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  // Only the extension columns were spoken for; the rest hold no candidate.
+  EXPECT_EQ(text_of(*squashed).substr(32), "RECOVERY");
+}
+
+TEST(TeletextRowSquasher, CopyCountIgnoresCopiesThatOnlyExtendTheRow) {
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of("HEAD"), 0, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 1, nullptr, 32, 8);
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 2, nullptr, 32, 8);
+
+  EXPECT_EQ(squasher.copy_count(kPage, 1), 1u);
+}
+
+TEST(TeletextRowSquasher, EvictionKeepsBothHalvesOfASplitRow) {
+  TeletextRowSquasher::Options options;
+  options.max_copies_per_row = 4;
+  TeletextRowSquasher squasher(options);
+
+  // The row's own columns saturate the bound; its extension columns arrive
+  // afterwards and must not be locked out, nor evict the row itself.
+  for (int64_t source = 0; source < 8; ++source) {
+    squasher.add_row(kPage, 1, row_of("HEAD"), source, nullptr, 0, 32);
+  }
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 100, nullptr, 32, 8);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed), "HEAD" + std::string(28, ' ') + "TAIL");
+  EXPECT_EQ(squasher.copy_count(kPage, 1), 4u);
+}
+
 TEST(TeletextRowSquasher, ClearDropsEverything) {
   TeletextRowSquasher squasher;
   squasher.add_row(kPage, 1, row_of("TEXT"), 0);

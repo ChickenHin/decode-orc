@@ -812,10 +812,11 @@ TEST_F(TeletextSubtitleCueTest, MultiRowSubtitlesJoinWithNewlines) {
 }
 
 // ---------------------------------------------------------------------------
-// 525-line WST (ITU-R BT.653 Table 1b): a 34-byte packet, so 32-column rows
-// and 24 header-text characters. Everything the decoder reads by position —
-// MRAG, page number, sub-code, control bits — is at the same offsets, so these
-// build on the 625-line helpers and simply stop short.
+// 525-line WST (ITU-R BT.653 Table 1b): a 34-byte packet, so 32 display bytes
+// per row packet and 24 header-text characters, with the remaining 8 columns
+// of each row carried in the service's row-extension packets. Everything the
+// decoder reads by position — MRAG, page number, sub-code, control bits — is at
+// the same offsets, so these build on the 625-line helpers and stop short.
 // ---------------------------------------------------------------------------
 
 using orc::kTeletext525PacketBytes;
@@ -860,7 +861,30 @@ class Teletext525PageDecoderTest : public TeletextPageDecoderTest {
   }
 };
 
-TEST_F(Teletext525PageDecoderTest, PageIsThirtyTwoColumnsWide) {
+// A 525-line row-extension packet: addressed to magazine|4, carrying columns
+// 32-39 of the block of four display rows |packet_number| identifies, as four
+// groups of eight (see the TeletextPageDecoder class comment). |tails| supplies
+// the groups in row order; missing or short ones pad with spaces.
+std::array<uint8_t, kTeletextPacketBytes> make_525_extension(
+    int magazine, int packet_number, const std::vector<std::string>& tails) {
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  const auto mrag = make_mrag(magazine | 0x4, packet_number);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  for (size_t group = 0; group < 4; ++group) {
+    const std::string& tail = group < tails.size() ? tails[group] : "";
+    for (size_t i = 0; i < 8; ++i) {
+      const char c = i < tail.size() ? tail[i] : ' ';
+      packet[2 + group * 8 + i] =
+          orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+    }
+  }
+  return packet;
+}
+
+TEST_F(Teletext525PageDecoderTest, ShortPacketsStillGiveTheFortyColumnGrid) {
+  // The display grid is 40 columns whatever the packet length; a service that
+  // fills only 32 of them leaves the rest blank, as it would on a receiver.
   feed(make_525_header(1, 0x00, 0, {}, "ELECTRA NEWS"), 0);
   feed(make_525_row(1, 1, "TOP STORY"), 1);
   feed(make_525_time_filling_header(1), 2);
@@ -868,7 +892,7 @@ TEST_F(Teletext525PageDecoderTest, PageIsThirtyTwoColumnsWide) {
 
   ASSERT_FALSE(snapshots_.empty());
   const auto& page = snapshots_.front();
-  EXPECT_EQ(page.columns, k525Columns);
+  EXPECT_EQ(page.columns, TeletextPageSnapshot::kColumns);
   EXPECT_EQ(page.magazine, 1);
   EXPECT_EQ(page.page_number, 0x00);
   EXPECT_EQ(row_text(page, 1), "TOP STORY");
@@ -924,6 +948,194 @@ TEST_F(Teletext525PageDecoderTest, SubtitleTextStopsAtTheServiceWidth) {
   const auto& cues = decoder_.subtitle_cues();
   ASSERT_EQ(cues.size(), 1u);
   EXPECT_EQ(cues[0].text, "ELECTRA");
+}
+
+TEST_F(Teletext525PageDecoderTest, RowExtensionPacketsCompleteTheFortyColumns) {
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 4, "The San Francisco 49ers have won"), 1);
+  feed(make_525_row(1, 5, "NFL title game 28-3 over the Chi"), 2);
+  feed(make_525_extension(1, 4, {" the", "cago"}), 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(page.columns, TeletextPageSnapshot::kColumns);
+  EXPECT_EQ(row_text(page, 4), "The San Francisco 49ers have won the");
+  EXPECT_EQ(row_text(page, 5), "NFL title game 28-3 over the Chicago");
+}
+
+TEST_F(Teletext525PageDecoderTest, TheFirstBlockIsNumberedOneAndServesRowZero) {
+  // The extension packet number identifies a block of four rows, not a row, so
+  // the first block's packets carry 1 — 0 being the page header's own number —
+  // and serve rows 0 to 3. It must complete the header rather than being read
+  // as a page header, which in serial mode would terminate every open page.
+  HeaderFlags flags;
+  flags.magazine_serial = true;
+  feed(make_525_header(1, 0x25, 0, flags, "20:37:21 Mon Jan  9 P125"), 0);
+  feed(make_525_extension(1, 1, {" ELECTRA", "row one", "", "row three"}), 1);
+  feed(make_525_row(1, 1, "TOP STORY"), 2);
+  feed(make_525_row(1, 3, std::string(32, 'X')), 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(page.page_number, 0x25);
+  EXPECT_EQ(row_text(page, 0), "        20:37:21 Mon Jan  9 P125 ELECTRA");
+  EXPECT_EQ(row_text(page, 1), "TOP STORY                       row one");
+  EXPECT_EQ(row_text(page, 3), std::string(32, 'X') + "row thre");
+}
+
+TEST_F(Teletext525PageDecoderTest, BlocksAreIdentifiedByRoundingTheNumberDown) {
+  // Blocks start at multiples of four; a packet numbered inside one serves that
+  // block, which is what lets the first block be numbered 1 at all.
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 5, std::string(32, 'X')), 1);
+  feed(make_525_extension(1, 7, {"", "tail"}), 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  // Packet 7 is in the block starting at row 4, so its second group is row 5.
+  EXPECT_EQ(row_text(snapshots_.front(), 5), std::string(32, 'X') + "tail");
+}
+
+TEST_F(Teletext525PageDecoderTest, ExtensionColumnsSurviveARollingHeader) {
+  // A re-sent header rewrites row 0's own display bytes; the extension columns
+  // came from another packet and it says nothing about them.
+  feed(make_525_header(1, 0x25, 0, {}, "20:37:21 Mon Jan  9 P125"), 0);
+  feed(make_525_extension(1, 1, {" ELECTRA"}), 1);
+  feed(make_525_header(1, 0x25, 0, {}, "20:37:22 Mon Jan  9 P125"), 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(row_text(snapshots_.back(), 0),
+            "        20:37:22 Mon Jan  9 P125 ELECTRA");
+}
+
+TEST_F(Teletext525PageDecoderTest,
+       ADamagedExtensionByteNeverReplacesACleanOne) {
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 8, std::string(32, 'X')), 1);
+  feed(make_525_extension(1, 8, {"ABCDEFGH"}), 2);
+  auto damaged = make_525_extension(1, 8, {"abcdefgh"});
+  damaged[2] ^= 0x01;  // breaks odd parity on the first extension byte
+  feed(damaged, 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  // The clean 'A' stands; the rest of the packet was undamaged and replaces.
+  EXPECT_EQ(row_text(page, 8), std::string(32, 'X') + "Abcdefgh");
+  EXPECT_FALSE(page.cells[8][32].parity_error);
+}
+
+TEST_F(Teletext525PageDecoderTest, RowsWithNoExtensionKeepBlankColumns) {
+  // Widening the page must not turn the columns of an unextended row into
+  // whatever the short packet left behind.
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 3, std::string(32, 'X')), 1);
+  feed(make_525_row(1, 20, std::string(32, 'Y')), 2);
+  feed(make_525_extension(1, 20, {"tail"}), 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(page.columns, TeletextPageSnapshot::kColumns);
+  EXPECT_EQ(row_text(page, 3), std::string(32, 'X'));
+  for (int column = 32; column < TeletextPageSnapshot::kColumns; ++column) {
+    const auto& cell = page.cells[3][static_cast<size_t>(column)];
+    EXPECT_EQ(cell.character, 0x20) << "column " << column;
+    EXPECT_FALSE(cell.parity_error) << "column " << column;
+  }
+}
+
+TEST_F(Teletext525PageDecoderTest, ExtensionColumnsSurviveRowSquashing) {
+  // With a squasher attached the head columns come from the combined copies;
+  // the extension columns are not display rows and must still reach the page.
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 6, "Mirrors have been made in Venice"), 1);
+  feed(make_525_extension(1, 4, {"", "", ", Italy,"}), 2);
+  feed(make_525_header(1, 0x00, 0), 3);
+  feed(make_525_row(1, 6, "Mirrors have been made in Venice"), 4);
+  feed(make_525_extension(1, 4, {"", "", ", Italy,"}), 5);
+  feed(make_525_time_filling_header(1), 6);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(row_text(snapshots_.back(), 6),
+            "Mirrors have been made in Venice, Italy,");
+}
+
+TEST_F(Teletext525PageDecoderTest, RepeatedExtensionsCorrectEachOther) {
+  // The point of squashing the extension columns: a damaged copy loses to the
+  // clean copies of the same columns, exactly as a damaged display row does.
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  for (int pass = 0; pass < 3; ++pass) {
+    const int64_t field = pass * 4;
+    feed(make_525_header(1, 0x00, 0), field);
+    feed(make_525_row(1, 8, std::string(32, 'X')), field + 1);
+    auto extension = make_525_extension(1, 8, {"RECOVERY"});
+    if (pass == 1) {
+      // One transmission arrives damaged in three of the eight columns.
+      extension[2] = 0x00;
+      extension[3] = 0x00;
+      extension[4] = 0x00;
+    }
+    feed(extension, field + 2);
+  }
+  feed(make_525_time_filling_header(1), 100);
+  decoder_.finalize(200);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.back();
+  EXPECT_EQ(row_text(page, 8), std::string(32, 'X') + "RECOVERY");
+  for (int column = 32; column < TeletextPageSnapshot::kColumns; ++column) {
+    EXPECT_FALSE(page.cells[8][static_cast<size_t>(column)].parity_error)
+        << "column " << column;
+  }
+}
+
+TEST_F(Teletext525PageDecoderTest, ExtensionCopiesDoNotCountAsRowCopies) {
+  // "How many times was this row transmitted" means the display packets; the
+  // packets that only extend it must not inflate the count a consumer weighs
+  // its confidence in the row by.
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  for (int pass = 0; pass < 2; ++pass) {
+    const int64_t field = pass * 4;
+    feed(make_525_header(1, 0x00, 0), field);
+    feed(make_525_row(1, 8, std::string(32, 'X')), field + 1);
+    feed(make_525_extension(1, 8, {"tail"}), field + 2);
+  }
+  feed(make_525_time_filling_header(1), 100);
+  decoder_.finalize(200);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(snapshots_.back().row_copies[8], 2);
+}
+
+TEST_F(TeletextPageDecoderTest, A625LineStreamKeepsMagazinesFourToSeven) {
+  // Extension decoding is a reading of a *short* packet's magazine bit; a
+  // 625-line service uses all eight magazines for pages and must be untouched.
+  decoder_.process_packet(make_header(5, 0x00, 0), 0);
+  decoder_.process_packet(make_row(5, 1, std::string(40, 'Z')), 1);
+  decoder_.process_packet(make_time_filling_header(5), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(snapshots_.front().magazine, 5);
+  EXPECT_EQ(row_text(snapshots_.front(), 1), std::string(40, 'Z'));
 }
 
 TEST_F(TeletextPageDecoderTest, DefaultPacketLengthKeepsTheFortyColumnPage) {

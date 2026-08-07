@@ -14,6 +14,7 @@
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/teletext_page_decoder.h>
+#include <orc/support/teletext_row_squasher.h>
 #include <orc/support/teletext_slicer.h>
 #include <teletext_observer.h>
 
@@ -362,6 +363,10 @@ RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
   RecoverySurvey survey;
   TeletextObserver observer;
   TeletextPageDecoder decoder;
+  // As the preview dialog reads it: with a squasher, so repeated copies of a
+  // row — and of the packets that extend it — correct each other.
+  TeletextRowSquasher squasher;
+  decoder.set_row_squasher(&squasher);
   decoder.set_page_callback([&survey](const TeletextPageSnapshot& page) {
     survey.pages.push_back(page);
   });
@@ -399,9 +404,12 @@ RecoverySurvey survey_recovery(VideoFrameRepresentation& representation) {
             static_cast<double>(odd) /
             static_cast<double>(observed->byte_count - 2));
 
+        // A stable source id per recovered line, which is what a consumer
+        // re-reading the same line has to supply for the squasher to replace
+        // rather than recount it.
         decoder.process_packet(
             observed->bytes, static_cast<int64_t>(field.value()),
-            TeletextPageDecoder::kAutoSource,
+            static_cast<int64_t>(field.value()) * 32 + field_line,
             observed->has_confidence ? &observed->confidence : nullptr,
             observed->byte_count);
       }
@@ -484,7 +492,7 @@ TEST(VBINTSCSource, TheObserverRecoversPacketsAtTheServicesOwnLength) {
   EXPECT_GT(median, 0.9);
 }
 
-TEST(VBINTSCSource, ThePageDecoderAssemblesReadable32ColumnPages) {
+TEST(VBINTSCSource, ThePageDecoderAssemblesReadable40ColumnPages) {
   if (!electra_capture_available()) {
     GTEST_SKIP() << "525-line capture not present: " << kElectraCapture;
   }
@@ -498,8 +506,11 @@ TEST(VBINTSCSource, ThePageDecoderAssemblesReadable32ColumnPages) {
   ASSERT_FALSE(survey.pages.empty())
       << "no page completed over " << kPageFrames << " frames";
 
+  // 40 columns from 34-byte packets: this service sends the last 8 columns of
+  // each row in row-extension packets (teletext_page_decoder.h). A page still
+  // 32 wide here would mean they had stopped being recognised.
   for (const auto& page : survey.pages) {
-    ASSERT_EQ(page.columns, static_cast<int>(kTeletext525PacketBytes) - 2)
+    ASSERT_EQ(page.columns, TeletextPageSnapshot::kColumns)
         << "page assembled at the wrong width";
   }
 
@@ -524,6 +535,83 @@ TEST(VBINTSCSource, ThePageDecoderAssemblesReadable32ColumnPages) {
   // a headline block, which is comfortably above this; a noise page scores a
   // handful.
   EXPECT_GT(word_count(*front_page), 20u);
+
+  // The extension columns carry the page, not a blank margin: this service
+  // fills its lines to the right-hand edge, so several rows must have content
+  // past the 32 columns one packet brings.
+  size_t rows_using_extension_columns = 0;
+  for (const auto& row : page_rows(*front_page)) {
+    const auto last = row.find_last_not_of(' ');
+    if (last != std::string::npos &&
+        static_cast<int>(last) >=
+            static_cast<int>(kTeletext525PacketBytes) - 2) {
+      ++rows_using_extension_columns;
+    }
+  }
+  EXPECT_GT(rows_using_extension_columns, 3u)
+      << "no row reached past column 32 — the row-extension packets are not "
+         "reaching the page";
+
+  // And they land on the right rows. A misattributed extension packet still
+  // passes odd parity — it is eight valid characters in the wrong place — so
+  // only content says the block mapping is right. This page's copyright line
+  // spans columns 27 to 38, crossing the boundary between what the display
+  // packet brought and what the extension packet did.
+  bool joins_across_the_boundary = false;
+  for (const auto& row : page_rows(*front_page)) {
+    if (row.find("Broadcasting") != std::string::npos) {
+      joins_across_the_boundary = true;
+    }
+  }
+  EXPECT_TRUE(joins_across_the_boundary)
+      << "the copyright line did not read across column 32 — the extension "
+         "packets are being attributed to the wrong rows";
+
+  // And they arrive as cleanly as the columns the display packets bring. The
+  // extension columns are squashed over their own repeats like any others, so
+  // damage in them is evidence of a mis-read packet rather than of the tape:
+  // the extension packets each serve four rows, and one attributed to the wrong
+  // block puts eight characters into four wrong places at once.
+  //
+  // Magazine 8 is excluded. It carries this service's time-filling test
+  // pattern, which sends an extension packet against every row rather than one
+  // per block, so its copies of a block genuinely disagree with each other.
+  const int kHeadColumns = static_cast<int>(kTeletext525PacketBytes) - 2;
+  size_t head_cells = 0;
+  size_t damaged_head_cells = 0;
+  size_t extension_cells = 0;
+  size_t damaged_extension_cells = 0;
+  for (const auto& page : survey.pages) {
+    if (page.magazine == 8) continue;
+    for (int row = 1; row < TeletextPageSnapshot::kRows; ++row) {
+      if (!page.row_received[static_cast<size_t>(row)]) continue;
+      for (int column = 0; column < page.columns; ++column) {
+        const bool damaged =
+            page.cells[static_cast<size_t>(row)][static_cast<size_t>(column)]
+                .parity_error;
+        size_t& cells = column < kHeadColumns ? head_cells : extension_cells;
+        size_t& damaged_cells = column < kHeadColumns ? damaged_head_cells
+                                                      : damaged_extension_cells;
+        ++cells;
+        damaged_cells += damaged ? 1 : 0;
+      }
+    }
+  }
+  ASSERT_GT(extension_cells, 1000u);
+  const double head_damage =
+      static_cast<double>(damaged_head_cells) / static_cast<double>(head_cells);
+  const double extension_damage = static_cast<double>(damaged_extension_cells) /
+                                  static_cast<double>(extension_cells);
+  std::cout << "Electra: " << damaged_head_cells << "/" << head_cells
+            << " display cells damaged (" << 100.0 * head_damage << "%), "
+            << damaged_extension_cells << "/" << extension_cells
+            << " extension cells (" << 100.0 * extension_damage << "%)\n";
+
+  // The bar is what an unsquashed extension column reaches on this capture,
+  // which is several times this; a regression that stopped the extension
+  // packets voting — or attributed them to the wrong block, which is the same
+  // thing seen from the other end — lands well above it.
+  EXPECT_LT(extension_damage, 0.02);
 }
 
 }  // namespace

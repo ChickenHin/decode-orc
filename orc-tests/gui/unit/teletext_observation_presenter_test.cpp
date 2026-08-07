@@ -287,8 +287,8 @@ TEST(TeletextObservationPresenterTest,
 }
 
 // ---------------------------------------------------------------------------
-// 525-line WST (ITU-R BT.653 Table 1b): a 34-byte packet giving 32-column
-// pages, carried by the observation string's own length
+// 525-line WST (ITU-R BT.653 Table 1b): a 34-byte packet, its length carried by
+// the observation string's own
 // ---------------------------------------------------------------------------
 
 TEST(TeletextObservationPresenterTest, Decodes525LinePacketsWithTheirLength) {

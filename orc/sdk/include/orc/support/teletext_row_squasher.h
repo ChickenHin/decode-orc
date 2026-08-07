@@ -44,6 +44,12 @@ using TeletextRowBytes = std::array<uint8_t, kTeletextRowBytes>;
 // that has nothing to say about it.
 using TeletextRowConfidence = std::array<float, kTeletextRowBytes>;
 
+// Which byte positions of a squashed row any copy actually covered. A service
+// that sends a row's columns in more than one packet (see add_row()'s column
+// range) can leave part of a row with nothing to vote on, and a position no
+// copy covered is not the same as one every copy agreed was zero.
+using TeletextRowCoverage = std::array<bool, kTeletextRowBytes>;
+
 // Identity of the page a row belongs to. Sub-code is part of the key because
 // a different sub-code is a different page (ETSI EN 300 706 §9.3.1.2) —
 // merging rotating sub-pages would blend unrelated content.
@@ -140,14 +146,33 @@ class TeletextRowSquasher {
    * @param confidence How sure the recovery chain was of each byte, or nullptr
    *               when it cannot say — which counts as wholly sure, so a caller
    *               with no confidences to offer votes exactly as it always did.
+   * @param first_column First byte position of @p bytes this copy speaks for
+   * @param column_count How many positions from there it speaks for
+   *
+   * The column range is for services that send one display row in more than
+   * one packet — 525-line WST sends columns 32-39 separately (see
+   * teletext_page_decoder.h). A copy votes only within its range, so the two
+   * halves of a row are combined across repeats independently and neither
+   * pollutes the other's positions. The default covers the whole row, which is
+   * what a service carrying a row in one packet wants.
    */
   void add_row(const TeletextPageKey& key, int row,
                const TeletextRowBytes& bytes, int64_t source,
-               const TeletextRowConfidence* confidence = nullptr);
+               const TeletextRowConfidence* confidence = nullptr,
+               size_t first_column = 0,
+               size_t column_count = kTeletextRowBytes);
 
-  /// Best estimate of @p row, or nullopt when no copy has been recorded
-  std::optional<TeletextRowBytes> squashed_row(const TeletextPageKey& key,
-                                               int row) const;
+  /**
+   * @brief Best estimate of @p row, or nullopt when no copy has been recorded
+   *
+   * @param covered When non-null, receives which byte positions any copy spoke
+   *                for. Positions no copy covered hold zero in the returned row
+   *                and false here; a caller that mixes column ranges must read
+   *                this rather than treat the zero as a recovered byte.
+   */
+  std::optional<TeletextRowBytes> squashed_row(
+      const TeletextPageKey& key, int row,
+      TeletextRowCoverage* covered = nullptr) const;
 
   /**
    * @brief Drop every copy held for one run of a page
@@ -160,7 +185,10 @@ class TeletextRowSquasher {
    */
   void erase_page(const TeletextPageKey& key);
 
-  /// Copies recorded for @p row (0 when none)
+  /// Copies recorded for @p row (0 when none). Counts the copies that speak
+  /// for the row's first column — the packets carrying the row itself, rather
+  /// than any that only extend it (see add_row()'s column range), which is what
+  /// "how many times was this row transmitted" means.
   size_t copy_count(const TeletextPageKey& key, int row) const;
 
   /// Pages currently tracked
@@ -173,6 +201,10 @@ class TeletextRowSquasher {
     std::vector<TeletextRowBytes> copies;
     std::vector<TeletextRowConfidence> confidences;
     std::vector<int64_t> sources;
+    // Byte positions each copy speaks for (see add_row()). A row carried whole
+    // by one packet has every copy at {0, kTeletextRowBytes}.
+    std::vector<uint8_t> first_column;
+    std::vector<uint8_t> column_count;
     // Insertion order of each slot. Once the copy bound is reached the oldest
     // slot is overwritten in place (erasing the front of the parallel vectors
     // would move every later element on every saturated add), so slot order no

@@ -142,9 +142,9 @@ TeletextFieldPacketsView TeletextObservationPresenter::extractFieldObservations(
     TeletextPacketView packet;
     packet.field_line = field_line;
     packet.bytes = observed->bytes;
-    // Carried rather than assumed: the page decoder takes the service's row
-    // width from it (ITU-R BT.653 Table 1b gives 525-line WST a 34-byte packet
-    // and therefore 32-column rows).
+    // Carried rather than assumed: the page decoder needs to know how many of
+    // a row's columns one packet brought (ITU-R BT.653 Table 1b gives 525-line
+    // WST a 34-byte packet, so 32 of the 40, the rest arriving separately).
     packet.byte_count = static_cast<int>(observed->byte_count);
     packet.has_confidence = observed->has_confidence;
     packet.confidence = observed->confidence;

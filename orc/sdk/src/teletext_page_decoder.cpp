@@ -30,6 +30,27 @@ constexpr int kMragBytes = 2;
 constexpr size_t kHeaderControlBytes = 10;
 constexpr int kHeaderTextColumn = 8;
 
+// Magazine address bit that marks a 525-line row-extension packet (see the
+// TeletextPageDecoder class comment): the service uses magazines 8, 1, 2 and 3
+// for its pages and addresses each one's extension packets to that magazine
+// with this bit set. Read only when the service's packets are short, so a
+// 625-line stream's magazines 4-7 are untouched.
+constexpr int kExtensionMagazineFlag = 0x4;
+
+// Rows one extension packet serves: its display bytes are that many equal
+// groups, one per row, in ascending row order.
+constexpr int kExtensionPacketRows = 4;
+
+// First display row an extension packet numbered |packet_number| serves. The
+// number identifies a block of kExtensionPacketRows rows rather than naming a
+// row, so it rounds down: the observed packets are numbered 1, 4, 8, 12, 16 and
+// 20 and serve rows 0-3, 4-7, 8-11, 12-15, 16-19 and 20-23. The first block
+// cannot be numbered 0 — that is the page header's packet number — which is why
+// its packets carry 1.
+int extension_first_row(int packet_number) {
+  return (packet_number / kExtensionPacketRows) * kExtensionPacketRows;
+}
+
 // ETSI EN 300 706 §9.3.1.1: page number 0xFF marks time-filling / page
 // terminating headers ("null page" convention, §7.2.2 with sub-code 3F7F);
 // such headers terminate a transmission but never open a page.
@@ -129,11 +150,12 @@ void TeletextPageDecoder::process_packet(
   last_row_attribution_.reset();
   last_row_number_ = 0;
 
-  // The service's row width, from the packet the service transmits: 42 bytes
-  // less the MRAG gives the 40 display bytes of EN 300 706 §9.3.2, 34 gives
-  // the 32 of ITU-R BT.653 Table 1b §3.4.
-  columns_ = std::clamp(static_cast<int>(packet_bytes) - kMragBytes, 0,
-                        TeletextPageSnapshot::kColumns);
+  // Display bytes one packet of this service carries: 42 bytes less the MRAG
+  // gives the 40 of EN 300 706 §9.3.2, 34 gives the 32 of ITU-R BT.653
+  // Table 1b §3.4. The grid stays 40 columns either way: what a short packet
+  // does not fill comes from the row-extension packets, or shows as spaces.
+  head_columns_ = std::clamp(static_cast<int>(packet_bytes) - kMragBytes, 0,
+                             TeletextPageSnapshot::kColumns);
 
   // MRAG: two Hamming 8/4 bytes carrying the 3-bit magazine and 5-bit packet
   // number (ETSI EN 300 706 §7.1.2). An uncorrectable MRAG byte means the
@@ -145,6 +167,22 @@ void TeletextPageDecoder::process_packet(
   }
   const int magazine = mrag_low & 0x7;
   const int packet_number = ((mrag_low >> 3) & 0x1) | (mrag_high << 1);
+
+  if (head_columns_ < TeletextPageSnapshot::kColumns &&
+      (magazine & kExtensionMagazineFlag) != 0) {
+    // A row-extension packet, not a page of magazine 4-7: its row number is a
+    // row range and it must not be read as a header or a display row. Checked
+    // before either, because an extension packet whose range starts at row 0
+    // would otherwise be taken for a page header and terminate the page it was
+    // sent to complete.
+    if (packet_number < TeletextPageSnapshot::kRows) {
+      handle_extension_packet(magazine & ~kExtensionMagazineFlag, packet_number,
+                              packet, field_index,
+                              source == kAutoSource ? next_source_++ : source,
+                              confidence);
+    }
+    return;
+  }
 
   if (packet_number == 0) {
     handle_header_packet(magazine, packet, field_index);
@@ -299,10 +337,24 @@ void TeletextPageDecoder::handle_header_packet(
   // ahead of them being identical (ITU-R BT.653 Table 1b §3.3). Columns 0-7
   // are decoder-generated (page number, clock) and left as spaces here.
   RowData& header_row = state.rows[0];
+  const bool header_extension_present = header_row.extension_present;
+  const auto header_extension_columns = header_row.characters;
+  const auto header_extension_parity = header_row.parity_error;
   header_row.present = true;
   header_row.characters.fill(0x20);
   header_row.parity_error.fill(false);
-  for (int column = kHeaderTextColumn; column < columns_; ++column) {
+  // The header row's own extension columns survive the rewrite: they were sent
+  // in a different packet and this one says nothing about them.
+  if (header_extension_present) {
+    header_row.extension_present = true;
+    for (int column = head_columns_; column < TeletextPageSnapshot::kColumns;
+         ++column) {
+      const auto i = static_cast<size_t>(column);
+      header_row.characters[i] = header_extension_columns[i];
+      header_row.parity_error[i] = header_extension_parity[i];
+    }
+  }
+  for (int column = kHeaderTextColumn; column < head_columns_; ++column) {
     const auto i = static_cast<size_t>(column - kHeaderTextColumn);
     const uint8_t byte = packet[kHeaderControlBytes + i];
     if (teletext_odd_parity_valid(byte)) {
@@ -332,7 +384,8 @@ void TeletextPageDecoder::handle_display_packet(
 
   RowData& row_data = state.rows[static_cast<size_t>(row)];
   row_data.present = true;
-  for (size_t column = 0; column < static_cast<size_t>(columns_); ++column) {
+  for (size_t column = 0; column < static_cast<size_t>(head_columns_);
+       ++column) {
     // The service's display bytes, 7 data bits + odd parity (EN 300 706
     // §9.3.2, §8.1).
     const uint8_t byte = packet[kMragBytes + column];
@@ -346,22 +399,101 @@ void TeletextPageDecoder::handle_display_packet(
   }
 
   if (row_squasher_ != nullptr) {
-    // The squasher's rows are the widest a service transmits; a narrower one
-    // leaves the tail at zero and the render below never reads it back, so the
-    // squasher needs no notion of the width itself.
+    // The squasher's rows are the widest a service transmits; a service whose
+    // packets carry fewer leaves the rest at zero, and the render below takes
+    // those columns from the row-extension store instead, so the squasher needs
+    // no notion of the width itself.
     TeletextRowBytes display{};
     std::copy(packet.begin() + kMragBytes,
-              packet.begin() + kMragBytes + kTeletextRowBytes, display.begin());
+              packet.begin() + kMragBytes + head_columns_, display.begin());
     // The row's own bytes are the packet bytes after the MRAG (§9.3.2), so its
     // confidences are the matching slice of the packet's.
     TeletextRowConfidence weights{};
     if (confidence != nullptr) {
       std::copy(confidence->begin() + kMragBytes,
-                confidence->begin() + kMragBytes + kTeletextRowBytes,
+                confidence->begin() + kMragBytes + head_columns_,
                 weights.begin());
     }
     row_squasher_->add_row(key, row, display, source,
-                           confidence != nullptr ? &weights : nullptr);
+                           confidence != nullptr ? &weights : nullptr, 0,
+                           static_cast<size_t>(head_columns_));
+  }
+
+  state.last_field_index = field_index;
+}
+
+void TeletextPageDecoder::handle_extension_packet(
+    int transmission_magazine, int packet_number,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet,
+    int64_t field_index, int64_t source,
+    const TeletextPacketConfidence* confidence) {
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  // Like a display row, an extension belongs to the page whose transmission is
+  // in progress in the magazine it is addressed to (EN 300 706 §7.2.1).
+  if (!state.page_open) {
+    return;
+  }
+
+  const int extension_columns = TeletextPageSnapshot::kColumns - head_columns_;
+  if (extension_columns <= 0) {
+    return;
+  }
+
+  const TeletextPageKey key = page_key(transmission_magazine);
+  const int first_row = extension_first_row(packet_number);
+
+  for (int group = 0; group < kExtensionPacketRows; ++group) {
+    const int row = first_row + group;
+    if (row >= TeletextPageSnapshot::kRows) {
+      break;
+    }
+    const size_t group_base = static_cast<size_t>(kMragBytes) +
+                              static_cast<size_t>(group * extension_columns);
+
+    RowData& row_data = state.rows[static_cast<size_t>(row)];
+    for (int offset = 0; offset < extension_columns; ++offset) {
+      const size_t column =
+          static_cast<size_t>(head_columns_) + static_cast<size_t>(offset);
+      const uint8_t byte = packet[group_base + static_cast<size_t>(offset)];
+      // A byte that fails odd parity (EN 300 706 §8.1) is known to be corrupt,
+      // so it never replaces a clean one already recovered for this column.
+      // This is the decoder's own store, which is all a caller without a row
+      // squasher has; with one attached the render takes these columns from its
+      // vote across every copy instead.
+      const bool clean = teletext_odd_parity_valid(byte);
+      if (!clean && row_data.extension_present &&
+          !row_data.parity_error[column]) {
+        continue;
+      }
+      row_data.characters[column] = clean ? static_cast<uint8_t>(byte & 0x7F)
+                                          : static_cast<uint8_t>(0x20);
+      row_data.parity_error[column] = !clean;
+    }
+    row_data.extension_present = true;
+
+    if (row_squasher_ == nullptr) {
+      continue;
+    }
+    // The extension columns go into the squasher as a copy speaking for those
+    // columns only, so repeated transmissions of them correct each other just
+    // as the display packets' columns do. One packet contributes to four rows;
+    // they are separate buckets, so the one source id serves all four.
+    TeletextRowBytes display{};
+    std::copy(packet.begin() + static_cast<std::ptrdiff_t>(group_base),
+              packet.begin() + static_cast<std::ptrdiff_t>(group_base) +
+                  extension_columns,
+              display.begin() + head_columns_);
+    TeletextRowConfidence weights{};
+    if (confidence != nullptr) {
+      std::copy(confidence->begin() + static_cast<std::ptrdiff_t>(group_base),
+                confidence->begin() + static_cast<std::ptrdiff_t>(group_base) +
+                    extension_columns,
+                weights.begin() + head_columns_);
+    }
+    row_squasher_->add_row(key, row, display, source,
+                           confidence != nullptr ? &weights : nullptr,
+                           static_cast<size_t>(head_columns_),
+                           static_cast<size_t>(extension_columns));
   }
 
   state.last_field_index = field_index;
@@ -441,26 +573,70 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
       erase_epoch({snapshot.magazine, state.page_number, state.subcode})};
 
   for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
+    const RowData& stored = state.rows[static_cast<size_t>(row)];
     RowData local_row_data;
     int row_copies = 0;
-    const RowData* row_source = &state.rows[static_cast<size_t>(row)];
+    const RowData* row_source = &stored;
+    bool from_squasher = false;
     if (row_squasher_ != nullptr && row >= 1) {
-      if (const auto squashed = row_squasher_->squashed_row(key, row)) {
+      TeletextRowCoverage covered{};
+      if (const auto squashed =
+              row_squasher_->squashed_row(key, row, &covered)) {
+        from_squasher = true;
         row_copies = static_cast<int>(row_squasher_->copy_count(key, row));
-        local_row_data.present = true;
-        for (size_t column = 0; column < static_cast<size_t>(columns_);
-             ++column) {
-          const uint8_t byte = (*squashed)[column];
+        // Every column the squasher has copies of, which for a service that
+        // splits its rows means the display packet's columns and the extension
+        // packets' are each voted on across their own repeats. A column no copy
+        // spoke for shows as a space: it was not recovered, and the zero the
+        // vote leaves there would read as a spacing attribute.
+        for (int column = 0; column < columns_; ++column) {
+          const auto i = static_cast<size_t>(column);
+          if (!covered[i]) {
+            local_row_data.characters[i] = 0x20;
+            local_row_data.parity_error[i] = false;
+            continue;
+          }
+          local_row_data.present = true;
+          if (column >= head_columns_) {
+            local_row_data.extension_present = true;
+          }
+          const uint8_t byte = (*squashed)[i];
           if (teletext_odd_parity_valid(byte)) {
-            local_row_data.characters[column] = byte & 0x7F;
-            local_row_data.parity_error[column] = false;
+            local_row_data.characters[i] = byte & 0x7F;
+            local_row_data.parity_error[i] = false;
           } else {
-            local_row_data.characters[column] = 0x20;
-            local_row_data.parity_error[column] = true;
+            local_row_data.characters[i] = 0x20;
+            local_row_data.parity_error[i] = true;
           }
         }
         row_source = &local_row_data;
       }
+    }
+    // Without a squasher the columns beyond what one packet carries come from
+    // the decoder's own store, where handle_extension_packet() put them. A row
+    // whose extension never arrived shows spaces there rather than whatever the
+    // short packet left behind.
+    if (!from_squasher && head_columns_ < columns_) {
+      local_row_data = stored;
+      row_source = &local_row_data;
+      if (!local_row_data.present) {
+        // Only the extension arrived. What the display packet would have
+        // brought is unknown, and the stored bytes for those columns are the
+        // zeros of a row never written — which would read as spacing attributes
+        // rather than as the blank they stand for.
+        std::fill(local_row_data.characters.begin(),
+                  local_row_data.characters.begin() + head_columns_, 0x20);
+        std::fill(local_row_data.parity_error.begin(),
+                  local_row_data.parity_error.begin() + head_columns_, false);
+      }
+      for (int column = head_columns_; column < columns_; ++column) {
+        const auto i = static_cast<size_t>(column);
+        const bool have = stored.extension_present;
+        local_row_data.characters[i] = have ? stored.characters[i] : 0x20;
+        local_row_data.parity_error[i] = have && stored.parity_error[i];
+      }
+      local_row_data.present =
+          local_row_data.present || stored.extension_present;
     }
     const RowData& row_data = *row_source;
     auto& cells = snapshot.cells[static_cast<size_t>(row)];

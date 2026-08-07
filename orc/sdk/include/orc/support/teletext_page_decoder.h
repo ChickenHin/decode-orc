@@ -88,12 +88,11 @@ struct TeletextPageSnapshot {
   static constexpr int kRows = 25;     // header row 0 + display rows 1-24
   static constexpr int kColumns = 40;  // EN 300 706 §9.3.2: 40 display bytes
 
-  // Display columns the service actually transmits: kColumns on 625 lines (EN
-  // 300 706 §9.3.2, a 40-byte data block) and 32 on 525 lines (ITU-R BT.653
-  // Table 1b §3.4, a 32-byte one). Cells from here to kColumns are no part of
-  // the page and keep their defaults — a renderer draws this many columns wide
-  // rather than blanking a margin, because a 32-column service fills its
-  // screen just as a 40-column one does.
+  // Display columns to draw. kColumns on both services: the Level 1 display is
+  // a 40-column grid whatever the packet length, and a row the service left
+  // short simply shows spaces to the right of what it sent — which is what a
+  // receiver puts on screen. Carried in the snapshot rather than read from
+  // kColumns by consumers so a service that displays fewer can say so.
   int columns = kColumns;
 
   // Displayed magazine number 1-8. Transmission magazine 0 is displayed as
@@ -176,11 +175,30 @@ struct TeletextSubtitleCue {
  * transmission modes (§7.2, §7.3, control bit C11).
  *
  * Both packet lengths ITU-R BT.653 defines for System B are handled: 42 bytes
- * giving 40-column pages on 625 lines, and 34 giving 32-column ones on 525
- * (Table 1b). Everything the decoder reads by position — the MRAG, the page
- * number, the sub-code and the control bits — sits at the same byte offsets in
- * both, so only the row width changes (see process_packet() and
- * TeletextPageSnapshot::columns).
+ * on 625 lines and 34 on 525 (Table 1b). Everything the decoder reads by
+ * position — the MRAG, the page number, the sub-code and the control bits —
+ * sits at the same byte offsets in both, so only the number of display bytes a
+ * packet carries changes: 40 and 32 (see process_packet()).
+ *
+ * Pages are 40 columns wide on both, because a 525-line service sends the
+ * remaining 8 columns of its rows in separate *row-extension* packets. This is
+ * not in BT.653 — the standard describes the 32-byte data block and stops — but
+ * it is what the surviving 525-line WST recordings carry, and it is the only
+ * way a 34-byte packet can deliver the 40-column page the standard's own
+ * addressing, header layout and display model assume.
+ *
+ * An extension packet is addressed to magazine M|4, which leaves the service
+ * the four magazines 8, 1, 2 and 3 for its pages. Its 32 display bytes are four
+ * groups of 8 carrying columns 32-39 of four consecutive rows, and its packet
+ * number identifies that block of four rather than naming a row: it rounds down
+ * to a multiple of four, so packets numbered 1, 4, 8, 12, 16 and 20 complete
+ * rows 0-3, 4-7, 8-11, 12-15, 16-19 and 20-23. The first block's packets carry
+ * 1 rather than 0 because 0 is the page header's own packet number. Row 0 is
+ * therefore extended like any other: on the reference recordings its columns
+ * 32-39 carry the service name, which is where a 40-column receiver photograph
+ * of the same service shows it.
+ *
+ * A row that gets no extension shows spaces there, as it would on a receiver.
  *
  * Completed pages are delivered as Level 1 snapshots through the page
  * callback when the page transmission is terminated by the next page header
@@ -259,10 +277,11 @@ class TeletextPageDecoder {
   // |packet_bytes| is how many of |packet| the service transmitted:
   // kTeletextPacketBytes on 625 lines, kTeletext525PacketBytes on 525 (the
   // byte_count of TeletextObservedPacket, or the packet_bytes of
-  // TeletextLineResult). It sets the row width for every page assembled from
-  // here on — a recording carries one service throughout, and rows are
-  // rendered long after the packet that brought them, so the width has to be
-  // decoder state rather than something each stored row carries.
+  // TeletextLineResult). It sets how many display bytes a packet carries for
+  // every page assembled from here on — a recording carries one service
+  // throughout, and rows are rendered long after the packet that brought them,
+  // so this has to be decoder state rather than something each stored row
+  // carries. A short packet also enables row-extension decoding (see above).
   void process_packet(const std::array<uint8_t, kTeletextPacketBytes>& packet,
                       int64_t field_index, int64_t source = kAutoSource,
                       const TeletextPacketConfidence* confidence = nullptr,
@@ -310,7 +329,14 @@ class TeletextPageDecoder {
  private:
   // Raw stored bytes of one page row (7-bit codes, parity removed).
   struct RowData {
+    // A packet carrying this row's own display bytes was received: columns 0
+    // to head_columns_ are what it brought.
     bool present = false;
+    // A row-extension packet covering this row was received: columns
+    // head_columns_ to columns_ are what it brought. Tracked apart from
+    // |present| because the two arrive in different packets and either can go
+    // missing on a tape.
+    bool extension_present = false;
     std::array<uint8_t, TeletextPageSnapshot::kColumns> characters{};
     std::array<bool, TeletextPageSnapshot::kColumns> parity_error{};
   };
@@ -346,6 +372,14 @@ class TeletextPageDecoder {
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
       int64_t field_index, int64_t source,
       const TeletextPacketConfidence* confidence);
+  // A 525-line row-extension packet: |packet_number| identifies the block of
+  // four rows whose columns head_columns_ to kColumns it carries (see the class
+  // comment).
+  void handle_extension_packet(
+      int transmission_magazine, int packet_number,
+      const std::array<uint8_t, kTeletextPacketBytes>& packet,
+      int64_t field_index, int64_t source,
+      const TeletextPacketConfidence* confidence);
 
   // A sub-page's identity without the erase epoch, which is what the epoch
   // counter below is keyed on: {displayed magazine, page number, sub-code}.
@@ -354,10 +388,13 @@ class TeletextPageDecoder {
   // Identity of the page currently open in |magazine|, for squasher keying.
   TeletextPageKey page_key(int transmission_magazine) const;
 
-  // Display columns of the service being decoded (see
-  // TeletextPageSnapshot::columns), taken from the packet length passed to
-  // process_packet().
+  // Display columns of the page grid (see TeletextPageSnapshot::columns).
   int columns_ = TeletextPageSnapshot::kColumns;
+
+  // Display bytes one packet of the service carries: the packet length passed
+  // to process_packet() less the MRAG. Equal to columns_ on 625 lines; 32 of
+  // the 40 on 525, the rest arriving in row-extension packets.
+  int head_columns_ = TeletextPageSnapshot::kColumns;
 
   // Erase epoch of |identity| (0 until its first C4 header).
   int erase_epoch(const PageIdentity& identity) const;
