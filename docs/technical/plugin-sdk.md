@@ -170,6 +170,7 @@ plugin at the author's convenience.
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
 | `<orc/support/logging.h>` | Logging system implementation |
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
+| `<orc/support/nabts_page.h>` | A decoded NAPLPS presentation record as a resolved display list in unit space |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
 | `<orc/support/teletext_page_decoder.h>` | WST teletext page decoder (625 and 525 line) producing Level 1 snapshots and subtitle cues |

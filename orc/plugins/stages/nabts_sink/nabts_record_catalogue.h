@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "nabts_record.h"
+#include "naplps_interpreter.h"
 
 namespace orc {
 
@@ -104,12 +105,17 @@ class NabtsRecordCatalogue {
   /// Whether |message| is a better copy than the one |entry| is holding.
   static bool copy_is_better(const Entry& entry, const NabtsMessage& message);
 
-  /// Overwrite |entry|'s kept copy from |message|.
-  static void take_copy(Entry& entry, const NabtsMessage& message);
+  /// Overwrite |entry|'s kept copy from |message|, decoding its presentation
+  /// code if it has any.
+  void take_copy(Entry& entry, const NabtsMessage& message);
 
   void enforce_bounds();
 
   std::size_t max_records_;
+  /// Reused across records rather than built per copy: an interpreter is a few
+  /// kilobytes of state and run() resets all of it, so one instance decodes the
+  /// whole service.
+  NaplpsInterpreter interpreter_;
   std::map<Key, Entry> records_;
   uint64_t touch_counter_ = 0;
   bool truncated_ = false;

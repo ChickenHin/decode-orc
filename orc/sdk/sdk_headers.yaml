@@ -497,6 +497,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Thread-safe least-recently-used cache"
+  - path: orc/support/nabts_page.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "A decoded NAPLPS presentation record as a resolved display list in unit space"
   - path: orc/support/preview_helpers.h
     tier: support
     domain: ""

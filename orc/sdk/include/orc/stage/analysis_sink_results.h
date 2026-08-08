@@ -12,6 +12,7 @@
 #define ORC_CORE_ANALYSIS_SINK_RESULTS_H
 
 #include <orc/stage/common_types.h>
+#include <orc/support/nabts_page.h>
 #include <orc/support/teletext_page_decoder.h>
 
 #include <cstdint>
@@ -249,6 +250,11 @@ struct NabtsCataloguedRecord {
 
   /// Function descriptors, for an application record. Empty otherwise.
   std::vector<NabtsRecordFunction> functions;
+
+  /// The record's presentation code (§6.1 NAPLPS) run into a display list, for
+  /// a presentation record — types 0, 1 and 3. Empty for an application record,
+  /// whose data is function descriptors rather than drawing.
+  NabtsPageSnapshot page;
 };
 
 /**

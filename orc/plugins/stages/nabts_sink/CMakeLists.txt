@@ -9,6 +9,10 @@ set(STAGE_PLUGIN_SOURCES
     nabts_data_group.cpp
     nabts_record.cpp
     nabts_record_catalogue.cpp
+    naplps_code_env.cpp
+    naplps_pdi.cpp
+    naplps_state.cpp
+    naplps_interpreter.cpp
 )
 
 orc_add_stage_plugin(

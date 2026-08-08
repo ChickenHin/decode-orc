@@ -29,6 +29,7 @@
 
 #include "nabts_record.h"
 #include "nabts_sink_stage.h"
+#include "naplps_state.h"
 #include "sha256_hash.h"
 #include "vbi_source_stage.h"
 
@@ -268,6 +269,12 @@ RecoveryRun recover(const std::string& capture_path,
   return run;
 }
 
+/// Message for the "most records should draw" assertion.
+std::string only_a_few(size_t drew, size_t total) {
+  return "only " + std::to_string(drew) + " of " + std::to_string(total) +
+         " records drew anything, so the NAPLPS interpreter is not running";
+}
+
 void report(const char* what, const RecoveryRun& run) {
   const NabtsRecoverySummary& summary = run.dataset.summary;
   std::cout << "[ INFO     ] " << what << ": " << run.status << "\n"
@@ -282,6 +289,25 @@ void report(const char* what, const RecoveryRun& run) {
             << summary.blocks_damaged << " damaged\n"
             << "[ INFO     ] " << what << ": " << run.dataset.records.size()
             << " records catalogued" << std::endl;
+  size_t with_primitives = 0;
+  size_t total_primitives = 0;
+  size_t characters = 0;
+  size_t geometry = 0;
+  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+    if (!record.page.primitives.empty()) ++with_primitives;
+    total_primitives += record.page.primitives.size();
+    for (const auto& primitive : record.page.primitives) {
+      if (primitive.kind == NabtsPrimitiveKind::kCharacter) {
+        ++characters;
+      } else {
+        ++geometry;
+      }
+    }
+  }
+  std::cout << "[ INFO     ] " << what << ": NAPLPS " << with_primitives << "/"
+            << run.dataset.records.size() << " records drew something, "
+            << total_primitives << " primitives (" << characters
+            << " characters, " << geometry << " geometric)" << std::endl;
   for (const NabtsCataloguedRecord& record : run.dataset.records) {
     std::cout << "[ INFO     ]   " << record.channel_text << " v"
               << static_cast<int>(record.version) << " type "
@@ -747,6 +773,117 @@ TEST_F(NabtsSinkPipelineTest, RecordExportIsOffByDefaultAndNeedsAnOutputFile) {
   EXPECT_NE(stage.get_trigger_status().find("need an output file"),
             std::string::npos)
       << stage.get_trigger_status();
+}
+
+// ---------------------------------------------------------------------------
+// NAPLPS presentation decoding (CEA-516 §6.1)
+// ---------------------------------------------------------------------------
+
+// The whole chain, end to end on a real service: VBI samples to data lines to
+// packets to data groups to records to a display list a viewer can draw.
+//
+// Measured on this capture, 48 of the 51 records draw something, and between
+// them they yield about 21000 primitives — roughly 19000 characters and 2000
+// geometric. That mix is the shape of a broadcast teletext page: mostly text,
+// with geometry for rules, borders and coloured blocks. The three that draw
+// nothing are legitimate: a record may define macros or DRCS and draw nothing
+// itself.
+//
+// The bounds below are loose on purpose. They are here to catch the interpreter
+// failing altogether — no primitives, or a page that is all geometry and no
+// text — rather than to pin a figure that a decoder tuning change would move.
+TEST_F(NabtsSinkPipelineTest, ExtraVisionRecordsDecodeIntoNaplpsDisplayLists) {
+  if (!std::filesystem::exists(kExtraVisionCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kExtraVisionCapture;
+  }
+
+  const RecoveryRun run =
+      recover(kExtraVisionCapture, ".tbc VBI crop, 16-bit (NABTS)",
+              dir_ / "extravision");
+  report("CBS ExtraVision", run);
+  ASSERT_TRUE(run.triggered) << run.status;
+  ASSERT_GT(run.dataset.records.size(), 20u);
+
+  size_t drew_something = 0;
+  size_t characters = 0;
+  size_t geometry = 0;
+  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+    if (!record.page.primitives.empty()) {
+      ++drew_something;
+    }
+    for (const NabtsPrimitive& primitive : record.page.primitives) {
+      if (primitive.kind == NabtsPrimitiveKind::kCharacter) {
+        ++characters;
+      } else {
+        ++geometry;
+      }
+    }
+
+    // Whatever a record drew, it drew inside the unit screen — §5.3.1 admits no
+    // coordinate outside it, and the decoder clips rather than wrapping.
+    for (const NabtsPrimitive& primitive : record.page.primitives) {
+      for (const NabtsPoint& point : primitive.points) {
+        EXPECT_GE(point.x, 0.0) << record.channel_text;
+        EXPECT_LT(point.x, 1.0) << record.channel_text;
+        EXPECT_GE(point.y, 0.0) << record.channel_text;
+        EXPECT_LT(point.y, 1.0) << record.channel_text;
+      }
+    }
+
+    // A presentation record's display list is NAPLPS; an application record's
+    // is empty, because its data is function descriptors (§7.2.2).
+    if (!nabts_type_is_presentation(record.record_type)) {
+      EXPECT_TRUE(record.page.primitives.empty()) << record.channel_text;
+    }
+
+    // The colour map a renderer is handed is always a full one, whether the
+    // record wrote to it or not.
+    for (const NabtsColour& colour : record.page.colour_map) {
+      EXPECT_LE(colour.green, 7u);
+      EXPECT_LE(colour.red, 7u);
+      EXPECT_LE(colour.blue, 7u);
+    }
+
+    // The shared budget of §8.6.1 held.
+    EXPECT_LE(record.page.diagnostics.storage_used, kNaplpsSharedStorageBytes)
+        << record.channel_text;
+  }
+
+  // Most of the service's records draw.
+  EXPECT_GT(drew_something, run.dataset.records.size() / 2)
+      << only_a_few(drew_something, run.dataset.records.size());
+
+  // And what they draw is a teletext page rather than a blank one or a plotter
+  // exercise: text in the thousands, geometry in the hundreds at least.
+  EXPECT_GT(characters, 1000u)
+      << "only " << characters << " characters over the whole service";
+  EXPECT_GT(geometry, 100u) << "only " << geometry << " geometric primitives";
+  EXPECT_GT(characters, geometry) << "a teletext page is mostly text";
+}
+
+// The captioning record is a presentation record (§5.2.2.3), so it decodes like
+// any other — and being a caption it should be short, which is what separates a
+// caption from a page.
+TEST_F(NabtsSinkPipelineTest, TheCaptioningRecordDecodesAsPresentationCode) {
+  if (!std::filesystem::exists(kExtraVisionCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kExtraVisionCapture;
+  }
+
+  const RecoveryRun run = recover(
+      kExtraVisionCapture, ".tbc VBI crop, 16-bit (NABTS)", dir_ / "captions");
+  ASSERT_TRUE(run.triggered) << run.status;
+
+  const NabtsCataloguedRecord* captioning = nullptr;
+  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+    if (record.channel == 0xA00 && record.address_text == "000") {
+      captioning = &record;
+    }
+  }
+  ASSERT_NE(captioning, nullptr);
+  EXPECT_TRUE(nabts_type_is_presentation(captioning->record_type));
+  // A caption is a fraction of a page: §7.1.3 makes captioning non-cyclic, sent
+  // as it is needed rather than carouselled.
+  EXPECT_LT(captioning->data.size(), 100u);
 }
 
 }  // namespace

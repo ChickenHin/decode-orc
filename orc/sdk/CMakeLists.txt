@@ -69,6 +69,7 @@ add_library(orc-sdk-support STATIC
     src/teletext_page_decoder.cpp
     src/teletext_recovery_stats.cpp
     src/teletext_row_squasher.cpp
+    src/nabts_page.cpp
     src/vbi_utilities.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,

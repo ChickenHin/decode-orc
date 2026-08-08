@@ -189,6 +189,8 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_data_group_test.cpp
         stages/nabts_sink/nabts_record_test.cpp
         stages/nabts_sink/nabts_record_catalogue_test.cpp
+        stages/nabts_sink/naplps_code_env_test.cpp
+        stages/nabts_sink/naplps_interpreter_test.cpp
         stages/nabts_sink/nabts_scan_state_test.cpp
         stages/teletext_sink/teletext_sink_stage_test.cpp
         stages/teletext_sink/teletext_sink_deps_test.cpp
@@ -453,6 +455,7 @@ orc_add_core_unit_tests(
         "unit"
 
         support/log_destination_test.cpp
+        support/nabts_page_test.cpp
         support/teletext_slicer_test.cpp
         support/teletext_page_decoder_test.cpp
         support/teletext_recovery_stats_test.cpp
