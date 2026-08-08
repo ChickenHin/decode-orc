@@ -52,6 +52,19 @@ struct TeletextCataloguedSubPage {
   /// appearance, not another one.
   uint64_t times_seen = 0;
 
+  /// Packet slots this sub-page's own transmissions lost, estimated the same
+  /// way as TeletextRecoverySummary::lost_packets_estimate but scoped to the
+  /// fields this sub-page occupied: a service part-way through a page fills
+  /// every VBI line it inserts on, in every field it uses, so a field of this
+  /// sub-page's extent that came back short is short by packets the recording
+  /// lost. Which row each would have carried is not knowable.
+  ///
+  /// Zero is the answer for a sub-page whose transmissions all came back full,
+  /// and it is what makes a missing row in @ref page readable: without a loss
+  /// to blame, a row the assembly never received is one the service chose not
+  /// to send, which most pages do to space themselves out.
+  uint64_t lost_packets = 0;
+
   /// Best assembly of the sub-page, built from every row copy recovered over
   /// the analysed range rather than from one transmission
   TeletextPageSnapshot page;

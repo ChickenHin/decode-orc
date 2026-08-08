@@ -514,6 +514,7 @@ bool TeletextSinkStage::trigger(
   cancel_requested_.store(false);
   has_results_ = false;
   dataset_ = TeletextAnalysisDataset{};
+  invalidate_catalogue();
 
   const auto fail_trigger = [this](const std::string& status) {
     trigger_status_ = status;
@@ -556,6 +557,7 @@ bool TeletextSinkStage::trigger(
     // user triggered it.
     dataset_ = result.dataset;
     has_results_ = result.success;
+    invalidate_catalogue();
 
     // Diagnostic report of the run: recovery profile plus what combining
     // repeated rows changed. Reported for a run that was cancelled part-way as

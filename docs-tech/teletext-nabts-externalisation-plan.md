@@ -265,106 +265,165 @@ standalone SDK tarball CI job no longer ships the five headers.
 
 ---
 
-## Phase 2 — A generic catalogue-results contract
+## Phase 2 — A generic catalogue-results contract — **done**
 
 One new stage-tier header replacing two format-specific ones, plus one generic dialog replacing two
 bespoke ones. This is the phase that unblocks any future service viewer, not just these two.
+
+**As built, Phase 2 also does what Task 3.1 described** — both sinks implement the new contract, so
+the generic path is live end to end and Phase 2's own exit criteria are met. Phase 3 is now deletion
+and the caption-cue seam only.
 
 ### Task 2.1 — `orc/stage/tooling/catalogue_results.h`
 
 The contract has three parts.
 
-**The catalogue** — what fills a list or tree pane:
-
-```
-struct CatalogueColumn { std::string id, title; ColumnAlign align; bool numeric; };
-struct CatalogueItem {
-  std::string id;                              // opaque, stable within one run
-  std::vector<std::string> parent_path;        // empty = top level; supports sub-pages
-  std::vector<std::string> values;             // one per column
-  std::vector<CatalogueBadge> badges;          // "subtitle", "damaged", "truncated"
-};
-struct CatalogueSummary { std::vector<std::pair<std::string,std::string>> rows; };
-```
-
-`TeletextCataloguedPage`/`TeletextCataloguedSubPage` map onto item + parent_path directly; the
-sub-page nesting the abi 13 bump introduced is exactly what `parent_path` is for.
-`NabtsCataloguedRecord` maps onto a flat item list with badges for the classification flags.
-
-**The payload** — what fills the viewer pane, a tagged union of three renderable forms:
-
-* `CellGridPage` — the 40×25 character grid, promoted verbatim from `orc_teletext.h`'s
-  `TeletextPageCellView` (mosaic bits, double height, flash, conceal, boxed, parity error). Nothing
-  in it is teletext-specific beyond the colour-index convention, which the contract fixes as the
-  eight-entry order of EN 300 706 §12.2 Table 26.
-* `DisplayList` — promoted verbatim from `orc_nabts.h`: primitives in unit Cartesian space, resolved
-  RGB with a transparent flag, Unicode text runs with an explicit character path, sixel mosaics.
-* `TextDocument` — plain or lightly marked-up text, for application records and function-descriptor
-  listings.
-
-Promoting the *view models* rather than the SDK snapshots is the right direction: the view models are
-already resolved and renderer-agnostic, which is precisely the property a cross-DSO contract needs.
-
-**The interface:**
+**The catalogue** — what fills the item list:
 
 ```cpp
-class ICatalogueResults {
- public:
-  virtual bool has_results() const = 0;
-  virtual std::vector<CatalogueColumn> columns() const = 0;
-  virtual std::vector<CatalogueItem> items() const = 0;
-  virtual CatalogueSummary summary() const = 0;
-  virtual CataloguePayload payload(const std::string& item_id) const = 0;
-  virtual std::vector<CatalogueExport> exports() const = 0;
-  virtual bool write_export(const std::string& export_id,
-                            const std::string& path) const = 0;
-  virtual ~ICatalogueResults() = default;
+struct CatalogueColumn { std::string id, title; bool numeric; };
+struct CatalogueItem {
+  std::string id;                    // opaque, unique within one dataset
+  std::string parent_id;             // empty = top level; else a variant of that item
+  std::vector<std::string> values;   // one per schema column
+  std::vector<std::string> badges;   // "subs" — appended to the first column
+  bool selectable;
+  std::string tooltip;               // why it is unselectable, what a badge means
+  std::string find_key;              // what the reader types to reach it
+  std::string variant_label;         // "0002", for the variant stepper
 };
+struct CatalogueSchema {             // columns + the chrome they imply
+  std::vector<CatalogueColumn> columns;
+  std::string item_noun, variant_noun;          // "Page", "Sub-page"
+  std::string find_label, find_placeholder;     // empty hides the find box
+  std::string highlight_label;                  // empty hides the damage toggle
+  std::string empty_message;
+};
+struct CatalogueSummary { std::string headline; std::vector<std::string> notices; };
 ```
 
-`CatalogueExport` carries an id, a display name and a file filter, so the dialogs' `.t42` and `.srt`
-buttons stop being format-specific host knowledge.
+`parent_id` rather than the `parent_path` vector the first draft proposed: one level of nesting is
+what a carousel of variants needs, and it keeps the host at a table plus a stepper rather than a
+tree. `TeletextCataloguedPage`/`TeletextCataloguedSubPage` map onto parent and variant directly;
+`NabtsCataloguedRecord` maps onto a flat item list.
 
-New `StageToolKind::CatalogueBrowser` and a contract id
-`decode-orc.stage-tools.catalogue.v1`, so `mainwindow.cpp` routes on a *kind* rather than on a stage
-identity.
+**The payload** — what fills the viewer pane, four renderable forms:
 
-This is an additive ABI change: new types, new interface, no existing layout moves. Host ABI 14, with
-an `abi_history.yaml` entry noting that no released plugin can see the difference.
+* `CatalogueCellGrid` — the character grid, promoted from `orc_teletext.h`'s `TeletextPageCellView`
+  (mosaic bits, double height, flash, conceal, boxed, damaged). Nothing in it is teletext-specific:
+  the display palette and the nominal character-rectangle aspect travel *with the payload*, so a
+  service with different colours or a different cell shape needs no host change.
+* `CatalogueDisplayList` — promoted from `orc_nabts.h`: operations in unit Cartesian space, resolved
+  RGB with a transparent flag, Unicode text runs with an explicit advance, sub-element mosaics,
+  downloadable glyph bitmaps and programmable fill masks.
+* `CatalogueTextDocument` — plain or monospaced text, for a function listing.
+* `CatalogueTable` — columns and rows, for a cue track.
+
+Plus the readouts that go around it: `companion_text` (the text form beside a visual payload),
+`headline` and `condition`.
+
+**The interface** — `ICatalogueResults::catalogue()` returns the whole `CatalogueDataset` at once,
+mirroring the `dataset()` shape the analysis sinks already use, rather than the per-item `payload()`
+call the first draft proposed. Both sinks build it lazily under a mutex on first ask and cache it:
+resolving every sub-page into a cell grid, or every record into a display list, is real work that a
+run which only exports a packet stream never needs.
+
+`StageToolKind::CatalogueBrowser` is appended to the enum (so released values do not move) and
+`kCatalogueBrowserContractId` is `decode-orc.stage-tools.catalogue.v1`.
+
+**Not built: `exports()`.** The first draft assumed the dialogs had `.t42` and `.srt` export
+buttons to generalise. They do not — export is a stage *parameter* (`export_subtitles`,
+`subtitle_page`, `subtitle_format`), written during the trigger. Adding an export surface to the
+contract would have been inventing UI, so it is left for whenever a viewer actually needs one.
+
+**ABI stays 13.** The branch is unreleased, so the additions and the `analysis_sink_results.h`
+removals are folded into the existing abi 13 entry rather than given one of their own.
 
 ### Task 2.2 — `CatalogueDialog` and two renderers
 
-One host dialog: splitter, item tree with sortable columns, summary panel, payload pane, export menu
-driven by `exports()`. Two payload renderers behind a small abstract base:
+One host dialog (`orc/gui/cataloguedialog.{h,cpp}`): find box, item table with schema-driven columns,
+item stepper, standing notices, payload stack, variant stepper, damage toggle, summary and a status
+bar carrying the headline and condition. Every piece of chrome is shown only when the schema asks
+for it.
 
-* `CellGridRenderer` — the drawing half of `teletextpagewidget.cpp` (~290 lines), unchanged in
-  substance including the squeeze handling at `:164-215`.
-* `DisplayListRenderer` — the drawing half of `nabtscanvaswidget.cpp` (~620 lines), unchanged in
-  substance including `arc_through()` and `spline_through()`.
+Two payload renderers behind the stack:
+
+* `CatalogueCellGridWidget` — the drawing half of `teletextpagewidget.cpp`, unchanged in substance
+  including the two-pass background/foreground order and the glyph squeeze, with the fixed teletext
+  palette replaced by the payload's own.
+* `CatalogueDisplayListWidget` — the drawing half of `nabtscanvaswidget.cpp`, unchanged in substance
+  including `arc_through()` and `spline_through()`.
 
 Both keep their Qt font and `QPainterPath` use, which is the whole reason for choosing a display-list
 contract over plugin-side rasterisation (§6).
 
 ### Task 2.3 — Coordinator plumbing
 
-Replace `GetTeletextAnalysisData` / `GetNabtsAnalysisData` with a single `GetCatalogueData` request,
-one `catalogueDataReady` signal and one `catalogueProgress` signal
-(`render_coordinator.h:74-75, 213-231, 551-552, 789-807, 1079-1098`). The fetch-or-trigger behaviour
-documented at `:789-807` is already format-agnostic and carries over unchanged. Likewise the
-per-node dialog and progress-dialog maps in `mainwindow.h:405-408`, which become one map each.
+`GetTeletextAnalysisData` and `GetNabtsAnalysisData` collapse into one `GetCatalogueData` request,
+one `catalogueDataReady` signal and one `catalogueProgress` signal. The fetch-or-trigger behaviour
+carries over unchanged, as do the per-node dialog and progress-dialog maps, which become one each.
+`IRenderPresenter` loses its two format-specific getters for one `getCatalogueData()`.
+
+`mainwindow.cpp` routes on `orc::kCatalogueBrowserContractId` (or the `catalogue_browser` kind
+string) and takes the window title from the tool's own display name, so "Teletext Pages" and "NABTS
+Records" still title their windows without the host knowing what either is.
 
 ### Task 2.4 — Tests
 
-`orc-tests/gui/unit/catalogue_dialog_test.cpp` replaces `teletext_dialog_test.cpp` and
-`nabts_dialog_test.cpp`, driven by a fake `ICatalogueResults` rather than by
-`teletext_page_fixtures.h`. Renderer tests exercise the two payload forms directly. A contract test
-asserts that any stage advertising `StageToolKind::CatalogueBrowser` is castable to
-`ICatalogueResults`.
+`orc-tests/gui/unit/catalogue_dialog_test.cpp` — 26 tests over the dialog and both renderers, driven
+by hand-built datasets in the two shapes the sinks produce. `render_coordinator_test.cpp`'s two
+parallel blocks collapse into one catalogue block. A contract test in
+`stage_registry_contract_test.cpp` asserts that every stage advertising
+`StageToolKind::CatalogueBrowser` carries the right contract id and is castable to
+`ICatalogueResults` — the two things the host's routing depends on and neither compiler-checked.
 
-**Exit criteria:** the two sinks still open their viewers, now through the generic path; no
-`contract_id` string for either appears in `mainwindow.cpp`.
+**Exit criteria (met):** the two sinks open their viewers through the generic path; no teletext or
+NABTS contract string appears in `mainwindow.cpp`.
 
----
+### Task 2.5 — The per-page lost-packet count (follow-up)
+
+`TeletextPageRecoveryView::lost_packets` had been declared and never populated, which left the red
+row-gap banding in the teletext overlay unreachable and the "packets lost" clause of the recovery
+readout dead. Phase 2 preserved that; this task wires a real count.
+
+**What does not work.** The obvious derivation — the page's transmission extent against the run's
+usual packets-per-field, the same calibration
+`TeletextRecoverySummary::lost_packets_estimate` uses — is unsound. A service inserting on several
+VBI lines interleaves its magazines, so the packets in one field belong to several different pages
+and a field that came back short is short for whichever page that packet belonged to, which is not
+knowable. Charging the shortfall to every page whose extent covers the field double-counts badly:
+measured on the 625-line reference capture it accused **94 of 107 sub-pages** and attributed 1008
+lost packets against a run-wide estimate of 413.
+
+**What does work.** The row copies. A row the carousel brought round `times_seen` times should have
+arrived `times_seen` times, and `TeletextPageSnapshot::row_copies` says how many copies were
+actually combined; the shortfall is what the recording lost *of that page*, with no overlap to
+double-count. Rows that never arrived at all are excluded — a row with no copies is either one the
+service never sent (which most pages do, to space themselves out) or one lost every single time, and
+nothing can tell those apart. On the same capture this reports **3 of 107 sub-pages** and 10 lost
+packets.
+
+`teletext_subpage_lost_packets()` lives beside the catalogue; the recovery pass applies it only when
+the row squasher was attached, because without repeats to compare there is one copy per received row
+whatever the carousel did and every page seen twice would look half lost.
+
+**The limitation, stated plainly.** The figure is a floor, and it is silent exactly where a gap is
+most likely to be a loss: a page seen once has nothing to compare against, so it reports zero and
+the banding stays off. It speaks on a recording long enough for the carousel to go round, which is
+the case the viewer is for. Under-reporting is the right way to be wrong here — a figure that
+accused pages which had arrived whole would train the reader to ignore the marks, which is worse
+than not marking at all.
+
+A functional assertion on both reference captures guards the property that matters: fewer than half
+the catalogue accused. On the 625-line capture it reports 3 of 107 sub-pages and 10 lost packets;
+on the noisier 525-line one, 11 of 57 and 534.
+
+The run-wide estimate is printed beside it for context but deliberately not compared against — the
+two count different things and neither bounds the other. The run-wide figure is the shortfall of
+fields that carried *something*, and leaves out fields that yielded nothing at all (a service
+inserting into one field of each frame would otherwise show a loss in every other field). The rows
+those empty fields would have carried are missing from their pages all the same, which is why the
+per-page total runs above the run-wide one on the 525-line capture.
 
 ## Phase 3 — Port the plugins and delete the host format code
 

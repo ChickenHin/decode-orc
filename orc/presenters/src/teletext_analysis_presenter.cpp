@@ -63,6 +63,11 @@ TeletextAnalysisView TeletextAnalysisPresenter::makeAnalysisView(
       sub_view.last_seen_frame = subpage.last_seen_frame;
       sub_view.times_seen = subpage.times_seen;
       sub_view.page = makePageView(subpage.page);
+      // Only the catalogue knows this: it is the shortfall over the field
+      // slots this sub-page's own transmissions occupied, which the page
+      // snapshot carries no trace of.
+      sub_view.page.recovery.lost_packets =
+          static_cast<int>(subpage.lost_packets);
       entry.subpages.push_back(std::move(sub_view));
     }
     view.pages.push_back(std::move(entry));

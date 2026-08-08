@@ -228,7 +228,23 @@ history:
     cause: data-contract-swap
     contracts:
       - orc/stage/analysis_sink_results.h
+      - orc/stage/tooling/catalogue_results.h
+      - orc/plugin/orc_stage_tooling.h
     notes: >-
+      Also in this entry, still unreleased and so folded in rather than given an
+      abi of its own: the generic catalogue-browser contract. The new
+      `<orc/stage/tooling/catalogue_results.h>` carries `CatalogueDataset` and
+      the `ICatalogueResults` interface a stage implements to hand the host a
+      browsable set of items with something drawable for each — a cell grid, a
+      2D display list, a text document or a table — and `StageToolKind` gains
+      `CatalogueBrowser` (appended, so the values released plugins encode do not
+      move). `<orc/stage/analysis_sink_results.h>` loses the teletext and NABTS
+      catalogue types described below in the same breath: they were never
+      generic plugin contract, and while they sat in the ABI-frozen stage tier a
+      teletext change bumped the host ABI for every plugin in the ecosystem.
+      They now live with their sink plugins. This is source-breaking for anything
+      that included that header for them, and nothing outside this repository
+      ever could have.
       Also in this entry, and additive rather than breaking: the NABTS record
       surface (CEA-516 / ITU-R BT.653 System C). `orc/stage/analysis_sink_results.h`
       gains `NabtsRecordFunction`, `NabtsCataloguedRecord`,

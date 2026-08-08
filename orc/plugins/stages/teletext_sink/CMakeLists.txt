@@ -7,6 +7,7 @@ set(STAGE_PLUGIN_SOURCES
     teletext_block_scanner.cpp
     teletext_page_catalogue.cpp
     teletext_squash_stats.cpp
+    teletext_catalogue_view.cpp
 )
 
 orc_add_stage_plugin(

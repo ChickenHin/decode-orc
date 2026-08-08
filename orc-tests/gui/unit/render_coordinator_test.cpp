@@ -28,8 +28,7 @@
 Q_DECLARE_METATYPE(orc::PreviewRenderResult)
 Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
 Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
-Q_DECLARE_METATYPE(orc::presenters::NabtsAnalysisView)
-Q_DECLARE_METATYPE(orc::presenters::TeletextAnalysisView)
+Q_DECLARE_METATYPE(orc::CatalogueDataset)
 Q_DECLARE_METATYPE(std::vector<orc::AudioPairView>)
 Q_DECLARE_METATYPE(std::shared_ptr<orc::presenters::IAudioStreamReader>)
 
@@ -46,10 +45,7 @@ static bool registerRenderCoordinatorMetatypes() {
       "orc::presenters::VideoParameterObservationView");
   qRegisterMetaType<orc::presenters::NtscFieldObservationsView>(
       "orc::presenters::NtscFieldObservationsView");
-  qRegisterMetaType<orc::presenters::TeletextAnalysisView>(
-      "orc::presenters::TeletextAnalysisView");
-  qRegisterMetaType<orc::presenters::NabtsAnalysisView>(
-      "orc::presenters::NabtsAnalysisView");
+  qRegisterMetaType<orc::CatalogueDataset>("orc::CatalogueDataset");
   return true;
 }
 
@@ -619,34 +615,36 @@ TEST(RenderCoordinatorTest, ObservationRequest_DistinctIdsSupportStaleDrop) {
   coordinator.stop();
 }
 
-// --- Teletext analysis: GetTeletextAnalysisData request/response ----------
+// --- Catalogue browser: GetCatalogueData request/response -----------------
 
 namespace {
 
-// One trigger run's catalogue, as the stage would have cached it.
-orc::presenters::TeletextAnalysisView makeTeletextCatalogue(int page_number) {
-  orc::presenters::TeletextAnalysisView view;
-  orc::presenters::TeletextCataloguedPageView page;
-  page.magazine = 1;
-  page.page_number = page_number;
-  page.times_seen = 5;
-  page.subpages.emplace_back();
-  view.pages.push_back(page);
-  view.summary.frames_analysed = 100;
-  return view;
+// One trigger run's catalogue, as a stage would have cached it.
+orc::CatalogueDataset makeCatalogue(const std::string& item_id) {
+  orc::CatalogueDataset data;
+  data.schema.columns = {orc::CatalogueColumn{"id", "Id", false}};
+  data.schema.item_noun = "Page";
+  orc::CatalogueItem item;
+  item.id = item_id;
+  item.find_key = item_id;
+  item.values = {item_id};
+  data.items.push_back(std::move(item));
+  data.payloads.emplace_back();
+  data.summary.headline = "100 packets recovered";
+  return data;
 }
 
 }  // namespace
 
 // A stage that has already been triggered answers straight from its cached
-// dataset, with no trigger run.
-TEST(RenderCoordinatorTest, TeletextAnalysisRequest_ServesCachedCatalogue) {
+// catalogue, with no trigger run.
+TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getTeletextAnalysisData(orc::NodeID(2)))
-      .WillOnce(Return(makeTeletextCatalogue(0x00)));
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(2)))
+      .WillOnce(Return(makeCatalogue("100")));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
 
@@ -656,42 +654,39 @@ TEST(RenderCoordinatorTest, TeletextAnalysisRequest_ServesCachedCatalogue) {
         return mock_presenter;
       });
 
-  QSignalSpy data_spy(&coordinator,
-                      &RenderCoordinator::teletextAnalysisDataReady);
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
 
   coordinator.start();
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
 
-  const uint64_t request_id =
-      coordinator.requestTeletextAnalysisData(orc::NodeID(2));
+  const uint64_t request_id = coordinator.requestCatalogueData(orc::NodeID(2));
 
   ASSERT_TRUE(waitForCount(data_spy, 1));
   EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
-  const auto data =
-      data_spy.at(0).at(1).value<orc::presenters::TeletextAnalysisView>();
-  ASSERT_EQ(data.pages.size(), 1u);
-  EXPECT_EQ(data.pages[0].page_number, 0x00);
-  EXPECT_EQ(data.summary.frames_analysed, 100u);
+  const auto data = data_spy.at(0).at(1).value<orc::CatalogueDataset>();
+  ASSERT_EQ(data.items.size(), 1u);
+  EXPECT_EQ(data.items[0].id, "100");
+  EXPECT_EQ(data.summary.headline, "100 packets recovered");
 
   coordinator.stop();
 }
 
 // Opening the viewer on a node that has never been triggered decodes the
 // range first, then reads the catalogue back (fetch-or-trigger).
-TEST(RenderCoordinatorTest, TeletextAnalysisRequest_TriggersThenRetries) {
+TEST(RenderCoordinatorTest, CatalogueRequest_TriggersThenRetries) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   {
     InSequence sequence;
-    EXPECT_CALL(*mock_presenter, getTeletextAnalysisData(orc::NodeID(3)))
+    EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3)))
         .WillOnce(Return(std::nullopt));
     EXPECT_CALL(*mock_presenter, triggerStage(orc::NodeID(3), ::testing::_))
         .WillOnce(Return(1));
-    EXPECT_CALL(*mock_presenter, getTeletextAnalysisData(orc::NodeID(3)))
-        .WillOnce(Return(makeTeletextCatalogue(0x88)));
+    EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3)))
+        .WillOnce(Return(makeCatalogue("888")));
   }
 
   RenderCoordinator coordinator(
@@ -700,33 +695,30 @@ TEST(RenderCoordinatorTest, TeletextAnalysisRequest_TriggersThenRetries) {
         return mock_presenter;
       });
 
-  QSignalSpy data_spy(&coordinator,
-                      &RenderCoordinator::teletextAnalysisDataReady);
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
 
   coordinator.start();
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
 
-  coordinator.requestTeletextAnalysisData(orc::NodeID(3));
+  coordinator.requestCatalogueData(orc::NodeID(3));
 
   ASSERT_TRUE(waitForCount(data_spy, 1));
-  const auto data =
-      data_spy.at(0).at(1).value<orc::presenters::TeletextAnalysisView>();
-  ASSERT_EQ(data.pages.size(), 1u);
-  EXPECT_EQ(data.pages[0].page_number, 0x88);
+  const auto data = data_spy.at(0).at(1).value<orc::CatalogueDataset>();
+  ASSERT_EQ(data.items.size(), 1u);
+  EXPECT_EQ(data.items[0].id, "888");
 
   coordinator.stop();
 }
 
 // A node that yields nothing even after triggering is an error, not an empty
-// catalogue: it is not a teletext sink, or the trigger failed.
-TEST(RenderCoordinatorTest,
-     TeletextAnalysisRequest_ReportsFailureAfterTrigger) {
+// catalogue: its stage does not offer one, or the trigger failed.
+TEST(RenderCoordinatorTest, CatalogueRequest_ReportsFailureAfterTrigger) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getTeletextAnalysisData(orc::NodeID(4)))
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(4)))
       .WillRepeatedly(Return(std::nullopt));
 
   RenderCoordinator coordinator(
@@ -735,16 +727,14 @@ TEST(RenderCoordinatorTest,
         return mock_presenter;
       });
 
-  QSignalSpy data_spy(&coordinator,
-                      &RenderCoordinator::teletextAnalysisDataReady);
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
   QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
 
   coordinator.start();
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
 
-  const uint64_t request_id =
-      coordinator.requestTeletextAnalysisData(orc::NodeID(4));
+  const uint64_t request_id = coordinator.requestCatalogueData(orc::NodeID(4));
 
   ASSERT_TRUE(waitForCount(error_spy, 1));
   EXPECT_EQ(error_spy.at(0).at(0).toULongLong(), request_id);
@@ -755,14 +745,13 @@ TEST(RenderCoordinatorTest,
 
 // Concurrent requests carry distinct ids and each response echoes its own id,
 // so a consumer can drop stale (superseded) responses.
-TEST(RenderCoordinatorTest,
-     TeletextAnalysisRequest_DistinctIdsSupportStaleDrop) {
+TEST(RenderCoordinatorTest, CatalogueRequest_DistinctIdsSupportStaleDrop) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getTeletextAnalysisData(::testing::_))
-      .WillRepeatedly(Return(makeTeletextCatalogue(0x00)));
+  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_))
+      .WillRepeatedly(Return(makeCatalogue("100")));
 
   RenderCoordinator coordinator(
       [mock_presenter](
@@ -770,17 +759,14 @@ TEST(RenderCoordinatorTest,
         return mock_presenter;
       });
 
-  QSignalSpy data_spy(&coordinator,
-                      &RenderCoordinator::teletextAnalysisDataReady);
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
 
   coordinator.start();
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
 
-  const uint64_t first =
-      coordinator.requestTeletextAnalysisData(orc::NodeID(2));
-  const uint64_t second =
-      coordinator.requestTeletextAnalysisData(orc::NodeID(5));
+  const uint64_t first = coordinator.requestCatalogueData(orc::NodeID(2));
+  const uint64_t second = coordinator.requestCatalogueData(orc::NodeID(5));
   EXPECT_NE(first, second);
 
   ASSERT_TRUE(waitForCount(data_spy, 2));
@@ -790,181 +776,15 @@ TEST(RenderCoordinatorTest,
   coordinator.stop();
 }
 
-// --- NABTS analysis: GetNabtsAnalysisData request/response ---------------
-
-namespace {
-
-// One trigger run's catalogue, as the stage would have cached it.
-orc::presenters::NabtsAnalysisView makeNabtsCatalogue(
-    const std::string& address) {
-  orc::presenters::NabtsAnalysisView view;
-  orc::presenters::NabtsCatalogueRecordView record;
-  record.channel = 0x000;
-  record.address_text = address;
-  record.channel_text = "000/" + address;
-  record.record_type = 0;
-  record.presentation = true;
-  record.times_seen = 5;
-  view.records.push_back(record);
-  view.summary.frames_analysed = 100;
-  return view;
-}
-
-}  // namespace
-
-// A stage that has already been triggered answers straight from its cached
-// dataset, with no trigger run.
-TEST(RenderCoordinatorTest, NabtsAnalysisRequest_ServesCachedCatalogue) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getNabtsAnalysisData(orc::NodeID(2)))
-      .WillOnce(Return(makeNabtsCatalogue("1A4")));
-  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
-      .Times(0);
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::nabtsAnalysisDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  const uint64_t request_id =
-      coordinator.requestNabtsAnalysisData(orc::NodeID(2));
-
-  ASSERT_TRUE(waitForCount(data_spy, 1));
-  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
-  const auto data =
-      data_spy.at(0).at(1).value<orc::presenters::NabtsAnalysisView>();
-  ASSERT_EQ(data.records.size(), 1u);
-  EXPECT_EQ(data.records[0].address_text, "1A4");
-  EXPECT_EQ(data.summary.frames_analysed, 100u);
-
-  coordinator.stop();
-}
-
-// Opening the viewer on a node that has never been triggered decodes the range
-// first, then reads the catalogue back (fetch-or-trigger).
-TEST(RenderCoordinatorTest, NabtsAnalysisRequest_TriggersThenRetries) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  {
-    InSequence sequence;
-    EXPECT_CALL(*mock_presenter, getNabtsAnalysisData(orc::NodeID(3)))
-        .WillOnce(Return(std::nullopt));
-    EXPECT_CALL(*mock_presenter, triggerStage(orc::NodeID(3), ::testing::_))
-        .WillOnce(Return(1));
-    EXPECT_CALL(*mock_presenter, getNabtsAnalysisData(orc::NodeID(3)))
-        .WillOnce(Return(makeNabtsCatalogue("000")));
-  }
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::nabtsAnalysisDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  coordinator.requestNabtsAnalysisData(orc::NodeID(3));
-
-  ASSERT_TRUE(waitForCount(data_spy, 1));
-  const auto data =
-      data_spy.at(0).at(1).value<orc::presenters::NabtsAnalysisView>();
-  ASSERT_EQ(data.records.size(), 1u);
-  EXPECT_EQ(data.records[0].address_text, "000");
-
-  coordinator.stop();
-}
-
-// A node that yields nothing even after triggering is an error, not an empty
-// catalogue: it is not a NABTS sink, or the trigger failed.
-TEST(RenderCoordinatorTest, NabtsAnalysisRequest_ReportsFailureAfterTrigger) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getNabtsAnalysisData(orc::NodeID(4)))
-      .WillRepeatedly(Return(std::nullopt));
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::nabtsAnalysisDataReady);
-  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  const uint64_t request_id =
-      coordinator.requestNabtsAnalysisData(orc::NodeID(4));
-
-  ASSERT_TRUE(waitForCount(error_spy, 1));
-  EXPECT_EQ(error_spy.at(0).at(0).toULongLong(), request_id);
-  EXPECT_EQ(data_spy.count(), 0);
-
-  coordinator.stop();
-}
-
-// Concurrent requests carry distinct ids and each response echoes its own id,
-// so a consumer can drop stale (superseded) responses.
-TEST(RenderCoordinatorTest, NabtsAnalysisRequest_DistinctIdsSupportStaleDrop) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getNabtsAnalysisData(::testing::_))
-      .WillRepeatedly(Return(makeNabtsCatalogue("1A4")));
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::nabtsAnalysisDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  const uint64_t first = coordinator.requestNabtsAnalysisData(orc::NodeID(2));
-  const uint64_t second = coordinator.requestNabtsAnalysisData(orc::NodeID(5));
-  EXPECT_NE(first, second);
-
-  ASSERT_TRUE(waitForCount(data_spy, 2));
-  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), first);
-  EXPECT_EQ(data_spy.at(1).at(0).toULongLong(), second);
-
-  coordinator.stop();
-}
-
-// The worker thread is torn down cleanly with a NABTS request outstanding —
+// The worker thread is torn down cleanly with a catalogue request outstanding —
 // AGENTS.md §4.5's shutdown requirement for every request type.
-TEST(RenderCoordinatorTest, NabtsAnalysisRequest_StopsCleanlyWhileInFlight) {
+TEST(RenderCoordinatorTest, CatalogueRequest_StopsCleanlyWhileInFlight) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getNabtsAnalysisData(::testing::_))
-      .WillRepeatedly(Return(makeNabtsCatalogue("1A4")));
+  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_))
+      .WillRepeatedly(Return(makeCatalogue("100")));
 
   RenderCoordinator coordinator(
       [mock_presenter](
@@ -976,7 +796,7 @@ TEST(RenderCoordinatorTest, NabtsAnalysisRequest_StopsCleanlyWhileInFlight) {
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
   for (int i = 0; i < 8; ++i) {
-    coordinator.requestNabtsAnalysisData(orc::NodeID(2));
+    coordinator.requestCatalogueData(orc::NodeID(2));
   }
   coordinator.stop();
 }

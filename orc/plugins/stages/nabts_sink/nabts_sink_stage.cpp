@@ -496,6 +496,7 @@ bool NabtsSinkStage::trigger(
     // use than showing nothing.
     dataset_ = result.dataset;
     has_results_ = !dataset_.records.empty();
+    invalidate_catalogue();
 
     // Diagnostic report of the run. Reported for a run that was cancelled
     // part-way as well as one that finished — how it was going is exactly the

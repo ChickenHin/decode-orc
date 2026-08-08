@@ -23,12 +23,11 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
+#include <orc/stage/tooling/catalogue_results.h>
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
 #include <orc_closed_caption.h>   // Closed caption observation view types
-#include <orc_nabts.h>            // NABTS analysis view types
 #include <orc_preview_views.h>
-#include <orc_teletext.h>  // Teletext observation view types
 
 #include <QObject>
 #include <QString>
@@ -71,10 +70,9 @@ enum class RenderRequestType {
   GetDropoutData,        // Get dropout analysis data
   GetSNRData,            // Get SNR analysis data
   GetBurstLevelData,     // Get burst level analysis data
-  GetTeletextAnalysisData,  // Get the teletext page catalogue of a sink stage
-  GetNabtsAnalysisData,     // Get the NABTS record catalogue of a sink stage
-  TriggerStage,             // Trigger a stage (batch processing)
-  CancelTrigger,            // Cancel ongoing trigger
+  GetCatalogueData,  // Get the browsable catalogue of a stage that offers one
+  TriggerStage,      // Trigger a stage (batch processing)
+  CancelTrigger,     // Cancel ongoing trigger
   GetAvailableOutputs,      // Query available preview outputs
   GetAudioChannelPairs,     // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
@@ -210,24 +208,13 @@ struct GetBurstLevelDataRequest : public RenderRequest {
 };
 
 /**
- * @brief Request to get the teletext page catalogue of an analysis sink stage
+ * @brief Request to get the browsable catalogue of a stage that offers one
  */
-struct GetTeletextAnalysisDataRequest : public RenderRequest {
+struct GetCatalogueDataRequest : public RenderRequest {
   orc::NodeID node_id;
 
-  GetTeletextAnalysisDataRequest(uint64_t id, orc::NodeID node)
-      : RenderRequest(RenderRequestType::GetTeletextAnalysisData, id),
-        node_id(std::move(node)) {}
-};
-
-/**
- * @brief Request to get the NABTS record catalogue of an analysis sink stage
- */
-struct GetNabtsAnalysisDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-
-  GetNabtsAnalysisDataRequest(uint64_t id, orc::NodeID node)
-      : RenderRequest(RenderRequestType::GetNabtsAnalysisData, id),
+  GetCatalogueDataRequest(uint64_t id, orc::NodeID node)
+      : RenderRequest(RenderRequestType::GetCatalogueData, id),
         node_id(std::move(node)) {}
 };
 
@@ -548,10 +535,8 @@ class IRenderPresenter {
       NodeID node_id) = 0;
   virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(NodeID node_id) = 0;
-  virtual std::optional<orc::presenters::TeletextAnalysisView>
-  getTeletextAnalysisData(NodeID node_id) = 0;
-  virtual std::optional<orc::presenters::NabtsAnalysisView>
-  getNabtsAnalysisData(NodeID node_id) = 0;
+  virtual std::optional<orc::CatalogueDataset> getCatalogueData(
+      NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -786,28 +771,16 @@ class RenderCoordinator : public QObject {
   uint64_t requestBurstLevelData(const orc::NodeID& node_id);
 
   /**
-   * @brief Request the teletext page catalogue of an analysis sink (async)
+   * @brief Request the browsable catalogue of a stage (async)
    *
-   * Fetch-or-trigger, as for the graph analyses: an untriggered stage is
-   * triggered first (progress via teletextAnalysisProgress) and the catalogue
-   * read back. Result is emitted via teletextAnalysisDataReady.
+   * Fetch-or-trigger: a node that has not been triggered is triggered first
+   * (progress via catalogueProgress) and the catalogue read back. Result is
+   * emitted via catalogueDataReady.
    *
-   * @param node_id Teletext analysis sink node to read
-   * @return Request ID for matching response
+   * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @return Request ID
    */
-  uint64_t requestTeletextAnalysisData(const orc::NodeID& node_id);
-
-  /**
-   * @brief Request the NABTS record catalogue of an analysis sink (async)
-   *
-   * Fetch-or-trigger, exactly as the teletext request is: an untriggered node
-   * is triggered first (progress via nabtsAnalysisProgress) and the catalogue
-   * read back. Result is emitted via nabtsAnalysisDataReady.
-   *
-   * @param node_id NABTS analysis sink node to read
-   * @return Request id, echoed by the response so a stale one can be dropped
-   */
-  uint64_t requestNabtsAnalysisData(const orc::NodeID& node_id);
+  uint64_t requestCatalogueData(const orc::NodeID& node_id);
 
   /**
    * @brief Request available outputs for a node (async)
@@ -1076,26 +1049,14 @@ class RenderCoordinator : public QObject {
   void burstLevelProgress(size_t current, size_t total, QString message);
 
   /**
-   * @brief Emitted when the teletext page catalogue is ready
+   * @brief Emitted when a stage's catalogue is ready
    */
-  void teletextAnalysisDataReady(uint64_t request_id,
-                                 orc::presenters::TeletextAnalysisView data);
+  void catalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
 
   /**
-   * @brief Emitted while an untriggered teletext sink is decoding
+   * @brief Emitted while an untriggered catalogue stage is decoding
    */
-  void teletextAnalysisProgress(size_t current, size_t total, QString message);
-
-  /**
-   * @brief Emitted when the NABTS record catalogue is ready
-   */
-  void nabtsAnalysisDataReady(uint64_t request_id,
-                              orc::presenters::NabtsAnalysisView data);
-
-  /**
-   * @brief Emitted while an untriggered NABTS sink is decoding
-   */
-  void nabtsAnalysisProgress(size_t current, size_t total, QString message);
+  void catalogueProgress(size_t current, size_t total, QString message);
 
   /**
    * @brief Emitted when available outputs query completes
@@ -1293,14 +1254,9 @@ class RenderCoordinator : public QObject {
   void handleGetBurstLevelData(const GetBurstLevelDataRequest& req);
 
   /**
-   * @brief Handle GetTeletextAnalysisData request
+   * @brief Handle GetCatalogueData request
    */
-  void handleGetTeletextAnalysisData(const GetTeletextAnalysisDataRequest& req);
-
-  /**
-   * @brief Handle GetNabtsAnalysisData request
-   */
-  void handleGetNabtsAnalysisData(const GetNabtsAnalysisDataRequest& req);
+  void handleGetCatalogueData(const GetCatalogueDataRequest& req);
 
   /**
    * @brief Handle GetAvailableOutputs request

@@ -10,9 +10,28 @@
 #include "teletext_page_catalogue.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <utility>
 
 namespace orc {
+
+uint64_t teletext_subpage_lost_packets(
+    const TeletextCataloguedSubPage& subpage) {
+  uint64_t lost = 0;
+  const auto& copies = subpage.page.row_copies;
+  // Row 0 is the header, which carries a live clock and is never squashed, so
+  // its copy count is always zero and says nothing.
+  for (std::size_t row = 1; row < copies.size(); ++row) {
+    const auto arrived = static_cast<uint64_t>(std::max(0, copies[row]));
+    // A row that never arrived is unknowable; more copies than appearances is
+    // a row re-sent inside one transmission, not negative loss.
+    if (arrived == 0 || arrived >= subpage.times_seen) {
+      continue;
+    }
+    lost += subpage.times_seen - arrived;
+  }
+  return lost;
+}
 
 TeletextPageCatalogue::TeletextPageCatalogue(std::size_t max_subpages,
                                              std::size_t max_subpages_per_page)

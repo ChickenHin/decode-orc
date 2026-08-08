@@ -141,6 +141,7 @@ orc_add_gui_unit_tests(
         plugin_browse_dialog_test.cpp
         plugin_manager_dialog_test.cpp
         closed_caption_dialog_test.cpp
+        catalogue_dialog_test.cpp
         teletext_dialog_test.cpp
         nabts_dialog_test.cpp
 )

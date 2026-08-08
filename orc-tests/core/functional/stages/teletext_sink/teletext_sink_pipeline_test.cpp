@@ -323,6 +323,48 @@ AnalysisRun analyse(const std::string& capture_path,
 }
 
 // The pages a run catalogued, as the magazine + two hex digits a viewer shows.
+// The per-page lost-packet count, reported and sanity-checked.
+//
+// TeletextCataloguedSubPage::lost_packets exists so a missing row on screen can
+// be blamed on the recording or acquitted, and it is derived from the row
+// copies rather than from the field slots the page occupied: a service
+// inserting on several VBI lines interleaves its magazines, so a field that
+// came back short is short for whichever page that packet belonged to, and
+// charging it to every page whose extent covers the field accused 94 of 107
+// sub-pages of this very capture. An estimate that accuses most of a catalogue
+// is worse than none at all, because it trains the reader to ignore the marks.
+void expect_sane_per_page_loss(const std::string& label,
+                               const AnalysisRun& run) {
+  uint64_t subpages_with_loss = 0;
+  uint64_t subpages_total = 0;
+  uint64_t per_page_loss = 0;
+  for (const auto& page : run.dataset.pages) {
+    for (const auto& subpage : page.subpages) {
+      ++subpages_total;
+      per_page_loss += subpage.lost_packets;
+      if (subpage.lost_packets > 0) {
+        ++subpages_with_loss;
+      }
+    }
+  }
+  std::cout << "[ INFO     ] " << label << ": " << subpages_with_loss << " of "
+            << subpages_total << " sub-page(s) lost packets, " << per_page_loss
+            << " in total against a run-wide estimate of "
+            << run.dataset.summary.lost_packets_estimate << std::endl;
+
+  ASSERT_GT(subpages_total, 0u);
+  EXPECT_LT(subpages_with_loss * 2, subpages_total)
+      << "the per-page loss count accuses more than half the catalogue";
+
+  // The run-wide estimate is printed for context, not compared against: the
+  // two count different things and neither bounds the other. The run-wide
+  // figure is the shortfall of fields that carried *something*, and leaves out
+  // fields that yielded nothing at all because a service inserting into one
+  // field of each frame would otherwise show a loss in every other field. The
+  // rows those empty fields would have carried are missing from their pages
+  // all the same, so on a noisy recording the per-page total runs above it.
+}
+
 std::set<std::string> catalogued_pages(const TeletextAnalysisDataset& dataset) {
   std::set<std::string> pages;
   for (const auto& page : dataset.pages) {
@@ -489,6 +531,8 @@ TEST_F(TeletextSinkPipelineTest, PalCaptureCataloguesTheServicesPages) {
             << " page(s) transmitted as a sequence of sub-pages" << std::endl;
   EXPECT_GT(multi_page_sets, 0u)
       << "no multi-page set found in a window that carries them";
+
+  expect_sane_per_page_loss("PAL WST", run);
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +681,8 @@ TEST_F(TeletextSinkPipelineTest, NtscCaptureCataloguesTheServicesPages) {
     }
   }
   EXPECT_EQ(wide_pages, subpages);
+
+  expect_sane_per_page_loss("NTSC WST", run);
 }
 
 }  // namespace

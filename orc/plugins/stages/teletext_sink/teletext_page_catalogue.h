@@ -23,6 +23,31 @@
 namespace orc {
 
 /**
+ * @brief Packets a sub-page's own transmissions lost, from its row copies
+ *
+ * A row the carousel brought round @c times_seen times should have arrived
+ * @c times_seen times. TeletextPageSnapshot::row_copies says how many copies of
+ * it were actually combined, and the shortfall is what the recording lost of
+ * this page — a sound per-page count, unlike anything derived from the field
+ * slots the page occupied: a service inserting on several VBI lines interleaves
+ * its magazines, so a field that came back short is short for whichever page
+ * that packet belonged to, and which one is not knowable.
+ *
+ * Rows that never arrived at all are excluded. A row with no copies is either
+ * one the service never sent — which most pages do, to space themselves out —
+ * or one lost every single time, and nothing here can tell those apart. So this
+ * under-reports, which is the right way to be wrong: the figure exists to
+ * decide whether a gap on screen is worth blaming on the recording, and a
+ * figure that accused pages that arrived whole would be worse than none.
+ *
+ * Meaningful only where the row squasher was attached: without it the decoder
+ * reports one copy per received row whatever the carousel did, and every page
+ * seen twice would look half lost. The caller says so by not asking.
+ */
+uint64_t teletext_subpage_lost_packets(
+    const TeletextCataloguedSubPage& subpage);
+
+/**
  * @brief Accumulates decoded page snapshots into a bounded page catalogue
  *
  * A trigger run decodes the whole frame range in one pass, which on a long

@@ -16,11 +16,10 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>   // Public API rendering types
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
+#include <orc/stage/tooling/catalogue_results.h>    // CatalogueDataset
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
-#include <orc_nabts.h>            // NABTS analysis view types
 #include <orc_preview_views.h>
-#include <orc_teletext.h>  // Teletext analysis view types
 
 #include <cstdint>
 #include <functional>
@@ -287,28 +286,17 @@ class RenderPresenter {
       NodeID node_id);
 
   /**
-   * @brief Get the teletext page catalogue from an analysis sink stage
+   * @brief Get the browsable catalogue from a stage that offers one
    *
-   * The catalogue is bounded by the stage's page cap rather than by the frame
-   * range, so unlike the graph series it needs no decimation.
-   *
-   * @param node_id Node to get data from
-   * @return The catalogue and recovery summary, or std::nullopt if the node is
-   *         not a triggered teletext sink
-   */
-  std::optional<TeletextAnalysisView> getTeletextAnalysisData(NodeID node_id);
-
-  /**
-   * @brief Get the NABTS record catalogue from an analysis sink stage
-   *
-   * Bounded by the stage's record cap rather than by the frame range, so like
-   * the teletext catalogue it needs no decimation.
+   * The dataset is bounded by whatever cap the stage applies rather than by
+   * the frame range, so unlike the graph series it needs no decimation, and it
+   * is handed over whole.
    *
    * @param node_id Node to get data from
-   * @return The catalogue, caption cues and recovery summary, or std::nullopt
-   *         if the node is not a triggered NABTS sink
+   * @return The catalogue, or std::nullopt if the node's stage does not expose
+   *         orc::ICatalogueResults or has not been triggered
    */
-  std::optional<NabtsAnalysisView> getNabtsAnalysisData(NodeID node_id);
+  std::optional<orc::CatalogueDataset> getCatalogueData(NodeID node_id);
 
   /**
    * @brief Request dropout analysis data from a sink node (deprecated - use

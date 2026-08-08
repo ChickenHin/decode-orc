@@ -120,6 +120,16 @@ set(ORC_GUI_LIB_SOURCES
     ntscobserverdialog.cpp
     ntscobserverdialog.h
 
+    # Generic catalogue browser: the viewer for any stage advertising
+    # StageToolKind::CatalogueBrowser, plus the two payload renderers it
+    # switches between.
+    cataloguecellgridwidget.cpp
+    cataloguecellgridwidget.h
+    cataloguedisplaylistwidget.cpp
+    cataloguedisplaylistwidget.h
+    cataloguedialog.cpp
+    cataloguedialog.h
+
     # Teletext page viewer (teletext_sink stage tool)
     teletextpagewidget.cpp
     teletextpagewidget.h

@@ -13,19 +13,18 @@
 #include <limits>
 
 #include "burstlevelanalysisdialog.h"
+#include "cataloguedialog.h"
 #include "closedcaptiondialog.h"
 #include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
 #include "logging.h"
 #include "mainwindow.h"
-#include "nabtsdialog.h"
 #include "ntscobserverdialog.h"
 #include "observation_status_formatter.h"
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
 #include "snranalysisdialog.h"
-#include "teletextdialog.h"
 #include "vbidialog.h"
 #include "videoparameterobserverdialog.h"
 
@@ -967,117 +966,57 @@ void MainWindow::onBurstLevelProgress(size_t current, size_t total,
   }
 }
 
-void MainWindow::onTeletextAnalysisDataReady(
-    uint64_t request_id, orc::presenters::TeletextAnalysisView data) {
+void MainWindow::onCatalogueDataReady(uint64_t request_id,
+                                      orc::CatalogueDataset data) {
   // Find which node this request was for
-  auto req_it = pending_teletext_analysis_requests_.find(request_id);
-  if (req_it == pending_teletext_analysis_requests_.end()) {
-    ORC_LOG_DEBUG(
-        "Ignoring stale teletext data response (unknown request_id {})",
-        request_id);
-    return;
-  }
-
-  orc::NodeID node_id = req_it->second;
-  pending_teletext_analysis_requests_.erase(req_it);
-
-  ORC_LOG_DEBUG("onTeletextAnalysisDataReady for node '{}': {} pages",
-                node_id.to_string(), data.pages.size());
-
-  // Close progress dialog safely (matches onTriggerComplete pattern). Erase
-  // from the map FIRST so a re-entrant progress callback sees it gone.
-  auto prog_it = teletext_analysis_progress_dialogs_.find(node_id);
-  if (prog_it != teletext_analysis_progress_dialogs_.end() && prog_it->second) {
-    QProgressDialog* pd = prog_it->second.data();
-    teletext_analysis_progress_dialogs_.erase(prog_it);
-    pd->blockSignals(true);
-    pd->hide();
-    pd->deleteLater();
-  }
-
-  // Find the viewer for this stage
-  auto dialog_it = teletext_analysis_dialogs_.find(node_id);
-  if (dialog_it == teletext_analysis_dialogs_.end() || !dialog_it->second) {
-    return;
-  }
-
-  auto* dialog = dialog_it->second;
-  dialog->setAnalysisData(data);
-
-  // Bring the viewer to the front now that it has data
-  dialog->raise();
-  dialog->activateWindow();
-}
-
-void MainWindow::onTeletextAnalysisProgress(size_t current, size_t total,
-                                            QString message) {
-  if (total == 0) return;
-  int percentage = static_cast<int>((current * 100) / total);
-  if (percentage >= 100) percentage = 99;
-
-  // Snapshot QPointers by value — see onDropoutProgress for reasoning.
-  std::vector<QPointer<QProgressDialog>> snapshot;
-  snapshot.reserve(teletext_analysis_progress_dialogs_.size());
-  for (auto& [id, pd] : teletext_analysis_progress_dialogs_) {
-    if (pd) snapshot.push_back(pd);
-  }
-  for (QPointer<QProgressDialog>& pd : snapshot) {
-    if (pd) pd->setValue(percentage);
-    if (pd) pd->setLabelText(message);
-  }
-}
-
-void MainWindow::onNabtsAnalysisDataReady(
-    uint64_t request_id, orc::presenters::NabtsAnalysisView data) {
-  // Find which node this request was for
-  auto req_it = pending_nabts_analysis_requests_.find(request_id);
-  if (req_it == pending_nabts_analysis_requests_.end()) {
-    ORC_LOG_DEBUG("Ignoring stale NABTS data response (unknown request_id {})",
+  auto req_it = pending_catalogue_requests_.find(request_id);
+  if (req_it == pending_catalogue_requests_.end()) {
+    ORC_LOG_DEBUG("Ignoring stale catalogue response (unknown request_id {})",
                   request_id);
     return;
   }
 
   orc::NodeID node_id = req_it->second;
-  pending_nabts_analysis_requests_.erase(req_it);
+  pending_catalogue_requests_.erase(req_it);
 
-  ORC_LOG_DEBUG("onNabtsAnalysisDataReady for node '{}': {} records",
-                node_id.to_string(), data.records.size());
+  ORC_LOG_DEBUG("onCatalogueDataReady for node '{}': {} items",
+                node_id.to_string(), data.items.size());
 
   // Close progress dialog safely (matches onTriggerComplete pattern). Erase
   // from the map FIRST so a re-entrant progress callback sees it gone.
-  auto prog_it = nabts_analysis_progress_dialogs_.find(node_id);
-  if (prog_it != nabts_analysis_progress_dialogs_.end() && prog_it->second) {
+  auto prog_it = catalogue_progress_dialogs_.find(node_id);
+  if (prog_it != catalogue_progress_dialogs_.end() && prog_it->second) {
     QProgressDialog* pd = prog_it->second.data();
-    nabts_analysis_progress_dialogs_.erase(prog_it);
+    catalogue_progress_dialogs_.erase(prog_it);
     pd->blockSignals(true);
     pd->hide();
     pd->deleteLater();
   }
 
-  // Find the viewer for this stage
-  auto dialog_it = nabts_analysis_dialogs_.find(node_id);
-  if (dialog_it == nabts_analysis_dialogs_.end() || !dialog_it->second) {
+  // Find the viewer for this node
+  auto dialog_it = catalogue_dialogs_.find(node_id);
+  if (dialog_it == catalogue_dialogs_.end() || !dialog_it->second) {
     return;
   }
 
   auto* dialog = dialog_it->second;
-  dialog->setAnalysisData(data);
+  dialog->setCatalogue(data);
 
   // Bring the viewer to the front now that it has data
   dialog->raise();
   dialog->activateWindow();
 }
 
-void MainWindow::onNabtsAnalysisProgress(size_t current, size_t total,
-                                         QString message) {
+void MainWindow::onCatalogueProgress(size_t current, size_t total,
+                                     QString message) {
   if (total == 0) return;
   int percentage = static_cast<int>((current * 100) / total);
   if (percentage >= 100) percentage = 99;
 
   // Snapshot QPointers by value — see onDropoutProgress for reasoning.
   std::vector<QPointer<QProgressDialog>> snapshot;
-  snapshot.reserve(nabts_analysis_progress_dialogs_.size());
-  for (auto& [id, pd] : nabts_analysis_progress_dialogs_) {
+  snapshot.reserve(catalogue_progress_dialogs_.size());
+  for (auto& [id, pd] : catalogue_progress_dialogs_) {
     if (pd) snapshot.push_back(pd);
   }
   for (QPointer<QProgressDialog>& pd : snapshot) {

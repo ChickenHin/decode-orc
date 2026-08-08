@@ -13,6 +13,7 @@ set(STAGE_PLUGIN_SOURCES
     naplps_pdi.cpp
     naplps_state.cpp
     naplps_interpreter.cpp
+    nabts_catalogue_view.cpp
 )
 
 orc_add_stage_plugin(

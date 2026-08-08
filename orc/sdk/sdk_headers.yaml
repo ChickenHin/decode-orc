@@ -437,6 +437,12 @@ headers:
     deprecated: true
     since_abi: ""
     notes: "Deprecated include-path shim — forwards to the tiered SDK layout"
+  - path: orc/stage/tooling/catalogue_results.h
+    tier: stage
+    domain: "tooling"
+    deprecated: false
+    since_abi: 13
+    notes: "Host-agnostic browsable result set for stages that catalogue items"
   - path: orc/stage/triggerable_stage.h
     tier: stage
     domain: "foundation"

@@ -49,7 +49,8 @@ The SDK surface is split into three tiers with distinct stability promises:
   ABI surface until they are relocated under a tier.)
 - **`orc/stage/`** — the stage contract: interfaces and data types that cross
   the plugin boundary, grouped by **domain** (`preview/`, `observation/`,
-  `dropout/`, `audio/`, `params/`) with the foundation types at the tier root.
+  `dropout/`, `audio/`, `params/`, `tooling/`) with the foundation types at the
+  tier root.
   A layout change here bumps the host ABI.
 - **`orc/support/`** — compiled-into-plugin utilities. Explicitly **not** ABI:
   changes never require a bump, only a plugin recompile at the author's
@@ -170,13 +171,8 @@ plugin at the author's convenience.
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
 | `<orc/support/logging.h>` | Logging system implementation |
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
-| `<orc/support/nabts_page.h>` | A decoded NAPLPS presentation record as a resolved display list in unit space |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
-| `<orc/support/teletext_page_decoder.h>` | WST teletext page decoder (625 and 525 line) producing Level 1 snapshots and subtitle cues |
-| `<orc/support/teletext_recovery_stats.h>` | Accumulates teletext recovery outcomes into a diagnostic profile of a run |
-| `<orc/support/teletext_row_squasher.h>` | Combines repeated copies of a teletext page row into one best-estimate row |
-| `<orc/support/teletext_slicer.h>` | WST teletext data-line slicer producing 42-byte (625 line) or 34-byte (525 line) packets |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
 

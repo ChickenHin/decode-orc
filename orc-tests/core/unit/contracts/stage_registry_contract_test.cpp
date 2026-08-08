@@ -8,6 +8,8 @@
  */
 
 #include <gtest/gtest.h>
+#include <orc/plugin/orc_stage_tooling.h>
+#include <orc/stage/tooling/catalogue_results.h>
 
 #include <optional>
 #include <set>
@@ -124,6 +126,43 @@ TEST(StageRegistryContractTest, EachPublicStage_CanBeCreatedFromRegistry) {
         << "Registry failed to create '" << expected_name << "'";
     EXPECT_EQ(created->get_node_type_info().stage_name, expected_name);
   }
+}
+
+// A stage that advertises a catalogue browser must actually be one: the host
+// routes on the tool kind alone and reaches the data by dynamic_cast, so a
+// stage that advertises the kind without implementing ICatalogueResults opens
+// a viewer that can never be filled. The contract id goes with the kind for
+// the same reason — it is what a host that routes on the contract string
+// matches.
+TEST(StageRegistryContractTest,
+     CatalogueBrowserStages_ExposeICatalogueResults) {
+  int browsers = 0;
+  for (const auto& spec : public_stage_specs()) {
+    auto stage = spec.create();
+    ASSERT_NE(stage, nullptr);
+    const auto* provider =
+        dynamic_cast<const orc::StageToolProvider*>(stage.get());
+    if (provider == nullptr) {
+      continue;
+    }
+    for (const auto& tool : provider->get_stage_tools()) {
+      if (tool.kind != orc::StageToolKind::CatalogueBrowser) {
+        continue;
+      }
+      ++browsers;
+      const auto stage_name = stage->get_node_type_info().stage_name;
+      EXPECT_EQ(tool.contract_id, orc::kCatalogueBrowserContractId)
+          << "Stage '" << stage_name << "' tool '" << tool.tool_id
+          << "' advertises a catalogue browser under the wrong contract id";
+      EXPECT_NE(dynamic_cast<orc::ICatalogueResults*>(stage.get()), nullptr)
+          << "Stage '" << stage_name
+          << "' advertises a catalogue browser but does not implement "
+             "orc::ICatalogueResults";
+    }
+  }
+  // The teletext and NABTS sinks are the two in the tree; a zero here means
+  // the inventory stopped covering them rather than that the rule holds.
+  EXPECT_GE(browsers, 2);
 }
 
 TEST(StageRegistryContractTest, UnknownStage_FailsCleanly) {

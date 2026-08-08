@@ -17,7 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <initializer_list>
 #include <string>
+#include <vector>
 
 namespace orc_unit_test {
 
@@ -58,6 +60,23 @@ const orc::TeletextPageSnapshot& only_subpage(
     const orc::TeletextCataloguedPage& page) {
   EXPECT_EQ(page.subpages.size(), 1u);
   return page.subpages.at(0).page;
+}
+
+// A run's per-field packet record: |counts[i]| packets recovered in field i.
+std::vector<uint8_t> field_counts(std::initializer_list<int> counts) {
+  std::vector<uint8_t> out;
+  out.reserve(counts.size());
+  for (const int count : counts) {
+    out.push_back(static_cast<uint8_t>(count));
+  }
+  return out;
+}
+
+// The one sub-page of a page that is not a multi-page set.
+const orc::TeletextCataloguedSubPage& only_sub_entry(
+    const orc::TeletextCataloguedPage& page) {
+  EXPECT_EQ(page.subpages.size(), 1u);
+  return page.subpages.at(0);
 }
 
 }  // namespace
@@ -309,6 +328,80 @@ TEST(TeletextPageCatalogue, Merge_CapsTheSubpagesOfOnePage) {
   EXPECT_EQ(pages[0].subpages[0].subcode, 0x0002);
   EXPECT_EQ(pages[0].subpages[1].subcode, 0x0003);
   EXPECT_TRUE(catalogue.truncated());
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Per-page lost-packet count
+//
+// A row the carousel brought round N times should have arrived N times; the
+// copies actually combined say how many did. This is the only sound per-page
+// count available: a service inserting on several VBI lines interleaves its
+// magazines, so a field that came back short is short for whichever page that
+// packet belonged to, and which one is not knowable.
+
+namespace {
+
+// A catalogued sub-page seen |times_seen| times, whose display rows arrived
+// |copies| times each (index 0 of |copies| is display row 1).
+orc::TeletextCataloguedSubPage seen_page(uint64_t times_seen,
+                                         std::initializer_list<int> copies) {
+  orc::TeletextCataloguedSubPage subpage;
+  subpage.times_seen = times_seen;
+  size_t row = 1;
+  for (const int count : copies) {
+    subpage.page.row_copies[row] = count;
+    subpage.page.row_received[row] = count > 0;
+    ++row;
+  }
+  return subpage;
+}
+
+}  // namespace
+
+// Every row arrived on every appearance: nothing was lost.
+TEST(TeletextSubPageLostPackets, AreZeroWhenEveryRowArrivedEveryTime) {
+  const auto subpage = seen_page(/*times_seen=*/8, {8, 8, 8});
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
+}
+
+// A row that arrived on six of eight appearances was lost twice, and the
+// shortfalls sum over the page's rows.
+TEST(TeletextSubPageLostPackets, CountTheShortfallAgainstTheAppearances) {
+  const auto subpage = seen_page(/*times_seen=*/8, {8, 6, 5});
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 5u);
+}
+
+// A row that never arrived at all is either one the service never sent — which
+// most pages do, to space themselves out — or one lost every single time, and
+// nothing here can tell those apart. Counting it would accuse every page of
+// losing the blank rows it never carried.
+TEST(TeletextSubPageLostPackets, IgnoreRowsThatNeverArrived) {
+  const auto subpage = seen_page(/*times_seen=*/8, {8, 0, 0, 8});
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
+}
+
+// A page seen once has nothing to compare against: every row it carried
+// arrived once, and the rows it did not are unknowable. Silence is the only
+// honest answer, and it is exactly where a gap is most likely to be a loss —
+// so the figure is a floor, not a measurement.
+TEST(TeletextSubPageLostPackets, AreZeroForAPageSeenOnce) {
+  const auto subpage = seen_page(/*times_seen=*/1, {1, 0, 1});
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
+}
+
+// More copies than appearances is not negative loss: a row re-sent inside one
+// transmission is squashed as another copy.
+TEST(TeletextSubPageLostPackets, ClampAtZeroOnMoreCopiesThanAppearances) {
+  const auto subpage = seen_page(/*times_seen=*/4, {9, 4});
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
+}
+
+// The header row carries a live clock and is never squashed, so its copy count
+// is always zero and says nothing about loss.
+TEST(TeletextSubPageLostPackets, IgnoreTheHeaderRow) {
+  auto subpage = seen_page(/*times_seen=*/8, {8, 8});
+  subpage.page.row_copies[0] = 0;
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
 }
 
 }  // namespace orc_unit_test

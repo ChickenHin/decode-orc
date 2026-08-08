@@ -128,24 +128,38 @@ TEST_F(TeletextSinkStage, NodeTypeInfo_MatchesDesign) {
   EXPECT_EQ(info.compatible_formats, orc::VideoFormatCompatibility::ALL);
 }
 
-// The host routes the viewer on the contract string, and it must be the batch
-// analysis kind so the trigger-then-open flow applies.
-TEST_F(TeletextSinkStage, StageTools_AdvertiseTheAnalysisContract) {
+// The host routes the viewer on the tool kind and the contract string alone —
+// it knows nothing about teletext — so both must name the generic catalogue
+// browser.
+TEST_F(TeletextSinkStage, StageTools_AdvertiseTheCatalogueContract) {
   const auto tools = instance_->get_stage_tools();
   ASSERT_EQ(tools.size(), 1u);
   EXPECT_EQ(tools[0].tool_id, "teletext_analysis");
-  EXPECT_EQ(tools[0].kind, orc::StageToolKind::BatchAnalysis);
-  EXPECT_EQ(tools[0].contract_id,
-            "decode-orc.stage-tools.teletext-analysis.v1");
+  EXPECT_EQ(tools[0].kind, orc::StageToolKind::CatalogueBrowser);
+  EXPECT_EQ(tools[0].contract_id, orc::kCatalogueBrowserContractId);
 }
 
-// The host discovers the viewer through StageToolProvider; AnalysisToolProvider
-// is the other, unrelated seam and must not resolve.
+// The host discovers the viewer through StageToolProvider and reads it through
+// ICatalogueResults; AnalysisToolProvider is the other, unrelated seam and must
+// not resolve.
 TEST_F(TeletextSinkStage, Mixins_ExposeStageToolProviderOnly) {
   EXPECT_NE(dynamic_cast<orc::StageToolProvider*>(instance_.get()), nullptr);
+  EXPECT_NE(dynamic_cast<orc::ICatalogueResults*>(instance_.get()), nullptr);
   EXPECT_NE(dynamic_cast<orc::ITeletextAnalysisResults*>(instance_.get()),
             nullptr);
   EXPECT_EQ(dynamic_cast<orc::AnalysisToolProvider*>(instance_.get()), nullptr);
+}
+
+// An untriggered stage has an empty catalogue rather than no catalogue: the
+// host asks for one whenever a viewer opens, and a null would be a crash.
+TEST_F(TeletextSinkStage, Catalogue_IsEmptyUntilTriggered) {
+  const auto& catalogue = instance_->catalogue();
+  EXPECT_TRUE(catalogue.items.empty());
+  EXPECT_TRUE(catalogue.consistent());
+  // The schema is a property of the stage, not of the run, so it is filled in
+  // even with nothing to show — that is what labels the empty viewer.
+  EXPECT_FALSE(catalogue.schema.columns.empty());
+  EXPECT_EQ(catalogue.schema.item_noun, "Page");
 }
 
 TEST_F(TeletextSinkStage, Results_AreEmptyUntilTriggered) {

@@ -14,13 +14,11 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/preview/stage_preview_capability.h>
 #include <orc/stage/stage.h>
+#include <orc/stage/tooling/catalogue_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
 
-// Plugin-side, not SDK: the teletext and NABTS catalogue contracts live with
-// their sink plugins (orc-vbi-services). Reached here by dynamic_cast, exactly
-// as the three SDK analysis-sink interfaces above are.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -55,11 +53,8 @@
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
-#include "nabts_analysis_presenter.h"
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
-#include "teletext_analysis_presenter.h"
-#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc::presenters {
 
@@ -2736,7 +2731,7 @@ RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
   return series;
 }
 
-std::optional<TeletextAnalysisView> RenderPresenter::getTeletextAnalysisData(
+std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
     NodeID node_id) {
   auto dag = impl_->getConcreteDAG();
   if (!dag) {
@@ -2748,40 +2743,16 @@ std::optional<TeletextAnalysisView> RenderPresenter::getTeletextAnalysisData(
     return std::nullopt;
   }
 
-  auto* sink =
-      dynamic_cast<orc::ITeletextAnalysisResults*>(target_node->stage.get());
-  if (!sink || !sink->has_results()) {
+  auto* browser =
+      dynamic_cast<orc::ICatalogueResults*>(target_node->stage.get());
+  if (!browser || !browser->has_results()) {
     return std::nullopt;
   }
 
-  // The catalogue is already bounded by the stage's page cap, so it is handed
-  // over whole — there is no decimation step as there is for the graph series.
-  return TeletextAnalysisPresenter::makeAnalysisView(sink->dataset());
-}
-
-std::optional<NabtsAnalysisView> RenderPresenter::getNabtsAnalysisData(
-    NodeID node_id) {
-  auto dag = impl_->getConcreteDAG();
-  if (!dag) {
-    return std::nullopt;
-  }
-
-  const orc::DAGNode* target_node = find_node(*dag, node_id);
-  if (!target_node) {
-    return std::nullopt;
-  }
-
-  auto* sink =
-      dynamic_cast<orc::INabtsAnalysisResults*>(target_node->stage.get());
-  if (!sink || !sink->has_results()) {
-    return std::nullopt;
-  }
-
-  // Bounded by the stage's record cap, so handed over whole. The NAPLPS
-  // interpretation has already happened in the stage; what this converts is the
-  // display list, which is the same size whichever side of the boundary it sits
-  // on.
-  return NabtsAnalysisPresenter::makeAnalysisView(sink->dataset());
+  // Handed over whole: the stage has already bounded the catalogue by its own
+  // cap, and building the payloads is the stage's work rather than something
+  // the host repeats per item.
+  return browser->catalogue();
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

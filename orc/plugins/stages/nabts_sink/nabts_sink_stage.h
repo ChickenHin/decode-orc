@@ -16,16 +16,19 @@
 #include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/catalogue_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "nabts_catalogue_view.h"
 #include "nabts_sink_deps_interface.h"
 #include "vbi-services/vbi_analysis_results.h"
 
@@ -58,7 +61,8 @@ class NabtsSinkStage : public DAGStage,
                        public TriggerableStage,
                        public StageToolProvider,
                        public IStagePreviewCapability,
-                       public INabtsAnalysisResults {
+                       public INabtsAnalysisResults,
+                       public ICatalogueResults {
  public:
   explicit NabtsSinkStage(IStageServices* stage_services);
   ~NabtsSinkStage() override = default;
@@ -109,6 +113,19 @@ class NabtsSinkStage : public DAGStage,
   bool has_results() const override { return has_results_; }
   const NabtsAnalysisDataset& dataset() const override { return dataset_; }
 
+  // ICatalogueResults interface. Running every record's presentation code into
+  // a display list costs real work and memory, and a run that only exports a
+  // packet stream never needs it, so it is built on first ask and cached.
+  // Called from the host's render worker, hence the lock.
+  const CatalogueDataset& catalogue() const override {
+    std::lock_guard<std::mutex> lock(catalogue_mutex_);
+    if (!catalogue_) {
+      catalogue_ =
+          std::make_unique<CatalogueDataset>(build_nabts_catalogue(dataset_));
+    }
+    return *catalogue_;
+  }
+
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
 
@@ -116,11 +133,17 @@ class NabtsSinkStage : public DAGStage,
     return {StageToolDescriptor{
         "nabts_analysis", "NABTS Records",
         "Decode the NABTS service and browse the records it carried.",
-        StageToolKind::BatchAnalysis, false,
-        "decode-orc.stage-tools.nabts-pages.v1"}};
+        StageToolKind::CatalogueBrowser, false, kCatalogueBrowserContractId}};
   }
 
  private:
+  /// Drop the cached catalogue so the next reader rebuilds it from the dataset
+  /// that has just replaced the one it was built from.
+  void invalidate_catalogue() {
+    std::lock_guard<std::mutex> lock(catalogue_mutex_);
+    catalogue_.reset();
+  }
+
   // Parses the parameter set into deps options, converting the 1-based UI line
   // window to the 0-based field lines the slicer uses. Throws
   // std::runtime_error on missing/invalid parameters.
@@ -139,6 +162,9 @@ class NabtsSinkStage : public DAGStage,
   // INabtsAnalysisResults.
   NabtsAnalysisDataset dataset_;
   bool has_results_{false};
+  // Built from dataset_ on first catalogue() call; cleared with it.
+  mutable std::mutex catalogue_mutex_;
+  mutable std::unique_ptr<CatalogueDataset> catalogue_;
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_input_;
 };

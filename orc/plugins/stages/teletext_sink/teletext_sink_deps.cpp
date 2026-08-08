@@ -496,6 +496,17 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // here is only what the loop needs to report progress.
   const auto finish_dataset = [&](TeletextSinkResult& partial) {
     partial.dataset.pages = catalogue.pages();
+    // Per-page loss, which only the row copies can give: see
+    // teletext_subpage_lost_packets(). Without the squasher there are no
+    // repeats to compare, so the question goes unanswered rather than answered
+    // wrongly.
+    if (squash) {
+      for (auto& page : partial.dataset.pages) {
+        for (auto& subpage : page.subpages) {
+          subpage.lost_packets = teletext_subpage_lost_packets(subpage);
+        }
+      }
+    }
     partial.dataset.summary.pages_truncated = catalogue.truncated();
     partial.dataset.summary.packets_recovered = partial.packets_written;
     partial.dataset.summary.fields_with_data = partial.fields_with_data;

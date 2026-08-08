@@ -1895,14 +1895,17 @@ std::string find_source_file_for_node(const Project& project, NodeID node_id) {
 namespace {
 
 // Whether |stage| offers a batch-analysis tool, i.e. a run of it produces
-// something to look at in the host as well as (or instead of) a file.
+// something to look at in the host as well as (or instead of) a file. A
+// catalogue browser is such a tool — the browsable result *is* the output —
+// so a sink offering one is not required to name an output file either.
 bool stage_has_batch_analysis_tool(const DAGStage& stage) {
   const auto* provider = dynamic_cast<const StageToolProvider*>(&stage);
   if (provider == nullptr) {
     return false;
   }
   for (const auto& tool : provider->get_stage_tools()) {
-    if (tool.kind == StageToolKind::BatchAnalysis) {
+    if (tool.kind == StageToolKind::BatchAnalysis ||
+        tool.kind == StageToolKind::CatalogueBrowser) {
       return true;
     }
   }
