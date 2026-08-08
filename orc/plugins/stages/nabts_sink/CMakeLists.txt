@@ -5,6 +5,10 @@ set(STAGE_PLUGIN_SOURCES
     nabts_frame_slicer.cpp
     nabts_scan_state.cpp
     nabts_block_scanner.cpp
+    nabts_packet.cpp
+    nabts_data_group.cpp
+    nabts_record.cpp
+    nabts_record_catalogue.cpp
 )
 
 orc_add_stage_plugin(

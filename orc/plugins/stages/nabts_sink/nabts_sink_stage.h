@@ -14,6 +14,7 @@
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/plugin/orc_stage_tooling.h>
+#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/triggerable_stage.h>
@@ -41,9 +42,12 @@ class IStageServices;
  * ordered (frame → field → ascending line): `.t33` for the 33-byte data packet
  * of CEA-516 §3.1.
  *
+ * The packets are also reassembled into data groups (§4) and teletext records
+ * (§5) as the pass goes, and the records the range carried are catalogued for
+ * the host to browse through INabtsAnalysisResults.
+ *
  * Separate from the Teletext Sink because the two services share nothing above
- * the packet. Below it they share everything, which is why the line recovery
- * itself is one shared library — see docs-tech/nabts-support-design.md.
+ * the packet — see docs-tech/nabts-support-design.md §2.
  *
  * This is a SINK stage - it has inputs but no outputs. All work happens in
  * trigger(); execute() only caches the input so the node can preview before it
@@ -52,7 +56,9 @@ class IStageServices;
 class NabtsSinkStage : public DAGStage,
                        public ParameterizedStage,
                        public TriggerableStage,
-                       public IStagePreviewCapability {
+                       public StageToolProvider,
+                       public IStagePreviewCapability,
+                       public INabtsAnalysisResults {
  public:
   explicit NabtsSinkStage(IStageServices* stage_services);
   ~NabtsSinkStage() override = default;
@@ -99,8 +105,20 @@ class NabtsSinkStage : public DAGStage,
 
   void cancel_trigger() override { cancel_requested_.store(true); }
 
+  // INabtsAnalysisResults interface
+  bool has_results() const override { return has_results_; }
+  const NabtsAnalysisDataset& dataset() const override { return dataset_; }
+
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  std::vector<StageToolDescriptor> get_stage_tools() const override {
+    return {StageToolDescriptor{
+        "nabts_analysis", "NABTS Records",
+        "Decode the NABTS service and browse the records it carried.",
+        StageToolKind::BatchAnalysis, false,
+        "decode-orc.stage-tools.nabts-pages.v1"}};
+  }
 
  private:
   // Parses the parameter set into deps options, converting the 1-based UI line
@@ -116,6 +134,11 @@ class NabtsSinkStage : public DAGStage,
   std::atomic<bool> cancel_requested_{false};
   IStageServices* stage_services_{nullptr};
   std::shared_ptr<INabtsSinkStageDeps> deps_override_;
+
+  // Cached results of the last trigger, read by the host through
+  // INabtsAnalysisResults.
+  NabtsAnalysisDataset dataset_;
+  bool has_results_{false};
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_input_;
 };

@@ -10,6 +10,7 @@
 #ifndef ORC_NABTS_SINK_DEPS_INTERFACE_H
 #define ORC_NABTS_SINK_DEPS_INTERFACE_H
 
+#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/teletext_slicer.h>
@@ -62,6 +63,10 @@ struct NabtsSinkOptions {
   // it. The report is always built; this only decides whether it is kept
   // somewhere a reader can go back to.
   bool write_report{false};
+  // Write each catalogued record's data as a file beside the packet stream,
+  // so the presentation code can be examined with external tools. Needs an
+  // output path for the same reason the report does.
+  bool export_records{false};
 };
 
 struct NabtsSinkResult {
@@ -84,6 +89,11 @@ struct NabtsSinkResult {
   // write failed (which never fails the export — the packet stream is the
   // product).
   std::string report_path;
+  // Record files written when export_records is set.
+  uint64_t records_exported{0};
+  // Every record the range carried, for the host to browse through
+  // INabtsAnalysisResults.
+  NabtsAnalysisDataset dataset;
 };
 
 class INabtsSinkStageDeps {

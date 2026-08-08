@@ -1068,7 +1068,8 @@ double teletext_interpolate_sample(const int16_t* line, size_t sample_count,
   return ((a * x + b) * x + c) * x + p1;
 }
 
-std::string_view teletext_reject_reason_name(TeletextRejectReason reason) {
+std::string_view teletext_reject_reason_name(TeletextRejectReason reason,
+                                             TeletextSystem system) {
   switch (reason) {
     case TeletextRejectReason::kNone:
       return "none";
@@ -1085,7 +1086,9 @@ std::string_view teletext_reject_reason_name(TeletextRejectReason reason) {
     case TeletextRejectReason::kFramingCodeMiss:
       return "framing code miss";
     case TeletextRejectReason::kInvalidMrag:
-      return "invalid MRAG";
+      // The same gate under each service's own name for the bytes it tests.
+      return system == TeletextSystem::kNabts525 ? "invalid packet prefix"
+                                                 : "invalid MRAG";
     case TeletextRejectReason::kNoPreambleLock:
       return "no preamble lock";
     case TeletextRejectReason::kPreambleResidual:

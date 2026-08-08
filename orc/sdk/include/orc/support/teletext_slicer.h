@@ -308,8 +308,14 @@ enum class TeletextRejectReason {
 constexpr size_t kTeletextRejectReasonCount = 12;
 
 // Short human-readable name of |reason| (e.g. "payload residual"), for
-// diagnostics summaries and log messages.
-std::string_view teletext_reject_reason_name(TeletextRejectReason reason);
+// diagnostics summaries and log messages. Names the reason in the terms of
+// |system|: the addressing gate rejects a System B packet whose MRAG did not
+// decode (ETSI EN 300 706 §7.1.2) and a System C packet whose five-byte packet
+// prefix did not (CEA-516 §3.2.1), and a report that called the latter an MRAG
+// would be naming a field the service does not have.
+std::string_view teletext_reject_reason_name(
+    TeletextRejectReason reason,
+    TeletextSystem system = TeletextSystem::kWst625);
 
 /**
  * @brief A narrowed acquisition window, learned from lines that already locked

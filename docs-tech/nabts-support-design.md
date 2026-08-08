@@ -495,66 +495,149 @@ handful of false locks); the streams match their goldens across thread counts 1,
 
 ## Phase 4 — Data groups and teletext records
 
-Turns the packet stream into the addressable objects a viewer lists.
+Turns the packet stream into the addressable objects a viewer lists. **Done 2026-08-08.**
+
+Everything below the results contract is stage-local, in `orc/plugins/stages/nabts_sink/`: the SDK
+carries the types that cross the stage-host boundary and nothing else, which is the boundary §2
+settled on.
 
 ### Task 4.1 — `nabts_packet.h`: prefix and suffix decoding
 
-Decode P1-P3, CI, PS (CEA-516 §3.2) and the suffix (§3.4): suffix length from PS b8/b6, longitudinal
-odd-parity check over data block + suffix, and single-bit correction using the product code the
-per-byte parity and the longitudinal byte form together. Report per-packet: channel, continuity
-index, synchronizing flag, data-block extent, and whether the block was clean, corrected or failed.
+Decodes P1-P3, CI, PS (§3.2) and the suffix (§3.4): suffix length from PS b8/b6, longitudinal
+odd-parity check over data block plus suffix, and single-bit correction using the product code the
+per-byte parity and the longitudinal byte form together. Reports per packet: channel, continuity
+index, synchronizing flag, data-block extent, and whether the block was unchecked, clean, corrected
+or uncorrectable.
 
 The 28-byte suffix (PS b8/b6 = 1,1) is **not** decoded. §3.4 leaves its bundle error-protection
 method "reserved for future standardization", so such a packet carries a zero-length data block and
-is counted and skipped rather than guessed at — while its continuity index is still consumed, which
-§3.4 requires.
+is counted and skipped — while its continuity index is still consumed, which §3.4 requires.
 
-*Acceptance:* unit tests over hand-built packets for each suffix length; a single-bit error anywhere
-in the data block is corrected; a two-bit error is detected and reported uncorrectable; a 1,1 packet
-contributes no data-block bytes and does not break the continuity chain.
+One thing the standard forced a decision on: the product code needs the odd byte parity §3.3
+requires of a *type-zero* group's data blocks, and a packet on its own cannot prove its group's type
+— the group header is in the synchronizing packet, which the packet in hand may not be. The
+correction runs anyway, bounded to one bit and only after the longitudinal check has already failed,
+so a clean packet of any group type is never touched. Recorded at the head of
+`nabts_decode_packet()`.
+
+*Acceptance, as met:* 14 tests. The single-bit correction is swept exhaustively — every bit of every
+byte of the prefix, and every bit of every byte of the data block and suffix — rather than sampled.
+Two-bit errors are detected and reported uncorrectable in both their shapes (two bytes, and one byte
+twice). A 1,1 packet contributes no data-block bytes and keeps its place in the continuity chain.
 
 ### Task 4.2 — `nabts_data_group.h`: group reassembly
 
-Per data channel, accumulate packets from a synchronizing packet (§4.1) using S1/S2 (further block
-count) and F1/F2 (final non-zero block size) from the eight Hamming-coded header bytes (§4.2), with
-the continuity index detecting loss (§3.2.4). Bound the working set; drop and report a group whose
-header does not decode or which exceeds the 1904-byte maximum (§8.4.2.5).
+Per data channel, accumulates packets from a synchronizing packet (§4.1) using S1/S2 and F1/F2 from
+the eight Hamming-coded header bytes (§4.2), with the continuity index detecting loss (§3.2.4).
 
-*Acceptance:* unit tests reassemble a multi-packet group across all suffix lengths, detect a dropped
-packet through the continuity index, and refuse an oversized group without unbounded allocation.
+Three details of §4.2.6 and §8.4.2.6 that a plain concatenation gets wrong, all covered:
+F1,F2 greater than a block reads as full; F1,F2 of zero discards the final non-zero block entirely;
+and the final non-zero block need not be the last packet, because zero-length blocks with 28-byte
+suffixes may follow it.
 
-### Task 4.3 — `nabts_record_assembler.h`: record headers and linking
+Bounded twice over: a group claiming more than the 67 further blocks of §8.4.2.5 is refused before
+it can reserve what it asked for, and at most `kNabtsMaxOpenGroups` (32) groups are held open, which
+is what stops a misread prefix inventing channels from opening a buffer for each of §3.2.3's 4096.
 
-Parse the record header (§5.2): RT, RD, A1-A3, optional A4-A9 address extension, L1/L2 link,
-classification sequence pointer/flag bytes (§5.2.7), and header extension fields (§5.2.8, skipped by
-length). Join a linked series into a message (§5.2.6) keyed on {channel, record address, version}.
-Application records (type 2, §7.2) are decoded to their function descriptors; presentation records
+*Acceptance, as met:* 22 tests, covering reassembly across every suffix length, interleaved
+channels, the continuity-index gap, both size bounds, and the wrap limit — a loss of exactly 16
+packets is invisible, which is a limit of the standard and is pinned as such.
+
+### Task 4.3 — `nabts_record.h`: record headers and linking
+
+Parses the record header (§5.2): RT, RD, A1-A3, the optional A4-A9 address extension, the L1/L2
+link, the classification sequence's pointer and flag bytes (§5.2.7), and header extension fields
+(§5.2.8). Joins a linked series into a message (§5.2.6) keyed on {channel, record address, version}.
+Application records (type 2) are split into their function descriptors (§7.2.2); presentation records
 (types 0, 1, 3) hand their data on to Phase 5.
 
-*Acceptance:* unit tests over hand-built records cover short and long addresses, an unlinked record,
-a three-record linked series arriving out of order, and a classification sequence with two pointer
-bytes; the reserved addresses of §7.1.5 are recognised and labelled.
+`HammingCursor` is why this is readable: §5.2.9 says the header's end "is a consequence of the
+Record Header format itself and is not necessarily indicated by any one byte", so decoding is a walk
+that can fail two ways at every step — out of bytes, or a byte that will not correct. Both are
+terminal and both are folded into the cursor, so the walk states the format and nothing else.
+
+*Acceptance, as met:* 31 tests. Short and long addresses and the equivalence §5.2.5 requires of
+them; an unlinked record; a three-record series arriving out of order; a classification sequence with
+two pointer bytes; chained header extensions; the reserved addresses of §7.1.5, including a long
+address that reduces to one.
+
+**A bug this found.** §5.2.8.2 puts the header-extension meaning in EI b6/b4/b2 with b8 as the
+continuation flag — the low three bits of the information nibble. The first implementation shifted
+right by one, reading b8 as part of the meaning. No real capture in the reference set carries a
+header extension, so only the test caught it.
 
 ### Task 4.4 — Catalogue and results contract
 
-`NabtsAnalysisDataset` and `INabtsAnalysisResults` in the SDK stage tier, mirroring
-`ITeletextAnalysisResults`: every record the range carried, its channel, address, type, version,
-first/last seen frame, times seen, and recovery figures. Wire it into `nabts_sink`, and add the
-`decode-orc.stage-tools.nabts-pages.v1` batch-analysis tool descriptor.
+`NabtsCataloguedRecord`, `NabtsRecoverySummary`, `NabtsAnalysisDataset` and `INabtsAnalysisResults`
+in `orc/stage/analysis_sink_results.h` alongside the teletext ones, plus the stage-local
+`nabts_record_catalogue.{h,cpp}` that fills them. The stage declares
+`decode-orc.stage-tools.nabts-pages.v1` as a batch-analysis tool, which is what Phase 6's dialog
+hangs off.
 
-*Acceptance:* SDK header manifest (`orc/sdk/sdk_headers.yaml`) regenerated with
-`tools/gen_sdk_header_allowlist.sh` and `tools/gen_sdk_header_docs.sh`; `ctest -L sdk` green; the
-functional test asserts the ExtraVision capture catalogues its master index (channel 000, record
-000) and the CBS service's cyclic marker.
+A catalogue entry is a *message* rather than a record, because §5.2.6 makes that the unit a receiver
+presents. Which copy is kept is decided by quality before recency: a complete, undamaged copy is
+never replaced by a damaged one, so a recording that degrades keeps the copy that arrived cleanly
+rather than the last one before the tape ran out.
+
+The SDK header manifest needed no change — `analysis_sink_results.h` is already on the allowlist —
+so no regeneration was required.
+
+*Acceptance, as met:* 17 catalogue tests; `ctest -L sdk` green. On the real captures:
+
+| | records | groups complete | messages complete / partial | blocks corrected / damaged |
+|---|---|---|---|---|
+| CBS ExtraVision | 51 | 53 | 51 / 0 | 8 / 3 |
+| NBC Teletext | 13 | 17 | 13 / 0 | 0 / 0 |
+| TBS Electra (WST read as NABTS) | **0** | **0** | 0 / 0 | 0 / 0 |
+
+The plan's stated acceptance — the master index at channel 000 address 000, and a cyclic marker —
+was wrong about what this window contains: 300 frames is about one carousel cycle of the ExtraVision
+magazine and it includes neither. What the recording does carry is a better test, and is what the
+functional test now asserts: **channel A00, record address 000, record type 1, caption flag set.**
+§7.1.5 reserves that channel and address for the start of captioning, §5.2.2.3 makes captioning a
+type-1 record, and §5.2.7.3 has a caption record carry the caption flag in Y13 — three facts from
+three sections of the standard, decoded by three separate parts of this (the address bytes, the
+record type byte, and the classification pointer-and-flag walk), agreeing. A parse with any of those
+bit positions wrong could not produce that agreement by chance.
 
 ### Task 4.5 — Optional record export
 
-`export_records` parameter writing each assembled record as a separate file beside the packet
-stream, named `<channel>-<address>-v<version>.rec`, so the presentation data can be examined with
-external tools before Phase 5 lands.
+`export_records` writes each catalogued record beside the packet stream as
+`<stream>.<channel>-<address>-v<version>.rec` — the identity §5.2.1 gives the record, so a directory
+of them sorts into the order the records dialog lists them. Off by default; refused without an
+output path, as the report is.
 
-*Acceptance:* records written round-trip byte-identically to the assembled data block bytes;
-disabled by default; refused without an output path, as the report is.
+*Acceptance, as met:* the functional test reads every exported file back and compares it byte for
+byte against the catalogued data. Which is how it was found that `write_records()` had been written
+and never called.
+
+### Two findings from the real captures
+
+**1. The record layer rejects everything the bit detectors leak.** §2's claim was that the framing
+code separates System B from System C; Phase 3 measured that as 126 false packets from a WST
+recording against 2460 from a real NABTS one, all from the MLSE detector. Those 126 now produce
+**zero** data groups and **zero** records: noise that passes a framing code and five Hamming bytes
+does not also carry a group header that decodes. The 20x separation at the packet layer is total at
+the record layer.
+
+The same holds within a NABTS recording. Read on the full BT.653 window the ExtraVision capture
+yields 2460 packets; read on the four lines the service actually uses it yields 2288. The 172
+difference is noise on empty lines, and the report accounts for it exactly — 172 refused group
+headers. Both runs catalogue the same 51 records.
+
+**2. Spurious locks on empty lines cost the data-phase pin.** `NabtsPhaseTracker` pools its locks
+over every line of the window, so those 172 spurious locks widen the distribution past
+`kMaxRadiusSamples` and the hint is withheld: narrowed to lines 15-18 the same recording pins to
+sample 146,1 +/- 3,0, and on the full window it does not pin at all. Pinning cannot lose a packet —
+a hinted attempt that fails is retried over the full window — but the two runs acquire differently,
+and on a marginal line the MLSE fit can settle on a different bit, which is why one of the 51 records
+differs by a few bytes between them.
+
+So narrowing the candidate window to the lines a service actually uses is worth doing twice over: a
+cleaner packet stream, and the phase pin engages. Worth saying in the stage instructions (Phase 7).
+
+Both are pinned by `TheRecordsDoNotDependOnTheCandidateLineWindow` and the record-layer half of
+`AWstCaptureYieldsAlmostNothing`.
 
 ## Phase 5 — NAPLPS presentation decoding
 

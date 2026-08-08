@@ -10,12 +10,14 @@
 
 #include <gtest/gtest.h>
 #include <orc/plugin/orc_stage_services.h>
+#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/teletext_slicer.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -25,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "nabts_record.h"
 #include "nabts_sink_stage.h"
 #include "sha256_hash.h"
 #include "vbi_source_stage.h"
@@ -202,6 +205,9 @@ struct RecoveryRun {
   std::string stream_path;
   uint64_t stream_bytes = 0;
   std::string stream_sha256;
+  // What the pass made of the packets above the packet layer: data groups,
+  // records, and the catalogue the records dialog reads.
+  NabtsAnalysisDataset dataset;
 };
 
 std::map<std::string, ParameterValue> recovery_parameters(
@@ -251,6 +257,7 @@ RecoveryRun recover(const std::string& capture_path,
   stage.execute({window}, parameters, observations);
   run.triggered = stage.trigger({window}, parameters, observations);
   run.status = stage.get_trigger_status();
+  run.dataset = stage.dataset();
 
   const std::filesystem::path candidate = output_path.string() + ".t33";
   if (std::filesystem::exists(candidate)) {
@@ -262,9 +269,33 @@ RecoveryRun recover(const std::string& capture_path,
 }
 
 void report(const char* what, const RecoveryRun& run) {
+  const NabtsRecoverySummary& summary = run.dataset.summary;
   std::cout << "[ INFO     ] " << what << ": " << run.status << "\n"
             << "[ INFO     ] " << what << ": " << run.stream_bytes
-            << " bytes, sha256 " << run.stream_sha256 << std::endl;
+            << " bytes, sha256 " << run.stream_sha256 << "\n"
+            << "[ INFO     ] " << what << ": groups "
+            << summary.groups_completed << " complete / "
+            << summary.groups_incomplete << " incomplete"
+            << ", messages " << summary.messages_complete << " complete / "
+            << summary.messages_partial << " partial"
+            << ", blocks " << summary.blocks_corrected << " corrected / "
+            << summary.blocks_damaged << " damaged\n"
+            << "[ INFO     ] " << what << ": " << run.dataset.records.size()
+            << " records catalogued" << std::endl;
+  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+    std::cout << "[ INFO     ]   " << record.channel_text << " v"
+              << static_cast<int>(record.version) << " type "
+              << static_cast<int>(record.record_type) << ", "
+              << record.data.size() << " bytes, seen " << record.times_seen
+              << " (" << record.times_intact << " intact)"
+              << (record.complete ? "" : ", incomplete")
+              << (record.cyclic_marker ? ", cyclic marker" : "")
+              << (record.caption ? ", caption" : "")
+              << (record.reserved_purpose.empty()
+                      ? std::string()
+                      : ", " + record.reserved_purpose)
+              << std::endl;
+  }
 }
 
 class NabtsSinkPipelineTest : public ::testing::Test {
@@ -374,6 +405,19 @@ TEST_F(NabtsSinkPipelineTest, AWstCaptureYieldsAlmostNothing) {
       << wst_packets << " packets from a WST recording against "
       << nabts_packets << " from a NABTS one: the framing-code discrimination "
       << "is not holding";
+
+  // And the layer above closes the gap the bit detectors leave. Those surviving
+  // packets are noise that happened to pass a framing code and five Hamming
+  // bytes; none of them carries a group header that decodes, so none opens a
+  // group that completes, so none becomes a record. The catalogue a user
+  // actually sees is empty.
+  EXPECT_TRUE(wst.dataset.records.empty())
+      << wst.dataset.records.size()
+      << " records catalogued from a World System Teletext recording";
+  EXPECT_EQ(wst.dataset.summary.groups_completed, 0u);
+  EXPECT_GT(nabts.dataset.records.size(), 0u)
+      << "no records from a real NABTS service, so the comparison proves "
+         "nothing";
 }
 
 // The property the parallel decode rests on: what a worker may read while it
@@ -401,6 +445,308 @@ TEST_F(NabtsSinkPipelineTest, TheDecodeDoesNotDependOnTheThreadCount) {
           << "packet stream";
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Data groups and records (CEA-516 §4, §5)
+// ---------------------------------------------------------------------------
+
+// The record layer against a real service. What makes this more than a
+// smoke test is the captioning record: CEA-516 §7.1.5 reserves channel A00,
+// record address 000 for the start of captioning; §5.2.2.3 makes captioning a
+// record of type 1; and §5.2.7.3 has a caption record carry the caption flag in
+// classification byte Y13. Three facts from three different sections of the
+// standard, decoded by three different pieces of this — the address bytes, the
+// record type byte, and the classification sequence's pointer-and-flag walk —
+// and they agree. A parse that had any of the three bit positions wrong could
+// not produce that agreement by chance.
+//
+// (The design plan expected this window to show the master index at channel
+// 000, address 000, and a cyclic marker record. It carries neither: a 300-frame
+// window is about one carousel cycle of the magazine, and this one does not
+// include them. Asserted here is what the recording actually contains.)
+TEST_F(NabtsSinkPipelineTest, ExtraVisionCaptureAssemblesTheServicesRecords) {
+  if (!std::filesystem::exists(kExtraVisionCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kExtraVisionCapture;
+  }
+
+  const RecoveryRun run =
+      recover(kExtraVisionCapture, ".tbc VBI crop, 16-bit (NABTS)",
+              dir_ / "extravision");
+  report("CBS ExtraVision", run);
+  ASSERT_TRUE(run.triggered) << run.status;
+
+  // A magazine's worth of records, not a handful of accidents.
+  ASSERT_GT(run.dataset.records.size(), 20u)
+      << "only " << run.dataset.records.size()
+      << " records — that is not a service's magazine";
+  EXPECT_GT(run.dataset.summary.groups_completed, 20u);
+  EXPECT_GT(run.dataset.summary.messages_complete, 20u);
+  EXPECT_FALSE(run.dataset.summary.records_truncated);
+
+  const orc::NabtsCataloguedRecord* captioning = nullptr;
+  size_t presentation_records = 0;
+  for (const auto& record : run.dataset.records) {
+    if (orc::nabts_type_is_presentation(record.record_type)) {
+      ++presentation_records;
+    }
+    if (record.channel == 0xA00 && record.address_text == "000") {
+      captioning = &record;
+    }
+  }
+
+  // §6.1: a presentation record's data is NAPLPS, which is what Phase 5 reads.
+  EXPECT_EQ(presentation_records, run.dataset.records.size())
+      << "a record of a type that is neither presentation nor application";
+
+  ASSERT_NE(captioning, nullptr)
+      << "the reserved captioning address of §7.1.5 was not recovered";
+  EXPECT_EQ(captioning->reserved_purpose, "Start of captioning");
+  EXPECT_EQ(captioning->record_type,
+            orc::kNabtsRecordTypeNoncyclicPresentation);
+  EXPECT_TRUE(captioning->caption)
+      << "the caption record of §5.2.7.3 did not carry its caption flag";
+  EXPECT_GT(captioning->data.size(), 0u);
+
+  // Every catalogued record holds record data, and none exceeds what a linked
+  // series could carry.
+  for (const auto& record : run.dataset.records) {
+    EXPECT_GT(record.data.size(), 0u)
+        << record.channel_text << " catalogued with no data";
+    EXPECT_GE(record.times_seen, 1u);
+    EXPECT_GE(record.times_seen, record.times_intact);
+    EXPECT_GE(record.records_in_message, 1u);
+  }
+}
+
+// The NBC service uses two data channels, which is what §3.2.3's packet address
+// is for, and is the case that would break a reassembler keying its groups on
+// anything else. It is also a much weaker recording — VHS at EP speed — so it
+// exercises the loss path rather than the clean one.
+TEST_F(NabtsSinkPipelineTest, NbcCaptureAssemblesRecordsOnTwoDataChannels) {
+  if (!std::filesystem::exists(kNbtsCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kNbtsCapture;
+  }
+
+  const RecoveryRun run =
+      recover(kNbtsCapture, ".tbc VBI crop, 16-bit (NABTS)", dir_ / "nbc");
+  report("NBC Teletext", run);
+  ASSERT_TRUE(run.triggered) << run.status;
+
+  ASSERT_GT(run.dataset.records.size(), 5u);
+
+  std::vector<uint16_t> channels;
+  for (const auto& record : run.dataset.records) {
+    if (channels.empty() || channels.back() != record.channel) {
+      channels.push_back(record.channel);
+    }
+  }
+  EXPECT_GT(channels.size(), 1u)
+      << "records on one channel only, so interleaved channels are untested";
+
+  // The catalogue is ordered by channel, so the channels came out ascending.
+  for (size_t i = 1; i < channels.size(); ++i) {
+    EXPECT_LT(channels[i - 1], channels[i]);
+  }
+
+  // A recording this marginal loses packets, and a record assembled over a gap
+  // is reported rather than presented as clean. Which way round it comes out is
+  // the recording's business, not this code's, so only the accounting is
+  // asserted.
+  for (const auto& record : run.dataset.records) {
+    EXPECT_LE(record.times_intact, record.times_seen);
+  }
+}
+
+// Task 4.5: the record files are the presentation data as transmitted, so they
+// must round-trip the catalogued bytes exactly — that is what makes them usable
+// with an external NAPLPS tool before this grows its own interpreter.
+TEST_F(NabtsSinkPipelineTest, ExportedRecordFilesMatchTheCataloguedData) {
+  if (!std::filesystem::exists(kExtraVisionCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kExtraVisionCapture;
+  }
+
+  const std::filesystem::path output = dir_ / "records";
+  VBISourceStage source;
+  ObservationContext observations;
+  const std::vector<ArtifactPtr> outputs =
+      source.execute({},
+                     {{"input_path", std::string(kExtraVisionCapture)},
+                      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")}},
+                     observations);
+  ASSERT_FALSE(outputs.empty());
+  const auto representation =
+      std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
+  ASSERT_TRUE(representation);
+  const auto window = std::make_shared<FrameWindow>(
+      representation, static_cast<FrameID>(representation->frame_count() / 4),
+      kFrameCount);
+
+  FunctionalStageServices services;
+  NabtsSinkStage stage(&services);
+  auto parameters = recovery_parameters(output.string(), true, 0);
+  parameters["export_records"] = true;
+  stage.set_parameters(parameters);
+  ASSERT_TRUE(stage.trigger({window}, parameters, observations))
+      << stage.get_trigger_status();
+
+  const NabtsAnalysisDataset& dataset = stage.dataset();
+  ASSERT_GT(dataset.records.size(), 20u);
+
+  size_t checked = 0;
+  for (const NabtsCataloguedRecord& record : dataset.records) {
+    // Named for the identity §5.2.1 gives the record, beside the stream.
+    char suffix[64];
+    std::snprintf(suffix, sizeof(suffix), ".t33.%03X-%s-v%X.rec",
+                  record.channel, record.address_text.c_str(), record.version);
+    const std::filesystem::path path = output.string() + suffix;
+    ASSERT_TRUE(std::filesystem::exists(path)) << path;
+    ASSERT_EQ(std::filesystem::file_size(path), record.data.size()) << path;
+
+    std::ifstream file(path, std::ios::binary);
+    std::vector<uint8_t> written(record.data.size());
+    file.read(reinterpret_cast<char*>(written.data()),
+              static_cast<std::streamsize>(written.size()));
+    EXPECT_EQ(written, record.data) << path;
+    ++checked;
+  }
+  EXPECT_EQ(checked, dataset.records.size());
+}
+
+// Disabled by default, and refused rather than silently skipped when there is
+// no output file for the records to sit beside.
+// The record layer's rejection is total, measured rather than asserted.
+//
+// Read on the full ITU-R BT.653 §2 window, the ExtraVision capture yields 2460
+// packets; read on the four lines the service actually uses (broadcast lines 15
+// to 18) it yields 2288. The 172 extra are noise on lines the service leaves
+// empty that happened to pass a framing code and five Hamming 8/4 prefix bytes
+// — and the group-header check refuses every one of them, which is why the
+// report counts exactly 172 bad headers.
+//
+// So both runs catalogue the same 51 records from the same 53 data groups. That
+// is the property worth pinning: what a user browses does not depend on how
+// wide a window they left the stage on, even though the exported packet stream
+// does.
+//
+// What is *not* asserted is that the two runs recover byte-identical record
+// data, because they do not, and the reason is worth writing down. The phase
+// tracker pools its locks over every line of the window (NabtsPhaseTracker), so
+// the spurious locks on the empty lines widen the distribution past
+// kMaxRadiusSamples and the hint is withheld: the narrow run pins the data
+// phase to sample 146,1 +/- 3,0 and the wide run does not pin at all. Pinning
+// cannot lose a packet — a hinted attempt that fails is retried over the full
+// window — but the two runs do acquire differently, and on a marginal line the
+// MLSE fit can settle on a different bit. One of the 51 records differs by a
+// few bytes for exactly that reason.
+//
+// Which is a second, practical finding: narrowing the window to the lines a
+// service actually uses both cleans up the packet stream and lets the phase pin
+// engage.
+TEST_F(NabtsSinkPipelineTest, TheRecordsDoNotDependOnTheCandidateLineWindow) {
+  if (!std::filesystem::exists(kExtraVisionCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kExtraVisionCapture;
+  }
+
+  VBISourceStage source;
+  ObservationContext observations;
+  const std::vector<ArtifactPtr> outputs =
+      source.execute({},
+                     {{"input_path", std::string(kExtraVisionCapture)},
+                      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")}},
+                     observations);
+  ASSERT_FALSE(outputs.empty());
+  const auto representation =
+      std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
+  ASSERT_TRUE(representation);
+  const auto window = std::make_shared<FrameWindow>(
+      representation, static_cast<FrameID>(representation->frame_count() / 4),
+      kFrameCount);
+
+  // The full window, then only the lines this service inserts on.
+  struct Run {
+    int32_t first_line;
+    int32_t last_line;
+    uint64_t packets = 0;
+    uint64_t groups = 0;
+    std::vector<NabtsCataloguedRecord> records;
+  };
+  Run runs[] = {{10, 21}, {15, 18}};
+
+  for (Run& run : runs) {
+    FunctionalStageServices services;
+    NabtsSinkStage stage(&services);
+    auto parameters = recovery_parameters(
+        (dir_ / ("w" + std::to_string(run.first_line))).string(), true, 0);
+    parameters["first_vbi_line"] = run.first_line;
+    parameters["last_vbi_line"] = run.last_line;
+    parameters["write_report"] = false;
+    stage.set_parameters(parameters);
+    ASSERT_TRUE(stage.trigger({window}, parameters, observations))
+        << stage.get_trigger_status();
+    run.packets = stage.dataset().summary.packets_recovered;
+    run.groups = stage.dataset().summary.groups_completed;
+    run.records = stage.dataset().records;
+  }
+
+  // The wider window really did admit packets the narrow one did not, or the
+  // comparison below proves nothing.
+  EXPECT_GT(runs[0].packets, runs[1].packets)
+      << "the two windows recovered the same packets, so this test is not "
+         "exercising what it claims to";
+
+  // And none of them reached a record: same groups, same records, same
+  // identities in the same order.
+  EXPECT_EQ(runs[0].groups, runs[1].groups);
+  ASSERT_EQ(runs[0].records.size(), runs[1].records.size())
+      << "the empty lines' packets changed the size of the record catalogue";
+  for (size_t i = 0; i < runs[0].records.size(); ++i) {
+    EXPECT_EQ(runs[0].records[i].channel_text, runs[1].records[i].channel_text);
+    EXPECT_EQ(runs[0].records[i].version, runs[1].records[i].version);
+    EXPECT_EQ(runs[0].records[i].record_type, runs[1].records[i].record_type);
+    EXPECT_EQ(runs[0].records[i].reserved_purpose,
+              runs[1].records[i].reserved_purpose);
+  }
+
+  // The record data agrees on all but a handful of bytes — see above for why it
+  // is not exact. A large divergence would mean the noise had got into a group
+  // rather than merely changed how the real lines were acquired.
+  size_t differing_records = 0;
+  for (size_t i = 0; i < runs[0].records.size(); ++i) {
+    if (runs[0].records[i].data != runs[1].records[i].data) {
+      ++differing_records;
+    }
+  }
+  EXPECT_LE(differing_records, runs[0].records.size() / 10)
+      << differing_records << " of " << runs[0].records.size()
+      << " records differ between the two windows, which is more than a "
+         "difference in bit-phase acquisition explains";
+}
+
+TEST_F(NabtsSinkPipelineTest, RecordExportIsOffByDefaultAndNeedsAnOutputFile) {
+  if (!std::filesystem::exists(kExtraVisionCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kExtraVisionCapture;
+  }
+
+  const RecoveryRun run = recover(
+      kExtraVisionCapture, ".tbc VBI crop, 16-bit (NABTS)", dir_ / "default");
+  ASSERT_TRUE(run.triggered) << run.status;
+  for (const auto& entry : std::filesystem::directory_iterator(dir_)) {
+    EXPECT_NE(entry.path().extension(), ".rec")
+        << "record files written without being asked for: " << entry.path();
+  }
+
+  FunctionalStageServices services;
+  NabtsSinkStage stage(&services);
+  ObservationContext observations;
+  auto parameters = recovery_parameters(std::string(), true, 0);
+  parameters["write_report"] = false;
+  parameters["export_records"] = true;
+  const auto window = std::make_shared<FrameWindow>(nullptr, 0, 1);
+  EXPECT_FALSE(stage.trigger({window}, parameters, observations));
+  EXPECT_NE(stage.get_trigger_status().find("need an output file"),
+            std::string::npos)
+      << stage.get_trigger_status();
 }
 
 }  // namespace

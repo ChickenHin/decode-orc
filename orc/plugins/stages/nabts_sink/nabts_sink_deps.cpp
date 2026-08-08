@@ -24,12 +24,17 @@
 
 #include "nabts_block_scanner.h"
 #include "nabts_frame_slicer.h"
+#include "nabts_packet.h"
 
 namespace orc {
 
 namespace {
 
 constexpr size_t kWriterBufferBytes = 1UL * 1024UL * 1024UL;
+
+// A record is at most 1904 bytes (CEA-516 §8.4.2.5), so a record file needs
+// nothing like the packet stream's buffer.
+constexpr size_t kRecordBufferBytes = 4UL * 1024UL;
 
 // Progress callbacks are throttled to once every N frames (plus the final
 // frame) so tight loops do not flood the UI.
@@ -111,7 +116,8 @@ void NabtsSinkDeps::init(TriggerProgressCallback progress_callback,
 std::string NabtsSinkDeps::build_report(
     const NabtsSinkOptions& options, const NabtsSinkResult& result,
     uint64_t total_frames, const TeletextRecoveryStats& stats,
-    const NabtsScanState& scan_state) const {
+    const NabtsScanState& scan_state, const NabtsGroupStats& group_stats,
+    const NabtsRecordStats& record_stats) const {
   std::string report = "NABTS recovery report\n";
   report += fmt::format(
       "  Output:        {}\n"
@@ -156,8 +162,17 @@ std::string NabtsSinkDeps::build_report(
                           scan_state.lines().lines_skipped());
   }
 
+  if (result.records_exported > 0) {
+    report += fmt::format("\n  Records:       {} exported beside the stream",
+                          result.records_exported);
+  }
+
   report += "\n\n";
   report += stats.summary();
+  report += "\n";
+  report += group_stats.summary();
+  report += "\n";
+  report += record_stats.summary();
   return report;
 }
 
@@ -181,6 +196,40 @@ void NabtsSinkDeps::write_report(const NabtsSinkOptions& options,
                 result.report.size());
   writer->close();
   result.report_path = path;
+}
+
+void NabtsSinkDeps::write_records(const NabtsSinkOptions& options,
+                                  NabtsSinkResult& result) const {
+  if (!options.export_records || result.output_path.empty() ||
+      stage_services_ == nullptr) {
+    return;
+  }
+
+  // Beside the packet stream, one file per record, named for the identity
+  // CEA-516 §5.2.1 gives it: channel, record address and version. That is the
+  // key the catalogue is ordered on, so a directory of these sorts into the
+  // order the records dialog lists them in.
+  const std::string base = result.output_path + ".";
+  for (const NabtsCataloguedRecord& record : result.dataset.records) {
+    if (record.data.empty()) {
+      continue;  // A record whose every copy was header-only has nothing to
+                 // write.
+    }
+    const std::string path =
+        base + fmt::format("{:03X}-{}-v{:X}.rec", record.channel,
+                           record.address_text, record.version);
+    auto writer =
+        stage_services_->create_buffered_file_writer_uint8(kRecordBufferBytes);
+    if (!writer || !writer->open(path)) {
+      ORC_LOG_WARN("NabtsSinkDeps: Could not write record to {}", path);
+      continue;  // One unwritable record never fails the export.
+    }
+    writer->write(record.data.data(), record.data.size());
+    writer->close();
+    ++result.records_exported;
+  }
+  ORC_LOG_DEBUG("NabtsSinkDeps: Exported {} record(s)",
+                result.records_exported);
 }
 
 NabtsSinkResult NabtsSinkDeps::analyse(
@@ -265,6 +314,33 @@ NabtsSinkResult NabtsSinkDeps::analyse(
   TeletextRecoveryStats stats;
   std::array<uint64_t, kMaxPacketsPerFieldTracked + 1> packets_per_field{};
 
+  // Packet → data group → message → catalogue. Each stage of the chain sees the
+  // stream in transmission order, which is what the continuity index and the
+  // link order are read against, so the whole chain is driven from the emission
+  // loop below rather than from the slicing threads.
+  //
+  // |catalogue_frame| is the frame the loop has reached, which a callback fired
+  // from deep in the chain has no other way of knowing. Groups complete on the
+  // packet that finishes them, so it is the right frame to file a record under.
+  NabtsGroupAssembler groups;
+  NabtsRecordAssembler records;
+  NabtsRecordCatalogue catalogue;
+  uint64_t catalogue_frame = 0;
+  // Per-block suffix figures are a property of the group that carried them, so
+  // they are totalled as the groups go past rather than kept in either
+  // assembler's statistics.
+  uint64_t blocks_corrected = 0;
+  uint64_t blocks_damaged = 0;
+  groups.set_group_callback([&](const NabtsDataGroup& group) {
+    blocks_corrected += group.blocks_corrected;
+    blocks_damaged += group.blocks_damaged;
+    records.add_group(group);
+  });
+  records.set_message_callback(
+      [&catalogue, &catalogue_frame](const NabtsMessage& message) {
+        catalogue.merge(message, catalogue_frame);
+      });
+
   std::vector<NabtsFieldScan> block(
       static_cast<size_t>(kNabtsMaxScanBlockFrames) * kNabtsFieldsPerFrame);
   const size_t worker_count = nabts_resolve_worker_count(
@@ -274,8 +350,36 @@ NabtsSinkResult NabtsSinkDeps::analyse(
 
   const auto finish = [&](NabtsSinkResult& partial) {
     partial.lost_packets_estimate = estimate_lost_packets(packets_per_field);
-    partial.report =
-        build_report(options, partial, total_frames, stats, scan_state);
+
+    // Whatever is still in flight is reported as it stands: a recording that
+    // ends part way through a group or a linked series is the normal case, and
+    // the bytes that did arrive still identify their record.
+    groups.flush();
+    records.flush();
+
+    partial.dataset.records = catalogue.records();
+    NabtsRecoverySummary& summary = partial.dataset.summary;
+    summary.frames_analysed = partial.frames_analysed;
+    summary.fields_with_data = partial.fields_with_data;
+    summary.packets_recovered = partial.packets_written;
+    summary.packets_prefix_rejected = groups.stats().prefix_failures;
+    summary.lost_packets_estimate = partial.lost_packets_estimate;
+    summary.groups_completed = groups.stats().groups_completed;
+    summary.groups_incomplete =
+        groups.stats().groups_superseded + groups.stats().groups_unfinished;
+    summary.messages_complete = records.stats().messages_complete;
+    summary.messages_partial = records.stats().messages_partial;
+    summary.records_truncated = catalogue.truncated();
+    summary.blocks_corrected = blocks_corrected;
+    summary.blocks_damaged = blocks_damaged;
+
+    // Exported before the report is built, because the report says how many
+    // were written. A cancelled run exports what it catalogued, for the same
+    // reason its packet stream is left as a prefix rather than deleted.
+    write_records(options, partial);
+
+    partial.report = build_report(options, partial, total_frames, stats,
+                                  scan_state, groups.stats(), records.stats());
   };
 
   try {
@@ -334,6 +438,7 @@ NabtsSinkResult NabtsSinkDeps::analyse(
         // Packet emission is strictly temporal: frame → field (1 then 2) →
         // ascending line, which is the order a receiver saw them broadcast and
         // therefore the order a data-group reassembler needs.
+        catalogue_frame = static_cast<uint64_t>(block_first) + block_offset;
         for (size_t field_idx = 0; field_idx < kNabtsFieldsPerFrame;
              ++field_idx) {
           const NabtsFieldScan& scan =
@@ -368,6 +473,12 @@ NabtsSinkResult NabtsSinkDeps::analyse(
               ++result.packets_written;
               ++field_packets;
               emit(line->sliced.bytes.data(), kNabtsPacketBytes);
+              // Same bytes, same order, into the reassembler. A padding packet
+              // is deliberately not fed: it stands for a line that carried
+              // nothing, and offering it as a packet would break the continuity
+              // chain rather than record a gap in it.
+              groups.add_packet(nabts_decode_packet(line->sliced.bytes.data(),
+                                                    kNabtsPacketBytes));
             } else if (options.keep_empty_packets) {
               ++result.packets_written;
               emit(kEmptyPacket.data(), kNabtsPacketBytes);

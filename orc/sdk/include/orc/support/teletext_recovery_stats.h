@@ -239,6 +239,12 @@ class TeletextRecoveryStats {
   uint64_t bit_error_packets_ = 0;
   std::array<double, kPayloadBits> bit_error_sums_{};
   std::map<int, LineStats> per_line_;
+  // Service the run recovered under, taken from the lines it was given, so the
+  // summary can name each rejection in that service's own terms. A run is one
+  // service by construction — the stage builds one slicer — so the first line
+  // to state a system settles it.
+  TeletextSystem system_ = TeletextSystem::kWst625;
+  bool system_known_ = false;
 };
 
 }  // namespace orc

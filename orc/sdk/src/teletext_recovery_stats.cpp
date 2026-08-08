@@ -92,7 +92,8 @@ std::string format_residual_histogram(
 // Render the non-zero rejection counters as one comma-separated line of named
 // reasons; empty when nothing was rejected.
 std::string format_rejections(
-    const std::array<uint64_t, kTeletextRejectReasonCount>& counts) {
+    const std::array<uint64_t, kTeletextRejectReasonCount>& counts,
+    TeletextSystem system) {
   std::string text;
   for (size_t index = 0; index < counts.size(); ++index) {
     if (counts[index] == 0) {
@@ -101,10 +102,10 @@ std::string format_rejections(
     if (!text.empty()) {
       text += ", ";
     }
-    text += fmt::format(
-        "{} {}",
-        teletext_reject_reason_name(static_cast<TeletextRejectReason>(index)),
-        counts[index]);
+    text += fmt::format("{} {}",
+                        teletext_reject_reason_name(
+                            static_cast<TeletextRejectReason>(index), system),
+                        counts[index]);
   }
   return text;
 }
@@ -113,6 +114,10 @@ std::string format_rejections(
 
 void TeletextRecoveryStats::add_line(int vbi_line,
                                      const TeletextLineResult& result) {
+  if (!system_known_) {
+    system_ = result.system;
+    system_known_ = true;
+  }
   ++lines_seen_;
   LineStats& line = per_line_[vbi_line];
   ++line.lines;
@@ -217,6 +222,10 @@ void TeletextRecoveryStats::add_observed_line(
     int vbi_line, const std::array<uint8_t, kTeletextPacketBytes>* packet,
     const TeletextPacketConfidence* confidence, size_t packet_bytes,
     TeletextSystem system) {
+  if (!system_known_) {
+    system_ = system;
+    system_known_ = true;
+  }
   const size_t byte_count = std::min(packet_bytes, kTeletextPacketBytes);
   ++lines_seen_;
   ++observed_lines_;
@@ -347,7 +356,7 @@ std::string TeletextRecoveryStats::brief() const {
     text += fmt::format(" from {} stored observations", lines_seen_);
   }
 
-  const std::string rejections = format_rejections(rejections_);
+  const std::string rejections = format_rejections(rejections_, system_);
   if (!rejections.empty()) {
     text += fmt::format("; rejected: {}", rejections);
   }
@@ -401,7 +410,7 @@ std::string TeletextRecoveryStats::summary() const {
     text += " from stored observations";
   }
 
-  const std::string rejections = format_rejections(rejections_);
+  const std::string rejections = format_rejections(rejections_, system_);
   if (!rejections.empty()) {
     text += fmt::format("\n  Rejected: {}", rejections);
   }

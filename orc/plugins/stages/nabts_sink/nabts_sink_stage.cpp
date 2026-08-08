@@ -311,6 +311,23 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  {
+    ParameterDescriptor desc;
+    desc.name = "export_records";
+    desc.display_name = "Export Record Files";
+    desc.description =
+        "Write each teletext record the recording carried as its own file "
+        "beside the packet stream, named for the channel, record address and "
+        "version that identify it (mydata.t33.000-1A4-v2.rec). The file holds "
+        "the record's data exactly as transmitted: NAPLPS presentation code, "
+        "or "
+        "application data for a record of type 2. Needs an output file to sit "
+        "beside";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
+    descriptors.push_back(desc);
+  }
+
   return descriptors;
 }
 
@@ -385,6 +402,7 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
   }
 
   options.write_report = get_bool_or(parameters, "write_report", false);
+  options.export_records = get_bool_or(parameters, "export_records", false);
 
   // The report is named after the packet stream and written beside it, so it
   // has nowhere to go on a run with no output file. Refused rather than
@@ -392,6 +410,11 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
   if (options.output_path.empty() && options.write_report) {
     throw std::runtime_error(
         "The report file needs an output file (it is written beside the "
+        "packet stream)");
+  }
+  if (options.output_path.empty() && options.export_records) {
+    throw std::runtime_error(
+        "The record files need an output file (they are written beside the "
         "packet stream)");
   }
 
@@ -445,6 +468,12 @@ bool NabtsSinkStage::trigger(
 
     is_processing_.store(false);
 
+    // Cached before the success check: a cancelled or partly failed run still
+    // catalogued whatever it read, and the records dialog showing that is more
+    // use than showing nothing.
+    dataset_ = result.dataset;
+    has_results_ = !dataset_.records.empty();
+
     // Diagnostic report of the run. Reported for a run that was cancelled
     // part-way as well as one that finished — how it was going is exactly the
     // question a cancelled run leaves — at debug level, because it is many
@@ -473,6 +502,14 @@ bool NabtsSinkStage::trigger(
     if (result.lost_packets_estimate > 0) {
       trigger_status_ += "; " + std::to_string(result.lost_packets_estimate) +
                          " packets estimated lost";
+    }
+    if (!dataset_.records.empty()) {
+      trigger_status_ += "; " + std::to_string(dataset_.records.size()) +
+                         " records catalogued";
+    }
+    if (result.records_exported > 0) {
+      trigger_status_ += "; " + std::to_string(result.records_exported) +
+                         " record files written";
     }
     if (!result.report_path.empty()) {
       trigger_status_ += "; report to " + result.report_path;

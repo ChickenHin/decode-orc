@@ -17,6 +17,9 @@
 #include <cstdint>
 #include <string>
 
+#include "nabts_data_group.h"
+#include "nabts_record.h"
+#include "nabts_record_catalogue.h"
 #include "nabts_scan_state.h"
 #include "nabts_sink_deps_interface.h"
 
@@ -52,7 +55,14 @@ class NabtsSinkDeps : public INabtsSinkStageDeps {
   std::string build_report(const NabtsSinkOptions& options,
                            const NabtsSinkResult& result, uint64_t total_frames,
                            const TeletextRecoveryStats& stats,
-                           const NabtsScanState& scan_state) const;
+                           const NabtsScanState& scan_state,
+                           const NabtsGroupStats& group_stats,
+                           const NabtsRecordStats& record_stats) const;
+
+  // Write every catalogued record's data beside the packet stream, one file
+  // apiece. Never fails the export.
+  void write_records(const NabtsSinkOptions& options,
+                     NabtsSinkResult& result) const;
 
   // Write |result.report| beside the packet stream. Never fails the export.
   void write_report(const NabtsSinkOptions& options,

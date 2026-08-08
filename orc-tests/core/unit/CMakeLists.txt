@@ -185,6 +185,10 @@ orc_add_core_unit_tests(
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
         stages/nabts_sink/nabts_sink_stage_test.cpp
         stages/nabts_sink/nabts_frame_slicer_test.cpp
+        stages/nabts_sink/nabts_packet_test.cpp
+        stages/nabts_sink/nabts_data_group_test.cpp
+        stages/nabts_sink/nabts_record_test.cpp
+        stages/nabts_sink/nabts_record_catalogue_test.cpp
         stages/nabts_sink/nabts_scan_state_test.cpp
         stages/teletext_sink/teletext_sink_stage_test.cpp
         stages/teletext_sink/teletext_sink_deps_test.cpp
