@@ -231,43 +231,48 @@ history:
       - orc/stage/tooling/catalogue_results.h
       - orc/plugin/orc_stage_tooling.h
     notes: >-
-      Also in this entry, still unreleased and so folded in rather than given an
-      abi of its own: the generic catalogue-browser contract. The new
+      Everything in this entry happened while abi 13 was unreleased, so it is
+      folded in here rather than spread over three bumps of its own. It began as
+      a teletext change: `TeletextCataloguedPage` replaced its single
+      `TeletextPageSnapshot page` member with a `std::vector` of a new
+      `TeletextCataloguedSubPage` (sub-code, first/last seen frame, times seen,
+      page snapshot), because a page number can carry a sequence of sub-pages the
+      service cycles through — the multi-page set of ETSI EN 300 706 Annex A.1 —
+      and cataloguing one assembly per page number kept only whichever sub-page
+      was transmitted last. That change is the reason the entry exists, and it is
+      also the argument for the removal the summary records: a sub-page field is
+      of no interest to any plugin that is not a teletext decoder, and it should
+      never have been able to break one.
+      The NABTS record surface (CEA-516 / ITU-R BT.653 System C) was added to
+      `orc/stage/analysis_sink_results.h` and to a support-tier
+      `<orc/support/nabts_page.h>` earlier in this same unreleased entry —
+      `NabtsRecordFunction`, `NabtsCataloguedRecord`, `NabtsRecoverySummary`,
+      `NabtsAnalysisDataset`, an `INabtsAnalysisResults` interface,
+      `NabtsCaptionCue`, the `nabts_caption_cues()` helper and the decoded
+      NAPLPS display list. None of it survived to a release: it went out with
+      the teletext types above, into the sink plugins' own
+      `vbi-services/vbi_analysis_results.h`, and the two sink stages now hand
+      the host a `CatalogueDataset` instead of an interface over their own
+      datasets. The net effect of abi 13 on the SDK surface is therefore the
+      catalogue contract alone; no released plugin ever saw the NABTS types.
+    summary: >-
+      Format-specific results contracts out, a generic one in. The new
       `<orc/stage/tooling/catalogue_results.h>` carries `CatalogueDataset` and
       the `ICatalogueResults` interface a stage implements to hand the host a
-      browsable set of items with something drawable for each — a cell grid, a
-      2D display list, a text document or a table — and `StageToolKind` gains
-      `CatalogueBrowser` (appended, so the values released plugins encode do not
-      move). `<orc/stage/analysis_sink_results.h>` loses the teletext and NABTS
-      catalogue types described below in the same breath: they were never
-      generic plugin contract, and while they sat in the ABI-frozen stage tier a
-      teletext change bumped the host ABI for every plugin in the ecosystem.
-      They now live with their sink plugins. This is source-breaking for anything
-      that included that header for them, and nothing outside this repository
-      ever could have.
-      Also in this entry, and additive rather than breaking: the NABTS record
-      surface (CEA-516 / ITU-R BT.653 System C). `orc/stage/analysis_sink_results.h`
-      gains `NabtsRecordFunction`, `NabtsCataloguedRecord`,
-      `NabtsRecoverySummary`, `NabtsAnalysisDataset`, the
-      `INabtsAnalysisResults` interface, `NabtsCaptionCue` and the
-      `nabts_caption_cues()` helper, and it now includes the new support-tier
-      header `<orc/support/nabts_page.h>` (the decoded NAPLPS display list,
-      `NabtsPageSnapshot` and friends). Every one of these types is new in this
-      entry, so no existing layout or vtable moves and no released plugin can
-      see the difference; a plugin implementing `INabtsAnalysisResults` must be
-      built against abi 13 or later, which the toolchain tag already enforces.
-      `NabtsPrimitive` gained its `path` member (X3.110 §5.3.2.3.3, needed to lay
-      a run of characters back out) inside this same entry, before any of it
-      shipped.
-    summary: >-
-      Teletext sub-pages: `TeletextCataloguedPage` in
-      `<orc/stage/analysis_sink_results.h>` replaces its single
-      `TeletextPageSnapshot page` member with a `std::vector` of the new
-      `TeletextCataloguedSubPage` (sub-code, first/last seen frame, times seen,
-      page snapshot), ascending by sub-code and never empty. A page number can
-      carry a sequence of sub-pages the service cycles through — the multi-page
-      set of ETSI EN 300 706 Annex A.1 — and cataloguing one assembly per page
-      number kept only whichever sub-page was transmitted last. The page-level
-      `times_seen`, `first_seen_frame` and `last_seen_frame` now cover the whole
-      set. Layout- and source-breaking for any plugin or host reading the
-      teletext catalogue.
+      browsable set of items with something drawable for each — a character-cell
+      grid, a 2D display list, a text document or a table — and `StageToolKind`
+      gains `CatalogueBrowser`, appended so the values released plugins encode do
+      not move. `<orc/stage/analysis_sink_results.h>` in exchange loses every
+      teletext and NABTS type it carried (`TeletextCataloguedPage`,
+      `TeletextAnalysisDataset`, `ITeletextAnalysisResults`,
+      `NabtsCataloguedRecord`, `NabtsAnalysisDataset`, `INabtsAnalysisResults`,
+      `nabts_caption_cues()` and their neighbours), along with its includes of
+      the format decoders; it keeps only `IDropoutAnalysisResults`,
+      `ISNRAnalysisResults` and `IBurstLevelAnalysisResults`. Those types were
+      never generic plugin contract, and while they sat in the ABI-frozen stage
+      tier a teletext catalogue change bumped the host ABI for every plugin in
+      the ecosystem; they now live privately with their sink plugins. The five
+      `orc/support/{teletext_*,nabts_page}.h` decoder headers leave the SDK in
+      the same breath. Layout- and source-breaking for anything that included
+      that header for the removed types, which nothing outside this repository
+      could have done.

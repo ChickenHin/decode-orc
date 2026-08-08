@@ -46,7 +46,7 @@ class IStageServices;
  * for the 34-byte 525-line one (BT.653 Table 1b).
  *
  * The same pass builds a catalogue of every page the range carried, which the
- * host reads through ITeletextAnalysisResults and presents as the stage's
+ * host reads through ICatalogueResults and presents as the stage's
  * batch-analysis tool.
  *
  * This is a SINK stage - it has inputs but no outputs. All work happens in
@@ -60,7 +60,6 @@ class TeletextSinkStage : public DAGStage,
                           public TriggerableStage,
                           public StageToolProvider,
                           public IStagePreviewCapability,
-                          public ITeletextAnalysisResults,
                           public ICatalogueResults {
  public:
   explicit TeletextSinkStage(IStageServices* stage_services);
@@ -108,9 +107,13 @@ class TeletextSinkStage : public DAGStage,
 
   void cancel_trigger() override { cancel_requested_.store(true); }
 
-  // ITeletextAnalysisResults interface
-  bool has_results() const override { return has_results_; }
-  const TeletextAnalysisDataset& dataset() const override { return dataset_; }
+  /// Whether the last trigger left a catalogue behind
+  bool has_results() const { return has_results_; }
+
+  /// The raw catalogue the last trigger built. Plugin-private: the host reads
+  /// the stage through ICatalogueResults and never sees this type. Kept public
+  /// for the stage's own tests, which compile against these sources.
+  const TeletextAnalysisDataset& dataset() const { return dataset_; }
 
   // ICatalogueResults interface. Resolving every sub-page into a drawable cell
   // grid costs real work and memory, and a run that only exports a packet
@@ -157,8 +160,8 @@ class TeletextSinkStage : public DAGStage,
   IStageServices* stage_services_{nullptr};
   std::shared_ptr<ITeletextSinkStageDeps> deps_override_;
 
-  // Cached results of the last trigger, read by the host through
-  // ITeletextAnalysisResults.
+  // Cached results of the last trigger, resolved into the host-facing
+  // catalogue on demand.
   TeletextAnalysisDataset dataset_;
   bool has_results_{false};
   // Built from dataset_ on first catalogue() call; cleared with it.

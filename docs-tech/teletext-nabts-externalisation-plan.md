@@ -425,31 +425,38 @@ inserting into one field of each frame would otherwise show a loss in every othe
 those empty fields would have carried are missing from their pages all the same, which is why the
 per-page total runs above the run-wide one on the 525-line capture.
 
-## Phase 3 — Port the plugins and delete the host format code
+## Phase 3 — Port the plugins and delete the host format code — **done**
 
 ### Task 3.1 — Implement `ICatalogueResults` in both sinks
 
-Each stage builds the catalogue and payloads from its own dataset. The conversion logic is the two
-presenters, moved across the boundary: `teletext_analysis_presenter.cpp` (170 lines) and
-`nabts_analysis_presenter.cpp` (554 lines) become plugin-side code with their host include
-dependency gone.
+The conversion half was built in Phase 2: `teletext_catalogue_view.cpp` and `nabts_catalogue_view.cpp`
+are the two presenters moved across the boundary, and both stages have advertised the generic
+contract since. Phase 3 finished the other half — `ITeletextAnalysisResults` and
+`INabtsAnalysisResults` are gone from `vbi_analysis_results.h` and from the two stage classes, whose
+`dataset()` is now an ordinary accessor the stages' own tests use rather than a virtual the host
+reaches through.
 
-`ITeletextAnalysisResults` and `INabtsAnalysisResults` are dropped from the stages; the datasets
-become plugin-private types with no cross-DSO exposure at all, which is what removes the typeinfo
-fragility of §3 for these two stages.
+Nothing in `vbi-services` is now the target of a cross-DSO `dynamic_cast`, which removes the
+typeinfo-name fragility of §3 for these two stages: the only interface the host casts to is
+`ICatalogueResults`, which is SDK. The datasets are plugin-private, so a field added to
+`TeletextCataloguedSubPage` costs a rebuild of two plugins and nothing else.
 
 ### Task 3.2 — Resolve `nabts_caption_cues()`
 
-Currently shared so the plugin's SubRip export and the host's caption track cannot disagree
-(`analysis_sink_results.h:320-332`, used at `nabts_sink_deps.cpp:270` and
-`nabts_analysis_presenter.cpp:474`). Once the plugin is external, sharing a *function* is no longer
-available; the plugin must emit the cues as data.
+Resolved by the catalogue contract rather than by a new seam. The plugin already computed the cues
+for its SubRip export; Phase 2's `nabts_catalogue_view.cpp` publishes the same cue list as a
+`CatalogueTable` payload — the caption track the viewer shows — so the host consumes cues as data and
+`nabts_analysis_presenter.cpp:474`, the one place it derived them, is deleted. The EIA-608
+observation route was not needed: a caption track is a reading of a triggered run, which is what the
+catalogue already carries. Both remaining callers are inside the plugin and will move out of tree
+with it.
 
-The plugin already computes them for its own SRT export. Have it publish them through the existing
-caption-cue path so the host consumes cues rather than deriving them — the same arrangement the
-EIA-608 closed-caption route uses, where the host reads a typed observation and never touches the
-decoder. Verify the SRT the plugin writes and the caption track the host builds remain byte-identical
-across the change; that equivalence is the reason the function was shared in the first place.
+The SubRip document builder is now `nabts_caption_srt()`, free and beside `write_captions()` so the
+equivalence can be asserted rather than asserted about:
+`orc-tests/core/unit/stages/nabts_sink/nabts_caption_publication_test.cpp` parses the document back
+and holds it against the published caption track cue for cue — count, extent, timing and text — and
+pins the one difference that is deliberate (SubRip keeps a two-line caption's line break; the table
+flattens it so the list stays scannable). A recording with no captioning publishes neither.
 
 ### Task 3.3 — Delete
 
@@ -459,14 +466,21 @@ across the change; that equivalence is the reason the function was shared in the
 | `orc/presenters/**/{teletext,nabts}_analysis_presenter.*` | 846 |
 | `orc/gui/teletextdialog.*`, `teletextpagewidget.*` | 1307 |
 | `orc/gui/nabtsdialog.*`, `nabtscanvaswidget.*` | 1615 |
-| `render_presenter.cpp:2733-2779`, coordinator handlers, `mainwindow.cpp` branches | ~250 |
+| their four test files and the teletext page fixtures (`orc-tests/gui/unit/`) | 2221 |
 
-net of the ~900 lines of drawing code that moved into the two generic renderers in Task 2.2.
+6 699 lines in all, 4 478 of them out of `orc/gui`, `orc/presenters` and `orc/view-types`, net of
+the drawing code that moved into the two generic renderers in Task 2.2. The coordinator handlers and
+`mainwindow.cpp` branches had already gone in Task 2.3. `orc-presenters` no longer links
+`orc-vbi-services`, so no host target compiles a plugin header any more — the dependency Task 1.4
+deliberately made visible.
 
-**Exit criteria:** `grep -ril "teletext\|nabts" orc/gui orc/presenters orc/view-types` returns
-nothing.
-
----
+**Exit criteria (met):** `grep -ril "teletext\|nabts" orc/gui orc/presenters orc/view-types` returns
+nine files, none of them host format code. Five are the LaserDisc VBI programme status the `biphase`
+observer reads (`ProgrammeStatusView::has_teletext`, which says only whether a disc carried a
+teletext service); one is a comment naming the PAL teletext VBI lines in `mask_line_presenter.h`;
+one is user-facing prose pointing at the stage; and two — `cataloguedialog.h` and `mainwindow.cpp` —
+name the two services in comments precisely to say the host does *not* know about them. No host file
+includes a format header, names a result type, or draws a service.
 
 ## Phase 4 — Move the plugins out of tree
 

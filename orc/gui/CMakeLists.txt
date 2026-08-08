@@ -130,17 +130,6 @@ set(ORC_GUI_LIB_SOURCES
     cataloguedialog.cpp
     cataloguedialog.h
 
-    # Teletext page viewer (teletext_sink stage tool)
-    teletextpagewidget.cpp
-    teletextpagewidget.h
-    teletextdialog.cpp
-    teletextdialog.h
-    # NABTS record viewer (nabts_sink stage tool)
-    nabtscanvaswidget.cpp
-    nabtscanvaswidget.h
-    nabtsdialog.cpp
-    nabtsdialog.h
-
     # Closed caption preview dialog
     closed_caption_assembler.cpp
     closed_caption_assembler.h

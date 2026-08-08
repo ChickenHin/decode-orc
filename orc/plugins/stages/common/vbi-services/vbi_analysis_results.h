@@ -1,8 +1,8 @@
 /*
  * File:        vbi_analysis_results.h
  * Module:      orc-vbi-services (shared plugin library)
- * Purpose:     Catalogue result contracts for the teletext and NABTS sink
- *              stages, read by the host across the shared library boundary
+ * Purpose:     Plugin-private catalogue types for the teletext and NABTS sink
+ *              stages
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -11,12 +11,14 @@
 #ifndef ORC_VBI_SERVICES_VBI_ANALYSIS_RESULTS_H
 #define ORC_VBI_SERVICES_VBI_ANALYSIS_RESULTS_H
 
-// Shared plugin-side library, NOT part of the SDK contract. These types carry
-// the teletext and NABTS catalogues from their sink stages to the host, which
-// reaches them by dynamic_cast on the stage pointer. Because the definitions
-// live outside the SDK, changing them costs a rebuild of the host and of the
-// two sink plugins — never an ABI bump for unrelated plugins, which is what
-// they cost while they sat in <orc/stage/analysis_sink_results.h>.
+// Shared plugin-side library, NOT part of the SDK contract, and no longer
+// crossing the plugin boundary at all: the two sink stages hold these types
+// privately and publish what the host reads through orc::ICatalogueResults
+// (<orc/stage/tooling/catalogue_results.h>), which is SDK. Nothing here has a
+// cross-DSO dynamic_cast against it, so nothing here depends on the runtime's
+// typeinfo-name fallback, and changing any of it costs a rebuild of the two
+// plugins alone — never an ABI bump for unrelated plugins, which is what these
+// types cost while they sat in <orc/stage/analysis_sink_results.h>.
 
 #include <cstdint>
 #include <string>
@@ -141,13 +143,6 @@ struct TeletextAnalysisDataset {
   /// Ascending by {magazine, page number}
   std::vector<TeletextCataloguedPage> pages;
   TeletextRecoverySummary summary;
-};
-
-class ITeletextAnalysisResults {
- public:
-  virtual bool has_results() const = 0;
-  virtual const TeletextAnalysisDataset& dataset() const = 0;
-  virtual ~ITeletextAnalysisResults() = default;
 };
 
 /**
@@ -314,18 +309,13 @@ struct NabtsCaptionCue {
  * PLPS code that erases either the entire display, or the area covered by the
  * caption" — so it ends the caption before it and yields no cue of its own.
  *
- * Shared between the sink stage's SubRip export and the host's caption track,
- * so the two cannot disagree about what the service said.
+ * Shared between the sink stage's SubRip export and the caption track it
+ * publishes in its catalogue, so the file and the screen cannot disagree about
+ * what the service said. Both callers are inside the plugin: the host reads the
+ * cues as catalogue data and never derives them.
  */
 std::vector<NabtsCaptionCue> nabts_caption_cues(
     const std::vector<NabtsCataloguedRecord>& records);
-
-class INabtsAnalysisResults {
- public:
-  virtual bool has_results() const = 0;
-  virtual const NabtsAnalysisDataset& dataset() const = 0;
-  virtual ~INabtsAnalysisResults() = default;
-};
 
 }  // namespace orc
 

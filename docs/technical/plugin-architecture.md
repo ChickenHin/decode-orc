@@ -164,11 +164,11 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `13` (`TeletextCataloguedPage` in
-`<orc/stage/analysis_sink_results.h>` replaced its single page snapshot with a
-vector of `TeletextCataloguedSubPage`, so a page number transmitted as a
-sequence of sub-pages is catalogued as the whole sequence). The
-authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
+**Current value:** `13` (the format-specific results contracts left
+`<orc/stage/analysis_sink_results.h>` for the generic `ICatalogueResults` of
+`<orc/stage/tooling/catalogue_results.h>`, so a stage hands the host a
+browsable catalogue instead of the host knowing the stage's own result type).
+The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
 Bumped when any of the following change:

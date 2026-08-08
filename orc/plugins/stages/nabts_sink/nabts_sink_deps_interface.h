@@ -100,8 +100,8 @@ struct NabtsSinkResult {
   // captioning, or when the write failed — none of which fails the export.
   uint64_t caption_cues_written{0};
   std::string caption_path;
-  // Every record the range carried, for the host to browse through
-  // INabtsAnalysisResults.
+  // Every record the range carried, which the stage resolves into the
+  // catalogue the host browses through ICatalogueResults.
   NabtsAnalysisDataset dataset;
 };
 

@@ -196,10 +196,17 @@ tool menu and results interface are each half inapplicable at any moment.
 | Stage | `teletext_sink` | `nabts_sink` (Phase 3) | — |
 | Packet → structure | `teletext_page_decoder` | `nabts_record_assembler` (Phase 4) | — |
 | Presentation | Level 1 cell grid | `naplps_interpreter` → display list (Phase 5) | — |
-| Results contract | `ITeletextAnalysisResults` | `INabtsAnalysisResults` (Phase 4) | — |
-| View types | `orc_teletext.h` | `orc_nabts.h` (Phase 6) | — |
-| Presenter | `teletext_analysis_presenter` | `nabts_analysis_presenter` (Phase 6) | — |
-| Viewer | `TeletextDialog` + `TeletextPageWidget` | `NabtsDialog` + `NabtsCanvasWidget` (Phase 6) | — |
+| Results contract | — | — | `ICatalogueResults` (see note below) |
+| View types | — | — | `<orc/stage/tooling/catalogue_results.h>` |
+| Presenter | — | `nabts_catalogue_view` (plugin-side) | — |
+| Viewer | — | — | `CatalogueDialog` + its two payload renderers |
+
+> **Superseded 2026-08-08.** The bottom four rows are how Phase 6 built it: a results interface, a
+> set of view types, a presenter and a bespoke dialog per service, each pair a near-duplicate of the
+> teletext one. They were replaced by the generic catalogue contract of
+> [teletext-nabts-externalisation-plan.md](teletext-nabts-externalisation-plan.md) Phase 2 — each
+> sink now builds an SDK `CatalogueDataset` and the host draws it without knowing what NABTS is.
+> The Phase 6 sections below are left as written, with the substitution noted in each.
 
 ### 2.2 Packet-stream file naming
 
@@ -590,6 +597,11 @@ in `orc/stage/analysis_sink_results.h` alongside the teletext ones, plus the sta
 `decode-orc.stage-tools.nabts-pages.v1` as a batch-analysis tool, which is what Phase 6's dialog
 hangs off.
 
+> **Superseded.** The catalogue types moved out of the SDK to
+> [vbi-services/vbi_analysis_results.h](../orc/plugins/stages/common/vbi-services/vbi_analysis_results.h)
+> and are now plugin-private; `INabtsAnalysisResults` is gone and the stage advertises the generic
+> `decode-orc.stage-tools.catalogue.v1` instead. `nabts_record_catalogue.{h,cpp}` is unchanged.
+
 A catalogue entry is a *message* rather than a record, because §5.2.6 makes that the unit a receiver
 presents. Which copy is kept is decided by quality before recency: a complete, undamaged copy is
 never replaced by a damaged one, so a recording that degrades keeps the copy that arrived cleanly
@@ -769,7 +781,12 @@ and that the mosaic set has exactly 65 positions with Figure 62's bit order.
 
 ### Task 6.1 — View types
 
-Built as planned: [orc_nabts.h](../orc/view-types/orc_nabts.h) with `NabtsColourView`,
+> **Superseded.** `orc_nabts.h` was deleted; its display-list model became the SDK's
+> `CatalogueDisplayList` in
+> [catalogue_results.h](../orc/sdk/include/orc/stage/tooling/catalogue_results.h), unchanged in
+> substance. What follows describes the original.
+
+Built as planned: `orc/view-types/orc_nabts.h` with `NabtsColourView`,
 `NabtsPrimitiveView`, `NabtsDrcsGlyphView`, `NabtsTextureMaskView`, `NabtsPageRecoveryView`,
 `NabtsPageView`, `NabtsRecordFunctionView`, `NabtsCatalogueRecordView`, `NabtsCaptionCueView`,
 `NabtsRecoverySummaryView` and `NabtsAnalysisView`. Plain value types, no Qt.
@@ -784,7 +801,12 @@ coalesced into one entry with a UTF-8 string, a character count and the measured
 
 ### Task 6.2 — Presenter
 
-[nabts_analysis_presenter.{h,cpp}](../orc/presenters/src/nabts_analysis_presenter.cpp): dataset →
+> **Superseded.** The presenter moved across the plugin boundary as
+> [nabts_catalogue_view.cpp](../orc/plugins/stages/nabts_sink/nabts_catalogue_view.cpp), which does
+> the same three resolutions into `CatalogueDataset` instead of into host view types. The two
+> findings below are the interpreter's and still stand.
+
+`nabts_analysis_presenter.{h,cpp}`: dataset →
 view. Three things resolve here — colour (three bits per gun to 8-bit channels, and the incremental
 colour runs of §5.3.3.6.3 through the colour map or as Figure 12 values depending on the colour
 mode), characters (repertoire lookup and run coalescing), and the caption track.
@@ -812,11 +834,15 @@ field in front of every accented letter. Fixed in
 composes the mark onto the letter behind it, which is Unicode's order and the reverse of the
 transmission's. Nothing in the reference captures is accented, so only the unit test found it.
 
-*Acceptance:* met — `nabts_analysis_presenter_test.cpp` converts synthetic datasets; an unwritten
+*Acceptance:* met — the presenter's tests converted synthetic datasets; an unwritten
 colour map resolves to the 16 entries of T.101 Table II-3 (grey ramp low, hues high, entry 8 pure
 blue) and a map the record wrote overrides them.
 
 ### Task 6.3 — Coordinator request
+
+> **Superseded.** The teletext and NABTS requests collapsed into one `GetCatalogueDataRequest` /
+> `catalogueDataReady` / `catalogueProgress` / `getCatalogueData()`, with the fetch-or-trigger
+> behaviour carried over unchanged.
 
 `GetNabtsAnalysisDataRequest`, `RenderCoordinator::requestNabtsAnalysisData()`,
 `nabtsAnalysisDataReady` / `nabtsAnalysisProgress`, and
@@ -828,7 +854,12 @@ requests in flight.
 
 ### Task 6.4 — Dialog and canvas
 
-[NabtsDialog](../orc/gui/nabtsdialog.cpp) and [NabtsCanvasWidget](../orc/gui/nabtscanvaswidget.cpp),
+> **Superseded.** Both were deleted for [CatalogueDialog](../orc/gui/cataloguedialog.cpp) and
+> [CatalogueDisplayListWidget](../orc/gui/cataloguedisplaylistwidget.cpp), which keep the drawing
+> code and the three-pane shape but take their columns, panes and labels from the payload the stage
+> published. `MainWindow` routes on the contract id alone and names no service.
+
+`NabtsDialog` and `NabtsCanvasWidget`,
 wired into `MainWindow` on the teletext tool's pattern (tool-id dispatch, per-node dialog and
 progress-dialog maps keyed on `NodeID` with `destroyed` erasing both, the close-project cleanup
 loops, and the erase-then-delete ordering in `onNabtsAnalysisDataReady`).
@@ -928,10 +959,17 @@ teletext path's, unchanged.
 
 ### Task 6.5 — Captioning
 
-The caption service is surfaced twice from one implementation: `nabts_caption_cues()` in the SDK
-([nabts_captions.cpp](../orc/plugins/stages/common/vbi-services/nabts_captions.cpp)) reads a catalogue into cues, and both the
-viewer's caption track and the stage's new `export_captions` parameter go through it — so the file
-and the screen cannot disagree about what the service said.
+The caption service is surfaced twice from one implementation:
+[`nabts_caption_cues()`](../orc/plugins/stages/common/vbi-services/nabts_captions.cpp) reads a
+catalogue into cues, and both the caption track the stage publishes in its catalogue and the stage's
+new `export_captions` parameter go through it — so the file and the screen cannot disagree about
+what the service said.
+
+> **Amended.** The function lived in the SDK because the host derived the viewer's cues by calling
+> it. The host no longer does: it reads the caption track as published catalogue data, both callers
+> are now inside the plugin, and
+> [nabts_caption_publication_test.cpp](../orc-tests/core/unit/stages/nabts_sink/nabts_caption_publication_test.cpp)
+> holds the two renderings against each other cue for cue.
 
 Three readings the standard settles and the code follows:
 

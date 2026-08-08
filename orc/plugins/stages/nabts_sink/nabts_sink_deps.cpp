@@ -123,6 +123,22 @@ uint64_t estimate_lost_packets(
 
 }  // namespace
 
+std::string nabts_caption_srt(const std::vector<NabtsCaptionCue>& cues) {
+  std::string document;
+  size_t index = 1;
+  for (const NabtsCaptionCue& cue : cues) {
+    document += std::to_string(index++);
+    document += '\n';
+    document += srt_timestamp(cue.start_frame);
+    document += " --> ";
+    document += srt_timestamp(cue.end_frame);
+    document += '\n';
+    document += cue.text;
+    document += "\n\n";
+  }
+  return document;
+}
+
 void NabtsSinkDeps::init(TriggerProgressCallback progress_callback,
                          std::atomic<bool>* cancel_requested) {
   progress_callback_ = std::move(progress_callback);
@@ -264,7 +280,7 @@ void NabtsSinkDeps::write_captions(const NabtsSinkOptions& options,
     return;
   }
 
-  // Read the same way the viewer's caption track reads it — one shared
+  // Read the same way the catalogue's caption track reads it — one shared
   // implementation, so the file and the screen cannot disagree.
   const std::vector<NabtsCaptionCue> cues =
       nabts_caption_cues(result.dataset.records);
@@ -274,18 +290,7 @@ void NabtsSinkDeps::write_captions(const NabtsSinkOptions& options,
     return;
   }
 
-  std::string document;
-  size_t index = 1;
-  for (const NabtsCaptionCue& cue : cues) {
-    document += std::to_string(index++);
-    document += '\n';
-    document += srt_timestamp(cue.start_frame);
-    document += " --> ";
-    document += srt_timestamp(cue.end_frame);
-    document += '\n';
-    document += cue.text;
-    document += "\n\n";
-  }
+  const std::string document = nabts_caption_srt(cues);
 
   // Beside the packet stream, named after it: mydata.t33 gives mydata.t33.srt,
   // which is the rule the report and the record files follow.

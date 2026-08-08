@@ -196,6 +196,7 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_data_group_test.cpp
         stages/nabts_sink/nabts_record_test.cpp
         stages/nabts_sink/nabts_record_catalogue_test.cpp
+        stages/nabts_sink/nabts_caption_publication_test.cpp
         stages/nabts_sink/naplps_code_env_test.cpp
         stages/nabts_sink/naplps_interpreter_test.cpp
         stages/nabts_sink/nabts_scan_state_test.cpp

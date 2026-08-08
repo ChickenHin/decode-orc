@@ -26,8 +26,6 @@ add_library(orc-presenters STATIC
     src/metrics_presenter.cpp
     src/vbi_presenter.cpp
     src/ntsc_observation_presenter.cpp
-    src/teletext_analysis_presenter.cpp
-    src/nabts_analysis_presenter.cpp
     src/closed_caption_observation_presenter.cpp
     src/video_parameter_observation_presenter.cpp
     src/core_init.cpp
@@ -77,10 +75,6 @@ target_link_libraries(orc-presenters
         orc-stage-plugin-dropout-analysis-sink
         orc-stage-plugin-snr-analysis-sink
         orc-stage-plugin-burst-level-analysis-sink
-        # The teletext and NABTS catalogue contracts, and the page-number
-        # parser the GUI uses. Plugin-side rather than SDK; PUBLIC so the
-        # include directory and nabts_caption_cues() reach the GUI targets.
-        orc-vbi-services
     PRIVATE
         orc-core    # Core implementation hidden from GUI/CLI
 )

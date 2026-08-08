@@ -145,8 +145,6 @@ TEST_F(TeletextSinkStage, StageTools_AdvertiseTheCatalogueContract) {
 TEST_F(TeletextSinkStage, Mixins_ExposeStageToolProviderOnly) {
   EXPECT_NE(dynamic_cast<orc::StageToolProvider*>(instance_.get()), nullptr);
   EXPECT_NE(dynamic_cast<orc::ICatalogueResults*>(instance_.get()), nullptr);
-  EXPECT_NE(dynamic_cast<orc::ITeletextAnalysisResults*>(instance_.get()),
-            nullptr);
   EXPECT_EQ(dynamic_cast<orc::AnalysisToolProvider*>(instance_.get()), nullptr);
 }
 

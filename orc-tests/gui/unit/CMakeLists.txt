@@ -99,8 +99,6 @@ orc_add_gui_unit_tests(
             quick_project_planner_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
-            teletext_analysis_presenter_test.cpp
-            nabts_analysis_presenter_test.cpp
             vectorscope_geometry_test.cpp
 )
 
@@ -142,6 +140,4 @@ orc_add_gui_unit_tests(
         plugin_manager_dialog_test.cpp
         closed_caption_dialog_test.cpp
         catalogue_dialog_test.cpp
-        teletext_dialog_test.cpp
-        nabts_dialog_test.cpp
 )

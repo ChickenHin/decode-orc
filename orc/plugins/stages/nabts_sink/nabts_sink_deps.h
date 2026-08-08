@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "nabts_data_group.h"
 #include "nabts_record.h"
@@ -27,6 +28,18 @@ namespace orc {
 
 class IStageServices;
 class TeletextRecoveryStats;
+
+/**
+ * @brief The caption service as a SubRip document
+ *
+ * The exported half of the pair the stage publishes: the same cue list that
+ * becomes the caption track of the catalogue (nabts_catalogue_view.h) written
+ * out as a file. Both take their reading of the service from
+ * nabts_caption_cues(), which is what stops the file and the screen disagreeing
+ * now that the host consumes the cues as data rather than deriving them itself.
+ * Free and exposed so a test can hold the two renderings against each other.
+ */
+std::string nabts_caption_srt(const std::vector<NabtsCaptionCue>& cues);
 
 /**
  * @brief The NABTS sink's real work: one pass over the frame range

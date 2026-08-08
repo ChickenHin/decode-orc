@@ -47,7 +47,7 @@ class IStageServices;
  *
  * The packets are also reassembled into data groups (§4) and teletext records
  * (§5) as the pass goes, and the records the range carried are catalogued for
- * the host to browse through INabtsAnalysisResults.
+ * the host to browse through ICatalogueResults.
  *
  * Separate from the Teletext Sink because the two services share nothing above
  * the packet — see docs-tech/nabts-support-design.md §2.
@@ -61,7 +61,6 @@ class NabtsSinkStage : public DAGStage,
                        public TriggerableStage,
                        public StageToolProvider,
                        public IStagePreviewCapability,
-                       public INabtsAnalysisResults,
                        public ICatalogueResults {
  public:
   explicit NabtsSinkStage(IStageServices* stage_services);
@@ -109,9 +108,13 @@ class NabtsSinkStage : public DAGStage,
 
   void cancel_trigger() override { cancel_requested_.store(true); }
 
-  // INabtsAnalysisResults interface
-  bool has_results() const override { return has_results_; }
-  const NabtsAnalysisDataset& dataset() const override { return dataset_; }
+  /// Whether the last trigger left a catalogue behind
+  bool has_results() const { return has_results_; }
+
+  /// The raw catalogue the last trigger built. Plugin-private: the host reads
+  /// the stage through ICatalogueResults and never sees this type. Kept public
+  /// for the stage's own tests, which compile against these sources.
+  const NabtsAnalysisDataset& dataset() const { return dataset_; }
 
   // ICatalogueResults interface. Running every record's presentation code into
   // a display list costs real work and memory, and a run that only exports a
@@ -158,8 +161,8 @@ class NabtsSinkStage : public DAGStage,
   IStageServices* stage_services_{nullptr};
   std::shared_ptr<INabtsSinkStageDeps> deps_override_;
 
-  // Cached results of the last trigger, read by the host through
-  // INabtsAnalysisResults.
+  // Cached results of the last trigger, resolved into the host-facing
+  // catalogue on demand.
   NabtsAnalysisDataset dataset_;
   bool has_results_{false};
   // Built from dataset_ on first catalogue() call; cleared with it.
