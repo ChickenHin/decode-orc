@@ -107,6 +107,21 @@ TEST(VideoSinkStageTest, ParameterDescriptors_KeyEncoderControlsOffFormat) {
   }
 }
 
+TEST(VideoSinkStageTest, ParameterDescriptors_Av1EnablesRateControls) {
+  orc::VideoSinkStage stage;
+  const auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+
+  for (const auto* name : {"encoder_crf", "encoder_bitrate"}) {
+    const auto* descriptor = find_parameter(descriptors, name);
+    ASSERT_NE(descriptor, nullptr) << name;
+    ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
+    EXPECT_TRUE(has_string(descriptor->constraints.depends_on->required_values,
+                           "mp4-av1"))
+        << name;
+  }
+}
+
 TEST(VideoSinkStageTest, Decoder_OptionsIncludeNtscPathsForCompositeAndYc) {
   orc::VideoSinkStage stage;
 

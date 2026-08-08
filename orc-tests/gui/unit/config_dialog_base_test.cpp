@@ -331,6 +331,38 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_AppliesPresetAndOptionRules) {
   EXPECT_EQ(std::get<std::string>(params.at("output_path")), "exports/out.mp4");
 }
 
+TEST(ConfigDialogBaseTest, FfmpegDialog_Av1WebPresetDefaultsToCrf32) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  auto* advanced_group =
+      findGroupByTitle(dialog, "Advanced Settings (Optional)");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  ASSERT_NE(advanced_group, nullptr);
+
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+
+  category_combo->setCurrentIndex(5);  // Modern (H.265/AV1)
+  QCoreApplication::processEvents();
+  const int av1_index = preset_combo->findText("AV1 (Web Delivery)");
+  ASSERT_GE(av1_index, 0);
+  preset_combo->setCurrentIndex(av1_index);
+  QCoreApplication::processEvents();
+
+  clickOk(dialog);
+  const auto parameters = dialog.get_parameters();
+  ASSERT_NE(parameters.find("encoder_crf"), parameters.end());
+  EXPECT_EQ(std::get<int>(parameters.at("encoder_crf")), 32);
+}
+
 TEST(ConfigDialogBaseTest, FfmpegDialog_RoundTripsAspectRatioAndVideoFilter) {
   (void)ensureApplication();
 

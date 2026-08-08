@@ -64,10 +64,10 @@ Alignment padding added to each output frame. Default: `8`.
 FFmpeg mode only. Encoder speed/quality trade-off. Values: `fast`, `medium`, `slow`, `veryslow`. Slower presets produce smaller files at the same quality level.
 
 ### encoder_crf (int)
-FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51; lower values produce higher quality and larger files. Default: `18`. Used when `encoder_bitrate` is `0`.
+FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51; lower values produce higher quality and larger files. Default: `18`. AV1 compact delivery typically uses CRF 30–35; the AV1 web-delivery preset uses 32. CRF is used only when lossless mode is off and `encoder_bitrate` is `0`.
 
 ### encoder_bitrate (int)
-FFmpeg mode only. Target bitrate in bits per second. When non-zero, overrides CRF mode. Default: `0` (use CRF).
+FFmpeg mode only. Target bitrate in bits per second. When non-zero, it overrides CRF mode. Default: `0` (use CRF). Rate-control precedence for H.264, H.265, and AV1 is lossless mode first, then a non-zero target bitrate, then CRF quality.
 
 ### hardware_encoder (string)
 FFmpeg mode only. Hardware-accelerated encoding backend. Values: `none`, `vaapi`, `nvenc`, `qsv`, `amf`, `videotoolbox`. Default: `none`.
@@ -76,7 +76,7 @@ FFmpeg mode only. Hardware-accelerated encoding backend. Values: `none`, `vaapi`
 FFmpeg mode only, `mov-prores` format. ProRes quality profile: `proxy`, `lt`, `standard`, `hq`, `4444`, `4444xq`. Default: `hq`.
 
 ### use_lossless_mode (bool)
-FFmpeg mode only. Enable mathematically lossless encoding (H.264/H.265/AV1 only, overrides CRF). Default: `false`.
+FFmpeg mode only. Enable mathematically lossless encoding (H.264/H.265/AV1 only, overrides bitrate and CRF). Default: `false`.
 
 ### apply_deinterlace (bool)
 FFmpeg mode only. Apply the bwdif deinterlacing filter for progressive web playback. One frame is produced per field, so the output frame rate doubles (50 fps for PAL, 59.94 fps for NTSC). Default: `false`.
@@ -91,7 +91,7 @@ FFmpeg mode only. Custom FFmpeg video filter chain applied before encoding, usin
 - `bwdif=mode=send_frame` — deinterlace without doubling the frame rate
 - `crop=692:554` — crop the output frame
 
-Filters may change the output dimensions and frame rate; the encoder follows the filter output automatically. Leave empty for no filtering (the default). An invalid filter string causes the export to fail with the FFmpeg error message in the trigger status.
+Filters may change the output dimensions and frame rate; the encoder follows the filter output automatically. They may improve compressibility, but do not control the encoded bitrate. Leave empty for no filtering (the default). An invalid filter string causes the export to fail with the FFmpeg error message in the trigger status.
 
 ### embed_audio (bool)
 FFmpeg mode only. Embed pipeline audio into the output file, one output audio stream per selected channel pair. Requires audio data to be present in the pipeline. Default: `false`.
@@ -142,7 +142,7 @@ Opens a preset helper dialog that lets you select common encoder configurations 
 - Raw output files can be very large; ensure sufficient disk space before triggering.
 - The `y4m` raw format adds a Y4M header to the file, making it directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.
 - Closed caption embedding is only supported in MP4/MOV containers.
-- CRF and bitrate modes are mutually exclusive; set `encoder_bitrate` to a non-zero value to switch from CRF mode.
+- Lossless mode overrides bitrate and CRF. Otherwise, set `encoder_bitrate` to a non-zero value to switch from CRF quality mode.
 - Video filtering (`apply_deinterlace` or `video_filter`) is not supported with hardware encoders that use GPU surfaces (`vaapi`, `qsv`, `videotoolbox`); the export automatically falls back to the software encoder in that case.
 - When a video filter chain is active, interlaced coding flags are not forced on the encoder; the field structure of the filter output determines how frames are flagged. Filters like `bwdif` and `fieldmatch,decimate` produce progressive frames.
 
