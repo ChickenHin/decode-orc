@@ -107,7 +107,7 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
       {"mp4-av1", "AV1 (Web Delivery)",
        "Modern royalty-free codec. Better compression than H.265. Excellent "
        "for web streaming. Limited device support currently.",
-       "mp4", "av1", false, true, 24, "medium", 0},
+       "mp4", "av1", false, true, 32, "medium", 0},
       {"mp4-av1_lossless", "AV1 Lossless",
        "Mathematically lossless AV1 encoding. Best compression for lossless "
        "archival. Slow encoding but excellent results.",

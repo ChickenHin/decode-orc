@@ -291,6 +291,51 @@ TEST(StageParameterDialogTest,
   EXPECT_DOUBLE_EQ(double_spin->value(), -0.5);
 }
 
+TEST(StageParameterDialogTest, Av1RateControlsEnableForAv1Format) {
+  (void)ensureApplication();
+
+  auto ffmpeg_format =
+      makeDescriptor("ffmpeg_format", "FFmpeg Format",
+                     orc::ParameterType::STRING, std::string("mkv-ffv1"),
+                     std::nullopt, std::nullopt, {"mkv-ffv1", "mp4-av1"});
+  auto encoder_crf =
+      makeDescriptor("encoder_crf", "Encoder CRF", orc::ParameterType::INT32,
+                     static_cast<int32_t>(18), static_cast<int32_t>(0),
+                     static_cast<int32_t>(51));
+  encoder_crf.constraints.depends_on =
+      orc::ParameterDependency{"ffmpeg_format", {"mp4-av1"}};
+  auto encoder_bitrate =
+      makeDescriptor("encoder_bitrate", "Encoder Bitrate",
+                     orc::ParameterType::INT32, static_cast<int32_t>(0),
+                     static_cast<int32_t>(0), static_cast<int32_t>(100000000));
+  encoder_bitrate.constraints.depends_on =
+      orc::ParameterDependency{"ffmpeg_format", {"mp4-av1"}};
+
+  StageParameterDialog dialog("video_sink", "Video Sink", "",
+                              {ffmpeg_format, encoder_crf, encoder_bitrate},
+                              {});
+
+  auto* format_combo =
+      qobject_cast<QComboBox*>(widgetForDisplayName(dialog, "FFmpeg Format"));
+  auto* crf =
+      qobject_cast<QSpinBox*>(widgetForDisplayName(dialog, "Encoder CRF"));
+  auto* bitrate =
+      qobject_cast<QSpinBox*>(widgetForDisplayName(dialog, "Encoder Bitrate"));
+  ASSERT_NE(format_combo, nullptr);
+  ASSERT_NE(crf, nullptr);
+  ASSERT_NE(bitrate, nullptr);
+  EXPECT_TRUE(crf->isHidden());
+  EXPECT_TRUE(bitrate->isHidden());
+
+  const int av1_index = format_combo->findText("mp4-av1");
+  ASSERT_GE(av1_index, 0);
+  format_combo->setCurrentIndex(av1_index);
+  QCoreApplication::processEvents();
+
+  EXPECT_FALSE(crf->isHidden());
+  EXPECT_FALSE(bitrate->isHidden());
+}
+
 TEST(StageParameterDialogTest,
      FrameMapRanges_DisplayedOneBasedAndStoredZeroBased) {
   (void)ensureApplication();

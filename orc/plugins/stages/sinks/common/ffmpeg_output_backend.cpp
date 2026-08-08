@@ -29,6 +29,7 @@
 #include <thread>
 
 #include "audio_pair_selection.h"
+#include "av1_rate_control.h"
 #include "componentframe.h"
 #include "subtitle_embed_policy.h"
 #include "teletext_subtitle_feed.h"
@@ -794,29 +795,42 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
       }
     }
   } else if (codec_id == "libsvtav1" || codec_id == "libaom-av1") {
-    // AV1 encoder settings
-    if (use_lossless_mode_) {
-      // Lossless AV1
-      if (codec_id == "libaom-av1") {
-        av_opt_set(codec_ctx_->priv_data, "cpu-used", "4", 0);
-        av_opt_set(codec_ctx_->priv_data, "crf", "0", 0);
-        av_opt_set(codec_ctx_->priv_data, "lossless", "1", 0);
-      } else {
-        // SVT-AV1 doesn't have direct lossless mode, use CRF=0
-        av_opt_set(codec_ctx_->priv_data, "crf", "0", 0);
-      }
-      ORC_LOG_DEBUG("FFmpegOutputBackend: Using AV1 lossless mode");
+    // All software AV1 candidates share the same rate-control precedence.
+    // Keep encoder-specific speed defaults separate from rate control.
+    if (codec_id == "libsvtav1") {
+      av_opt_set(codec_ctx_->priv_data, "preset", "6", 0);
     } else {
-      // Quality mode
-      if (codec_id == "libsvtav1") {
-        av_opt_set(codec_ctx_->priv_data, "preset", "6", 0);
+      av_opt_set(codec_ctx_->priv_data, "cpu-used", "4", 0);
+    }
+
+    switch (resolve_av1_rate_control(use_lossless_mode_, encoder_bitrate_)) {
+      case Av1RateControl::kLossless:
+        if (codec_id == "libaom-av1") {
+          av_opt_set(codec_ctx_->priv_data, "crf", "0", 0);
+          av_opt_set(codec_ctx_->priv_data, "lossless", "1", 0);
+        } else {
+          // SVT-AV1 represents lossless output as CRF 0.
+          av_opt_set(codec_ctx_->priv_data, "crf", "0", 0);
+        }
+        ORC_LOG_DEBUG("FFmpegOutputBackend: Using AV1 lossless mode");
+        break;
+      case Av1RateControl::kTargetBitrate:
+        codec_ctx_->bit_rate = encoder_bitrate_;
+        if (codec_id == "libsvtav1") {
+          // SVT-AV1 rate control: 1 = variable bitrate. FFmpeg passes
+          // encoder-native options through the svtav1-params dictionary.
+          av_opt_set(codec_ctx_->priv_data, "svtav1-params", "rc=1", 0);
+        }
+        ORC_LOG_DEBUG(
+            "FFmpegOutputBackend: Using AV1 target bitrate mode: {} "
+            "bps",
+            encoder_bitrate_);
+        break;
+      case Av1RateControl::kCrfQuality:
         av_opt_set_int(codec_ctx_->priv_data, "crf", encoder_crf_, 0);
-      } else {
-        av_opt_set(codec_ctx_->priv_data, "cpu-used", "4", 0);
-        av_opt_set_int(codec_ctx_->priv_data, "crf", encoder_crf_, 0);
-      }
-      ORC_LOG_DEBUG("FFmpegOutputBackend: Using AV1 CRF mode: {}",
-                    encoder_crf_);
+        ORC_LOG_DEBUG("FFmpegOutputBackend: Using AV1 CRF mode: {}",
+                      encoder_crf_);
+        break;
     }
   } else if (codec_id == "h264_vaapi" || codec_id == "hevc_vaapi") {
     // VA-API settings
@@ -850,24 +864,6 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     av_opt_set_int(codec_ctx_->priv_data, "q", 60, 0);
     stream_->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
     ORC_LOG_DEBUG("FFmpegOutputBackend: Using VideoToolbox settings");
-  } else if (codec_id == "libsvtav1") {
-    // SVT-AV1 settings
-    av_opt_set_int(codec_ctx_->priv_data, "crf", 24, 0);
-    av_opt_set_int(codec_ctx_->priv_data, "cpu-used", 6, 0);
-    av_opt_set_int(codec_ctx_->priv_data, "row-mt", 1, 0);
-    ORC_LOG_DEBUG("FFmpegOutputBackend: Using SVT-AV1 settings");
-  } else if (codec_id == "libaom-av1") {
-    // libaom-av1 settings
-    if (codec_name_ == "av1_lossless") {
-      av_opt_set_int(codec_ctx_->priv_data, "crf", 0, 0);
-      av_opt_set(codec_ctx_->priv_data, "aom-params", "lossless=1", 0);
-    } else {
-      av_opt_set_int(codec_ctx_->priv_data, "crf", 24, 0);
-    }
-    av_opt_set_int(codec_ctx_->priv_data, "cpu-used", 6, 0);
-    av_opt_set_int(codec_ctx_->priv_data, "row-mt", 1, 0);
-    av_opt_set_int(codec_ctx_->priv_data, "error-resilience", 1, 0);
-    ORC_LOG_DEBUG("FFmpegOutputBackend: Using libaom-av1 settings");
   } else if (codec_id.find("_vaapi") != std::string::npos ||
              codec_id.find("_qsv") != std::string::npos ||
              codec_id.find("_nvenc") != std::string::npos) {
