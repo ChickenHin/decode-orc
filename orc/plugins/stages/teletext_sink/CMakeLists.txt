@@ -4,6 +4,7 @@ set(STAGE_PLUGIN_SOURCES
     teletext_sink_deps.cpp
     teletext_frame_slicer.cpp
     teletext_scan_state.cpp
+    teletext_block_scanner.cpp
     teletext_page_catalogue.cpp
     teletext_squash_stats.cpp
 )

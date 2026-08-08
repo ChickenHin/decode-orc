@@ -1607,19 +1607,28 @@ TEST(Teletext525Hex, ConfidenceSuffixRoundTripsAtItsOwnLength) {
   }
 }
 
-TEST(Teletext525Hex, TheFourAcceptedLengthsAreDistinct) {
+TEST(Teletext525Hex, TheAcceptedLengthsAreDistinct) {
   // What lets a string be decoded without being told which system produced it.
+  // Three services, each with a plain and a confidence-suffixed form.
   const std::set<size_t> lengths{
-      kTeletextPacketBytes * 2, kTeletextPacketBytes * 3,
-      kTeletext525PacketBytes * 2, kTeletext525PacketBytes * 3};
-  EXPECT_EQ(lengths.size(), 4u);
+      kTeletextPacketBytes * 2,    kTeletextPacketBytes * 3,
+      kTeletext525PacketBytes * 2, kTeletext525PacketBytes * 3,
+      kNabtsPacketBytes * 2,       kNabtsPacketBytes * 3};
+  EXPECT_EQ(lengths.size(), 6u);
 
-  // And a length that is neither service's is refused rather than truncated.
+  // And a length that is no service's is refused rather than truncated. Two
+  // bytes shorter than a 525-line packet is a 33-byte System C one and so is
+  // accepted; four shorter is nobody's.
   const std::string good =
       teletext_packet_to_hex(make_525_test_payload(), kTeletext525PacketBytes);
-  EXPECT_FALSE(teletext_hex_to_observed_packet(good.substr(0, good.size() - 2))
+  EXPECT_FALSE(teletext_hex_to_observed_packet(good.substr(0, good.size() - 4))
                    .has_value());
   EXPECT_FALSE(teletext_hex_to_observed_packet(good + "00").has_value());
+
+  // The one length this change did move: 66 characters used to be nobody's and
+  // is now a System C packet.
+  EXPECT_TRUE(teletext_hex_to_observed_packet(good.substr(0, good.size() - 2))
+                  .has_value());
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -1714,6 +1723,225 @@ TEST(TeletextPhaseHint, PinsTheMlseAcquisitionToo) {
   const TeletextLineResult pinned = slice_line(line, slicer_options, hint);
   ASSERT_TRUE(pinned.valid);
   EXPECT_EQ(pinned.bytes, unpinned.bytes);
+}
+
+// ---------------------------------------------------------------------------
+// NABTS (ITU-R BT.653 System C, CEA-516)
+// ---------------------------------------------------------------------------
+
+TeletextLineResult slice_nabts_line(const std::vector<int16_t>& line,
+                                    TeletextSlicerOptions options = {},
+                                    const TeletextPhaseHint& hint = {}) {
+  const TeletextSlicer slicer(kNtscSampleRate, TeletextSystem::kNabts525,
+                              options);
+  return slicer.slice(line.data(), line.size(),
+                      static_cast<int16_t>(kNtscBlack),
+                      static_cast<int16_t>(kNtscWhite), hint);
+}
+
+// A band-limited NABTS line: the same 3 MHz roll-off the WST tape fixture
+// uses, which is below the 3,47 MHz clock run-in fundamental and so is what
+// the MLSE detector exists for.
+TeletextLineSynthOptions nabts_tape_like_options() {
+  TeletextLineSynthOptions opt = nabts_synth_options();
+  opt.low_pass_cutoff_hz = 3.0e6;
+  return opt;
+}
+
+// The 525-line System B equivalent, so the two services are compared under
+// identical channel conditions.
+TeletextLineSynthOptions ntsc_tape_like_options() {
+  TeletextLineSynthOptions opt = ntsc_wst_synth_options();
+  opt.low_pass_cutoff_hz = 3.0e6;
+  return opt;
+}
+
+TEST(TeletextSlicerNabts, RecoversThe33BytePacketFromACleanLine) {
+  const auto payload = make_nabts_test_payload();
+  const auto result = slice_nabts_line(synthesize_nabts_line(payload));
+
+  ASSERT_TRUE(result.valid)
+      << "reject reason: " << teletext_reject_reason_name(result.reject_reason);
+  EXPECT_EQ(result.packet_bytes, kNabtsPacketBytes);
+  EXPECT_EQ(result.system, TeletextSystem::kNabts525);
+  EXPECT_EQ(result.framing_bit_errors, 0);
+  for (size_t i = 0; i < kNabtsPacketBytes; ++i) {
+    EXPECT_EQ(result.bytes[i], payload[i]) << "byte " << i;
+  }
+  // The eight bytes past the packet were never transmitted.
+  for (size_t i = kNabtsPacketBytes; i < kTeletextPacketBytes; ++i) {
+    EXPECT_EQ(result.bytes[i], 0) << "byte " << i;
+  }
+}
+
+TEST(TeletextSlicerNabts, MlseRecoversABandLimitedLine) {
+  const auto payload = make_nabts_test_payload();
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+
+  const auto result = slice_nabts_line(
+      synthesize_nabts_line(payload, nabts_tape_like_options()), options);
+
+  ASSERT_TRUE(result.valid)
+      << "reject reason: " << teletext_reject_reason_name(result.reject_reason);
+  EXPECT_EQ(result.detector, TeletextDetector::kMlse);
+  for (size_t i = 0; i < kNabtsPacketBytes; ++i) {
+    EXPECT_EQ(result.bytes[i], payload[i]) << "byte " << i;
+  }
+}
+
+// CEA-516 §3.3 makes byte parity conditional on the data group type, which one
+// packet cannot establish, so parity-guided repair never runs on System C.
+TEST(TeletextSlicerNabts, ParityRepairIsNeverAppliedToSystemC) {
+  auto payload = make_nabts_test_payload();
+  // Break the parity of a data-block byte the way a channel error would.
+  payload[10] = static_cast<uint8_t>(payload[10] ^ 0x01);
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  options.parity_repair = true;
+
+  const auto result = slice_nabts_line(
+      synthesize_nabts_line(payload, nabts_tape_like_options()), options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.repaired_bytes, 0);
+  EXPECT_EQ(result.bytes[10], payload[10]);
+}
+
+// The threshold detector's prefix gate covers all five Hamming-coded bytes of
+// the packet prefix (CEA-516 §3.2.1), not just the leading two.
+TEST(TeletextSlicerNabts, RejectsAPacketWhoseContinuityIndexIsUnrecoverable) {
+  auto payload = make_nabts_test_payload();
+  // Two bit errors in CI: Hamming 8/4 detects but cannot correct them.
+  payload[3] = static_cast<uint8_t>(payload[3] ^ 0x03);
+  const auto line = synthesize_nabts_line(payload);
+
+  TeletextSlicerOptions strict;
+  strict.require_valid_mrag = true;
+  const auto rejected = slice_nabts_line(line, strict);
+  EXPECT_FALSE(rejected.valid);
+  EXPECT_EQ(rejected.reject_reason, TeletextRejectReason::kInvalidMrag);
+
+  TeletextSlicerOptions permissive;
+  permissive.require_valid_mrag = false;
+  const auto accepted = slice_nabts_line(line, permissive);
+  ASSERT_TRUE(accepted.valid);
+  EXPECT_EQ(accepted.bytes[3], payload[3]);
+}
+
+// CEA-516 §1.3 allows the first transition to sit anywhere in 10,48 ± 0,34 µs,
+// and the ExtraVision captures measure half a bit period below nominal.
+TEST(TeletextSlicerNabts, ToleratesTheSpecifiedTimingSpread) {
+  const auto payload = make_nabts_test_payload();
+  for (const double centre : {10.23, 10.39, 10.57, 10.91}) {
+    TeletextLineSynthOptions opt = nabts_synth_options();
+    opt.first_bit_centre_us = centre;
+    const auto result = slice_nabts_line(synthesize_nabts_line(payload, opt));
+    EXPECT_TRUE(result.valid) << "first bit centre " << centre << " us";
+  }
+}
+
+TEST(TeletextSlicerNabts, RejectsNoise) {
+  TeletextLineSynthOptions opt = nabts_synth_options();
+  opt.noise_amplitude = 200;
+  std::vector<int16_t> line(opt.sample_count, static_cast<int16_t>(kNtscBlack));
+  // Reuse the synthesizer's noise generator by asking it for a line with no
+  // packet in it: an all-zero transmission still leaves the noise on top.
+  for (uint32_t seed = 1; seed <= 200; ++seed) {
+    opt.noise_seed = seed;
+    const auto noisy = synthesize_teletext_line_bytes({}, opt);
+    EXPECT_FALSE(slice_nabts_line(noisy).valid) << "seed " << seed;
+    TeletextSlicerOptions mlse;
+    mlse.detector = TeletextDetector::kMlse;
+    EXPECT_FALSE(slice_nabts_line(noisy, mlse).valid) << "seed " << seed;
+  }
+}
+
+// The test that holds the whole design up. System B and System C share the
+// clock run-in, the bit rate, the lines and the levels on a 525-line capture:
+// the framing code is the only thing that tells them apart, so each slicer
+// must be blind to the other's lines.
+TEST(TeletextSlicerNabts, SystemBAndSystemCLinesDoNotCrossDecode) {
+  // Both a clean line and a band-limited one. The band-limited case is the
+  // hard one and the reason the gate exists: the MLSE detector fits the
+  // framing code rather than matching it, so on a tape — where the framing
+  // bits are smeared into each other — nothing but the fit tells the two
+  // services apart.
+  struct Case {
+    const char* name;
+    TeletextLineSynthOptions wst;
+    TeletextLineSynthOptions nabts;
+  };
+  const Case cases[] = {
+      {"clean", ntsc_wst_synth_options(), nabts_synth_options()},
+      {"band-limited", ntsc_tape_like_options(), nabts_tape_like_options()},
+  };
+
+  for (const Case& c : cases) {
+    const auto wst_line =
+        synthesize_ntsc_wst_line(make_525_test_payload(), c.wst);
+    const auto nabts_line =
+        synthesize_nabts_line(make_nabts_test_payload(), c.nabts);
+
+    for (const TeletextDetector detector :
+         {TeletextDetector::kThreshold, TeletextDetector::kMlse}) {
+      for (const bool tolerant : {false, true}) {
+        TeletextSlicerOptions options;
+        options.detector = detector;
+        options.tolerant_framing = tolerant;
+
+        EXPECT_FALSE(slice_nabts_line(wst_line, options).valid)
+            << c.name << ": a System B line decoded as System C (detector "
+            << static_cast<int>(detector) << ", tolerant " << tolerant << ")";
+        EXPECT_FALSE(slice_ntsc_line(nabts_line, options).valid)
+            << c.name << ": a System C line decoded as System B (detector "
+            << static_cast<int>(detector) << ", tolerant " << tolerant << ")";
+      }
+    }
+  }
+}
+
+// The observation-string encoding has to carry a 33-byte packet without being
+// told which service produced it (teletext_hex_to_observed_packet).
+TEST(TeletextSlicerNabts, ObservationStringsRoundTripA33BytePacket) {
+  const auto payload = make_nabts_test_payload();
+
+  const std::string plain = teletext_packet_to_hex(payload, kNabtsPacketBytes);
+  EXPECT_EQ(plain.size(), kNabtsPacketBytes * 2);
+  const auto decoded = teletext_hex_to_observed_packet(plain);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->byte_count, kNabtsPacketBytes);
+  EXPECT_FALSE(decoded->has_confidence);
+  for (size_t i = 0; i < kNabtsPacketBytes; ++i) {
+    EXPECT_EQ(decoded->bytes[i], payload[i]) << "byte " << i;
+  }
+
+  TeletextPacketConfidence confidence{};
+  for (size_t i = 0; i < kNabtsPacketBytes; ++i) {
+    confidence[i] = static_cast<float>(i % 16) / 15.0F;
+  }
+  const std::string suffixed =
+      teletext_packet_to_hex(payload, confidence, kNabtsPacketBytes);
+  EXPECT_EQ(suffixed.size(), kNabtsPacketBytes * 3);
+  const auto decoded_suffixed = teletext_hex_to_observed_packet(suffixed);
+  ASSERT_TRUE(decoded_suffixed.has_value());
+  EXPECT_EQ(decoded_suffixed->byte_count, kNabtsPacketBytes);
+  EXPECT_TRUE(decoded_suffixed->has_confidence);
+}
+
+// Every string length the encoding accepts must name exactly one packet
+// length, or a stored observation would decode as the wrong service.
+TEST(TeletextSlicerNabts, EveryAcceptedObservationLengthIsUnambiguous) {
+  std::set<size_t> lengths;
+  for (const size_t bytes :
+       {kTeletextPacketBytes, kTeletext525PacketBytes, kNabtsPacketBytes}) {
+    EXPECT_TRUE(lengths.insert(bytes * 2).second)
+        << "plain length collision at " << bytes << " bytes";
+    EXPECT_TRUE(lengths.insert(bytes * 3).second)
+        << "confidence-suffixed length collision at " << bytes << " bytes";
+  }
+  EXPECT_EQ(lengths.size(), 6u);
 }
 
 }  // namespace

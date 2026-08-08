@@ -1,13 +1,13 @@
 /*
- * File:        teletext_frame_slicer.cpp
- * Module:      orc-stage-plugin-teletext_sink
- * Purpose:     Per-frame teletext line recovery implementation
+ * File:        nabts_frame_slicer.cpp
+ * Module:      orc-stage-plugin-nabts_sink
+ * Purpose:     Per-frame NABTS line recovery implementation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "teletext_frame_slicer.h"
+#include "nabts_frame_slicer.h"
 
 #include <orc/stage/cvbs_signal_constants.h>
 
@@ -18,82 +18,74 @@ namespace orc {
 
 namespace {
 
-// The slicer options the stage's tuning parameters map onto. The system is set
-// per slicer by the constructor below.
+// The slicer options the stage's tuning parameters map onto. Every slicer this
+// builds is a System C one, so the system is fixed here rather than carried
+// through the options.
 TeletextSlicerOptions to_slicer_options(
-    const TeletextFrameSlicerOptions& options) {
+    const NabtsFrameSlicerOptions& options) {
   TeletextSlicerOptions slicer_options;
   slicer_options.detector = options.detector;
-  slicer_options.parity_repair = options.parity_repair;
   slicer_options.tolerant_framing = options.tolerant_framing;
-  slicer_options.require_valid_mrag = options.require_valid_mrag;
+  slicer_options.require_valid_mrag = options.require_valid_prefix;
+  // See NabtsFrameSlicerOptions: CEA-516 §3.3 leaves byte parity conditional
+  // on the data group type, so it is never repaired here.
+  slicer_options.parity_repair = false;
   return slicer_options;
 }
 
-// The slicer for entry |index| of kTeletextVideoSystems, from that system's
-// own profile — so the sample rate and the teletext system are paired in one
-// place rather than asserted again here.
+// The slicer for entry |index| of kNabtsVideoSystems, from that system's own
+// profile — so the sample rate comes from one place rather than being asserted
+// again here.
 TeletextSlicer make_slicer(size_t index,
-                           const TeletextFrameSlicerOptions& options) {
-  const auto profile =
-      TeletextFrameSlicer::profile_for(kTeletextVideoSystems[index]);
-  return TeletextSlicer(profile.sample_rate, profile.teletext_system,
+                           const NabtsFrameSlicerOptions& options) {
+  const auto profile = NabtsFrameSlicer::profile_for(kNabtsVideoSystems[index]);
+  return TeletextSlicer(profile.sample_rate, TeletextSystem::kNabts525,
                         to_slicer_options(options));
 }
 
 }  // namespace
 
-TeletextFrameSlicer::TeletextFrameSlicer(TeletextFrameSlicerOptions options)
+NabtsFrameSlicer::NabtsFrameSlicer(NabtsFrameSlicerOptions options)
     : options_(options),
-      slicers_{{make_slicer(0, options), make_slicer(1, options),
-                make_slicer(2, options)}} {
-  static_assert(kTeletextVideoSystems.size() == 3,
+      slicers_{{make_slicer(0, options), make_slicer(1, options)}} {
+  static_assert(kNabtsVideoSystems.size() == 2,
                 "add a make_slicer() row when a television system is added");
 }
 
-TeletextFrameSlicer::SystemProfile TeletextFrameSlicer::profile_for(
+NabtsFrameSlicer::SystemProfile NabtsFrameSlicer::profile_for(
     VideoSystem system) {
   switch (system) {
-    case VideoSystem::PAL:
-      // 625 lines: ETSI EN 300 706.
-      return SystemProfile{true,
-                           TeletextSystem::kWst625,
-                           kTeletextFirstFieldLine625,
-                           kTeletextLastFieldLine625,
-                           kPalSampleRate,
-                           static_cast<int16_t>(kPalBlack),
-                           static_cast<int16_t>(kPalWhite),
-                           0};
     case VideoSystem::NTSC:
-      // 525 lines: ITU-R BT.653 Table 1b. NTSC and PAL_M share the line
-      // structure and therefore the service; only the 4FSC sample rate
-      // differs.
+      // NTSC and PAL_M share the 525-line structure and therefore the service;
+      // only the 4FSC sample rate differs.
       return SystemProfile{true,
-                           TeletextSystem::kWst525,
-                           kTeletextFirstFieldLine525,
-                           kTeletextLastFieldLine525,
+                           kNabtsFirstFieldLine,
+                           kNabtsLastFieldLine,
                            kNtscSampleRate,
                            static_cast<int16_t>(kNtscBlack),
                            static_cast<int16_t>(kNtscWhite),
-                           1};
+                           0};
     case VideoSystem::PAL_M:
       return SystemProfile{true,
-                           TeletextSystem::kWst525,
-                           kTeletextFirstFieldLine525,
-                           kTeletextLastFieldLine525,
+                           kNabtsFirstFieldLine,
+                           kNabtsLastFieldLine,
                            kPalMSampleRate,
                            static_cast<int16_t>(kNtscBlack),
                            static_cast<int16_t>(kNtscWhite),
-                           2};
+                           1};
+    // PAL is 625 lines, and CEA-516 §1.1.1 specifies NABTS on the 525-line
+    // signal, so there is no System C service there to recover; an unknown
+    // system is not claimed to carry one either.
+    case VideoSystem::PAL:
     case VideoSystem::Unknown:
       break;
   }
   SystemProfile none;
-  none.carries_teletext = false;
+  none.carries_nabts = false;
   return none;
 }
 
-TeletextFrameSlicer::SystemProfile TeletextFrameSlicer::effective_profile(
+NabtsFrameSlicer::SystemProfile NabtsFrameSlicer::effective_profile(
     VideoSystem system) const {
   SystemProfile profile = profile_for(system);
   if (options_.first_field_line.has_value()) {
@@ -105,10 +97,10 @@ TeletextFrameSlicer::SystemProfile TeletextFrameSlicer::effective_profile(
   return profile;
 }
 
-void TeletextFrameSlicer::slice_field(
+void NabtsFrameSlicer::slice_field(
     const VideoFrameRepresentation& representation, FrameID frame_id,
-    size_t field_idx, uint64_t frame_index,
-    const TeletextScanSnapshot& snapshot, TeletextFieldScan& out) const {
+    size_t field_idx, uint64_t frame_index, const NabtsScanSnapshot& snapshot,
+    NabtsFieldScan& out) const {
   out.clear();
 
   const auto vp_opt = representation.get_video_parameters();
@@ -118,7 +110,7 @@ void TeletextFrameSlicer::slice_field(
   const auto& vp = vp_opt.value();
 
   const SystemProfile profile = effective_profile(vp.system);
-  if (!profile.carries_teletext ||
+  if (!profile.carries_nabts ||
       profile.last_field_line < profile.first_field_line) {
     return;
   }
@@ -179,7 +171,7 @@ void TeletextFrameSlicer::slice_field(
       continue;
     }
 
-    TeletextFrameLineResult entry;
+    NabtsFrameLineResult entry;
     entry.field_line = field_line;
     entry.flat_line = flat_line;
     entry.sliced = slicer.slice(line_data, sample_count, black_level,

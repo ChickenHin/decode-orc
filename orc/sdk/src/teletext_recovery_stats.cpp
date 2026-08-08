@@ -187,6 +187,15 @@ void TeletextRecoveryStats::add_line(int vbi_line,
   // (ETSI EN 300 706 §9.3.1), and the row is only known when the addressing
   // decodes (§7.1.2, §8.2), so packets failing either test contribute no
   // parity evidence and are left out of the denominator.
+  //
+  // A service whose data bytes are not row-parity coded at all contributes
+  // none either: CEA-516 §3.3 gives a NABTS data block odd parity only when
+  // its data group is type 0, which the packet does not say, and the first two
+  // bytes of one are a packet address rather than a row number — so decoding a
+  // row from them and profiling on it would be inventing a diagnostic.
+  if (!teletext_has_parity_coded_rows(result.system)) {
+    return;
+  }
   const int mrag_low = teletext_hamming84_decode(result.bytes[0]);
   const int mrag_high = teletext_hamming84_decode(result.bytes[1]);
   if (mrag_low < 0 || mrag_high < 0) {
@@ -206,7 +215,8 @@ void TeletextRecoveryStats::add_line(int vbi_line,
 
 void TeletextRecoveryStats::add_observed_line(
     int vbi_line, const std::array<uint8_t, kTeletextPacketBytes>* packet,
-    const TeletextPacketConfidence* confidence, size_t packet_bytes) {
+    const TeletextPacketConfidence* confidence, size_t packet_bytes,
+    TeletextSystem system) {
   const size_t byte_count = std::min(packet_bytes, kTeletextPacketBytes);
   ++lines_seen_;
   ++observed_lines_;
@@ -233,7 +243,11 @@ void TeletextRecoveryStats::add_observed_line(
   }
 
   // Per-position parity profile, on the same terms as add_line() above: only
-  // rows whose addressing decodes and which carry byte-wise odd parity.
+  // rows whose addressing decodes and which carry byte-wise odd parity, and
+  // only for a service that codes its rows that way.
+  if (!teletext_has_parity_coded_rows(system)) {
+    return;
+  }
   const int mrag_low = teletext_hamming84_decode((*packet)[0]);
   const int mrag_high = teletext_hamming84_decode((*packet)[1]);
   if (mrag_low < 0 || mrag_high < 0) {

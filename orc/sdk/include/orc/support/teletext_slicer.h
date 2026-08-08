@@ -48,34 +48,79 @@ constexpr double kTeletext525BitRate = 5'727'272.0;
 // line reads noise rather than a short packet.
 constexpr size_t kTeletext525PacketBytes = 34;
 
+// CEA-516-S-2013 §2.1 and §3.1, Teletext System C (NABTS) on 525-line
+// television systems: the data line is 288 bits, of which the first 24 are the
+// synchronization sequence (§2.2), leaving a 264-bit data packet organized as
+// 33 bytes. The bit rate is the 525-line System B one (§1.3) and so is the
+// clock run-in; the framing code (§2.2.3) and this length are what differ.
+constexpr size_t kNabtsPacketBytes = 33;
+
 // Payload bits of one 625-line packet: the 42 T42 bytes, transmitted LSB first
 // per byte (ETSI EN 300 706 §7.1). The detectors index the packet by bit as
 // well as by byte, and the per-bit diagnostics are sized from here — a
 // 525-line packet fills the leading kTeletext525PacketBytes * 8 of them.
 constexpr size_t kTeletextPayloadBits = kTeletextPacketBytes * 8;
 
-// Television system the teletext service is carried on. Both are ITU-R BT.653
-// System B — the same framing code, clock run-in and transmission coding — and
-// differ in bit rate, packet length and the position of the data in the line.
+// Teletext service, and the television system it is carried on. All three
+// share the 16-bit clock run-in and the LSB-first byte order, and differ in
+// bit rate, framing code, packet length and the position of the data in the
+// line.
 enum class TeletextSystem {
-  // ETSI EN 300 706 (System B on 625 lines): 6,9375 Mbit/s, 42-byte packet.
+  // ETSI EN 300 706 (System B on 625 lines): 6,9375 Mbit/s, 42-byte packet,
+  // framing code 0xE4.
   kWst625,
 
   // ITU-R BT.653 Table 1b (System B on 525 lines): 5,727272 Mbit/s, 34-byte
-  // packet. The service US broadcasters carried as "WST".
+  // packet, framing code 0xE4. The service US broadcasters carried as "WST".
   kWst525,
+
+  // CEA-516-S-2013, ITU-R BT.653 System C (NABTS) on 525 lines: the same
+  // 5,727272 Mbit/s (§1.3) and the same clock run-in (§2.2.2) as the line
+  // above, with framing code 0xE7 (§2.2.3) and a 33-byte packet (§3.1). The
+  // framing code is the only thing that separates the two on a capture.
+  kNabts525,
 };
 
 // Transmitted bit rate of |system|, in Hz.
 constexpr double teletext_bit_rate(TeletextSystem system) {
-  return system == TeletextSystem::kWst525 ? kTeletext525BitRate
-                                           : kTeletextBitRate;
+  return system == TeletextSystem::kWst625 ? kTeletextBitRate
+                                           : kTeletext525BitRate;
 }
 
 // Packet length of |system|, in bytes (framing code excluded).
 constexpr size_t teletext_packet_bytes(TeletextSystem system) {
-  return system == TeletextSystem::kWst525 ? kTeletext525PacketBytes
-                                           : kTeletextPacketBytes;
+  switch (system) {
+    case TeletextSystem::kWst525:
+      return kTeletext525PacketBytes;
+    case TeletextSystem::kNabts525:
+      return kNabtsPacketBytes;
+    case TeletextSystem::kWst625:
+      break;
+  }
+  return kTeletextPacketBytes;
+}
+
+// Whether |system| gives its data bytes byte-wise odd parity in a way a slicer
+// may gate on.
+//
+// True for both System B services: ETSI EN 300 706 §9.3.1 and ITU-R BT.653
+// Table 1b give the display bytes of rows 0-25 odd parity, and the row number
+// is recoverable from the packet's own addressing. False for NABTS, where
+// CEA-516 §3.3 makes byte parity conditional on the data group type — a
+// property of the group the packet belongs to, not of the packet, and so not
+// knowable from one line.
+constexpr bool teletext_has_parity_coded_rows(TeletextSystem system) {
+  return system != TeletextSystem::kNabts525;
+}
+
+// Bytes at the head of a packet that carry Hamming 8/4 protected addressing,
+// and which a slicer may therefore test for plausibility.
+//
+//   System B: the two MRAG bytes (ETSI EN 300 706 §7.1.2).
+//   System C: the five packet prefix bytes P1-P3, CI and PS (CEA-516 §3.2.1),
+//             which use the same Hamming 8/4 code (§3.2.2).
+constexpr size_t teletext_hamming_prefix_bytes(TeletextSystem system) {
+  return system == TeletextSystem::kNabts525 ? 5 : 2;
 }
 
 // Encode a 4-bit value as a Hamming 8/4 protected byte.
@@ -309,10 +354,18 @@ struct TeletextLineResult {
   std::array<uint8_t, kTeletextPacketBytes> bytes{};
 
   // Bytes of |bytes| the service transmits: kTeletextPacketBytes on 625 lines,
-  // kTeletext525PacketBytes on 525 (ITU-R BT.653 Table 1a/1b). Set whether or
-  // not the line yielded a packet, so a caller reading a rejected result still
-  // knows what it was looking for.
+  // kTeletext525PacketBytes on 525 (ITU-R BT.653 Table 1a/1b),
+  // kNabtsPacketBytes for System C (CEA-516 §3.1). Set whether or not the line
+  // yielded a packet, so a caller reading a rejected result still knows what it
+  // was looking for.
   size_t packet_bytes = kTeletextPacketBytes;
+
+  // The service the slicer was configured for, and therefore the one these
+  // bytes are coded under. Carried alongside the length because a consumer
+  // needs it to know how to read them — the transmission coding of a System C
+  // packet is not that of a System B one — and deriving it from the length
+  // would put that knowledge in every consumer instead of here.
+  TeletextSystem system = TeletextSystem::kWst625;
 
   // Number of bit errors accepted in the framing code: 0, or 1 when the
   // slicer runs in tolerant-framing mode.

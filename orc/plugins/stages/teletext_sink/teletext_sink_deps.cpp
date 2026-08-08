@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "teletext_block_scanner.h"
 #include "teletext_frame_slicer.h"
 #include "teletext_page_catalogue.h"
 #include "teletext_squash_stats.h"
@@ -46,25 +47,6 @@ constexpr size_t kWriterBufferBytes = 1UL * 1024UL * 1024UL;
 // and costs around 5 kB. The bound is the point past which a recording's older
 // runs start going uncorrected rather than a memory ceiling being enforced.
 constexpr size_t kSquashPageRunBound = 4096;
-
-// Fields per frame. Named because it is the stride of the block buffer as well
-// as the loop bound, and the two must not drift apart.
-constexpr size_t kFieldsPerFrame = 2;
-
-// Frames sliced per block, first and last. Blocks exist because the pass
-// learns as it goes (see TeletextScanSnapshot): every frame of a block is
-// sliced against one frozen view of what is known, and the block is then
-// emitted in order, which is what advances it.
-//
-// So the size trades learning latency against everything else. Early blocks
-// are small because that is when there is most to learn — a recording's data
-// phase is pinned within the first few dozen frames rather than the first few
-// hundred — and they grow because a large block amortises the per-block
-// thread creation and leaves the workers less often idle at its tail. The
-// ceiling is a memory bound: a block holds every line it sliced, at about
-// 1,6 kB each, so 128 frames of a 625-line window is roughly 7 MB.
-constexpr uint64_t kFirstScanBlockFrames = 16;
-constexpr uint64_t kMaxScanBlockFrames = 128;
 
 // Progress callbacks are throttled to once every N frames (plus the final
 // frame) so tight loops do not flood the UI.
@@ -215,102 +197,6 @@ uint64_t estimate_lost_packets(
     lost += histogram[count] * static_cast<uint64_t>(mode - count);
   }
   return lost;
-}
-
-// Threads to slice with: |requested|, or one per hardware thread when that is
-// 0. Never more than there are frames to slice, and never fewer than one —
-// which runs everything on the calling thread and starts none.
-size_t resolve_worker_count(uint64_t frame_count, int32_t requested) {
-  uint64_t wanted = static_cast<uint64_t>(std::max(requested, 0));
-  if (wanted == 0) {
-    unsigned hardware = std::thread::hardware_concurrency();
-    if (hardware == 0) {
-      hardware = 4;  // hardware_concurrency() is allowed to say it cannot tell
-    }
-    wanted = hardware;
-  }
-  const uint64_t capped = std::min(wanted, frame_count);
-  return static_cast<size_t>(std::max<uint64_t>(1, capped));
-}
-
-/**
- * @brief Slice one block of frames, in parallel
- *
- * Recovering a line reads that line and nothing else, so the fields of a block
- * are independent and are handed out to |worker_count| threads as they come
- * free. VideoFrameRepresentation's const accessors are documented safe to call
- * concurrently, which is what lets them all read one representation.
- *
- * |out| is indexed by frame offset within the block times kFieldsPerFrame plus
- * the field index, so the caller can walk it back in the strict temporal order
- * emission needs. Each frame owns its own elements, so no two threads touch
- * the same one and no locking is needed on the hot path.
- *
- * Throws if a worker did, once they have all been joined — an exception
- * escaping a std::thread would otherwise take the process with it.
- */
-void slice_block(const VideoFrameRepresentation& representation,
-                 const TeletextFrameSlicer& slicer, FrameID first_frame,
-                 uint64_t first_frame_index, uint64_t frame_count,
-                 const TeletextScanSnapshot& snapshot, size_t worker_count,
-                 const std::atomic<bool>* cancel_requested,
-                 std::vector<TeletextFieldScan>& out) {
-  std::atomic<uint64_t> next_frame{0};
-  std::mutex failure_mutex;
-  std::string failure;
-
-  const auto run = [&] {
-    try {
-      for (;;) {
-        const uint64_t offset =
-            next_frame.fetch_add(1, std::memory_order_relaxed);
-        if (offset >= frame_count) {
-          return;
-        }
-        if (cancel_requested != nullptr && cancel_requested->load()) {
-          return;  // The caller discards the whole block, so stop taking work.
-        }
-        // A whole frame at a time rather than a field: both fields read the
-        // same frame from the source, so taking them together turns what would
-        // be two fetches on two threads into one fetch and a cache hit.
-        const FrameID frame_id = first_frame + static_cast<FrameID>(offset);
-        const size_t base = static_cast<size_t>(offset) * kFieldsPerFrame;
-        for (size_t field_idx = 0; field_idx < kFieldsPerFrame; ++field_idx) {
-          slicer.slice_field(representation, frame_id, field_idx,
-                             first_frame_index + offset, snapshot,
-                             out[base + field_idx]);
-        }
-      }
-    } catch (const std::exception& e) {
-      const std::lock_guard<std::mutex> lock(failure_mutex);
-      if (failure.empty()) {
-        failure = e.what();
-      }
-      // Drain the queue so the other workers stop rather than finish a block
-      // whose result is about to be thrown away.
-      next_frame.store(frame_count, std::memory_order_relaxed);
-    }
-  };
-
-  if (worker_count <= 1) {
-    run();
-  } else {
-    // One fewer thread than workers: this one takes a share too, which saves a
-    // thread creation per block and keeps a single-core machine honest.
-    std::vector<std::thread> threads;
-    threads.reserve(worker_count - 1);
-    for (size_t i = 0; i + 1 < worker_count; ++i) {
-      threads.emplace_back(run);
-    }
-    run();
-    for (auto& thread : threads) {
-      thread.join();
-    }
-  }
-
-  if (!failure.empty()) {
-    throw std::runtime_error(failure);
-  }
 }
 
 }  // namespace

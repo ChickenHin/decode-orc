@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -28,10 +29,23 @@ namespace {
 // (first transmitted bit is '1'; even bit indices are ones).
 constexpr int kRunInBits = 16;
 
-// ETSI EN 300 706 §6.2: 8-bit framing code, transmission order 11100100
-// (conventionally written 0xE4 MSB-first).
+// Framing code length. Both System B (ETSI EN 300 706 §6.2) and System C
+// (CEA-516 §2.2.3) use eight bits; the pattern is per-system and lives in the
+// geometry table below.
 constexpr int kFramingBits = 8;
-constexpr int kFramingCodeBits[kFramingBits] = {1, 1, 1, 0, 0, 1, 0, 0};
+
+// The framing code of a service, in transmission order.
+using FramingCode = std::array<int, kFramingBits>;
+
+// ETSI EN 300 706 §6.2: transmission order 11100100 (conventionally written
+// 0xE4 MSB-first).
+constexpr FramingCode kFramingCodeWst = {1, 1, 1, 0, 0, 1, 0, 0};
+
+// CEA-516 §2.2.3: the broadcast teletext framing code is 11100111, written
+// there as b8…b1 with b1 transmitted first. The pattern is symmetric under bit
+// reversal, so it reads the same in either convention — unlike the System B
+// code, which does not, and which is why the two are never confused.
+constexpr FramingCode kFramingCodeNabts = {1, 1, 1, 0, 0, 1, 1, 1};
 
 // The payload of a 625-line packet is 336 bits: ETSI EN 300 706 §7.1's 360-bit
 // packet less the run-in (16) and framing code (8), transmitted LSB first per
@@ -79,40 +93,100 @@ constexpr double kRunInSearchEndUs625 = 12.0;
 constexpr double kRunInSearchStartUs525 = 8.0;
 constexpr double kRunInSearchEndUs525 = 11.5;
 
+// NABTS: CEA-516 §1.3 puts the half-amplitude point of the first 0→1
+// transition of the clock synchronization sequence at 10,48 µs ± 0,34 from the
+// leading edge of horizontal sync. That transition is the leading edge of
+// run-in bit 0, so the first bit centre is half a bit period later at 10,57
+// µs. The ExtraVision captures measured for the VBI source stage put the
+// leading edge at 10,27 to 10,34 µs, i.e. a bit centre of 10,39 µs — half a
+// bit period below nominal, well inside the tabulated tolerance.
+//
+// The lower bound clears the colour burst, which ends ≈ 7,8 µs into the line.
+// The upper bound is what leaves the whole 288-bit line (§2.1) inside the
+// 910-sample NTSC line: 12,2 µs of lock plus 50,3 µs of burst ends at 62,5 of
+// 63,56 µs. That still gives +1,3 µs of network re-timing headroom above
+// nominal, comparable to the 625-line row above.
+constexpr double kRunInSearchStartUsNabts = 8.5;
+constexpr double kRunInSearchEndUsNabts = 12.2;
+
 // Everything above that the slicer's geometry depends on the system for,
-// gathered so that the choice is made once. A third service — NABTS is the
-// obvious candidate — is a row here plus a TeletextSystem enumerator, rather
-// than a ternary to be found in each of the places the geometry is read.
+// gathered so that the choice is made once. A further service is a row here
+// plus a TeletextSystem enumerator, rather than a ternary to be found in each
+// of the places the geometry is read.
 struct SystemGeometry {
-  double bit_rate;      // Hz (ITU-R BT.653 Tables 1a and 1b)
+  double bit_rate;      // Hz (ITU-R BT.653 Tables 1a and 1b, CEA-516 §1.3)
   size_t packet_bytes;  // framing code excluded
   double data_one_fraction;
   double search_start_us;  // first clock run-in bit centre, from 0H
   double search_end_us;
+  FramingCode framing;
+  // Hamming 8/4 protected addressing bytes at the head of the packet, which
+  // the plausibility gates test (see teletext_hamming_prefix_bytes).
+  size_t hamming_prefix_bytes;
+  // Whether the data bytes are byte-wise odd parity coded in a way the MLSE
+  // plausibility gate can act on (see teletext_has_parity_coded_rows).
+  bool parity_coded_rows;
 };
 
 constexpr SystemGeometry system_geometry(TeletextSystem system) {
-  if (system == TeletextSystem::kWst525) {
-    return SystemGeometry{kTeletext525BitRate, kTeletext525PacketBytes,
-                          kDataOneLevelFraction525, kRunInSearchStartUs525,
-                          kRunInSearchEndUs525};
+  switch (system) {
+    case TeletextSystem::kWst525:
+      return SystemGeometry{kTeletext525BitRate,
+                            kTeletext525PacketBytes,
+                            kDataOneLevelFraction525,
+                            kRunInSearchStartUs525,
+                            kRunInSearchEndUs525,
+                            kFramingCodeWst,
+                            teletext_hamming_prefix_bytes(system),
+                            teletext_has_parity_coded_rows(system)};
+    case TeletextSystem::kNabts525:
+      // CEA-516 §1.6 puts logic '1' at 70 IRE and logic '0' at blanking, which
+      // is what ITU-R BT.653 Table 1b says of the 525-line System B service as
+      // well, so the fraction is shared with the row above. It is expressed
+      // against the black-to-white excursion while the transmitted '0' sits at
+      // blanking, below the 7,5 IRE setup black: measured against the levels
+      // the VBI source stage places to (blanking 240, '1' 632, black 282,
+      // white 800 in the 10-bit domain) the true fraction is 0,676, so 0,70
+      // sets the nominal 3,5 % high and the half-nominal amplitude gate
+      // correspondingly strict. A real burst still clears it by 350 counts
+      // against 181 — a factor of 1,9.
+      return SystemGeometry{kTeletext525BitRate,
+                            kNabtsPacketBytes,
+                            kDataOneLevelFraction525,
+                            kRunInSearchStartUsNabts,
+                            kRunInSearchEndUsNabts,
+                            kFramingCodeNabts,
+                            teletext_hamming_prefix_bytes(system),
+                            teletext_has_parity_coded_rows(system)};
+    case TeletextSystem::kWst625:
+      break;
   }
-  return SystemGeometry{kTeletextBitRate, kTeletextPacketBytes,
-                        kDataOneLevelFraction625, kRunInSearchStartUs625,
-                        kRunInSearchEndUs625};
+  return SystemGeometry{
+      kTeletextBitRate,
+      kTeletextPacketBytes,
+      kDataOneLevelFraction625,
+      kRunInSearchStartUs625,
+      kRunInSearchEndUs625,
+      kFramingCodeWst,
+      teletext_hamming_prefix_bytes(TeletextSystem::kWst625),
+      teletext_has_parity_coded_rows(TeletextSystem::kWst625)};
 }
 
-// The public accessors in the header and this table describe the same two
+// The public accessors in the header and this table describe the same
 // services, so they must agree; they are separate only because the header's
 // have to be usable in constant expressions by callers that never see this.
 static_assert(system_geometry(TeletextSystem::kWst625).bit_rate ==
                   teletext_bit_rate(TeletextSystem::kWst625) &&
               system_geometry(TeletextSystem::kWst525).bit_rate ==
                   teletext_bit_rate(TeletextSystem::kWst525) &&
+              system_geometry(TeletextSystem::kNabts525).bit_rate ==
+                  teletext_bit_rate(TeletextSystem::kNabts525) &&
               system_geometry(TeletextSystem::kWst625).packet_bytes ==
                   teletext_packet_bytes(TeletextSystem::kWst625) &&
               system_geometry(TeletextSystem::kWst525).packet_bytes ==
-                  teletext_packet_bytes(TeletextSystem::kWst525));
+                  teletext_packet_bytes(TeletextSystem::kWst525) &&
+              system_geometry(TeletextSystem::kNabts525).packet_bytes ==
+                  teletext_packet_bytes(TeletextSystem::kNabts525));
 
 // Correlation phase-search step in samples. At the ≈ 2.556 samples/bit of the
 // 625-line service, or the 2.5 of the 525-line one, a quarter sample bounds
@@ -197,6 +271,31 @@ constexpr double kMlseMaxResidualFraction = 0.20;
 // LaserDisc captures, real packets sit below 0.4.
 constexpr double kMlseMaxPayloadResidualFraction = 0.5;
 
+// How much better another service's framing code must explain the framing
+// samples before an MLSE lock is rejected as being that other service's line,
+// in units of the fitted channel's response to one bit (channel_bit_energy).
+//
+// System B and System C differ in two of the eight framing bits, so a line of
+// the wrong service costs about two bit energies; a same-service line whose
+// framing bits the recording has damaged costs a fraction of one.
+//
+// The value is a floor, not a midpoint: a larger margin rejects less, so
+// raising it leaks more of the other service's lines through. Measured on the
+// reference captures, a 525-line WST recording read as System C yields 126
+// packets at 1,25 against 133 at 1,5 and 268 at 4,0. Below 1,25 the exhaustive
+// 625-line WST decode starts losing its own marginal packets — 3963 of 3964 at
+// 1,0 — so 1,25 is the smallest margin that costs the WST services nothing.
+//
+// The gate does not close the leak on its own and is not expected to. On the
+// same WST recording the threshold detector, which matches the framing code bit
+// by bit, produced zero false locks; every one of the 126 came from the MLSE
+// detector, which fits the framing code rather than matching it. What stops
+// them being mistaken for a service is the five-byte Hamming prefix gate
+// (1559 rejections on that recording against this gate's 91) and the resulting
+// yield: 126 packets at a mean decision confidence of 0,21, against 2460 at
+// 0,56 from a real System C recording over the same number of frames.
+constexpr double kFramingDiscriminationBits = 1.25;
+
 // Minimum fraction of the data bytes (40 of them on 625 lines, 32 on 525) that
 // must carry odd parity for an MLSE-recovered packet in a parity-coded row.
 //
@@ -232,12 +331,31 @@ constexpr int kMlseLastParityCodedRow = 25;
 // followed by one per byte of quantised confidence.
 constexpr char kHexDigits[] = "0123456789abcdef";
 
-// Packet lengths a WST service transmits, and therefore the only ones an
-// observation string may encode. The four resulting string lengths — 68, 84,
-// 102 and 126 characters — are distinct, which is what lets a string be
-// decoded without being told which system produced it.
-constexpr size_t kPacketByteLengths[] = {kTeletextPacketBytes,
-                                         kTeletext525PacketBytes};
+// Packet lengths a teletext service transmits, and therefore the only ones an
+// observation string may encode. The six resulting string lengths — 66, 68,
+// 84, 99, 102 and 126 characters — are distinct, which is what lets a string
+// be decoded without being told which system produced it.
+constexpr size_t kPacketByteLengths[] = {
+    kTeletextPacketBytes, kTeletext525PacketBytes, kNabtsPacketBytes};
+
+// The claim above, checked rather than asserted: no packet length's plain
+// encoding collides with another's confidence-suffixed one.
+constexpr bool packet_string_lengths_are_distinct() {
+  for (size_t i = 0; i < std::size(kPacketByteLengths); ++i) {
+    for (size_t j = 0; j < std::size(kPacketByteLengths); ++j) {
+      if (i != j && kPacketByteLengths[i] * 2 == kPacketByteLengths[j] * 3) {
+        return false;
+      }
+      if (i < j && kPacketByteLengths[i] == kPacketByteLengths[j]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+static_assert(packet_string_lengths_are_distinct(),
+              "an observation string length would decode as two different "
+              "packet lengths");
 
 // Value of one hex character (either case), or -1 when it is not one.
 inline int hex_nibble(char c) {
@@ -267,10 +385,11 @@ inline bool odd_parity(uint8_t byte) {
   return (ones & 1) == 1;
 }
 
-// The known preamble bit at index |k| (0 … kPreambleBits - 1).
-inline int preamble_bit(int k) {
+// The known preamble bit at index |k| (0 … kPreambleBits - 1): the alternating
+// clock run-in followed by the service's framing code.
+inline int preamble_bit(int k, const FramingCode& framing) {
   return k < kRunInBits ? ((k % 2 == 0) ? 1 : 0)
-                        : kFramingCodeBits[k - kRunInBits];
+                        : framing[static_cast<size_t>(k - kRunInBits)];
 }
 
 // Linear interpolation between adjacent samples at fractional position |t|.
@@ -484,10 +603,11 @@ ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
 
 // The channel fit against the known preamble: the acquisition and detection
 // model of every line.
-ChannelFit fit_preamble_channel(const std::vector<double>& grid, int phases) {
+ChannelFit fit_preamble_channel(const std::vector<double>& grid, int phases,
+                                const FramingCode& framing) {
   return fit_channel_range(
-      grid, phases, [](int k) { return preamble_bit(k); }, kChannelCentre,
-      kPreambleBits - 1 - (kChannelTaps - 1 - kChannelCentre));
+      grid, phases, [&framing](int k) { return preamble_bit(k, framing); },
+      kChannelCentre, kPreambleBits - 1 - (kChannelTaps - 1 - kChannelCentre));
 }
 
 // Energy of the fitted channel's response to one bit: the squared change, over
@@ -505,6 +625,89 @@ double channel_bit_energy(const ChannelFit& fit) {
     }
   }
   return energy;
+}
+
+// Whether the framing code the slicer was configured for explains the samples
+// at least as well as any other service's does.
+//
+// The threshold detector matches the framing code bit by bit, which is exactly
+// what makes it blind to the other service's lines. The MLSE detector does not
+// match it at all: it fits its channel to the whole 24-bit preamble and takes
+// the framing code as known. On a 525-line capture System B and System C share
+// the bit rate, the clock run-in, the lines and the levels, and differ in
+// nothing but those eight bits — two of them, between 0xE4 and 0xE7 — so an
+// assumed code that is wrong still fits well enough to clear the residual
+// gates, and the payload is then read at the wrong length under the wrong
+// coding.
+//
+// This is deliberately a discrimination test and not a quality test. Asking
+// whether the samples support the assumed code in absolute terms would reject
+// the band-limited recordings the MLSE detector exists for, where the framing
+// bits are smeared into each other and no per-bit decision is reliable. Asking
+// which of the two real framing codes explains them best is a far easier
+// question — the codes differ in two bits — and it is the only question that
+// needs answering, because a line carries one service or the other.
+//
+// The comparison carries a margin, and needs one. Simply requiring the
+// configured code to be the better of the two rejects genuine lines: where the
+// recording has damaged the two bits that differ, which code explains them is a
+// coin toss, and half of that marginal tail is thrown away — measured at 0,7 %
+// of the 625-line reference capture's packets and 1,7 % of the 525-line one's.
+// The margin is expressed in units of the fitted channel's response to one bit
+// (channel_bit_energy), which is the natural scale: a code wrong in two bits
+// costs about two of them, while noise on a marginal line costs a fraction of
+// one.
+//
+// The comparison is also biased in favour of the configured code, whose assumed
+// bits the channel was fitted to; that bias costs nothing here, since it can
+// only make a wrongly-rejected line rarer.
+bool framing_code_fits_best(const std::vector<double>& grid, int phases,
+                            const ChannelFit& fit, const FramingCode& framing) {
+  const auto grid_bits =
+      static_cast<int>(grid.size() / static_cast<size_t>(phases));
+
+  // Every sample any framing bit reaches: sample k is formed from bits
+  // k - kChannelCentre + j for j in [0, kChannelTaps).
+  const int first_sample =
+      std::max(0, kRunInBits + kChannelCentre - (kChannelTaps - 1));
+  const int last_sample =
+      std::min(kRunInBits + kFramingBits - 1 + kChannelCentre, grid_bits - 1);
+  if (last_sample < first_sample) {
+    return true;
+  }
+
+  const auto residual_for = [&](const FramingCode& candidate) {
+    double sum_sq = 0.0;
+    for (int k = first_sample; k <= last_sample; ++k) {
+      for (int p = 0; p < phases; ++p) {
+        double predicted = fit.offset;
+        for (int j = 0; j < kChannelTaps; ++j) {
+          const int source = k - kChannelCentre + j;
+          const int value = (source >= 0 && source < kPreambleBits)
+                                ? preamble_bit(source, candidate)
+                                : 0;
+          predicted +=
+              fit.taps[static_cast<size_t>(p)][static_cast<size_t>(j)] *
+              static_cast<double>(value);
+        }
+        const double error = grid[grid_index(k, p, phases)] - predicted;
+        sum_sq += error * error;
+      }
+    }
+    return sum_sq;
+  };
+
+  const double configured = residual_for(framing);
+  const double margin = kFramingDiscriminationBits * channel_bit_energy(fit);
+  for (const FramingCode& candidate : {kFramingCodeWst, kFramingCodeNabts}) {
+    if (candidate == framing) {
+      continue;
+    }
+    if (residual_for(candidate) + margin < configured) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Viterbi detection of |bit_count| payload bits from |grid| (a
@@ -527,9 +730,9 @@ double channel_bit_energy(const ChannelFit& fit) {
 // which, with the branch metrics of the forward sweep kept, is a sweep of adds
 // and comparisons rather than of arithmetic on samples.
 double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
-                   const ChannelFit& fit, int bit_count, uint8_t* bits_out,
-                   float* bit_errors_out, float* bit_confidence_out,
-                   int tail_bits) {
+                   const ChannelFit& fit, const FramingCode& framing,
+                   int bit_count, uint8_t* bits_out, float* bit_errors_out,
+                   float* bit_confidence_out, int tail_bits) {
   constexpr int kStateMask = kMlseStates - 1;
   const int phases = fit.phases;
   const auto grid_bits =
@@ -596,7 +799,7 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
   cost.fill(std::numeric_limits<double>::infinity());
   int init_state = 0;
   for (int i = 0; i < kChannelTaps - 1; ++i) {
-    init_state |= preamble_bit(kPreambleBits - 1 - i) << i;
+    init_state |= preamble_bit(kPreambleBits - 1 - i, framing) << i;
   }
   cost[static_cast<size_t>(init_state)] = 0.0;
 
@@ -714,7 +917,8 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
     // before the payload are the known preamble.
     const auto bit_value = [&](int index) {
       if (index < 0) {
-        return static_cast<double>(preamble_bit(first_payload_bit + index));
+        return static_cast<double>(
+            preamble_bit(first_payload_bit + index, framing));
       }
       return static_cast<double>(decided[static_cast<size_t>(index)]);
     };
@@ -1044,6 +1248,7 @@ TeletextSlicer::TeletextSlicer(double sample_rate, TeletextSystem system,
 TeletextLineResult TeletextSlicer::new_result() const {
   TeletextLineResult result;
   result.packet_bytes = packet_bytes_;
+  result.system = options_.system;
   return result;
 }
 
@@ -1195,13 +1400,16 @@ TeletextLineResult TeletextSlicer::slice_threshold(
     return reject(result, TeletextRejectReason::kRunInPattern);
   }
 
-  // Framing-code lock (§6.2): resolve the run-in's even-bit-shift
-  // ambiguity by searching for the framing code around the correlation lock.
-  // Candidates are ranked by framing-code bit errors first, then by whether
-  // the MRAG that follows is Hamming 8/4 decodable (§7.1.2, §8.2), then by
-  // proximity to the lock. The MRAG tie-break matters because widening the
-  // search also widens the chance of the payload happening to spell the
-  // framing code; an alignment whose address bytes decode is the real one.
+  // Framing-code lock (ETSI EN 300 706 §6.2, CEA-516 §2.2.3): resolve the
+  // run-in's even-bit-shift ambiguity by searching for the service's framing
+  // code around the correlation lock. Candidates are ranked by framing-code bit
+  // errors first, then by whether the Hamming-coded addressing prefix that
+  // follows decodes (the MRAG of §7.1.2 on System B, the packet prefix of
+  // CEA-516 §3.2 on System C), then by proximity to the lock. The prefix
+  // tie-break matters because widening the search also widens the chance of the
+  // payload happening to spell the framing code; an alignment whose address
+  // bytes decode is the real one.
+  const SystemGeometry geometry = system_geometry(options_.system);
   const int max_framing_errors = options_.tolerant_framing ? 1 : 0;
   const auto bit_at = [&](double t) {
     return sample_at(line, t) > threshold ? 1 : 0;
@@ -1212,16 +1420,16 @@ TeletextLineResult TeletextSlicer::slice_threshold(
 
   int best_shift = 0;
   int best_errors = kFramingBits + 1;
-  bool best_mrag_ok = false;
+  bool best_prefix_ok = false;
   bool found = false;
   // Whether any alignment matched the framing code, which separates "no
-  // framing code here" from "framing code found but its MRAG was rejected".
+  // framing code here" from "framing code found but its prefix was rejected".
   bool framing_matched = false;
   for (int shift = -kFramingSearchBits; shift <= kFramingSearchBits; ++shift) {
     int errors = 0;
     for (int k = 0; k < kFramingBits; ++k) {
       errors += (bit_at(best_t0 + (kRunInBits + shift + k) * spb) !=
-                 kFramingCodeBits[k])
+                 geometry.framing[static_cast<size_t>(k)])
                     ? 1
                     : 0;
     }
@@ -1229,35 +1437,42 @@ TeletextLineResult TeletextSlicer::slice_threshold(
       continue;
     }
     framing_matched = true;
-    // The whole packet must fit at this alignment (§7.1).
+    // The whole packet must fit at this alignment (§7.1, CEA-516 §2.1).
     const double start = payload_start(shift);
     if (start < 0.0 || start + (payload_bits_ - 1) * spb + 1.0 >=
                            static_cast<double>(sample_count)) {
       continue;
     }
 
-    std::array<uint8_t, 2> mrag{};
-    for (int n = 0; n < 16; ++n) {
+    const int prefix_bits = static_cast<int>(geometry.hamming_prefix_bytes) * 8;
+    std::array<uint8_t, kTeletextPacketBytes> prefix{};
+    for (int n = 0; n < prefix_bits; ++n) {
       if (bit_at(start + n * spb) != 0) {
-        mrag[static_cast<size_t>(n) >> 3] |=
+        prefix[static_cast<size_t>(n) >> 3] |=
             static_cast<uint8_t>(1u << (n & 7));
       }
     }
-    const bool mrag_ok = teletext_hamming84_decode(mrag[0]) >= 0 &&
-                         teletext_hamming84_decode(mrag[1]) >= 0;
-    if (options_.require_valid_mrag && !mrag_ok) {
+    bool prefix_ok = true;
+    for (size_t i = 0; i < geometry.hamming_prefix_bytes; ++i) {
+      if (teletext_hamming84_decode(prefix[i]) < 0) {
+        prefix_ok = false;
+        break;
+      }
+    }
+    if (options_.require_valid_mrag && !prefix_ok) {
       continue;
     }
 
-    const bool better = !found || errors < best_errors ||
-                        (errors == best_errors && mrag_ok && !best_mrag_ok) ||
-                        (errors == best_errors && mrag_ok == best_mrag_ok &&
-                         std::abs(shift) < std::abs(best_shift));
+    const bool better =
+        !found || errors < best_errors ||
+        (errors == best_errors && prefix_ok && !best_prefix_ok) ||
+        (errors == best_errors && prefix_ok == best_prefix_ok &&
+         std::abs(shift) < std::abs(best_shift));
     if (better) {
       found = true;
       best_errors = errors;
       best_shift = shift;
-      best_mrag_ok = mrag_ok;
+      best_prefix_ok = prefix_ok;
     }
   }
   if (!found) {
@@ -1277,8 +1492,9 @@ TeletextLineResult TeletextSlicer::slice_threshold(
     }
   }
 
-  // The MRAG plausibility filter (§7.1.2, §8.2) was applied per candidate
-  // alignment during the framing lock; the stored bytes stay as transmitted.
+  // The addressing-prefix plausibility filter (ETSI EN 300 706 §7.1.2 and
+  // §8.2, CEA-516 §3.2.2) was applied per candidate alignment during the
+  // framing lock; the stored bytes stay as transmitted.
 
   result.framing_bit_errors = best_errors;
   result.data_start_sample = data_start;
@@ -1293,6 +1509,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
                                               AcquisitionWindow window) const {
   TeletextLineResult result = new_result();
   result.detector = TeletextDetector::kMlse;
+  const SystemGeometry geometry = system_geometry(options_.system);
   const double spb = samples_per_bit_;
   const double search_start = window.first;
   const double search_end = window.last;
@@ -1323,7 +1540,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
       continue;
     }
     resample_bit_grid(line, sample_count, t0, spb, kPreambleBits, 1, grid);
-    const ChannelFit fit = fit_preamble_channel(grid, 1);
+    const ChannelFit fit = fit_preamble_channel(grid, 1, geometry.framing);
     if (!fit.ok || fit.gain < min_gain) {
       continue;
     }
@@ -1353,7 +1570,8 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
           : 0;
   resample_bit_grid(line, sample_count, best_t0, spb,
                     kPreambleBits + payload_bits_ + trailing, phases, grid);
-  const ChannelFit best_fit = fit_preamble_channel(grid, phases);
+  const ChannelFit best_fit =
+      fit_preamble_channel(grid, phases, geometry.framing);
   // Only a positive gain is required here — acquisition has already applied
   // the min-gain test, and a fractionally-spaced fit that then claims a weak
   // channel says so through its relative residual below, which is the same
@@ -1373,6 +1591,14 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
     return reject(result, TeletextRejectReason::kPreambleResidual);
   }
 
+  // The framing code was assumed in order to fit the channel; now check that
+  // no other service's code explains the samples better. This is what stops a
+  // line of the other 525-line service being decoded as this one (see
+  // framing_code_fits_best).
+  if (!framing_code_fits_best(grid, phases, best_fit, geometry.framing)) {
+    return reject(result, TeletextRejectReason::kFramingCodeMiss);
+  }
+
   const double data_start = best_t0 + kPreambleBits * spb;
   std::vector<uint8_t> bits(static_cast<size_t>(payload_bits_), 0);
 
@@ -1382,8 +1608,8 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   // its residual is the gate below, and its per-bit errors are the timing
   // diagnostic.
   const double payload_residual =
-      mlse_detect(grid, kPreambleBits, best_fit, payload_bits_, bits.data(),
-                  result.payload_bit_errors.data(),
+      mlse_detect(grid, kPreambleBits, best_fit, geometry.framing,
+                  payload_bits_, bits.data(), result.payload_bit_errors.data(),
                   /*bit_confidence_out=*/nullptr, trailing) /
       best_fit.gain;
   result.payload_residual = payload_residual;
@@ -1434,9 +1660,9 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   const int last_fittable = kPreambleBits + payload_bits_ + trailing - 1 -
                             (kChannelTaps - 1 - kChannelCentre);
   const int payload_bits = payload_bits_;
-  const auto decided_bit = [&bits, payload_bits](int k) {
+  const auto decided_bit = [&bits, payload_bits, &geometry](int k) {
     if (k < kPreambleBits) {
-      return preamble_bit(k);
+      return preamble_bit(k, geometry.framing);
     }
     const int index = k - kPreambleBits;
     // ETSI EN 300 706 §7.1: nothing follows the packet, so the line is black.
@@ -1447,8 +1673,9 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   const ChannelFit refit = fit_channel_range(grid, phases, decided_bit,
                                              kChannelCentre, last_fittable);
   if (refit.ok && refit.gain > 0.0) {
-    mlse_detect(grid, kPreambleBits, refit, payload_bits_, bits.data(),
-                /*bit_errors_out=*/nullptr, bit_confidence.data(), trailing);
+    mlse_detect(grid, kPreambleBits, refit, geometry.framing, payload_bits_,
+                bits.data(), /*bit_errors_out=*/nullptr, bit_confidence.data(),
+                trailing);
     result.has_byte_confidence = true;
   }
 
@@ -1472,15 +1699,45 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
     }
   }
 
-  const int mrag_low = teletext_hamming84_decode(result.bytes[0]);
-  const int mrag_high = teletext_hamming84_decode(result.bytes[1]);
-  if (options_.require_valid_mrag && (mrag_low < 0 || mrag_high < 0)) {
+  // Addressing plausibility over the service's Hamming-coded prefix: the two
+  // MRAG bytes on System B (ETSI EN 300 706 §7.1.2), the five packet prefix
+  // bytes on System C (CEA-516 §3.2.1).
+  bool prefix_ok = true;
+  for (size_t i = 0; i < geometry.hamming_prefix_bytes; ++i) {
+    if (teletext_hamming84_decode(result.bytes[i]) < 0) {
+      prefix_ok = false;
+      break;
+    }
+  }
+  if (options_.require_valid_mrag && !prefix_ok) {
     return reject(result, TeletextRejectReason::kInvalidMrag);
   }
 
-  // Transmission-coding plausibility. Only reachable when the addressing
-  // decoded, because the row number is what says whether the payload is
-  // parity coded at all.
+  // Transmission-coding plausibility, which the MLSE detector needs and the
+  // threshold detector does not: an exact framing-code match already rules out
+  // noise there, whereas here the framing code is fitted rather than matched.
+  //
+  // System C has no equivalent of the row-parity gate below — CEA-516 §3.3
+  // makes byte parity conditional on the data group type, which one packet
+  // cannot establish — so its five Hamming-coded prefix bytes carry the gate
+  // instead, and they are far stronger: random bytes clear all five with
+  // probability (16/256)^5, about 1e-6. Applied unconditionally, exactly as
+  // the parity gate is, rather than only when require_valid_mrag is set.
+  if (!geometry.parity_coded_rows) {
+    if (!prefix_ok) {
+      return reject(result, TeletextRejectReason::kInvalidMrag);
+    }
+    // Parity-guided repair is skipped for the same reason the parity gate is:
+    // a data byte that fails odd parity is only known to be damaged when the
+    // group it belongs to is type 0, and the packet does not say.
+    result.framing_bit_errors = 0;
+    result.data_start_sample = data_start;
+    result.valid = true;
+    return result;
+  }
+
+  const int mrag_low = teletext_hamming84_decode(result.bytes[0]);
+  const int mrag_high = teletext_hamming84_decode(result.bytes[1]);
   if (mrag_low >= 0 && mrag_high >= 0) {
     const int row = ((mrag_low >> 3) & 0x01) | ((mrag_high << 1) & 0x1E);
     if (row <= kMlseLastParityCodedRow) {

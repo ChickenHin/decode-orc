@@ -110,11 +110,15 @@ class TeletextRecoveryStats {
    * @param packet_bytes Bytes of @p packet the service transmitted
    *                     (TeletextObservedPacket::byte_count); the rest were
    *                     never sent and are left out of every profile
+   * @param system       Service the packet was recovered under, which decides
+   *                     whether the parity profile applies to it at all (see
+   *                     teletext_has_parity_coded_rows)
    */
   void add_observed_line(
       int vbi_line, const std::array<uint8_t, kTeletextPacketBytes>* packet,
       const TeletextPacketConfidence* confidence,
-      size_t packet_bytes = kTeletextPacketBytes);
+      size_t packet_bytes = kTeletextPacketBytes,
+      TeletextSystem system = TeletextSystem::kWst625);
 
   /// Candidate lines recorded
   uint64_t lines_seen() const { return lines_seen_; }

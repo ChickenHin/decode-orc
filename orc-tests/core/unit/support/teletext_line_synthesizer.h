@@ -264,5 +264,93 @@ inline std::array<uint8_t, kTeletextPacketBytes> make_525_test_payload() {
   return payload;
 }
 
+// ---------------------------------------------------------------------------
+// NABTS (ITU-R BT.653 System C, CEA-516)
+// ---------------------------------------------------------------------------
+
+// Full NABTS transmission line: run-in (2) + framing (1) + packet (33).
+// CEA-516 §2.1: 288 bits = 36 bytes.
+constexpr size_t kNabtsTransmissionBytes = 36;
+
+// Build the transmission packet for a NABTS payload. The clock run-in is the
+// System B one (CEA-516 §2.2.2 = ETSI EN 300 706 §6.1, 1010… starting with a
+// '1', so 0x55 0x55 LSB-first on air); the framing code is 11100111 with b1
+// transmitted first (§2.2.3), which is 0xE7 whichever end of the byte is read
+// first because the pattern is symmetric under bit reversal.
+inline std::vector<uint8_t> make_nabts_transmission_bytes(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload) {
+  std::vector<uint8_t> packet(3 + kNabtsPacketBytes, 0);
+  packet[0] = 0x55;
+  packet[1] = 0x55;
+  packet[2] = 0xE7;
+  for (size_t i = 0; i < kNabtsPacketBytes; ++i) {
+    packet[3 + i] = payload[i];
+  }
+  return packet;
+}
+
+// Synthesis options for a clean, nominally timed NABTS line.
+// CEA-516 §1.3: 5,727272 Mbit/s and the half-amplitude point of the first 0→1
+// transition of the clock synchronization sequence 10,48 µs after the sync
+// leading edge, so the first run-in bit centre is half a bit period later at
+// 10,57 µs. §1.6: logic '1' at 70 IRE, logic '0' at blanking — the same levels
+// ITU-R BT.653 Table 1b gives the 525-line System B service, so the same
+// black-referenced fraction is used (see the slicer's geometry table).
+inline TeletextLineSynthOptions nabts_synth_options() {
+  TeletextLineSynthOptions opt;
+  opt.sample_rate = kNtscSampleRate;
+  opt.bit_rate = kTeletext525BitRate;
+  opt.sample_count = static_cast<size_t>(kNtscSamplesPerLine);
+  opt.black_level = static_cast<int16_t>(kNtscBlack);
+  opt.white_level = static_cast<int16_t>(kNtscWhite);
+  opt.amplitude_fraction = 0.70;
+  opt.first_bit_centre_us = 10.57;
+  return opt;
+}
+
+// Build a NABTS packet prefix (CEA-516 §3.2.1): the three packet address
+// bytes P1-P3 carrying the data channel as three hexadecimal digits, the
+// continuity index CI, and the packet structure byte PS. All five are Hamming
+// 8/4 coded (§3.2.2), which is the same code as ETSI EN 300 706 §8.2.
+//
+// |ps| is the four information bits of PS: b2 synchronizing packet, b4 not
+// full, b6/b8 suffix length (§3.2.5), here in D1…D4 order.
+inline std::array<uint8_t, 5> make_nabts_prefix(int channel, int continuity,
+                                                int ps) {
+  return {teletext_hamming84_encode(static_cast<uint8_t>((channel >> 8) & 0xF)),
+          teletext_hamming84_encode(static_cast<uint8_t>((channel >> 4) & 0xF)),
+          teletext_hamming84_encode(static_cast<uint8_t>(channel & 0xF)),
+          teletext_hamming84_encode(static_cast<uint8_t>(continuity & 0xF)),
+          teletext_hamming84_encode(static_cast<uint8_t>(ps & 0xF))};
+}
+
+// A deterministic 33-byte NABTS payload in the buffer shape the slicer
+// returns: a valid Hamming-coded prefix followed by a byte pattern, with the
+// bytes past the packet left at zero because they were never sent.
+//
+// The data block is odd-parity coded, as CEA-516 §3.3 requires of a data group
+// of type 0 — the type broadcast teletext uses. The slicer does not gate on
+// that (the type is a property of the group, not of the packet), but a fixture
+// that is coded as transmitted is the more honest test.
+inline std::array<uint8_t, kTeletextPacketBytes> make_nabts_test_payload(
+    int channel = 0x123, int continuity = 5, int ps = 0x1) {
+  std::array<uint8_t, kTeletextPacketBytes> payload{};
+  const auto prefix = make_nabts_prefix(channel, continuity, ps);
+  std::copy(prefix.begin(), prefix.end(), payload.begin());
+  for (size_t i = prefix.size(); i < kNabtsPacketBytes; ++i) {
+    payload[i] = teletext_odd_parity_encode(
+        static_cast<uint8_t>((0x5A ^ (i * 37)) & 0x7F));
+  }
+  return payload;
+}
+
+// Synthesize a NABTS line carrying |payload|.
+inline std::vector<int16_t> synthesize_nabts_line(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload,
+    const TeletextLineSynthOptions& opt = nabts_synth_options()) {
+  return synthesize_teletext_line_bytes(make_nabts_transmission_bytes(payload),
+                                        opt);
+}
+
 }  // namespace tests
 }  // namespace orc

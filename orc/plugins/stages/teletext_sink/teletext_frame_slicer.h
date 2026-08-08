@@ -1,8 +1,8 @@
 /*
  * File:        teletext_frame_slicer.h
  * Module:      orc-stage-plugin-teletext_sink
- * Purpose:     Per-frame WST teletext line recovery from a video frame
- *              representation
+ * Purpose:     Per-frame World System Teletext line recovery from a video
+ *              frame representation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -98,17 +98,18 @@ inline constexpr std::array<VideoSystem, 3> kTeletextVideoSystems = {
     VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M};
 
 /**
- * @brief Recovers the teletext packets of one field of a video frame
+ * @brief Recovers the World System Teletext packets of one field of a frame
  *
  * Owns one TeletextSlicer per television system — each carries its own sample
  * rate, bit rate, packet length and data-timing window, and all are cheap
  * enough to build once here rather than per frame — and selects between them
  * from the representation's video parameters.
  *
- * Only the ITU-R BT.653 System B services are recovered: 625 lines (ETSI EN
- * 300 706, PAL) and 525 lines (Table 1b, NTSC and PAL_M). NABTS (System C)
- * shares the 525 lines and the bit rate but not the framing code, so its lines
- * are seen and rejected rather than decoded.
+ * System B only: 625 lines per ETSI EN 300 706 (PAL) and 525 per ITU-R BT.653
+ * Table 1b (NTSC and PAL_M). NABTS, the other BT.653 service carried on the
+ * same 525-line VBI lines, is recovered by the nabts_sink stage, which has its
+ * own copy of this pass — see docs-tech/nabts-support-design.md §2 for why the
+ * two are not one.
  *
  * Thread safety: slice_field() is const and the class holds no mutable state;
  * a single instance may be used concurrently from multiple threads.
@@ -121,8 +122,8 @@ class TeletextFrameSlicer {
    * @brief Everything about a television system that teletext recovery needs
    *
    * The single place a video system is turned into the facts that follow from
-   * it. Recovery reads nothing per-system anywhere else, so a service added
-   * here is a service added: no caller has to be found and updated to match.
+   * it. Recovery reads nothing per-system anywhere else, so a system added
+   * here is a system added: no caller has to be found and updated to match.
    */
   struct SystemProfile {
     /// False for a system carrying no service this can recover, in which case
@@ -147,10 +148,10 @@ class TeletextFrameSlicer {
     size_t slicer_index = 0;
   };
 
-  /// Profile of |system| before any option override is applied.
+  /// Profile of |system|, before any option override is applied.
   static SystemProfile profile_for(VideoSystem system);
 
-  /// Whether |system| carries a WST service this can recover.
+  /// Whether |system| carries a teletext service this can recover.
   static bool applies_to(VideoSystem system) {
     return profile_for(system).carries_teletext;
   }
