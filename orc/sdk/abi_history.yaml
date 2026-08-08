@@ -228,6 +228,21 @@ history:
     cause: data-contract-swap
     contracts:
       - orc/stage/analysis_sink_results.h
+    notes: >-
+      Also in this entry, and additive rather than breaking: the NABTS record
+      surface (CEA-516 / ITU-R BT.653 System C). `orc/stage/analysis_sink_results.h`
+      gains `NabtsRecordFunction`, `NabtsCataloguedRecord`,
+      `NabtsRecoverySummary`, `NabtsAnalysisDataset`, the
+      `INabtsAnalysisResults` interface, `NabtsCaptionCue` and the
+      `nabts_caption_cues()` helper, and it now includes the new support-tier
+      header `<orc/support/nabts_page.h>` (the decoded NAPLPS display list,
+      `NabtsPageSnapshot` and friends). Every one of these types is new in this
+      entry, so no existing layout or vtable moves and no released plugin can
+      see the difference; a plugin implementing `INabtsAnalysisResults` must be
+      built against abi 13 or later, which the toolchain tag already enforces.
+      `NabtsPrimitive` gained its `path` member (X3.110 §5.3.2.3.3, needed to lay
+      a run of characters back out) inside this same entry, before any of it
+      shipped.
     summary: >-
       Teletext sub-pages: `TeletextCataloguedPage` in
       `<orc/stage/analysis_sink_results.h>` replaces its single

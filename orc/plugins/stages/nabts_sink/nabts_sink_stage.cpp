@@ -328,6 +328,23 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  {
+    ParameterDescriptor desc;
+    desc.name = "export_captions";
+    desc.display_name = "Export Captions (SubRip)";
+    desc.description =
+        "Write the recording's captioning as a SubRip subtitle file beside the "
+        "packet stream (mydata.t33 gives mydata.t33.srt). The cues are the "
+        "records the service marked with the caption flag (CEA-516 §5.2.7.3), "
+        "in the order they were transmitted, each running until the next one "
+        "replaces it; cue timing comes from the 59.94 fields per second of "
+        "SMPTE 170M. A recording that carried no captioning writes no file. "
+        "Needs an output file to sit beside";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
+    descriptors.push_back(desc);
+  }
+
   return descriptors;
 }
 
@@ -403,6 +420,7 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
 
   options.write_report = get_bool_or(parameters, "write_report", false);
   options.export_records = get_bool_or(parameters, "export_records", false);
+  options.export_captions = get_bool_or(parameters, "export_captions", false);
 
   // The report is named after the packet stream and written beside it, so it
   // has nowhere to go on a run with no output file. Refused rather than
@@ -415,6 +433,11 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
   if (options.output_path.empty() && options.export_records) {
     throw std::runtime_error(
         "The record files need an output file (they are written beside the "
+        "packet stream)");
+  }
+  if (options.output_path.empty() && options.export_captions) {
+    throw std::runtime_error(
+        "The caption file needs an output file (it is written beside the "
         "packet stream)");
   }
 

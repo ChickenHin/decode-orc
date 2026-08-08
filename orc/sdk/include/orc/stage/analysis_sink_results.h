@@ -296,6 +296,41 @@ struct NabtsAnalysisDataset {
   NabtsRecoverySummary summary;
 };
 
+/**
+ * @brief One caption, with the frames it was on screen for
+ *
+ * CEA-516 §7.3.10 carries captioning as non-cyclic presentation records marked
+ * with the Caption Flag of §5.2.7.3, each new caption a new version of the same
+ * record address (§7.3.10.1: "Each time the caption content is changed, the
+ * Version Number shall be changed").
+ */
+struct NabtsCaptionCue {
+  /// Frames the cue covers (0-based, as the catalogue counts them). The extent
+  /// runs to the next caption: §7.3.10.1 has a receiver replace the caption on
+  /// screen rather than being told when to take it down.
+  uint64_t start_frame = 0;
+  uint64_t end_frame = 0;
+  uint16_t channel = 0;
+  std::string address_text;
+  uint8_t version = 0;
+  /// The record's text, as nabts_page_text() reads it.
+  std::string text;
+};
+
+/**
+ * @brief The caption service a catalogue carries (CEA-516 §7.3.10)
+ *
+ * Ascending by the frame each caption was first seen at. A caption record that
+ * drew nothing is an erase — §7.3.10.1: "Captions may be erased by the use of
+ * PLPS code that erases either the entire display, or the area covered by the
+ * caption" — so it ends the caption before it and yields no cue of its own.
+ *
+ * Shared between the sink stage's SubRip export and the host's caption track,
+ * so the two cannot disagree about what the service said.
+ */
+std::vector<NabtsCaptionCue> nabts_caption_cues(
+    const std::vector<NabtsCataloguedRecord>& records);
+
 class INabtsAnalysisResults {
  public:
   virtual bool has_results() const = 0;

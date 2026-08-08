@@ -27,6 +27,7 @@
 #include "line_navigation_mapper.h"
 #include "logging.h"
 #include "masklineconfigdialog.h"
+#include "nabtsdialog.h"
 #include "ntscobserverdialog.h"
 #include "orcgraphicsview.h"
 #include "pluginmanagerdialog.h"
@@ -465,6 +466,10 @@ MainWindow::MainWindow(QWidget* parent)
   connect(render_coordinator_.get(),
           &RenderCoordinator::teletextAnalysisProgress, this,
           &MainWindow::onTeletextAnalysisProgress, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::nabtsAnalysisDataReady,
+          this, &MainWindow::onNabtsAnalysisDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::nabtsAnalysisProgress,
+          this, &MainWindow::onNabtsAnalysisProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
           &MainWindow::onTriggerProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerComplete, this,
@@ -1314,12 +1319,18 @@ void MainWindow::closeAllDialogs() {
       dialogs_to_close.push_back(pair.second);
     }
   }
+  for (auto& pair : nabts_analysis_dialogs_) {
+    if (pair.second) {
+      dialogs_to_close.push_back(pair.second);
+    }
+  }
   // Clear maps before closing to prevent destroyed signal handlers from
   // modifying them
   dropout_analysis_dialogs_.clear();
   snr_analysis_dialogs_.clear();
   burst_level_analysis_dialogs_.clear();
   teletext_analysis_dialogs_.clear();
+  nabts_analysis_dialogs_.clear();
 
   // Now safe to close all dialogs
   for (auto* dialog : dialogs_to_close) {
@@ -1364,6 +1375,14 @@ void MainWindow::closeAllDialogs() {
     }
   }
   teletext_analysis_progress_dialogs_.clear();
+
+  for (auto& pair : nabts_analysis_progress_dialogs_) {
+    if (pair.second) {
+      pair.second->close();
+      delete pair.second;
+    }
+  }
+  nabts_analysis_progress_dialogs_.clear();
 }
 
 void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
@@ -3902,6 +3921,10 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       tool_info.stage_tool_contract ==
           "decode-orc.stage-tools.teletext-analysis.v1" ||
       tool_info.id == "teletext_analysis";
+  const bool is_nabts_analysis_tool =
+      tool_info.stage_tool_contract ==
+          "decode-orc.stage-tools.nabts-pages.v1" ||
+      tool_info.id == "nabts_analysis";
 
   ORC_LOG_DEBUG("Running analysis '{}' for node '{}'", tool_info.name,
                 node_id.to_string());
@@ -4501,6 +4524,76 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     ORC_LOG_DEBUG(
         "Requested teletext analysis data for node '{}', request_id={}",
         node_id.to_string(), request_id);
+    return;
+  }
+
+  // Special-case: NABTS Records decodes the range and shows the record viewer
+  if (is_nabts_analysis_tool) {
+    auto nodes = project_.presenter()->getNodes();
+    auto node_it = std::find_if(nodes.begin(), nodes.end(),
+                                [&node_id](const orc::presenters::NodeInfo& n) {
+                                  return n.node_id == node_id;
+                                });
+
+    QString node_label = QString::fromStdString(stage_name);
+    if (node_it != nodes.end()) {
+      node_label = QString::fromStdString(
+          node_it->label.empty() ? node_it->stage_name : node_it->label);
+    }
+    QString title = QString("NABTS Records - %1 (%2)")
+                        .arg(node_label)
+                        .arg(QString::fromStdString(node_id.to_string()));
+
+    // Get or create the viewer for this stage
+    NabtsDialog* dialog = nullptr;
+    auto it = nabts_analysis_dialogs_.find(node_id);
+    if (it == nabts_analysis_dialogs_.end()) {
+      dialog = new NabtsDialog(this);
+      dialog->setWindowTitle(title);
+      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+
+      // Connect destroyed signal to clean up map entry
+      connect(dialog, &QObject::destroyed, [this, node_id]() {
+        nabts_analysis_dialogs_.erase(node_id);
+        nabts_analysis_progress_dialogs_.erase(node_id);
+      });
+
+      nabts_analysis_dialogs_[node_id] = dialog;
+    } else {
+      dialog = it->second;
+    }
+
+    // Create and show progress dialog for this stage
+    auto& prog_dialog = nabts_analysis_progress_dialogs_[node_id];
+    if (prog_dialog) {
+      delete prog_dialog;
+    }
+    prog_dialog =
+        new QProgressDialog("Decoding NABTS data...", QString(), 0, 100, this);
+    prog_dialog->setWindowTitle(dialog->windowTitle());
+    prog_dialog->setWindowModality(Qt::ApplicationModal);
+    prog_dialog->setMinimumDuration(0);
+    prog_dialog->setCancelButton(nullptr);
+    prog_dialog->setValue(0);
+    // No activateWindow(): see the teletext path above.
+    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
+    prog_dialog->show();
+    prog_dialog->raise();
+
+    // Show the viewer (empty until the catalogue arrives)
+    dialog->showPending();
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+
+    // Request the catalogue from the coordinator, which triggers the stage
+    // first when it has not been triggered yet.
+    uint64_t request_id =
+        render_coordinator_->requestNabtsAnalysisData(node_id);
+    pending_nabts_analysis_requests_[request_id] = node_id;
+
+    ORC_LOG_DEBUG("Requested NABTS analysis data for node '{}', request_id={}",
+                  node_id.to_string(), request_id);
     return;
   }
 

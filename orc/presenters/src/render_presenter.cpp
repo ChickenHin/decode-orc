@@ -52,6 +52,7 @@
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
+#include "nabts_analysis_presenter.h"
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
 #include "teletext_analysis_presenter.h"
@@ -2752,6 +2753,31 @@ std::optional<TeletextAnalysisView> RenderPresenter::getTeletextAnalysisData(
   // The catalogue is already bounded by the stage's page cap, so it is handed
   // over whole — there is no decimation step as there is for the graph series.
   return TeletextAnalysisPresenter::makeAnalysisView(sink->dataset());
+}
+
+std::optional<NabtsAnalysisView> RenderPresenter::getNabtsAnalysisData(
+    NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
+  }
+
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
+  if (!target_node) {
+    return std::nullopt;
+  }
+
+  auto* sink =
+      dynamic_cast<orc::INabtsAnalysisResults*>(target_node->stage.get());
+  if (!sink || !sink->has_results()) {
+    return std::nullopt;
+  }
+
+  // Bounded by the stage's record cap, so handed over whole. The NAPLPS
+  // interpretation has already happened in the stage; what this converts is the
+  // display list, which is the same size whichever side of the boundary it sits
+  // on.
+  return NabtsAnalysisPresenter::makeAnalysisView(sink->dataset());
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

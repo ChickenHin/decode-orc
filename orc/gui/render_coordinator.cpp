@@ -91,6 +91,11 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getTeletextAnalysisData(node_id);
   }
 
+  std::optional<orc::presenters::NabtsAnalysisView> getNabtsAnalysisData(
+      orc::NodeID node_id) override {
+    return presenter_.getNabtsAnalysisData(node_id);
+  }
+
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID node_id) override {
     return presenter_.getAvailableOutputs(node_id);
@@ -433,6 +438,14 @@ uint64_t RenderCoordinator::requestTeletextAnalysisData(
   return id;
 }
 
+uint64_t RenderCoordinator::requestNabtsAnalysisData(
+    const orc::NodeID& node_id) {
+  uint64_t id = nextRequestId();
+  auto req = std::make_unique<GetNabtsAnalysisDataRequest>(id, node_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
 uint64_t RenderCoordinator::requestAvailableOutputs(
     const orc::NodeID& node_id) {
   uint64_t id = nextRequestId();
@@ -686,6 +699,11 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
     case RenderRequestType::GetTeletextAnalysisData:
       handleGetTeletextAnalysisData(
           *static_cast<GetTeletextAnalysisDataRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetNabtsAnalysisData:
+      handleGetNabtsAnalysisData(
+          *static_cast<GetNabtsAnalysisDataRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetAvailableOutputs:
@@ -1225,6 +1243,54 @@ void RenderCoordinator::handleGetTeletextAnalysisData(
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Teletext analysis failed: {}", e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleGetNabtsAnalysisData(
+    const GetNabtsAnalysisDataRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Getting NABTS analysis data for node '{}' "
+      "(request {})",
+      req.node_id.to_string(), req.request_id);
+
+  try {
+    if (!worker_render_presenter_) {
+      emit error(req.request_id, "Render presenter not initialized");
+      return;
+    }
+
+    auto data = worker_render_presenter_->getNabtsAnalysisData(req.node_id);
+    if (!data) {
+      // Stage has not been triggered yet — decode the range now so the
+      // catalogue exists to read.
+      ORC_LOG_DEBUG(
+          "RenderCoordinator: NABTS stage has no results, triggering now "
+          "(request {})",
+          req.request_id);
+      auto progress_cb = makePercentGatedProgress(
+          [this](int current, int total, const std::string& message) {
+            emit nabtsAnalysisProgress(static_cast<size_t>(current),
+                                       static_cast<size_t>(total),
+                                       QString::fromStdString(message));
+          });
+      worker_render_presenter_->triggerStage(req.node_id, progress_cb);
+      data = worker_render_presenter_->getNabtsAnalysisData(req.node_id);
+      if (!data) {
+        emit error(req.request_id,
+                   "Failed to get NABTS data - node may not be a "
+                   "NabtsSinkStage or trigger failed");
+        return;
+      }
+    }
+
+    ORC_LOG_DEBUG(
+        "RenderCoordinator: Served NABTS catalogue from sink ({} records)",
+        data->records.size());
+    emit nabtsAnalysisDataReady(req.request_id, std::move(*data));
+
+  } catch (const std::exception& e) {
+    ORC_LOG_ERROR("RenderCoordinator: NABTS analysis failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
 }

@@ -148,6 +148,10 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
       orc::NodeID) override {
     return std::nullopt;
   }
+  std::optional<orc::presenters::NabtsAnalysisView> getNabtsAnalysisData(
+      orc::NodeID) override {
+    return std::nullopt;
+  }
   LineSampleData getLineSamplesWithYC(orc::NodeID, orc::PreviewOutputType,
                                       uint64_t, int, int, int) override {
     return {};

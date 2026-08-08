@@ -202,6 +202,8 @@ class MockRenderPresenter : public IRenderPresenter {
               getBurstLevelAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD((std::optional<orc::presenters::TeletextAnalysisView>),
               getTeletextAnalysisData, (NodeID node_id), (override));
+  MOCK_METHOD((std::optional<orc::presenters::NabtsAnalysisView>),
+              getNabtsAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD((std::vector<orc::PreviewOutputInfo>), getAvailableOutputs,
               (NodeID node_id), (override));
 

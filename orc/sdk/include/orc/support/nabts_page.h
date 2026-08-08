@@ -228,6 +228,11 @@ struct NabtsPrimitive {
   uint8_t drcs_index = 0;
 
   NabtsCharRotation rotation = NabtsCharRotation::kNone;
+  /// The character path in force (§5.3.2.3.3), i.e. the direction the cursor
+  /// moved to the next character field. Carried because a display list of one
+  /// primitive per character loses it otherwise, and a consumer laying the
+  /// characters back out as a run needs it.
+  NabtsCharPath path = NabtsCharPath::kRight;
   /// Reverse video (§6.2.7.4): the character shape is left undrawn and the
   /// field around it is filled instead.
   bool reverse_video = false;
@@ -345,6 +350,90 @@ void nabts_default_colour_map(NabtsColour (&map)[kNabtsColourMapEntries]);
 /// specifically (§5.3.2.4.3 highlight, §6.2.3 DRCS elements, §6.2.8.1 blink).
 constexpr NabtsColour kNabtsNominalBlack{0, 0, 0, false};
 constexpr NabtsColour kNabtsNominalWhite{7, 7, 7, false};
+
+// ---- Character repertoires ------------------------------------------------
+//
+// A kCharacter primitive names a code position and the G-set it belongs to;
+// what that position *is* comes from X3.110 §7. The mapping lives here rather
+// than in a presenter because two consumers need the same answer: the host's
+// viewer, which draws it, and the sink stage, which writes caption text.
+
+/**
+ * @brief The primary set (X3.110 §5.1, §7) as a Unicode code point
+ *
+ * §7.2 puts the primary set's graphics at 2/1 to 7/14 and bases the repertoire
+ * on ANSI X3.4-1977, so the set is ASCII: Table 25 places the number sign at
+ * 2/3, the dollar sign at 2/4, the grave accent at 6/0, the circumflex at 5/14
+ * and the tilde at 7/14, each where ASCII has it. 2/0 is SPACE; 7/15 is not a
+ * graphic and reads as SPACE.
+ */
+char32_t nabts_primary_to_unicode(uint8_t code);
+
+/**
+ * @brief The supplementary set (X3.110 §5.2, §7) as a Unicode code point
+ *
+ * The layout is the ISO 6937-1982 supplementary set §7.2 names as a source,
+ * with the additions X3.110 makes at 5/6 to 5/11 and 6/5 (Table 25: the full
+ * horizontal and vertical lines, the four diagonals and the cross, which ISO
+ * 6937 leaves vacant or uses differently).
+ *
+ * Columns 4 is the non-spacing diacriticals of Tables 26 and 27, returned as
+ * the corresponding Unicode combining mark: a composite character is
+ * transmitted as the mark followed by the letter (§7.2), which is the opposite
+ * of Unicode's order, so a consumer assembling text has to swap them.
+ * Unassigned positions read as SPACE.
+ */
+char32_t nabts_supplementary_to_unicode(uint8_t code);
+
+/// True when |code| is one of the non-spacing marks of Tables 26 and 27, which
+/// precede the character they apply to instead of following it.
+bool nabts_supplementary_is_nonspacing(uint8_t code);
+
+/**
+ * @brief The six sub-elements a mosaic code position lights (X3.110 §5.4)
+ *
+ * Figure 62 numbers the 2x3 cell b1 top-left, b2 top-right, b3 middle-left,
+ * b4 middle-right, b5 bottom-left and b7 bottom-right, with b6 = 1 marking the
+ * position as a mosaic — so the mosaics are columns 2, 3, 6 and 7, plus the
+ * second copy of the solid mosaic §5.4 places at 5/15.
+ *
+ * Returned as six bits in the same order the World System Teletext sixels use
+ * (bit 0 top-left through bit 5 bottom-right), because it is the same 2x3 cell:
+ * a renderer draws either from one routine.
+ */
+uint8_t nabts_mosaic_sixels(uint8_t code);
+
+/// Whether |code| is one of the 65 mosaic positions §5.4 assigns; the rest are
+/// reserved and "shall be displayed as SPACE".
+bool nabts_is_mosaic_code(uint8_t code);
+
+/**
+ * @brief One character of |repertoire| as UTF-8, for text rather than a glyph
+ *
+ * Used where the character is being read rather than drawn — a caption cue, a
+ * record's text content. A mosaic or a DRCS character has no text form and
+ * yields a SPACE, which is what §5.4 and §5.6 make an undrawable position
+ * anyway.
+ */
+std::string nabts_character_to_utf8(uint8_t code,
+                                    NabtsPrimitive::Repertoire repertoire);
+
+/**
+ * @brief A decoded record's text content, in reading order
+ *
+ * NAPLPS has no rows — a character goes wherever the cursor was — so the rows
+ * are inferred from where the record put the characters: runs sharing a
+ * baseline within half a character height are one line, lines run down the
+ * screen (y decreasing, since unit space has y upwards), and a line reads left
+ * to right. Lines are separated by a newline.
+ *
+ * For reading a record back rather than drawing it: a caption cue, a search, a
+ * text pane beside the rendering. Block mosaics and DRCS characters are shapes
+ * rather than text and are left out; the non-spacing marks of X3.110 Tables 26
+ * and 27 are composed onto the letters that follow them, which is Unicode's
+ * order and the reverse of the transmission's.
+ */
+std::string nabts_page_text(const NabtsPageSnapshot& page);
 
 }  // namespace orc
 

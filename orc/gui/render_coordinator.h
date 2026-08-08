@@ -26,6 +26,7 @@
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
 #include <orc_closed_caption.h>   // Closed caption observation view types
+#include <orc_nabts.h>            // NABTS analysis view types
 #include <orc_preview_views.h>
 #include <orc_teletext.h>  // Teletext observation view types
 
@@ -71,6 +72,7 @@ enum class RenderRequestType {
   GetSNRData,            // Get SNR analysis data
   GetBurstLevelData,     // Get burst level analysis data
   GetTeletextAnalysisData,  // Get the teletext page catalogue of a sink stage
+  GetNabtsAnalysisData,     // Get the NABTS record catalogue of a sink stage
   TriggerStage,             // Trigger a stage (batch processing)
   CancelTrigger,            // Cancel ongoing trigger
   GetAvailableOutputs,      // Query available preview outputs
@@ -215,6 +217,17 @@ struct GetTeletextAnalysisDataRequest : public RenderRequest {
 
   GetTeletextAnalysisDataRequest(uint64_t id, orc::NodeID node)
       : RenderRequest(RenderRequestType::GetTeletextAnalysisData, id),
+        node_id(std::move(node)) {}
+};
+
+/**
+ * @brief Request to get the NABTS record catalogue of an analysis sink stage
+ */
+struct GetNabtsAnalysisDataRequest : public RenderRequest {
+  orc::NodeID node_id;
+
+  GetNabtsAnalysisDataRequest(uint64_t id, orc::NodeID node)
+      : RenderRequest(RenderRequestType::GetNabtsAnalysisData, id),
         node_id(std::move(node)) {}
 };
 
@@ -537,6 +550,8 @@ class IRenderPresenter {
   getBurstLevelAnalysisData(NodeID node_id) = 0;
   virtual std::optional<orc::presenters::TeletextAnalysisView>
   getTeletextAnalysisData(NodeID node_id) = 0;
+  virtual std::optional<orc::presenters::NabtsAnalysisView>
+  getNabtsAnalysisData(NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -781,6 +796,18 @@ class RenderCoordinator : public QObject {
    * @return Request ID for matching response
    */
   uint64_t requestTeletextAnalysisData(const orc::NodeID& node_id);
+
+  /**
+   * @brief Request the NABTS record catalogue of an analysis sink (async)
+   *
+   * Fetch-or-trigger, exactly as the teletext request is: an untriggered node
+   * is triggered first (progress via nabtsAnalysisProgress) and the catalogue
+   * read back. Result is emitted via nabtsAnalysisDataReady.
+   *
+   * @param node_id NABTS analysis sink node to read
+   * @return Request id, echoed by the response so a stale one can be dropped
+   */
+  uint64_t requestNabtsAnalysisData(const orc::NodeID& node_id);
 
   /**
    * @brief Request available outputs for a node (async)
@@ -1060,6 +1087,17 @@ class RenderCoordinator : public QObject {
   void teletextAnalysisProgress(size_t current, size_t total, QString message);
 
   /**
+   * @brief Emitted when the NABTS record catalogue is ready
+   */
+  void nabtsAnalysisDataReady(uint64_t request_id,
+                              orc::presenters::NabtsAnalysisView data);
+
+  /**
+   * @brief Emitted while an untriggered NABTS sink is decoding
+   */
+  void nabtsAnalysisProgress(size_t current, size_t total, QString message);
+
+  /**
    * @brief Emitted when available outputs query completes
    */
   void availableOutputsReady(uint64_t request_id,
@@ -1258,6 +1296,11 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetTeletextAnalysisData request
    */
   void handleGetTeletextAnalysisData(const GetTeletextAnalysisDataRequest& req);
+
+  /**
+   * @brief Handle GetNabtsAnalysisData request
+   */
+  void handleGetNabtsAnalysisData(const GetNabtsAnalysisDataRequest& req);
 
   /**
    * @brief Handle GetAvailableOutputs request

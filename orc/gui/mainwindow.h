@@ -41,6 +41,7 @@ class PreviewDialog;
 class VBIDialog;
 class VideoParameterObserverDialog;
 class NtscObserverDialog;
+class NabtsDialog;
 class TeletextDialog;
 class ClosedCaptionDialog;
 class DropoutAnalysisDialog;
@@ -217,6 +218,9 @@ class MainWindow : public QMainWindow {
                                    orc::presenters::TeletextAnalysisView data);
   void onTeletextAnalysisProgress(size_t current, size_t total,
                                   QString message);
+  void onNabtsAnalysisDataReady(uint64_t request_id,
+                                orc::presenters::NabtsAnalysisView data);
+  void onNabtsAnalysisProgress(size_t current, size_t total, QString message);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
   void onCoordinatorError(uint64_t request_id, QString message);
@@ -372,6 +376,8 @@ class MainWindow : public QMainWindow {
       pending_burst_level_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>
       pending_teletext_analysis_requests_;  // request_id -> node_id
+  std::unordered_map<uint64_t, orc::NodeID>
+      pending_nabts_analysis_requests_;  // request_id -> node_id
 
   // Dropout analysis state tracking
   orc::NodeID last_dropout_node_id_;
@@ -398,6 +404,8 @@ class MainWindow : public QMainWindow {
       burst_level_analysis_dialogs_;
   // Teletext page viewers, one per analysis sink node (stage tool)
   std::unordered_map<orc::NodeID, TeletextDialog*> teletext_analysis_dialogs_;
+  // NABTS record viewers, one per analysis sink node (stage tool)
+  std::unordered_map<orc::NodeID, NabtsDialog*> nabts_analysis_dialogs_;
   OrcGraphModel* dag_model_;
   OrcGraphicsView* dag_view_;
   OrcGraphicsScene* dag_scene_;
@@ -474,6 +482,8 @@ class MainWindow : public QMainWindow {
       burst_level_progress_dialogs_;
   std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
       teletext_analysis_progress_dialogs_;
+  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
+      nabts_analysis_progress_dialogs_;
 };
 
 #endif  // MAINWINDOW_H

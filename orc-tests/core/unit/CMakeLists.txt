@@ -456,6 +456,7 @@ orc_add_core_unit_tests(
 
         support/log_destination_test.cpp
         support/nabts_page_test.cpp
+        support/nabts_repertoire_test.cpp
         support/teletext_slicer_test.cpp
         support/teletext_page_decoder_test.cpp
         support/teletext_recovery_stats_test.cpp

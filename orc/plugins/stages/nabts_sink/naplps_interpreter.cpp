@@ -510,10 +510,22 @@ void NaplpsInterpreter::execute_graphic(uint8_t byte) {
       primitive.points.push_back(state_.cursor);
       primitive.size = state_.text.character_field;
       primitive.rotation = state_.text.rotation;
+      primitive.path = state_.text.path;
       primitive.reverse_video = state_.text.reverse_video;
       primitive.underlined = state_.text.underlined;
       emit(std::move(primitive));
-      advance_cursor();
+
+      // §7.2: a composite character is transmitted as a non-spacing mark from
+      // the supplementary set followed by the letter it applies to, and Table
+      // 27's note has the mark's coded representation "precede those of the
+      // characters" it modifies. The pair occupies one character field — that
+      // is what makes it one character of the repertoire (§7.1) — so the mark
+      // itself must not move the cursor, or every accented letter would come
+      // out with a gap in front of it.
+      if (set != NaplpsGSet::kSupplementary ||
+          !nabts_supplementary_is_nonspacing(byte)) {
+        advance_cursor();
+      }
       return;
     }
   }

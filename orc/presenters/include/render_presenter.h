@@ -18,6 +18,7 @@
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
+#include <orc_nabts.h>            // NABTS analysis view types
 #include <orc_preview_views.h>
 #include <orc_teletext.h>  // Teletext analysis view types
 
@@ -296,6 +297,18 @@ class RenderPresenter {
    *         not a triggered teletext sink
    */
   std::optional<TeletextAnalysisView> getTeletextAnalysisData(NodeID node_id);
+
+  /**
+   * @brief Get the NABTS record catalogue from an analysis sink stage
+   *
+   * Bounded by the stage's record cap rather than by the frame range, so like
+   * the teletext catalogue it needs no decimation.
+   *
+   * @param node_id Node to get data from
+   * @return The catalogue, caption cues and recovery summary, or std::nullopt
+   *         if the node is not a triggered NABTS sink
+   */
+  std::optional<NabtsAnalysisView> getNabtsAnalysisData(NodeID node_id);
 
   /**
    * @brief Request dropout analysis data from a sink node (deprecated - use

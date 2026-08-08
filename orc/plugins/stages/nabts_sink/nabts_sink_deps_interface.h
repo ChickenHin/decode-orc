@@ -67,6 +67,9 @@ struct NabtsSinkOptions {
   // so the presentation code can be examined with external tools. Needs an
   // output path for the same reason the report does.
   bool export_records{false};
+  // Write the caption service (CEA-516 §7.3.10) as a SubRip document beside the
+  // packet stream. Needs an output path for the same reason the report does.
+  bool export_captions{false};
 };
 
 struct NabtsSinkResult {
@@ -91,6 +94,11 @@ struct NabtsSinkResult {
   std::string report_path;
   // Record files written when export_records is set.
   uint64_t records_exported{0};
+  // Caption cues written when export_captions is set, and where they went. The
+  // path is empty when the option is off, when the recording carried no
+  // captioning, or when the write failed — none of which fails the export.
+  uint64_t caption_cues_written{0};
+  std::string caption_path;
   // Every record the range carried, for the host to browse through
   // INabtsAnalysisResults.
   NabtsAnalysisDataset dataset;

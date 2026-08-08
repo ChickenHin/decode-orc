@@ -711,60 +711,152 @@ decodes a captured ExtraVision record to a stable display list.
 
 ## Phase 6 — Viewer
 
-Mirrors the teletext viewer path exactly, so the two behave the same way for a user.
+Mirrors the teletext viewer path, so the two behave the same way for a user.
+
+> **Built 2026-08-08.** All five tasks are done. Two things were found on the way and are recorded
+> in place: the character repertoires had to go into the SDK rather than the presenter (Task 6.0
+> below, which the plan did not anticipate), and the interpreter was advancing the cursor over a
+> non-spacing mark, which put a gap in front of every accented letter (Task 6.2).
+
+### Task 6.0 — Character repertoires in the SDK (added)
+
+Not in the original plan. Task 6.2 called for the presenter to map code points to Unicode, and Task
+6.5 needs the same mapping to write caption text out of the *stage* — where a presenter does not
+reach. Two implementations that must agree is the outcome to avoid, so the mapping went into the
+support tier instead, beside the display list it reads:
+[nabts_page.h](../orc/sdk/include/orc/support/nabts_page.h) gains `nabts_primary_to_unicode()`,
+`nabts_supplementary_to_unicode()`, `nabts_supplementary_is_nonspacing()`, `nabts_is_mosaic_code()`,
+`nabts_mosaic_sixels()`, `nabts_character_to_utf8()` and `nabts_page_text()`.
+
+**The repertoires came from X3.110 itself rather than from T.101 Appendix I** (which Task 6.2
+suggested). The primary set is ASCII across 2/1 to 7/14 — §7.2 bases the repertoire on
+ANSI X3.4-1977, and Table 25 puts the number sign at 2/3, the dollar at 2/4, the grave at 6/0, the
+circumflex at 5/14 and the tilde at 7/14, each where ASCII has it. The supplementary set was
+transcribed position by position from the Coded Representation column of Tables 18 to 27, which
+names the code position of every character the set carries; the layout that falls out is ISO
+6937-1982's, which §7.2 names as its source, **plus X3.110's own additions at 5/6 to 5/11 and 6/5**
+— the full horizontal and vertical lines, the four diagonals and the cross of Table 25 notes 1 to 7,
+where ISO 6937 has `¬`, `¦` and three vacancies. A mapping taken from ISO 6937 alone would have got
+those seven wrong.
+
+The mosaic set was read off **Figure 62** as an image (`pages/page-108/img-72.jpeg` and
+`img-73.jpeg`): the 2×3 cell is b1 top-left, b2 top-right, b3 middle-left, b4 middle-right, b5
+bottom-left, **b7** bottom-right, with b6 = 1 marking the position as a mosaic. That is columns 2,
+3, 6 and 7 — 64 positions — plus the second copy of the solid mosaic §5.4 places at 5/15, giving the
+65 the text claims. **It is the same allocation World System Teletext uses for its G1 sixels**, so
+the packing is literally the teletext presenter's `(code & 0x1F) | ((code >> 1) & 0x20)`, and 5/15
+falls out of it as all-on without a special case.
+
+*Acceptance:* met — `nabts_repertoire_test.cpp` checks 35 supplementary positions against the
+tables that name them, the seven X3.110 additions, that column 4 and only column 4 is non-spacing,
+and that the mosaic set has exactly 65 positions with Figure 62's bit order.
 
 ### Task 6.1 — View types
 
-`orc/view-types/orc_nabts.h`: `NabtsPrimitiveView` (kind, resolved RGB, unit-space geometry, text
-run), `NabtsPageView` (display list, display-area extent, recovery), `NabtsCatalogueRecordView`,
-`NabtsRecoverySummaryView`, `NabtsAnalysisView`. Plain value types, no Qt.
+Built as planned: [orc_nabts.h](../orc/view-types/orc_nabts.h) with `NabtsColourView`,
+`NabtsPrimitiveView`, `NabtsDrcsGlyphView`, `NabtsTextureMaskView`, `NabtsPageRecoveryView`,
+`NabtsPageView`, `NabtsRecordFunctionView`, `NabtsCatalogueRecordView`, `NabtsCaptionCueView`,
+`NabtsRecoverySummaryView` and `NabtsAnalysisView`. Plain value types, no Qt.
 
-*Acceptance:* `ctest -R MVPArchitectureCheck` green.
+One departure from the plan's shape: `NabtsPrimitiveKind::kCharacter` splits into **three** view
+kinds — `kText`, `kMosaic` and `kDrcs` — because a renderer does something different with each and
+nothing useful with a union of the three. `kText` is the "text run" the plan asked for: consecutive
+character primitives sharing their attributes and lying a character field apart along one axis are
+coalesced into one entry with a UTF-8 string, a character count and the measured `advance`.
+
+*Acceptance:* met — `ctest -R MVPArchitectureCheck` green.
 
 ### Task 6.2 — Presenter
 
-`orc/presenters/{include,src}/nabts_analysis_presenter.{h,cpp}`: dataset → view, resolving the
-colour map to RGB and the code points to Unicode so the GUI holds no NAPLPS knowledge. Character and
-mosaic mapping follows the repertoires of ITU-T T.101 Appendix I — Repertoire 7 block mosaics use
-the same 2×3 sub-cell numbering the teletext presenter already maps sixels through.
+[nabts_analysis_presenter.{h,cpp}](../orc/presenters/src/nabts_analysis_presenter.cpp): dataset →
+view. Three things resolve here — colour (three bits per gun to 8-bit channels, and the incremental
+colour runs of §5.3.3.6.3 through the colour map or as Figure 12 values depending on the colour
+mode), characters (repertoire lookup and run coalescing), and the caption track.
 
-*Acceptance:* Tier 1 presenter tests convert a synthetic dataset; an unwritten colour map resolves
-to the 16 entries of ITU-T T.101 Table II-3, and a map written by the record overrides them.
+**Finding: the interpreter advanced the cursor over a non-spacing mark.** §7.2 transmits a composite
+character as a mark from the supplementary set *followed by* the letter it applies to, and §7.1
+makes the pair one character of the repertoire — so the pair occupies one character field. The
+interpreter was calling `advance_cursor()` after every graphic including the mark, which put a blank
+field in front of every accented letter. Fixed in
+[naplps_interpreter.cpp](../orc/plugins/stages/nabts_sink/naplps_interpreter.cpp); the presenter then
+composes the mark onto the letter behind it, which is Unicode's order and the reverse of the
+transmission's. Nothing in the reference captures is accented, so only the unit test found it.
+
+*Acceptance:* met — `nabts_analysis_presenter_test.cpp` converts synthetic datasets; an unwritten
+colour map resolves to the 16 entries of T.101 Table II-3 (grey ramp low, hues high, entry 8 pure
+blue) and a map the record wrote overrides them.
 
 ### Task 6.3 — Coordinator request
 
-`GetNabtsAnalysisDataRequest` and `RenderCoordinator::requestNabtsAnalysisData()`, following
-`requestTeletextAnalysisData()`
-([render_coordinator.cpp:427-433](../orc/gui/render_coordinator.cpp#L427-L433)).
+`GetNabtsAnalysisDataRequest`, `RenderCoordinator::requestNabtsAnalysisData()`,
+`nabtsAnalysisDataReady` / `nabtsAnalysisProgress`, and
+`RenderPresenter::getNabtsAnalysisData()` — fetch-or-trigger, exactly as the teletext path does it.
 
-*Acceptance:* `RenderCoordinator` tests cover request ordering, response delivery, stale-response
-suppression and clean shutdown, as AGENTS.md §4.5 requires.
+*Acceptance:* met — five `RenderCoordinator` tests: cached-catalogue service, trigger-then-retry,
+failure after trigger, distinct ids for stale-response suppression, and clean shutdown with
+requests in flight.
 
 ### Task 6.4 — Dialog and canvas
 
-`NabtsDialog` (record list: channel, address, type, times seen, first/last frame; recovery summary;
-linked-record navigation) and `NabtsCanvasWidget` (QPainter over the display list, aspect-correct,
-scaling with the dialog). Coordinates arrive as unit-space fractions, so the widget keeps at least
-the 12 bits of internal precision X3.110 Appendix B calls for at a 256-pixel resolution.
+[NabtsDialog](../orc/gui/nabtsdialog.cpp) and [NabtsCanvasWidget](../orc/gui/nabtscanvaswidget.cpp),
+wired into `MainWindow` on the teletext tool's pattern (tool-id dispatch, per-node dialog and
+progress-dialog maps keyed on `NodeID` with `destroyed` erasing both, the close-project cleanup
+loops, and the erase-then-delete ordering in `onNabtsAnalysisDataReady`).
 
-Wire into `MainWindow` on the pattern the teletext tool already sets: tool-id dispatch beside
-`is_teletext_analysis_tool`, per-node dialog and progress-dialog maps keyed on `NodeID` with the
-`destroyed` signal erasing both entries, the close-project cleanup loops, and
-`onNabtsAnalysisDataReady` / `onNabtsAnalysisProgress` mirroring their teletext counterparts —
-including the erase-then-delete ordering that keeps a re-entrant progress callback safe.
+The dialogue is a record table beside a stack of three panes, because a NABTS service holds three
+genuinely different things: a **presentation record** is drawn on the canvas with its text beside
+it, an **application record** is listed as its function descriptors (§7.2.2), and the **caption
+track** replaces both on request.
 
-*Acceptance:* Tier 3 offscreen smoke test opens the dialog, loads a synthetic view, selects records
-and steps a linked series; closing the project destroys both dialog and progress dialog without a
-dangling map entry; `QT_QPA_PLATFORM=offscreen ctest -L gui` green.
+**"Linked-record navigation" is stepping the catalogue.** §5.2.6's linked series is joined into one
+message by the record assembler, so there is nothing left to navigate there. What a receiver
+actually steps is §7.3's Next record, which "is either defined in Header Extension Field or is
+obtained by incrementing the Record Address of the present Record" — and the catalogue is already in
+ascending {channel, address, version} order, so stepping the list *is* stepping the service. The
+header-extension redefinition is deliberately not followed: the extension-data table of §5.2.8.4 is
+visibly garbled in the copy in hand (row 12 merges two meanings, and rows 6 and 9 label a 6- and a
+9-byte field as a "Short Record Address"), no reference capture carries a header extension, and
+guessing at a corrupt table would be worse than the documented default.
+
+**Geometry.** The display area's nominal resolution is 256 × 200 (T.101 Table II-3) inside a unit
+rect 1 × 0.78125, so its pixels are square — 1/256 across and 0.78125/200 = 1/256 down. The canvas
+therefore keeps a 1 : 0.78125 aspect and uses **one** scale factor for both axes, which is what stops
+a circle coming out an ellipse. Coordinates stay `double` from the interpreter to the QPainter call,
+so the 12 bits X3.110 Appendix B asks for survive.
+
+*Acceptance:* met — twelve offscreen tests open the dialogue, load a synthetic view, select records,
+step the series (wrapping at both ends), list an application record's descriptors, list the caption
+cues, and paint a display list of text, line, rectangle and mosaic primitives. The map cleanup is
+the teletext path's, unchanged.
 
 ### Task 6.5 — Captioning
 
-Record type 1 on channel A00 (§7.1.5, §7.3.10) is the NABTS caption service. Surface it in the
-viewer as a caption track, and add an `export_captions` parameter writing SubRip cues, with timing
-from the 59.94 fields/s of SMPTE 170M.
+The caption service is surfaced twice from one implementation: `nabts_caption_cues()` in the SDK
+([nabts_captions.cpp](../orc/sdk/src/nabts_captions.cpp)) reads a catalogue into cues, and both the
+viewer's caption track and the stage's new `export_captions` parameter go through it — so the file
+and the screen cannot disagree about what the service said.
 
-*Acceptance:* the NBC capture's caption records, if present, produce cues with monotonic timing;
-the option is refused without an output path.
+Three readings the standard settles and the code follows:
+
+1. **The Caption Flag, not the channel.** §7.3.10 makes A00/000 the entry point a receiver *acquires*
+   captioning through; the captions themselves are whatever records carry the Caption Flag of
+   §5.2.7.3. Filtering on the channel would have missed a service whose captions sit elsewhere.
+2. **A cue runs to the next cue.** §7.3.10.1 has the receiver replace the caption on screen rather
+   than being told when to take it down, so the next caption *is* the end of this one. The last cue
+   runs to the last frame its own record was seen at, which is all the recording says about it.
+3. **A caption record that drew nothing is an erase**, not an empty caption — §7.3.10.1's "Captions
+   may be erased by the use of PLPS code that erases either the entire display". Such a record ends
+   the cue before it and yields none of its own.
+
+Cue timing is frames at 30000/1001 per second, which is the 59.94 fields/s of SMPTE 170M. The
+document is written beside the packet stream as `<output>.t33.srt`, on the same rule the report and
+the record files follow, and the parameter is refused without an output path for the same reason.
+
+*Acceptance:* met for what can be tested here — eight SDK tests cover cue ordering, extents,
+the erase case, the flag-not-channel rule and monotonic timing when two captions share a frame; two
+stage tests cover the parameter and its refusal. The reference captures available in-tree carry no
+caption records, so the "NBC capture" half of the original acceptance is untested against real data
+and is left for Phase 7's sweep to revisit if a captioned capture appears.
 
 ## Phase 7 — Documentation and closeout
 

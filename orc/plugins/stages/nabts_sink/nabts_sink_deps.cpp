@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
@@ -49,6 +50,21 @@ constexpr std::array<uint8_t, kNabtsPacketBytes> kEmptyPacket{};
 // histogram behind the lost-packet estimate. One more than the widest window
 // this stage will probe, so every possible count has a bucket.
 constexpr size_t kMaxPacketsPerFieldTracked = 40;
+
+// SMPTE 170M: 525-line NTSC scans 59,94 fields per second, so a frame is
+// 1001/30000 of a second. Caption cue extents are frame counts, and this is
+// what turns one into a SubRip timestamp.
+constexpr double kNtscFramesPerSecond = 30000.0 / 1001.0;
+
+// Format a frame index as an SRT timestamp (HH:MM:SS,mmm).
+std::string srt_timestamp(uint64_t frame) {
+  const double seconds_total =
+      static_cast<double>(frame) / kNtscFramesPerSecond;
+  const int64_t millis_total = std::llround(seconds_total * 1000.0);
+  return fmt::format("{:02}:{:02}:{:02},{:03}", millis_total / 3'600'000,
+                     (millis_total / 60'000) % 60, (millis_total / 1'000) % 60,
+                     millis_total % 1'000);
+}
 
 // The stream's extension. The flat file is a run of whole packets with no
 // header, so a reader can only tell 33-byte NABTS packets from the 34-byte
@@ -166,6 +182,15 @@ std::string NabtsSinkDeps::build_report(
     report += fmt::format("\n  Records:       {} exported beside the stream",
                           result.records_exported);
   }
+  if (options.export_captions) {
+    report +=
+        result.caption_path.empty()
+            ? std::string(
+                  "\n  Captions:      none (no record carried the "
+                  "caption flag)")
+            : fmt::format("\n  Captions:      {} cues to {}",
+                          result.caption_cues_written, result.caption_path);
+  }
 
   report += "\n\n";
   report += stats.summary();
@@ -230,6 +255,54 @@ void NabtsSinkDeps::write_records(const NabtsSinkOptions& options,
   }
   ORC_LOG_DEBUG("NabtsSinkDeps: Exported {} record(s)",
                 result.records_exported);
+}
+
+void NabtsSinkDeps::write_captions(const NabtsSinkOptions& options,
+                                   NabtsSinkResult& result) const {
+  if (!options.export_captions || result.output_path.empty() ||
+      stage_services_ == nullptr) {
+    return;
+  }
+
+  // Read the same way the viewer's caption track reads it — one shared
+  // implementation, so the file and the screen cannot disagree.
+  const std::vector<NabtsCaptionCue> cues =
+      nabts_caption_cues(result.dataset.records);
+  if (cues.empty()) {
+    ORC_LOG_DEBUG(
+        "NabtsSinkDeps: No caption records in the range; no cues written");
+    return;
+  }
+
+  std::string document;
+  size_t index = 1;
+  for (const NabtsCaptionCue& cue : cues) {
+    document += std::to_string(index++);
+    document += '\n';
+    document += srt_timestamp(cue.start_frame);
+    document += " --> ";
+    document += srt_timestamp(cue.end_frame);
+    document += '\n';
+    document += cue.text;
+    document += "\n\n";
+  }
+
+  // Beside the packet stream, named after it: mydata.t33 gives mydata.t33.srt,
+  // which is the rule the report and the record files follow.
+  const std::string path = result.output_path + ".srt";
+  auto writer =
+      stage_services_->create_buffered_file_writer_uint8(kWriterBufferBytes);
+  if (!writer || !writer->open(path)) {
+    ORC_LOG_WARN("NabtsSinkDeps: Could not write captions to {}", path);
+    return;
+  }
+  writer->write(reinterpret_cast<const uint8_t*>(document.data()),
+                document.size());
+  writer->close();
+  result.caption_path = path;
+  result.caption_cues_written = cues.size();
+  ORC_LOG_DEBUG("NabtsSinkDeps: Exported {} caption cue(s) to {}", cues.size(),
+                path);
 }
 
 NabtsSinkResult NabtsSinkDeps::analyse(
@@ -377,6 +450,7 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     // were written. A cancelled run exports what it catalogued, for the same
     // reason its packet stream is left as a prefix rather than deleted.
     write_records(options, partial);
+    write_captions(options, partial);
 
     partial.report = build_report(options, partial, total_frames, stats,
                                   scan_state, groups.stats(), records.stats());

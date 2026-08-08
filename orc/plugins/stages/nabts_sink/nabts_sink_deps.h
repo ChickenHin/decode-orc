@@ -64,6 +64,11 @@ class NabtsSinkDeps : public INabtsSinkStageDeps {
   void write_records(const NabtsSinkOptions& options,
                      NabtsSinkResult& result) const;
 
+  // Write the caption service as a SubRip document beside the packet stream.
+  // Never fails the export.
+  void write_captions(const NabtsSinkOptions& options,
+                      NabtsSinkResult& result) const;
+
   // Write |result.report| beside the packet stream. Never fails the export.
   void write_report(const NabtsSinkOptions& options,
                     NabtsSinkResult& result) const;

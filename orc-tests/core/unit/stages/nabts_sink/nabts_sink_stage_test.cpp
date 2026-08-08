@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -207,6 +208,36 @@ TEST_F(NabtsSinkStage, Trigger_RefusesAReportWithNoOutputFile) {
   EXPECT_FALSE(stage_.trigger({input}, parameters, observations));
   EXPECT_NE(stage_.get_trigger_status().find("needs an output file"),
             std::string::npos);
+}
+
+// The caption document is named after the packet stream too, so it is refused
+// on the same grounds — an export silently not happening is the worse outcome.
+TEST_F(NabtsSinkStage, Trigger_RefusesCaptionExportWithNoOutputFile) {
+  auto parameters = default_parameters();
+  parameters["output_path"] = std::string("");
+  parameters["export_captions"] = true;
+
+  MockObservationContext observations;
+  auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+  EXPECT_FALSE(stage_.trigger({input}, parameters, observations));
+  EXPECT_NE(stage_.get_trigger_status().find("needs an output file"),
+            std::string::npos);
+}
+
+// Every parameter the stage advertises has to be readable back, or the GUI
+// dialogue would drop it on save.
+TEST_F(NabtsSinkStage, ExportCaptionsIsAdvertisedAsAParameter) {
+  const auto descriptors = stage_.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+  const auto found = std::find_if(descriptors.begin(), descriptors.end(),
+                                  [](const orc::ParameterDescriptor& d) {
+                                    return d.name == "export_captions";
+                                  });
+  ASSERT_NE(found, descriptors.end());
+  EXPECT_EQ(found->type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(found->constraints.default_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<bool>(*found->constraints.default_value));
+  EXPECT_FALSE(std::get<bool>(*found->constraints.default_value));
 }
 
 TEST_F(NabtsSinkStage, Trigger_ReportsTheDepsResult) {
