@@ -317,6 +317,96 @@ The output can be used directly with existing ld-decode tools.
 
 ---
 
+## NABTS Sink
+
+| | |
+|-|-|
+| **Stage id** | `nabts_sink` |
+| **Stage name** | NABTS Sink |
+| **Connections** | 1 input → no outputs |
+| **Purpose** | Recover North American Basic Teletext from the VBI of a 525-line source, export the packet stream, and browse the records the recording carried |
+
+**Use this stage when:**
+
+* Preserving the NABTS data carried by an NTSC or PAL-M capture — CBS ExtraVision, NBC Teletext and their contemporaries
+* Reading the pages a recording carried without leaving decode-orc
+* Producing a `.t33` packet stream, or per-record files, for an external NAPLPS tool
+
+**What it does**
+
+NABTS is **ITU-R BT.653 System C**, specified by CEA-516 (formerly EIA-516): 5.727272 Mbit/s in 33-byte packets on the 525-line signal. Its presentation layer is **NAPLPS** (ANSI X3.110-1983, also ITU-T T.101 Data Syntax III), so a page is a drawing program rather than a grid of characters — lines, arcs, polygons, mosaics and redefinable characters as well as text.
+
+Triggering the stage makes one linear pass over the whole frame range and carries the recovery up through every layer CEA-516 defines. It probes the candidate VBI lines of both fields of every frame, recovers the packets and writes them as a flat, headerless stream in strictly temporal order (frame → field → ascending line), keeping their transmission coding — Hamming 8/4 on the five prefix bytes, odd parity on the data block — so a consumer decodes the stream exactly as a receiver decodes a live broadcast. Above that it reassembles the packets into data groups per data channel, decodes the teletext record in each group and joins any linked series back into one message, and interprets the NAPLPS of a presentation record into a display list. An application record's data is decoded as function descriptors instead.
+
+Frames are decoded on several threads while the stream is written from one, and the pass learns where in the line this recording puts its data and which lines carry it, so later frames cost far less than the first ones. None of it changes what is recovered: see `decode_threads`, `pin_data_phase` and `learn_active_lines` below.
+
+The catalogue of records rides along with the packet stream, which is why this is a sink rather than an analysis sink. That is what the **NABTS Records** tool shows, and leaving `output_path` empty makes it the only thing the run produces.
+
+!!! warning "Not World System Teletext"
+
+    On a 525-line capture NABTS and WST share the clock run-in, the bit rate, the VBI lines and the data levels, and are told apart by the framing code alone — `0xE7` against `0xE4`. Use the **Teletext Sink** for WST. A stage pointed at the wrong service recovers nothing rather than recovering nonsense, so a run that finds almost no packets is the signal to try the other one.
+
+Recovery quality tracks the source's luma bandwidth, and NABTS is far less forgiving of a marginal tape than WST is: a WST page is a grid of independent parity-coded bytes, so damage stays where it lands, while a NABTS record is a stateful byte stream in which one wrong byte changes how the several after it are read. The report's **mean decision confidence** is the number to read first — around 0.5 and above, expect readable pages; approaching 0.2, the recording is at the noise floor and no amount of decoding will recover a page from it. The two reference recordings bracket the range: a VHS SP capture of ExtraVision reads at 0.55 with 0.02 % of record bytes failing parity, while a VHS EP capture of NBC Teletext reads at 0.22 with 7.10 % failing, and browses as nonsense.
+
+**Parameters**
+
+* `output_path` (file path)
+    - Path to the output packet stream; the `.t33` extension is appended if absent.
+    - Optional. Left empty, the run decodes exactly as it would but writes no file, which is what to do when the records themselves are what you are after — the **NABTS Records** tool is filled either way. `write_report`, `export_records` and `export_captions` are all written beside the packet stream, so enabling any of them without a path fails the run.
+* `first_vbi_line` (integer)
+    - First candidate field line probed, 1-based, both fields.
+    - Default: `10`.
+* `last_vbi_line` (integer)
+    - Last candidate field line probed, 1-based, both fields. With the above this gives the window of CEA-516 §1.1.1 and ITU-R BT.653 §2: broadcast lines 10–21 and 273–284. Narrowing it to the lines a service actually uses keeps noise out of the packet stream and helps the data-phase pin engage; the records catalogued come out the same either way.
+    - Default: `21`.
+* `keep_empty_packets` (boolean)
+    - Emit a whole zero packet for candidate lines with no data so packet position maps 1:1 to (frame, field, line).
+    - Default: `false`.
+* `detector` (string)
+    - How data bits are recovered: `Threshold` (slice at bit centres; exact on direct captures), `MLSE` (fit the recording's frequency response to the known start of each line and detect against it; recovers data from tape, where limited bandwidth smears bits into their neighbours), or `Automatic` (threshold first, MLSE only where it fails, so a clean source pays nothing extra).
+    - Default: `Automatic`.
+* `tolerant_framing` (boolean)
+    - Accept a framing code with one bit error. Worth leaving off: the framing code is the only thing separating NABTS from 525-line WST, so tolerating an error in it weakens that separation as well as raising the false-positive rate on noise.
+    - Default: `false`.
+* `require_valid_prefix` (boolean)
+    - Drop packets whose five prefix bytes — packet address, continuity index and packet structure, all under the same Hamming 8/4 code — do not survive correction. Random bytes clear all five about once in a million, and a packet whose prefix is unrecoverable cannot be placed in a data group anyway.
+    - Default: `true`.
+* `pin_data_phase` (boolean)
+    - Narrow the search for where each line's data burst starts to where this recording's lines have already been seen to start. A narrowed search that finds nothing is repeated over the full window, so this cannot lose a packet.
+    - Default: `true`.
+* `learn_active_lines` (boolean)
+    - After the first frames, read only the candidate lines this recording has been seen to carry data on, rechecking the full window periodically so a service starting part way into a recording is still picked up.
+    - Default: `true`.
+* `decode_threads` (integer)
+    - Threads to recover lines on; `0`, the default, uses one per processor. The recovered stream is identical whatever this is set to, so lower it only to leave the machine free for other work.
+    - Default: `0`.
+* `write_report` (boolean)
+    - Write the run's diagnostic report next to the packet stream under its full name plus `.txt` (`mydata.t33` gives `mydata.t33.txt`), so it needs `output_path` set. Beyond the packet-level recovery profile it accounts for every layer above: packets orphaned rather than placed in a group, groups completed, record headers refused, linked series joined, records catalogued. The same report always goes to the log at debug level.
+    - Default: `false`.
+* `export_records` (boolean)
+    - Write each record as its own file beside the packet stream, named for the channel, record address and version that identify it (`mydata.t33.000-1A4-v2.rec`). The file holds the record's data exactly as transmitted — NAPLPS presentation code, or application data for a type 2 record — which is what to hand to an external NAPLPS tool.
+    - Default: `false`.
+* `export_captions` (boolean)
+    - Write the recording's captioning as a SubRip file beside the packet stream (`mydata.t33.srt`). The cues are the records the service marked with the caption flag of CEA-516 §5.2.7.3 — the flag, not the data channel, is what selects them — in transmission order, each running until the next replaces it, timed from the 59.94 fields per second of SMPTE 170M. Colour and positioning are dropped; SRT carries the plain text. A recording that carried no captioning writes no file.
+    - Default: `false`.
+
+**Stage tools**
+
+* **NABTS Records** — the record viewer for this node. It lists every record the range carried, with its channel and record address, version, record type, how often it was seen and over which frames, and the classification flags the service set. It opens automatically when the node is triggered, which is how the records are reached: leave `output_path` empty and triggering the node is a decode-and-browse with no file written. Because the catalogue comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel.
+    - A **presentation record** is drawn as its NAPLPS display list, beside the plain text of the page in reading order — an index page is mostly words, and picking them off a rasterised page is tedious. **Show display area** outlines the lower 0.78125 of the unit screen that every receiver is guaranteed to show (ANSI X3.110 Table D1), which is how to tell a record drawn deliberately into one corner from one that was mis-scaled.
+    - An **application record** is shown as its function descriptors instead, each with its code in the code-table notation of §7.2.2 and its arguments.
+    - **Caption track** switches the pane to the recording's captioning as a list of cues with their timings. §7.3.10 carries captioning as a run of records that each replace the last, so the cues rather than the individual records are what the service says. The control is enabled only on a recording that carried captioning, and the line above the list says which records those were.
+
+**Notes**
+
+* NTSC and PAL-M sources are accepted. A 625-line source reports an error: CEA-516 §1.1.1 specifies NABTS on the 525-line signal, and no 625-line service exists to recover.
+* This stage writes no CSV — its file output is the packet stream, and optionally the per-record files, the caption document and the report.
+* Nothing is corrected in the packet stream. Where a packet carries the longitudinal check byte of §3.4, that byte and the per-byte parity form a product code and a single-bit error in the data block is located and corrected before the record layer sees it; whether a service sends it is the service's choice.
+* Byte parity is not used to repair damaged bytes as it is for World System Teletext. CEA-516 §3.3 gives the data block odd parity only when its data group is of type 0, and a single packet does not say which type its group is.
+* Only one copy of each record is kept — the intact copy if one arrives, otherwise the longest. A carousel transmits each record many times, and combining those copies the way the Teletext Sink combines repeated rows is not done here.
+
+---
+
 ## Raw EFM Sink
 
 | | |
@@ -441,7 +531,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 
 **Notes**
 
-* PAL, NTSC and PAL-M sources are accepted; any other video system reports an error. NABTS (System C) shares the 525 lines but not the framing code, so its lines are seen and rejected rather than decoded, and NTSC line-21 captions are handled by the Closed Caption Sink instead.
+* PAL, NTSC and PAL-M sources are accepted; any other video system reports an error. NABTS (System C) shares the 525 lines but not the framing code, so its lines are seen and rejected rather than decoded — use the **NABTS Sink** for those. NTSC line-21 captions are handled by the Closed Caption Sink instead.
 * This stage writes no CSV — its file output is the packet stream, and optionally the subtitle document and the report.
 * The `.t42` format is described on the zxnet teletext wiki (T42 packet stream); `.t34` is the same flat, headerless convention at the 525-line packet length.
 * A 525-line service sends the last eight columns of its rows in separate row-extension packets, which the page viewer reassembles; the packet stream holds them as transmitted.

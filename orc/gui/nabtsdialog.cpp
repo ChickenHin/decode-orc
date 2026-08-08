@@ -147,6 +147,10 @@ void NabtsDialog::setupUI() {
   caption_hint_->setVisible(false);
   top_row->addWidget(caption_hint_);
 
+  top_row->addStretch();
+
+  // Both view switches sit together on the right, away from the record
+  // navigation on the left.
   show_captions_check_ = new QCheckBox(tr("Caption track"), this);
   show_captions_check_->setObjectName("nabtsShowCaptionsCheck");
   show_captions_check_->setToolTip(
@@ -158,8 +162,6 @@ void NabtsDialog::setupUI() {
   connect(show_captions_check_, &QCheckBox::toggled, this,
           &NabtsDialog::onShowCaptionsToggled);
   top_row->addWidget(show_captions_check_);
-
-  top_row->addStretch();
 
   show_errors_check_ = new QCheckBox(tr("Show display area"), this);
   show_errors_check_->setObjectName("nabtsShowErrorsCheck");

@@ -5,7 +5,9 @@ Recovers World System Teletext (WST) data lines from the VBI, writes the packets
 * **625 lines** (PAL) — ETSI EN 300 706, 6.9375 Mbit/s, 42-byte packets, written as `.t42`.
 * **525 lines** (NTSC, PAL-M) — BT.653 Table 1b, 5.727272 Mbit/s, 34-byte packets, written as `.t34`.
 
-French System A, North American NABTS (System C) and Japanese System D transmissions are not supported, and NTSC line-21 captions are covered by the Closed Caption Sink instead.
+North American NABTS (System C) is covered by the **NABTS Sink** instead. That matters on a 525-line capture, because the two services share the clock run-in, the bit rate, the VBI lines and the data levels and are told apart by the framing code alone — `0xE4` for WST here against `0xE7` for NABTS. A stage pointed at the wrong one recovers nothing rather than recovering nonsense, so if this sink finds almost no packets on a 525-line source, try the other.
+
+French System A and Japanese System D transmissions are not supported, and NTSC line-21 captions are covered by the Closed Caption Sink instead.
 
 ## When to use
 

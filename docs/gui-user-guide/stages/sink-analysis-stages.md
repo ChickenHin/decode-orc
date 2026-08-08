@@ -18,7 +18,7 @@ Every analysis sink works the same way: trigger the stage to compute the dataset
 
 The burst level, dropout and SNR sinks measure the signal and present a chart with an optional CSV export.
 
-A batch-analysis dialog is not the same thing as an analysis sink, and one stage that offers one lives elsewhere: the **Teletext Sink** is documented under [Sink Stages](sink-core-stages.md) because writing the packet stream is its product, and its page viewer is a by-product of the same pass rather than the reason for it.
+A batch-analysis dialog is not the same thing as an analysis sink, and two stages that offer one live elsewhere: the **Teletext Sink** and the **NABTS Sink** are documented under [Sink Stages](sink-core-stages.md) because writing the packet stream is their product, and their page and record viewers are by-products of the same pass rather than the reason for it.
 
 **CSV output format.** Each CSV is written from the full-resolution, canonical per-frame dataset — **one row per frame** (every analysis sink analyses every frame), with the frame's true (1-based) frame number in the first column. Units are carried in the header names (`_samples`, `_db`, `_10bit`) and values are plain numbers. A metric that was not measured for a frame is written as an **empty field** (never the string `nan`). The CSV is independent of the display decimation used to draw the chart, so it always contains every frame regardless of the on-screen point count.
 
