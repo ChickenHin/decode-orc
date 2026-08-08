@@ -50,7 +50,7 @@ const char* kElectraCapture = ORC_VBI_TEST_DATA_DIR
 // stored, so the same preset reads both and only the service is configured
 // differently.
 const char* kExtraVisionCapture = ORC_VBI_TEST_DATA_DIR
-    "/teletext/NTSC Teletext samples/"
+    "/teletext/NTSC NABTS Teletext samples/"
     "CBS_1985-12-10_ExtraVision_teletext_NTSC_SP_vbi_only_part4_u16.flac";
 
 // Stored frame lines a 525-line capture carries data on: broadcast frame lines

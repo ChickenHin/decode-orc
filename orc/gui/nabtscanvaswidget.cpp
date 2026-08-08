@@ -114,13 +114,103 @@ QBrush texture_brush(const NabtsPrimitiveView& primitive,
   return QBrush(tile);
 }
 
-/// A quadratic Bezier whose curve passes through |through| at its midpoint,
-/// which is the circular arc of X3.110 §5.3.3.3 to within a pixel at this size.
+// Two points closer than this in device pixels are the same point — which is
+// what makes an arc a circle (§5.3.3.3.1) — and a circumcircle determinant
+// smaller than this means three colinear points.
+constexpr double kCoincidentPixels = 1e-6;
+constexpr double kColinearDeterminant = 1e-12;
+
+constexpr double kPi = 3.14159265358979323846;
+
+double distance_between(const QPointF& a, const QPointF& b) {
+  return std::hypot(a.x() - b.x(), a.y() - b.y());
+}
+
+/// The angle of |point| about |centre| in the degrees QPainterPath::arcTo uses:
+/// zero at three o'clock, increasing counter-clockwise on screen. The y term is
+/// negated because the widget's y runs downwards and unit space's does not.
+double arc_angle(const QPointF& centre, const QPointF& point) {
+  return std::atan2(centre.y() - point.y(), point.x() - centre.x()) * 180.0 /
+         kPi;
+}
+
+double normalised_degrees(double angle) {
+  double out = std::fmod(angle, 360.0);
+  if (out < 0.0) {
+    out += 360.0;
+  }
+  return out;
+}
+
+/**
+ * @brief The circular arc of X3.110 §5.3.3.3 through three points
+ *
+ * §5.3.3.3.1: "an arc is drawn from a start point to an end point through an
+ * intermediate point on the arc", plus the two degenerate readings it gives —
+ * "Drawing of a circle results when the start and end points are coincident;
+ * the intermediate point defines the diameter", and "If the three drawing
+ * points are colinear, a line is drawn from the start point to the end point".
+ *
+ * A real circle rather than a curve fitted to the three points: a quadratic
+ * through them is visibly wrong at any useful radius, and on a circle — where
+ * the start and end coincide — it collapses to nothing at all, which is how the
+ * CBS eye came to be missing from the ExtraVision index page.
+ */
 QPainterPath arc_through(const QPointF& start, const QPointF& through,
                          const QPointF& end) {
-  const QPointF control = 2.0 * through - (start + end) / 2.0;
   QPainterPath path(start);
-  path.quadTo(control, end);
+
+  if (distance_between(start, end) < kCoincidentPixels) {
+    // A circle: the intermediate point is diametrically opposite the start.
+    const QPointF centre((start.x() + through.x()) / 2.0,
+                         (start.y() + through.y()) / 2.0);
+    const double radius = distance_between(start, through) / 2.0;
+    if (radius < kCoincidentPixels) {
+      return path;
+    }
+    const QRectF box(centre.x() - radius, centre.y() - radius, radius * 2.0,
+                     radius * 2.0);
+    path.arcMoveTo(box, arc_angle(centre, start));
+    path.arcTo(box, arc_angle(centre, start), 360.0);
+    return path;
+  }
+
+  // The circumcircle of the three points; a zero determinant means they are
+  // colinear.
+  const double ax = start.x();
+  const double ay = start.y();
+  const double bx = through.x();
+  const double by = through.y();
+  const double cx = end.x();
+  const double cy = end.y();
+  const double determinant =
+      2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (std::fabs(determinant) < kColinearDeterminant) {
+    path.lineTo(end);
+    return path;
+  }
+
+  const double a2 = ax * ax + ay * ay;
+  const double b2 = bx * bx + by * by;
+  const double c2 = cx * cx + cy * cy;
+  const QPointF centre(
+      (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / determinant,
+      (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / determinant);
+  const double radius = distance_between(start, centre);
+  const QRectF box(centre.x() - radius, centre.y() - radius, radius * 2.0,
+                   radius * 2.0);
+
+  const double from = arc_angle(centre, start);
+  const double via = arc_angle(centre, through);
+  const double to = arc_angle(centre, end);
+  // Sweep the way round that passes through the intermediate point, which is
+  // what picks the major arc from the minor one.
+  const double counter_clockwise = normalised_degrees(to - from);
+  const double sweep = normalised_degrees(via - from) <= counter_clockwise
+                           ? counter_clockwise
+                           : counter_clockwise - 360.0;
+  path.arcMoveTo(box, from);
+  path.arcTo(box, from, sweep);
   return path;
 }
 
@@ -327,11 +417,17 @@ void NabtsCanvasWidget::paintPrimitive(QPainter& painter,
       if (points.size() < 2) {
         return;
       }
-      QPainterPath path = points.size() == 3
-                              ? arc_through(points[0], points[1], points[2])
-                              : (points.size() < 3 ? QPainterPath(points[0])
-                                                   : spline_through(points));
-      if (points.size() == 2) {
+      // §5.3.3.3.1: three points are a circle or a segment of one, and
+      // "Drawing of a curvilinear spline results when more than three points
+      // are specified". Two is what a truncated record leaves behind, and a
+      // line through them is the most that can be said of it.
+      QPainterPath path;
+      if (points.size() == 3) {
+        path = arc_through(points[0], points[1], points[2]);
+      } else if (points.size() > 3) {
+        path = spline_through(points);
+      } else {
+        path = QPainterPath(points[0]);
         path.lineTo(points[1]);
       }
       if (primitive.filled) {

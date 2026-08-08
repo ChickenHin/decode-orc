@@ -166,12 +166,21 @@ void NaplpsInterpreter::execute_c0(uint8_t byte) {
       env_.invoke_single_shift(NaplpsGSlot::kG3);
       return;
 
-    // §6.1.2: the format effectors. The cursor moves; nothing is drawn.
+    // §6.1.2: the format effectors. The cursor moves; nothing is drawn. All
+    // four are defined relative to the character path, and they are four
+    // different movements — a line feed that stepped along the path instead of
+    // across it would draw every row of a page on top of the last.
     case kNaplpsApb:
+      move_cursor_by(CursorMove::kBackward);
+      return;
     case kNaplpsApf:
+      move_cursor_by(CursorMove::kForward);
+      return;
     case kNaplpsApd:
+      move_cursor_by(CursorMove::kDown);
+      return;
     case kNaplpsApu:
-      advance_cursor();
+      move_cursor_by(CursorMove::kUp);
       return;
     case kNaplpsApr:
       // §6.1.2.7: to the first character position along the character path.
@@ -182,29 +191,67 @@ void NaplpsInterpreter::execute_c0(uint8_t byte) {
       // has no canvas to clear, so what is recorded is that everything before
       // this was wiped — the primitives are dropped.
       snapshot_.primitives.clear();
-      move_cursor(NabtsPoint{
-          0.0,
-          kNabtsDisplayAreaHeight - std::fabs(state_.text.character_field.dy)});
+      move_cursor(state_.home_position());
       return;
     case kNaplpsAph:
-      move_cursor(NabtsPoint{
-          0.0,
-          kNabtsDisplayAreaHeight - std::fabs(state_.text.character_field.dy)});
+      move_cursor(state_.home_position());
       return;
 
-    case kNaplpsNsr:
+    case kNaplpsNsr: {
       // §6.1.6.5: a non-selective reset of everything but the colour map and
-      // the programmable masks. The two-byte cursor address that may follow is
-      // not consumed here — the bytes are executed as characters, which is what
-      // §6.1.6.5 requires when they are not from columns 4 to 7, and is the
-      // safe reading for a record that may have lost the pair.
+      // the programmable masks.
       env_.reset();
       state_.domain.reset();
       state_.text.reset();
       state_.texture.reset();
       state_.colour.select_direct_mode();
       state_.blinking = false;
+
+      // §6.1.6.5(6): NSR "can be used as an alternative means to position the
+      // cursor". If the two bytes that follow are both from columns 4 to 7 they
+      // are a row and a column address and are consumed; anything else is left
+      // to be executed, which is what the clause requires. Note the origin:
+      // "row 0, column 0 in the upper leftmost character position in the
+      // display area" — the opposite end from APS's own numbering (§6.1.2.4).
+      Frame& frame = frames_.back();
+      if (frame.position + 1 < frame.length) {
+        const uint8_t row_byte =
+            static_cast<uint8_t>(frame.bytes[frame.position] & 0x7F);
+        const uint8_t column_byte =
+            static_cast<uint8_t>(frame.bytes[frame.position + 1] & 0x7F);
+        const auto is_address = [](uint8_t byte) {
+          return byte >= 0x40 && byte <= 0x7F;  // columns 4 to 7
+        };
+        const auto is_ignored = [](uint8_t byte) {
+          return byte >= 0x20 && byte < 0x40;  // columns 2 and 3
+        };
+        if (is_address(row_byte) && is_address(column_byte)) {
+          frame.position += 2;
+          const int row = row_byte & 0x3F;
+          const int column = column_byte & 0x3F;
+          const double dx = std::fabs(state_.text.character_field.dx);
+          const double dy = std::fabs(state_.text.character_field.dy);
+          // Row 0's character field has its top on the top of the display area,
+          // and the cursor is that field's lower left corner (§5.3.2.3.2).
+          move_cursor(NabtsPoint{
+              static_cast<double>(column) * dx,
+              kNabtsDisplayAreaHeight - static_cast<double>(row + 1) * dy});
+          return;
+        }
+        if (is_ignored(row_byte) && is_ignored(column_byte)) {
+          // "If the two bytes are from columns 2 and 3 (or columns 10 and 11),
+          // they are ignored" — consumed and discarded rather than drawn.
+          frame.position += 2;
+        }
+        // Anything else is left where it is: a C0 or C1 byte "terminates the
+        // NSR sequence and is executed", and a mixed pair only costs the cursor
+        // move.
+      }
+      // No address: the reset alone, and the cursor goes home as §5.3.2.9.3
+      // has it for a reset of the text parameters.
+      move_cursor(state_.home_position());
       return;
+    }
 
     case kNaplpsCan:
       // §6.1.6.3: terminate every executing macro. Execution resumes after the
@@ -706,11 +753,9 @@ void NaplpsInterpreter::pdi_reset(NaplpsOperandReader& reader) {
   if (bit(byte2, 1)) {
     // §5.3.2.9.3: home the cursor and reset every text parameter.
     state_.text.reset();
-    state_.cursor =
-        NabtsPoint{0.0, kNabtsDisplayAreaHeight -
-                            std::fabs(state_.text.character_field.dy)};
     state_.field_origin = NabtsPoint{0.0, 0.0};
     state_.field_size = NabtsSize{1.0, 1.0};
+    move_cursor(state_.home_position());
   }
   if (bit(byte2, 2)) {
     state_.blinking = false;
@@ -814,10 +859,12 @@ void NaplpsInterpreter::pdi_set_colour(NaplpsOperandReader& reader,
     return;
   }
 
-  // Each complete colour word sets a colour; §5.3.2.5.1 has additional data
-  // repeat the opcode with the map address incremented first.
+  // Each colour word sets a colour; §5.3.2.5.1 has additional data repeat the
+  // opcode with the map address incremented first. The first word is whatever
+  // bytes are there — a short operand is legal and zero-fills — so only the
+  // repeats need a whole word behind them.
   bool first = true;
-  while (reader.remaining() >= operand_bytes) {
+  while (first ? !reader.empty() : reader.remaining() >= operand_bytes) {
     const NabtsColour colour = reader.read_colour();
     if (!first && state_.colour.mode() != NabtsColourMode::kDirect) {
       // The repeat writes the next entry, not the same one again. Modelled by
@@ -1008,10 +1055,17 @@ void NaplpsInterpreter::pdi_arc(NaplpsPdi opcode, NaplpsOperandReader& reader) {
     }
   }
 
-  if (primitive.points.size() < 3) {
-    // An arc needs a start, an intermediate and an end (§5.3.3.3.1).
+  if (primitive.points.size() < 2) {
+    // An arc needs a start and at least the intermediate point (§5.3.3.3.1).
     ++snapshot_.diagnostics.truncated_pdis;
     return;
+  }
+  if (primitive.points.size() == 2) {
+    // §5.3.3.3.1: "If the end point is omitted, it is taken to be coincident
+    // with the start point and a circle is drawn." A record drawing a circle
+    // saves a whole coordinate block this way, so it is a normal encoding
+    // rather than a truncation.
+    primitive.points.push_back(start);
   }
   const NabtsPoint end = primitive.points.back();
   emit(std::move(primitive));
@@ -1265,43 +1319,92 @@ void NaplpsInterpreter::move_cursor(const NabtsPoint& point) {
   }
 }
 
-void NaplpsInterpreter::advance_cursor() {
-  // §5.3.2.3.4 Table 8's fixed spacings are multiples of the character field
-  // dimension lying parallel to the character path. Proportional spacing (code
-  // 3) is font-dependent and §5.3.2.3.4 makes the algorithm
-  // implementation-dependent, so it advances by one field — the floor the
-  // standard guarantees: "it is at least as many characters per line as would
-  // be allowed by the current character field dimensions".
-  static constexpr double kSpacing[4] = {1.0, 1.25, 1.5, 1.0};
-  const double factor = kSpacing[state_.text.intercharacter_spacing & 0x03];
-  const double dx = std::fabs(state_.text.character_field.dx) * factor;
-  const double dy = std::fabs(state_.text.character_field.dy) * factor;
+void NaplpsInterpreter::move_cursor_by(CursorMove move) {
+  // §5.3.2.3.4 Table 8 and §5.3.2.3.5 Table 9: both spacings are multiples of
+  // the character field dimension lying along the direction of travel — the one
+  // parallel to the character path for a movement along it, the one
+  // perpendicular for a movement across it. Proportional inter-character
+  // spacing (code 3) is font-dependent and §5.3.2.3.4 makes the algorithm
+  // implementation-dependent, so it steps one field: the floor the standard
+  // guarantees, "at least as many characters per line as would be allowed by
+  // the current character field dimensions".
+  static constexpr double kCharacterSpacing[4] = {1.0, 1.25, 1.5, 1.0};
+  static constexpr double kRowSpacing[4] = {1.0, 1.25, 1.5, 2.0};
 
-  NabtsPoint next = state_.cursor;
+  const bool along_path =
+      move == CursorMove::kForward || move == CursorMove::kBackward;
+  const bool path_is_horizontal = state_.text.path == NabtsCharPath::kRight ||
+                                  state_.text.path == NabtsCharPath::kLeft;
+
+  const double character_distance =
+      std::fabs(path_is_horizontal ? state_.text.character_field.dx
+                                   : state_.text.character_field.dy) *
+      kCharacterSpacing[state_.text.intercharacter_spacing & 0x03];
+  const double row_distance =
+      std::fabs(path_is_horizontal ? state_.text.character_field.dy
+                                   : state_.text.character_field.dx) *
+      kRowSpacing[state_.text.interrow_spacing & 0x03];
+  const double distance = along_path ? character_distance : row_distance;
+
+  // The character path as a unit vector (§5.3.2.3.3 Table 7).
+  double path_x = 0.0;
+  double path_y = 0.0;
   switch (state_.text.path) {
     case NabtsCharPath::kRight:
-      next.x += dx;
+      path_x = 1.0;
       break;
     case NabtsCharPath::kLeft:
-      next.x -= dx;
+      path_x = -1.0;
       break;
     case NabtsCharPath::kUp:
-      next.y += dy;
+      path_y = 1.0;
       break;
     case NabtsCharPath::kDown:
-      next.y -= dy;
+      path_y = -1.0;
       break;
   }
 
-  // §5.3.2.3.6's automatic APR APD: a movement that would put any part of the
-  // character field outside the active field wraps to the start of the next
-  // row.
+  // Forward along the path, backward 180 degrees from it, down -90 and up +90
+  // — rotating the path vector, so all four follow the path wherever TEXT put
+  // it. On the default rightward path -90 degrees is straight down, which is
+  // what makes APD the line feed.
+  double step_x = 0.0;
+  double step_y = 0.0;
+  switch (move) {
+    case CursorMove::kForward:
+      step_x = path_x;
+      step_y = path_y;
+      break;
+    case CursorMove::kBackward:
+      step_x = -path_x;
+      step_y = -path_y;
+      break;
+    case CursorMove::kDown:
+      step_x = path_y;
+      step_y = -path_x;
+      break;
+    case CursorMove::kUp:
+      step_x = -path_y;
+      step_y = path_x;
+      break;
+  }
+
+  NabtsPoint next = state_.cursor;
+  next.x += step_x * distance;
+  next.y += step_y * distance;
+
+  // §5.3.2.3.6's automatic APR APD: a forward movement that would put any part
+  // of the character field outside the active field wraps to the start of the
+  // next row. Only the forward move wraps here — §6.1.2.1 gives APB the mirror
+  // of it, and §6.1.2.3 makes APD's own overflow a scroll-mode question that
+  // Table D1 leaves out of the teletext model.
   const double field_right =
       state_.field_origin.x + std::fabs(state_.field_size.dx);
-  if (state_.text.path == NabtsCharPath::kRight &&
+  if (move == CursorMove::kForward &&
+      state_.text.path == NabtsCharPath::kRight &&
       next.x + std::fabs(state_.text.character_field.dx) > field_right) {
     next.x = state_.field_origin.x;
-    next.y -= std::fabs(state_.text.character_field.dy);
+    next.y -= row_distance;
   }
 
   move_cursor(next);

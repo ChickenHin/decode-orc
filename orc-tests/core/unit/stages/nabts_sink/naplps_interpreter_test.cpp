@@ -87,9 +87,20 @@ TEST(NaplpsInterpreter, AFreshInterpreterMatchesTableII3) {
   interpreter.run({});
   const NaplpsState& state = interpreter.state();
 
-  // current-text-position: lower left corner.
+  // current-text-position: Table II-3 says "lower left corner", which is the
+  // corner of the *character field* rather than of the screen. X3.110 says so
+  // three times over — §5.3.2.9.3 sends a reset cursor to "its home position
+  // (top left character position in the display area)", §6.1.2.6 and §6.1.2.8
+  // home CS and APH to "the upper left character position in the display area,
+  // in which the top of the character field coincides with the top boundary",
+  // and §6.1.6.5(6) numbers NSR's rows from "the upper leftmost character
+  // position" — and Table II-3 itself gives the other two data syntaxes an
+  // "upper left corner". Reading it as the bottom of the screen puts every
+  // record that opens with text and line feeds, which is how the reference
+  // ExtraVision service writes, on the bottom row with every line feed clamped.
   EXPECT_DOUBLE_EQ(state.cursor.x, 0.0);
-  EXPECT_DOUBLE_EQ(state.cursor.y, 0.0);
+  EXPECT_DOUBLE_EQ(state.cursor.y,
+                   kNabtsDisplayAreaHeight - state.text.character_field.dy);
 
   // current-foreground-colour: colour = white, mode = direct.
   EXPECT_EQ(state.colour.mode(), NabtsColourMode::kDirect);
@@ -368,7 +379,8 @@ TEST(NaplpsInterpreter, AColourMapWriteIsVisibleToTheNextPrimitive) {
       .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
       .byte(numeric(0b001100))
       // SET COLOR writes entry 3. One byte gives two bits per gun: GRB = 100,
-      // GRB = 000 → green 10, red 10, blue 00, zero-extended to 100/100/000.
+      // GRB = 000 → green 10, red 10, blue 00, i.e. 2 of the 3 a two-bit
+      // operand can express.
       .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
       .byte(numeric(0b110000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
@@ -377,12 +389,68 @@ TEST(NaplpsInterpreter, AColourMapWriteIsVisibleToTheNextPrimitive) {
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
   EXPECT_EQ(snapshot.primitives[0].colour_mode, NabtsColourMode::kMapped);
-  EXPECT_EQ(snapshot.primitives[0].colour.green, 0b100u);
-  EXPECT_EQ(snapshot.primitives[0].colour.red, 0b100u);
+  // §5.3.2.5.1: "For each primary, the maximum color fraction attainable, given
+  // the number of bits specified in the color value operand, shall be
+  // interpreted as full intensity and intermediate values shall be equally
+  // distributed between zero and full intensity." Over two bits that is
+  // 0, 7/3, 14/3, 7 — so 2 of 3 is 5 of 7, not the 4 a shift-and-zero-fill
+  // would give. The clause matters: zero-filling makes white unreachable in a
+  // one-byte operand, and the reference ExtraVision service sets white with
+  // exactly one byte.
+  EXPECT_EQ(snapshot.primitives[0].colour.green, 5u);
+  EXPECT_EQ(snapshot.primitives[0].colour.red, 5u);
   EXPECT_EQ(snapshot.primitives[0].colour.blue, 0u);
   // And the map the renderer is handed carries it, because §5.3.2.5 makes a map
   // change retroactive for every pixel already pointing at that entry.
-  EXPECT_EQ(snapshot.colour_map[3].green, 0b100u);
+  EXPECT_EQ(snapshot.colour_map[3].green, 5u);
+}
+
+// The regression the ExtraVision logo exposed. DOMAIN may declare a multi-value
+// length of three bytes and the service still send SET COLOR one byte at a
+// time; §5.3.2.5.1 zero-fills the rest. Requiring the declared length dropped
+// the write silently, so the CBS eye was drawn in whatever colour came before
+// it — the page background — and vanished.
+TEST(NaplpsInterpreter, AShortColourOperandStillSetsTheColour) {
+  Record record;
+  record
+      .pdi()
+      // DOMAIN with a three-byte multi-value length.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000010))
+      // A one-byte SET COLOR: all six payload bits set is full intensity.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b111111))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].colour, kNabtsNominalWhite)
+      << "a one-byte SET COLOR was dropped, so the primitive kept the previous "
+         "colour";
+}
+
+// The same clause from the other end: a colour operand longer than the map can
+// hold "is truncated and only the most significant bits are used".
+TEST(NaplpsInterpreter, ALongColourOperandIsTruncatedToTheMostSignificantBits) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000010))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      // Three bytes: green takes b6 and b3 of each, so 1,0 1,0 1,0 = 0b101010
+      // over six bits, truncated to its top three = 0b101 = 5.
+      .byte(numeric(0b100000))
+      .byte(numeric(0b100000))
+      .byte(numeric(0b100000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].colour.green, 5u);
+  EXPECT_EQ(snapshot.primitives[0].colour.red, 0u);
+  EXPECT_EQ(snapshot.primitives[0].colour.blue, 0u);
 }
 
 // §5.3.2.5.1: "If no operand follows a SET COLOR opcode, the transparent color
@@ -474,6 +542,205 @@ TEST(NaplpsInterpreter, EmitsCharactersAndAdvancesAlongTheCharacterPath) {
   // Default intercharacter spacing is 1, so the fields abut (§5.3.2.3.4).
   EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 1.0 / 40.0);
   EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.x, 2.0 / 40.0);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// The format effectors (§6.1.2)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// The regression this section exists for. §6.1.2 defines four *different*
+// movements relative to the character path, and an implementation that treats
+// them all as "advance along the path" draws every row of a page on top of the
+// last: the ExtraVision news pages came out with each line overprinting the one
+// before it, one character out of step.
+TEST(NaplpsInterpreter, APRThenAPDStartsANewRowRatherThanOverprinting) {
+  // CS first: the reset cursor is at the lower left corner (T.101 Table II-3),
+  // where there is no room below to move into. A record that draws rows homes
+  // the cursor first, which is what CS does (§6.1.2.6).
+  Record record;
+  record.text_mode()
+      .byte(0x0C)  // CS — home to the top left of the display area
+      .add({'A', 'B'})
+      .byte(0x0D)  // APR — back to the first character position of the row
+      .byte(0x0A)  // APD — down one row
+      .add({'C'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  const NabtsPoint& first = snapshot.primitives[0].origin;
+  const NabtsPoint& third = snapshot.primitives[2].origin;
+  // Back to the left edge...
+  EXPECT_DOUBLE_EQ(third.x, first.x);
+  // ...and one row down, which is the whole point.
+  EXPECT_LT(third.y, first.y);
+  EXPECT_DOUBLE_EQ(third.y, first.y - 5.0 / 128.0);
+}
+
+// §6.1.2.3: APD moves "a distance equal to the interrow space lying
+// perpendicular to the character path in a direction perpendicular to the
+// character path (-90 degrees)". Default interrow spacing is 1, so that is one
+// character field height.
+TEST(NaplpsInterpreter, APDMovesDownOneRowAndLeavesTheColumnAlone) {
+  Record record;
+  record.text_mode().byte(0x0C).add({'A'}).byte(0x0A).add({'B'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  // The character before it advanced one field along the path; APD adds no
+  // horizontal movement of its own.
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 1.0 / 40.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y,
+                   snapshot.primitives[0].origin.y - 5.0 / 128.0);
+}
+
+// §6.1.2.5: APU is the same movement 180 degrees round.
+TEST(NaplpsInterpreter, APUMovesUpOneRow) {
+  Record record;
+  record.text_mode()
+      .byte(0x0C)
+      .add({'A'})
+      .byte(0x0A)  // down, so there is room to come back up
+      .byte(0x0B)  // APU
+      .add({'B'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y,
+                   snapshot.primitives[0].origin.y);
+}
+
+// §6.1.2.1: APB moves back along the character path, so the character after it
+// lands on the one before — which is how a record overstrikes.
+TEST(NaplpsInterpreter, APBMovesBackAlongTheCharacterPath) {
+  Record record;
+  record.text_mode().byte(0x0C).add({'A', 'B'}).byte(0x08).add({'C'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  // 'B' was drawn at one field in and the cursor left at two; APB puts it back
+  // to one, so 'C' lands on 'B'.
+  EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.x,
+                   snapshot.primitives[1].origin.x);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.y,
+                   snapshot.primitives[1].origin.y);
+}
+
+// The regression the ExtraVision service exposed. A record that simply writes
+// text with CR and LF — no CS, no APS, no NSR — must run *down* the screen from
+// the top. Homing the cursor at the bottom left clamps every line feed, and the
+// whole page piles onto one row.
+TEST(NaplpsInterpreter, ARecordThatOpensWithTextStartsAtTheTopOfTheScreen) {
+  Record record;
+  record.text_mode()
+      .add({'A'})
+      .add({0x0D, 0x0A})  // APR APD — carriage return, line feed
+      .add({'B'})
+      .add({0x0D, 0x0A})
+      .add({'C'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  const double field = snapshot.primitives[0].size.dy;
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.y,
+                   kNabtsDisplayAreaHeight - field);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y,
+                   kNabtsDisplayAreaHeight - 2.0 * field);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.y,
+                   kNabtsDisplayAreaHeight - 3.0 * field);
+  // Nothing was clamped back into the screen on the way.
+  EXPECT_EQ(snapshot.diagnostics.out_of_range_coordinates, 0u);
+}
+
+// §6.1.6.5(6): NSR "can be used as an alternative means to position the
+// cursor" — the two bytes after it are a row and a column when both come from
+// columns 4 to 7, and they are consumed rather than drawn. The reference
+// ExtraVision records open with exactly this, and executing the pair as text
+// left the cursor wherever it was and put two stray glyphs on the page.
+TEST(NaplpsInterpreter, NSRConsumesItsRowAndColumnAddress) {
+  Record record;
+  // NSR, row 2, column 3 — both bytes from column 4 of the in-use table.
+  record.text_mode().byte(0x1F).byte(0x42).byte(0x43).add({'X'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u) << "the address bytes were drawn";
+  EXPECT_EQ(snapshot.primitives[0].character, 'X');
+  const double dx = snapshot.primitives[0].size.dx;
+  const double dy = snapshot.primitives[0].size.dy;
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, 3.0 * dx);
+  // Row 0 is the *upper* leftmost character position here — the opposite end
+  // from APS's own numbering in §6.1.2.4.
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.y,
+                   kNabtsDisplayAreaHeight - 3.0 * dy);
+}
+
+// §6.1.6.5(6): "If the two bytes are from columns 2 and 3 (or columns 10 and
+// 11), they are ignored" — consumed and discarded, so nothing is drawn for
+// them and the cursor stays where the reset put it.
+TEST(NaplpsInterpreter, NSRIgnoresAnAddressFromColumnsTwoAndThree) {
+  Record record;
+  record.text_mode().byte(0x1F).add({'!', '"'}).add({'X'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u) << "the ignored bytes were drawn";
+  EXPECT_EQ(snapshot.primitives[0].character, 'X');
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, 0.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.y,
+                   kNabtsDisplayAreaHeight - snapshot.primitives[0].size.dy);
+}
+
+// A C0 control after NSR "terminates the NSR sequence" and is executed, so it
+// must not be swallowed as half an address.
+TEST(NaplpsInterpreter, NSRLeavesAFollowingControlToBeExecuted) {
+  Record record;
+  // NSR, then APD (line feed), then a character: the line feed must move the
+  // cursor down a row rather than being read as a row address.
+  record.text_mode().byte(0x1F).byte(0x0A).add({'X'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_DOUBLE_EQ(
+      snapshot.primitives[0].origin.y,
+      kNabtsDisplayAreaHeight - 2.0 * snapshot.primitives[0].size.dy);
+}
+
+// §6.1.2.2: APF is the forward movement, i.e. a tab of one character position.
+TEST(NaplpsInterpreter, APFSkipsOneCharacterPosition) {
+  Record record;
+  record.text_mode().byte(0x0C).add({'A'}).byte(0x09).add({'B'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  // One field for the character, one for the APF.
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 2.0 / 40.0);
+}
+
+// All four are defined *relative to the character path*, so a record that
+// turned the path through 90 degrees gets its rows turned with it (§5.3.2.3.3
+// Table 7 and §5.3.2.3.5). With the path running down the screen, -90 degrees
+// from it is to the left.
+TEST(NaplpsInterpreter, TheFormatEffectorsFollowTheCharacterPath) {
+  // TEXT byte 1 carries the character path in b4-b3 (§5.3.2.3.1); Table 7
+  // code 2 is "up". Started from the reset cursor at the lower left, so both
+  // the advance and the APD move away from the edges rather than into them.
+  Record record;
+  record.pdi()
+      .byte(code(2, 2))                             // TEXT (§5.3.2.3, Fig. 13)
+      .byte(numeric(static_cast<uint8_t>(2 << 2)))  // path = up
+      .byte(numeric(0))
+      .text_mode()
+      .add({'A'})
+      .byte(0x0A)  // APD: -90 degrees from an upward path, i.e. to the right
+      .add({'B'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  // 'A' advanced the cursor up the screen — the path — by the field height,
+  // and APD then stepped across the path by the field width rather than
+  // further along it.
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y,
+                   snapshot.primitives[0].origin.y + 5.0 / 128.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x,
+                   snapshot.primitives[0].origin.x + 1.0 / 40.0);
 }
 
 // §6.2.7.6-10: each C1 text control sets the character field to a stated size.
@@ -888,13 +1155,39 @@ TEST(NaplpsInterpreter, ATruncatedRecordYieldsWhatItManaged) {
       .byte(numeric(0b000000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
       .byte(coord1(0b001, 0b001))
-      // An arc that needs three points and gets one.
-      .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined))
-      .byte(coord1(0b001, 0b001));
+      // An arc with no coordinate data at all behind it.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined));
 
   const NabtsPageSnapshot snapshot = run(record);
   EXPECT_EQ(snapshot.primitives.size(), 1u) << "the point before it survived";
   EXPECT_GT(snapshot.diagnostics.truncated_pdis, 0u);
+}
+
+// §5.3.3.3.1: "If the end point is omitted, it is taken to be coincident with
+// the start point and a circle is drawn." A single coordinate block after ARC
+// is the compact encoding of a circle, not a record that ran out — reading it
+// as a truncation drops every circle a service draws that way.
+TEST(NaplpsInterpreter, AnArcWithNoEndPointIsACircle) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .byte(coord1(0b001, 0b001))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined))
+      .byte(coord1(0b011, 0b011));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  const NabtsPrimitive& arc = snapshot.primitives[0];
+  EXPECT_EQ(arc.kind, NabtsPrimitiveKind::kArc);
+  // Start, the intermediate point that gives the diameter, and an end point
+  // supplied as coincident with the start — which is what makes it a circle.
+  ASSERT_EQ(arc.points.size(), 3u);
+  EXPECT_DOUBLE_EQ(arc.points[2].x, arc.points[0].x);
+  EXPECT_DOUBLE_EQ(arc.points[2].y, arc.points[0].y);
+  EXPECT_NE(arc.points[1].x, arc.points[0].x);
+  EXPECT_EQ(snapshot.diagnostics.truncated_pdis, 0u);
 }
 
 // CEA-516 §3.3 puts odd parity in b8 of every data byte, so the interpreter

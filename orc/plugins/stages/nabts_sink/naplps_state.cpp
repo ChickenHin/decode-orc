@@ -215,10 +215,13 @@ void NaplpsState::reset_all() {
   text.reset();
   texture.reset();
   colour.reset();
-  drawing_point = NabtsPoint{0.0, 0.0};
-  cursor = NabtsPoint{0.0, 0.0};
   field_origin = NabtsPoint{0.0, 0.0};
   field_size = NabtsSize{1.0, 1.0};
+  // The text cursor starts at home; the drawing point starts at the geometric
+  // origin, which is the lower left of the unit screen (T.101 Table II-3 lists
+  // the two positions separately for the data syntaxes that have both).
+  cursor = home_position();
+  drawing_point = NabtsPoint{0.0, 0.0};
   blinking = false;
   clear_macros();
   clear_drcs();
@@ -226,6 +229,26 @@ void NaplpsState::reset_all() {
     mask = NabtsTextureMask{};
   }
   storage_used_ = 0;
+}
+
+NabtsPoint NaplpsState::home_position() const {
+  // X3.110 §6.1.2.6 and §6.1.2.8: home is "the upper left character position in
+  // the display area, in which the top of the character field coincides with
+  // the top boundary of the display area", and §5.3.2.9.3 sends a reset cursor
+  // to "its home position (top left character position in the display area)".
+  // The cursor is the *lower* left corner of that character field (§5.3.2.3.2),
+  // so it sits one field height below the top.
+  //
+  // T.101 Table II-3 lists data syntax III's current-text-position as "lower
+  // left corner", which is the corner of the character field rather than of the
+  // screen: reading it as the bottom of the screen puts every record that opens
+  // with text and line feeds — which is how the reference ExtraVision service
+  // writes — on the bottom row, with every line feed clamped against it. The
+  // table gives the other two data syntaxes an "upper left corner", and its
+  // character height for this one is a known typo, so X3.110's three statements
+  // decide it.
+  return NabtsPoint{
+      0.0, kNabtsDisplayAreaHeight - std::fabs(text.character_field.dy)};
 }
 
 size_t NaplpsState::index_of_code(uint8_t code) {

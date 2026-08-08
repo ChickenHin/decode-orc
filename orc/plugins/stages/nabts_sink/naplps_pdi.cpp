@@ -18,6 +18,7 @@ namespace {
 
 // Bits per gun in the stored colour map (Table D1 item 5(4)).
 constexpr int kGunBits = 3;
+constexpr uint32_t kGunMax = (1u << kGunBits) - 1u;  // 7, full intensity
 
 /**
  * @brief A binary fraction from |bits| significant bits, MSB first
@@ -120,6 +121,17 @@ NabtsPoint NaplpsOperandReader::read_coordinate() {
 NabtsColour NaplpsOperandReader::read_colour() {
   truncated_ = false;
 
+  // §5.3.2.5.1 makes a short colour operand legal: "If the maximum size entry
+  // that the color map can accommodate is larger than the number of bits
+  // provided by the SET COLOR operand, trailing zero bits are supplied by the
+  // receiving presentation process." The DOMAIN multi-value length is the most
+  // this may read, not the least — the reference ExtraVision service sets
+  // white with a single byte where DOMAIN declared three, and requiring the
+  // full three dropped the write and left the CBS eye drawn in the background
+  // colour.
+  const size_t words =
+      std::max<size_t>(1, std::min(format_.multi_value_bytes, remaining()));
+
   // Figure 12: "Each byte contains two three-tuples. Each three-tuple contains
   // one bit for each of the three primary colors ... in the order green, red,
   // blue". So the six payload bits are G R B G R B, and each gun's value is the
@@ -130,8 +142,7 @@ NabtsColour NaplpsOperandReader::read_colour() {
   uint32_t blue = 0;
   int bits = 0;
 
-  for (size_t byte_index = 0; byte_index < format_.multi_value_bytes;
-       ++byte_index) {
+  for (size_t byte_index = 0; byte_index < words; ++byte_index) {
     const uint8_t payload = next();
     for (int tuple = 1; tuple >= 0; --tuple) {
       const int base = tuple * 3;
@@ -142,13 +153,24 @@ NabtsColour NaplpsOperandReader::read_colour() {
     }
   }
 
-  // §5.3.2.5: more bits than the map can hold are truncated to the most
-  // significant; fewer are zero-extended. Both fall out of a shift.
+  // §5.3.2.5.1 twice over: an operand with more bits than the map holds "is
+  // truncated and only the most significant bits are used", and "For each
+  // primary, the maximum color fraction attainable, given the number of bits
+  // specified in the color value operand, shall be interpreted as full
+  // intensity and intermediate values shall be equally distributed between zero
+  // and full intensity". Truncation already satisfies both above three bits —
+  // all ones truncates to all ones. Below three it does not: zero-filling two
+  // bits would make the brightest colour the service can send 6 of 7 rather
+  // than white, so the short case is scaled instead.
   const auto to_gun = [bits](uint32_t value) -> uint8_t {
     if (bits >= kGunBits) {
       return static_cast<uint8_t>(value >> (bits - kGunBits));
     }
-    return static_cast<uint8_t>(value << (kGunBits - bits));
+    const uint32_t maximum = (1u << bits) - 1u;
+    if (maximum == 0) {
+      return 0;
+    }
+    return static_cast<uint8_t>((value * kGunMax + maximum / 2) / maximum);
   };
 
   NabtsColour colour;

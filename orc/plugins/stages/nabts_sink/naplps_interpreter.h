@@ -156,8 +156,21 @@ class NaplpsInterpreter {
   /// |base| displaced by |delta|, resolved.
   NabtsPoint resolve_relative(const NabtsPoint& base, const NabtsPoint& delta);
 
+  /// A cursor movement expressed relative to the character path, which is what
+  /// §6.1.2 defines the four format effectors in terms of.
+  enum class CursorMove : uint8_t {
+    kForward,   ///< APF (§6.1.2.2), and the advance after a character
+    kBackward,  ///< APB (§6.1.2.1): 180 degrees from the path
+    kDown,      ///< APD (§6.1.2.3): -90 degrees, by the interrow spacing
+    kUp,        ///< APU (§6.1.2.5): +90 degrees, by the interrow spacing
+  };
+
+  /// Move the cursor one step of |move| (§6.1.2), wrapping to the next row
+  /// where §5.3.2.3.6 says a forward step should.
+  void move_cursor_by(CursorMove move);
+
   /// Advance the cursor one character along the character path (§5.3.2.3.3).
-  void advance_cursor();
+  void advance_cursor() { move_cursor_by(CursorMove::kForward); }
 
   // ---- Definitions ---------------------------------------------------------
 

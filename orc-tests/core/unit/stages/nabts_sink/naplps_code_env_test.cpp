@@ -464,18 +464,45 @@ TEST(NaplpsOperandReader, ReadsColourWordsAsGreenRedBlueTuples) {
   EXPECT_EQ(colour.blue, 0u);
 }
 
-TEST(NaplpsOperandReader, ZeroExtendsAColourWordNarrowerThanThreeBits) {
+// §5.3.2.5.1 ends with the rule that decides how a short colour word is read:
+// "For each primary, the maximum color fraction attainable, given the number of
+// bits specified in the color value operand, shall be interpreted as full
+// intensity and intermediate values shall be equally distributed between zero
+// and full intensity." Over two bits that is 0, 7/3, 14/3, 7 → 0, 2, 5, 7.
+//
+// The earlier sentence about "trailing zero bits" would instead give 0, 2, 4, 6
+// and make white unreachable in a one-byte operand — which the reference
+// ExtraVision service disproves, since it sets white with exactly one byte.
+TEST(NaplpsOperandReader, ScalesAColourWordNarrowerThanThreeBitsToFullRange) {
   NaplpsOperandFormat format;
   format.multi_value_bytes = 1;
 
   // One byte gives two bits per gun. GRB = 110, GRB = 000 → green 10, red 10,
-  // blue 00, which zero-extends to 100, 100, 000.
+  // blue 00 — 2 of 3, which is 5 of 7.
   const std::vector<uint8_t> bytes = {numeric(0b110000)};
   NaplpsOperandReader reader(bytes.data(), bytes.size(), format);
   const NabtsColour colour = reader.read_colour();
-  EXPECT_EQ(colour.green, 0b100u);
-  EXPECT_EQ(colour.red, 0b100u);
+  EXPECT_EQ(colour.green, 5u);
+  EXPECT_EQ(colour.red, 5u);
   EXPECT_EQ(colour.blue, 0u);
+
+  // The brightest a two-bit operand can ask for is full intensity, or a service
+  // could not send white in one byte.
+  const std::vector<uint8_t> brightest = {numeric(0b111111)};
+  NaplpsOperandReader white(brightest.data(), brightest.size(), format);
+  EXPECT_EQ(white.read_colour(), kNabtsNominalWhite);
+}
+
+// A colour operand shorter than the DOMAIN-declared multi-value length is read
+// for what it carries rather than refused: §5.3.2.5.1 supplies the missing bits
+// itself, and the declared length is a maximum.
+TEST(NaplpsOperandReader, ReadsAColourWordShorterThanTheDeclaredLength) {
+  NaplpsOperandFormat format;
+  format.multi_value_bytes = 3;
+
+  const std::vector<uint8_t> bytes = {numeric(0b111111)};
+  NaplpsOperandReader reader(bytes.data(), bytes.size(), format);
+  EXPECT_EQ(reader.read_colour(), kNabtsNominalWhite);
 }
 
 // §5.3.1 makes an out-of-screen coordinate an error "whose handling is

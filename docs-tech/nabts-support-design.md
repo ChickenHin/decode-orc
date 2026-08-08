@@ -773,6 +773,20 @@ view. Three things resolve here — colour (three bits per gun to 8-bit channels
 colour runs of §5.3.3.6.3 through the colour map or as Figure 12 values depending on the colour
 mode), characters (repertoire lookup and run coalescing), and the caption track.
 
+**Finding: the four format effectors were all doing the same thing.** §6.1.2 defines APB, APF, APD
+and APU as four *different* movements relative to the character path — back along it, forward along
+it, and −90 and +90 degrees across it by the *interrow* spacing of §5.3.2.3.5 rather than the
+inter-character spacing. Phase 5 collapsed all four onto "advance along the path", so APD (the line
+feed) moved right instead of down and APR then put the cursor back at the left of the row it was
+already on. Every multi-line record drew its rows on top of each other, one character out of step —
+visible on the ExtraVision news pages as two headlines interleaved character by character.
+
+Fixed in [naplps_interpreter.cpp](../orc/plugins/stages/nabts_sink/naplps_interpreter.cpp) with
+`move_cursor_by(CursorMove)`, which rotates the path vector so all four follow the path wherever
+TEXT put it, and picks the inter-character or interrow distance by whether the movement runs along
+the path or across it. Six tests pin the four effectors, the APR-then-APD row break, and the
+rotation property on a non-default path.
+
 **Finding: the interpreter advanced the cursor over a non-spacing mark.** §7.2 transmits a composite
 character as a mark from the supplementary set *followed by* the letter it applies to, and §7.1
 makes the pair one character of the repertoire — so the pair occupies one character field. The
@@ -818,16 +832,83 @@ visibly garbled in the copy in hand (row 12 merges two meanings, and rows 6 and 
 9-byte field as a "Short Record Address"), no reference capture carries a header extension, and
 guessing at a corrupt table would be worse than the documented default.
 
+**Finding: an ARC was drawn as a quadratic Bezier, so circles vanished.** §5.3.3.3.1 codes a circle
+as "an arc whose end points coincide and whose intermediate point (with the end points) defines the
+diameter". Fitting a quadratic through those three points collapses it to a degenerate there-and-back
+curve enclosing no area, so a filled circle painted **nothing** — which is why the CBS eye was missing
+from the left of the ExtraVision index page's logotype while everything else on it drew. The canvas
+now builds the real circle: the circumcircle of the three points, swept the way round that passes
+through the intermediate one, with §5.3.3.3.1's two degenerate readings handled explicitly — start
+coincident with end is a circle about the midpoint of start and intermediate, and three colinear
+points are "a line drawn from the start point to the end point".
+
+A latent second bug came out of the same clause and is fixed with it: "If the end point is omitted,
+it is taken to be coincident with the start point and a circle is drawn." The interpreter was
+counting a two-point ARC as a truncated PDI and dropping it, when it is the compact encoding of a
+circle. The ExtraVision pages do not use it — their `truncated_pdis` is zero — so this was found by
+reading rather than by seeing it fail.
+
+**Finding: the cursor started at the bottom of the screen, so text-and-line-feed
+records piled onto one row.** T.101 Table II-3 lists data syntax III's
+current-text-position as "lower left corner", which Phase 5 read as the bottom
+left of the screen. X3.110 says otherwise three times — §5.3.2.9.3 sends a reset
+cursor to "its home position (top left character position in the display area)",
+§6.1.2.6 and §6.1.2.8 home CS and APH to the upper left, and §6.1.6.5(6) numbers
+NSR's rows from "the upper leftmost character position" — and Table II-3 itself
+gives the other two data syntaxes an "upper left corner". The ExtraVision service
+settles it: several of its records are plain text with CR and LF and nothing
+else, so starting at the bottom clamps every line feed and puts the whole record
+on the bottom row. "Lower left corner" is the corner of the *character field*
+(§5.3.2.3.2), not of the screen. The text cursor now starts at home; the drawing
+point still starts at the geometric origin, which Table II-3 lists separately for
+the syntaxes that have both.
+
+**Finding: NSR was not consuming its cursor address.** §6.1.6.5(6) makes NSR
+"an alternative means to position the cursor": when the two bytes after it are
+both from columns 4 to 7 they are a row and a column and are consumed. Phase 5
+declined to consume them, so every ExtraVision record — which opens
+`SO CAN NSR @ @`, i.e. home to row 0 column 0 — drew two stray `@` glyphs and
+never moved. The full clause is now implemented, including "if the two bytes are
+from columns 2 and 3 … they are ignored" and a following C0 terminating the
+sequence to be executed in its own right.
+
+**Finding: a SET COLOR shorter than the declared operand length was dropped.**
+§5.3.2.5.1 lets a colour operand be shorter than the map can hold — "trailing
+zero bits are supplied by the receiving presentation process" — so the DOMAIN
+multi-value length is a maximum, not a requirement. Phase 5 required a whole
+word and silently discarded anything shorter. ExtraVision sets white with a
+single byte where DOMAIN declared three, so the CBS eye was drawn in whatever
+colour came before it: the page background. Its arcs are white on the outside and
+background-blue inside, and both were blue.
+
+The same clause fixes how a short word scales. Its last sentence — "For each
+primary, the maximum color fraction attainable, given the number of bits
+specified in the color value operand, shall be interpreted as full intensity and
+intermediate values shall be equally distributed between zero and full
+intensity" — contradicts the zero-fill sentence for operands narrower than three
+bits, and it is the one to follow: zero-filling makes the brightest colour a
+one-byte operand can express 6 of 7 rather than white, which would leave a
+service unable to send white at all in the encoding ExtraVision actually uses.
+Two bits now read 0, 2, 5, 7 rather than 0, 2, 4, 6.
+
 **Geometry.** The display area's nominal resolution is 256 × 200 (T.101 Table II-3) inside a unit
 rect 1 × 0.78125, so its pixels are square — 1/256 across and 0.78125/200 = 1/256 down. The canvas
 therefore keeps a 1 : 0.78125 aspect and uses **one** scale factor for both axes, which is what stops
 a circle coming out an ellipse. Coordinates stay `double` from the interpreter to the QPainter call,
 so the 12 bits X3.110 Appendix B asks for survive.
 
-*Acceptance:* met — twelve offscreen tests open the dialogue, load a synthetic view, select records,
+These four were found by decoding the reference ExtraVision capture and dumping
+the display list rather than by reading the code — the capture is in-tree at
+`test-data/teletext/NTSC NABTS Teletext samples/`, and two `vbi_source`
+functional tests were silently skipping over it because they named the directory
+`NTSC Teletext samples`. That path is corrected, so those two now run.
+
+*Acceptance:* met — fifteen offscreen tests open the dialogue, load a synthetic view, select records,
 step the series (wrapping at both ends), list an application record's descriptors, list the caption
-cues, and paint a display list of text, line, rectangle and mosaic primitives. The map cleanup is
-the teletext path's, unchanged.
+cues, and paint a display list of text, line, rectangle and mosaic primitives. Three of them work on
+the rendered pixels rather than on the primitive count, because a display list can be walked with
+nothing reaching the screen — which is exactly how the vanishing circle hid. The map cleanup is the
+teletext path's, unchanged.
 
 ### Task 6.5 — Captioning
 

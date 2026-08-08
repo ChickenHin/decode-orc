@@ -10,8 +10,13 @@
 #include <gtest/gtest.h>
 
 #include <QApplication>
+#include <QColor>
 #include <QCoreApplication>
+#include <QImage>
+#include <QPainter>
 #include <QPixmap>
+#include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -106,6 +111,50 @@ void renderOffscreen(QWidget* widget, int width = 400, int height = 320) {
   widget->resize(width, height);
   QPixmap target(width, height);
   widget->render(&target);
+}
+
+// The same paint pass, kept as pixels. A display list can be walked without
+// anything reaching the screen — a degenerate path draws nothing — so the tests
+// that care about geometry look at what was actually put down.
+QImage renderToImage(QWidget* widget, int width = 400, int height = 320) {
+  widget->resize(width, height);
+  QImage target(width, height, QImage::Format_ARGB32);
+  target.fill(Qt::black);
+  widget->render(&target);
+  return target;
+}
+
+// Whether any pixel of |image| is |colour|, within a tolerance that absorbs
+// antialiasing at the edges of a shape.
+bool imageContains(const QImage& image, const QColor& colour,
+                   int tolerance = 24) {
+  for (int y = 0; y < image.height(); ++y) {
+    for (int x = 0; x < image.width(); ++x) {
+      const QColor pixel = image.pixelColor(x, y);
+      if (std::abs(pixel.red() - colour.red()) <= tolerance &&
+          std::abs(pixel.green() - colour.green()) <= tolerance &&
+          std::abs(pixel.blue() - colour.blue()) <= tolerance) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// An arc primitive through |start|, |through| and |end| in unit space.
+NabtsPrimitiveView arc(NabtsPointView start, NabtsPointView through,
+                       NabtsPointView end, bool filled) {
+  NabtsPrimitiveView primitive;
+  primitive.kind = NabtsPrimitiveKindView::kArc;
+  primitive.points = {start, through, end};
+  primitive.origin = start;
+  primitive.filled = filled;
+  primitive.colour = NabtsColourView{255, 255, 255, false};
+  // §5.3.2.2.6: the logical pel is what gives an outline its width. A record
+  // drawing a visible line sets one, and without it a one-pixel stroke lands
+  // half on each of two rows once antialiased — solid nowhere.
+  primitive.logical_pel = NabtsSizeView{0.01, 0.01};
+  return primitive;
 }
 
 }  // namespace
@@ -338,6 +387,76 @@ TEST(NabtsCanvasWidgetTest, PaintsAnUndefinedDrcsCharacterAsNothing) {
   canvas.setPage(page);
   renderOffscreen(&canvas);
   EXPECT_EQ(canvas.primitivesPainted(), 1);
+}
+
+// The regression the ExtraVision index page exposed: its CBS eye is drawn as
+// filled circles, and §5.3.3.3.1 codes a circle as an arc whose start and end
+// coincide. Fitting a quadratic through the three points collapses that to
+// nothing, so the logo simply was not there. Painting has to put pixels down.
+TEST(NabtsCanvasWidgetTest, PaintsACircleWhoseStartAndEndCoincide) {
+  ensureApplication();
+  orc::presenters::NabtsPageView page;
+  // Start at the left of the circle, intermediate diametrically opposite.
+  page.primitives.push_back(arc(NabtsPointView{0.30, 0.35},
+                                NabtsPointView{0.60, 0.35},
+                                NabtsPointView{0.30, 0.35}, /*filled=*/true));
+
+  NabtsCanvasWidget canvas;
+  canvas.setPage(page);
+  const QImage image = renderToImage(&canvas);
+  EXPECT_EQ(canvas.primitivesPainted(), 1);
+  EXPECT_TRUE(imageContains(image, QColor(255, 255, 255)))
+      << "a filled circle drew nothing";
+}
+
+// An outlined segment of a circle is the ordinary case, and it must sweep the
+// way round that passes through the intermediate point (§5.3.3.3.1) — the
+// major arc, here, which the minor one would leave blank.
+TEST(NabtsCanvasWidgetTest, PaintsAnArcThroughItsIntermediatePoint) {
+  ensureApplication();
+  orc::presenters::NabtsPageView page;
+  // Start and end level with each other, intermediate below both: the arc has
+  // to dip through the bottom rather than take the short way over the top.
+  page.primitives.push_back(arc(NabtsPointView{0.30, 0.50},
+                                NabtsPointView{0.45, 0.20},
+                                NabtsPointView{0.60, 0.50}, /*filled=*/false));
+
+  NabtsCanvasWidget canvas;
+  canvas.setPage(page);
+  const QImage image = renderToImage(&canvas);
+  ASSERT_TRUE(imageContains(image, QColor(255, 255, 255)));
+
+  // The lowest painted row must be near the intermediate point rather than
+  // near the chord, which is what says the sweep went the right way round.
+  int lowest = -1;
+  for (int y = 0; y < image.height(); ++y) {
+    for (int x = 0; x < image.width(); ++x) {
+      if (image.pixelColor(x, y).green() > 200) {
+        lowest = std::max(lowest, y);
+      }
+    }
+  }
+  ASSERT_GE(lowest, 0);
+  // Unit y 0.20 maps below unit y 0.50, and the widget's y runs downwards.
+  const double display_bottom = image.height();
+  EXPECT_GT(static_cast<double>(lowest), display_bottom * 0.4)
+      << "the arc took the short way round and missed its intermediate point";
+}
+
+// §5.3.3.3.1: "If the three drawing points are colinear, a line is drawn from
+// the start point to the end point" — the circumcircle is undefined there and
+// must not produce a divide-by-zero or an invisible primitive.
+TEST(NabtsCanvasWidgetTest, PaintsColinearArcPointsAsAStraightLine) {
+  ensureApplication();
+  orc::presenters::NabtsPageView page;
+  page.primitives.push_back(arc(NabtsPointView{0.20, 0.30},
+                                NabtsPointView{0.40, 0.30},
+                                NabtsPointView{0.60, 0.30}, /*filled=*/false));
+
+  NabtsCanvasWidget canvas;
+  canvas.setPage(page);
+  const QImage image = renderToImage(&canvas);
+  EXPECT_TRUE(imageContains(image, QColor(255, 255, 255)));
 }
 
 TEST(NabtsCanvasWidgetTest, ClearPageForgetsTheRecord) {

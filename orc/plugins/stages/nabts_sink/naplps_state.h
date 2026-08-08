@@ -225,6 +225,11 @@ class NaplpsState {
   /// leaving the colour map and the programmable masks alone.
   void reset_all();
 
+  /// The home position of X3.110 §6.1.2.6: the upper left character position of
+  /// the display area. Depends on the current character field, so it moves with
+  /// the text size.
+  NabtsPoint home_position() const;
+
   NaplpsDomainState domain;
   NaplpsTextState text;
   NaplpsTextureState texture;
