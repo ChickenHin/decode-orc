@@ -79,8 +79,8 @@ void NabtsRecordCatalogue::take_copy(Entry& entry,
 
   // §6.1: a presentation record's data is NAPLPS, so this is where it becomes
   // something a viewer can draw. An application record's data is function
-  // descriptors (§7.2.2), already rendered above, and running it as presentation
-  // code would draw nonsense.
+  // descriptors (§7.2.2), already rendered above, and running it as
+  // presentation code would draw nonsense.
   if (nabts_type_is_presentation(message.type)) {
     record.page = interpreter_.run(message.data);
   } else {

@@ -402,11 +402,11 @@ TEST(NaplpsOperandReader, ReadsTwoDimensionalCoordinatesFromContiguousFields) {
   format.multi_value_bytes = 1;
 
   // One byte gives three bits per component. §5.3.1 puts the point just left of
-  // the sign bit — "the MSB represents the digit just to the right of the decimal
-  // point" — so the weights are -1, 1/2, 1/4 and the range is [-1, 1). That is
-  // what an absolute coordinate needs: §5.3.1 also calls for positions "from 0
-  // (inclusive) to 1 (noninclusive)", which a sign bit weighted -1/2 could not
-  // reach.
+  // the sign bit — "the MSB represents the digit just to the right of the
+  // decimal point" — so the weights are -1, 1/2, 1/4 and the range is [-1, 1).
+  // That is what an absolute coordinate needs: §5.3.1 also calls for positions
+  // "from 0 (inclusive) to 1 (noninclusive)", which a sign bit weighted -1/2
+  // could not reach.
   //
   // X = 010 is therefore +1/2, and Y = 110 is -1 + 1/2 = -1/2.
   const std::vector<uint8_t> bytes = {numeric(0b010110)};

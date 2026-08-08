@@ -274,8 +274,8 @@ void NaplpsInterpreter::execute_escape() {
       execute_c1(escape.c1);
       return;
     // A sequence naming a set this does not implement, and one broken by a byte
-    // outside the syntax, come to the same thing here: nothing is designated and
-    // nothing is invoked. They differ only in what was consumed, which
+    // outside the syntax, come to the same thing here: nothing is designated
+    // and nothing is invoked. They differ only in what was consumed, which
     // naplps_parse_escape() has already decided — §4.3.2 leaves the offending
     // byte of a malformed sequence to be executed in its own right.
     case NaplpsEscapeKind::kUnsupported:
@@ -1031,9 +1031,9 @@ void NaplpsInterpreter::pdi_rect(NaplpsPdi opcode,
     // would leave the unit screen an error handled implementation-dependently,
     // and this clips — so a clipped rectangle must report the extent it was
     // clipped to, or a renderer reading |size| would draw outside the screen
-    // while one reading |points| stayed inside it. Real service records do this:
-    // the ExtraVision capture has rectangles whose corner lands at x = 1 and
-    // just past it.
+    // while one reading |points| stayed inside it. Real service records do
+    // this: the ExtraVision capture has rectangles whose corner lands at x = 1
+    // and just past it.
     const NabtsPoint corner =
         resolve(NabtsPoint{start.x + extent.x, start.y + extent.y});
 
@@ -1334,8 +1334,8 @@ void NaplpsInterpreter::begin_definition(Collecting what, uint8_t code) {
     constexpr uint16_t kMaskSide = 16;
     mask_target_->width = kMaskSide;
     mask_target_->height = kMaskSide;
-    mask_target_->elements.assign(
-        static_cast<size_t>(kMaskSide) * kMaskSide, false);
+    mask_target_->elements.assign(static_cast<size_t>(kMaskSide) * kMaskSide,
+                                  false);
   }
 }
 

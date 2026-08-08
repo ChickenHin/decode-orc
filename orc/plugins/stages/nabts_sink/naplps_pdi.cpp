@@ -92,8 +92,8 @@ NabtsPoint NaplpsOperandReader::read_coordinate() {
   const int bits_per_byte = static_cast<int>(kNaplpsNumericBits / components);
   const uint32_t field_mask = (1u << bits_per_byte) - 1u;
   // X is the first field and Y the second. Z, when present, is the third and is
-  // never read: §5.3.2.2.4 has the receiver ignore it, projecting the image into
-  // the X-Y plane.
+  // never read: §5.3.2.2.4 has the receiver ignore it, projecting the image
+  // into the X-Y plane.
   const int x_shift = kNaplpsNumericBits - bits_per_byte;
   const int y_shift = kNaplpsNumericBits - 2 * bits_per_byte;
 
