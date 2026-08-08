@@ -17,8 +17,6 @@
 
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <array>
 #include <cstdint>
@@ -29,9 +27,11 @@
 #include <utility>
 #include <vector>
 
+#include "../../common/vbi-services/teletext_line_synthesizer.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
 #include "../../stage_services_mock.h"
-#include "../../support/teletext_line_synthesizer.h"
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/teletext_slicer.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Invoke;

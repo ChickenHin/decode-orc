@@ -9,9 +9,10 @@
 
 #pragma once
 
-#include <orc/stage/analysis_sink_results.h>
-#include <orc/support/teletext_page_decoder.h>
 #include <orc_teletext.h>
+
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc::presenters {
 

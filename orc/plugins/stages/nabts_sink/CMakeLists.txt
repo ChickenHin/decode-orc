@@ -20,4 +20,7 @@ orc_add_stage_plugin(
     OUTPUT_NAME orc-stage-plugin-nabts-sink
     PLUGIN_VERSION "${ORC_VERSION}"
     SOURCES ${STAGE_PLUGIN_SOURCES}
+    # System C rides the same slicer as WST, and NAPLPS decoding needs the
+    # shared display-list model (see orc/plugins/stages/common/vbi-services).
+    LINK_LIBRARIES orc-vbi-services
 )

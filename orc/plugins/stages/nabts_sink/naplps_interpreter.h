@@ -10,8 +10,6 @@
 #ifndef ORC_NAPLPS_INTERPRETER_H
 #define ORC_NAPLPS_INTERPRETER_H
 
-#include <orc/support/nabts_page.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -19,6 +17,7 @@
 #include "naplps_code_env.h"
 #include "naplps_pdi.h"
 #include "naplps_state.h"
+#include "vbi-services/nabts_page.h"
 
 namespace orc {
 

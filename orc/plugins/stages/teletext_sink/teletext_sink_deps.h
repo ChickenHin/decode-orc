@@ -11,7 +11,6 @@
 #define ORC_TELETEXT_SINK_DEPS_H
 
 #include <orc/stage/triggerable_stage.h>
-#include <orc/support/teletext_recovery_stats.h>
 
 #include <atomic>
 #include <cstdint>
@@ -20,6 +19,7 @@
 #include "teletext_scan_state.h"
 #include "teletext_sink_deps_interface.h"
 #include "teletext_squash_stats.h"
+#include "vbi-services/teletext_recovery_stats.h"
 
 namespace orc {
 

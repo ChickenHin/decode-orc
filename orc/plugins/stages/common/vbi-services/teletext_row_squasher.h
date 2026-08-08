@@ -1,6 +1,6 @@
 /*
  * File:        teletext_row_squasher.h
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     Combine repeated copies of a teletext page row into one
  *              best-estimate row ("squashing")
  *
@@ -19,8 +19,10 @@
 #ifndef ORC_TELETEXT_ROW_SQUASHER_H
 #define ORC_TELETEXT_ROW_SQUASHER_H
 
-// SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
-// ABI; changes never force an ABI bump (recompile the plugin at your leisure).
+// Shared plugin-side library, NOT part of the SDK contract: it compiles
+// against the public SDK headers only and is linked privately into the stage
+// plugins that need it. Nothing here crosses the plugin boundary, so changes
+// never force an ABI bump.
 
 #include <array>
 #include <cstddef>

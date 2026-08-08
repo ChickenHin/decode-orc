@@ -11,8 +11,6 @@
 #ifndef ORC_NABTS_RECORD_CATALOGUE_H
 #define ORC_NABTS_RECORD_CATALOGUE_H
 
-#include <orc/stage/analysis_sink_results.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -21,6 +19,7 @@
 
 #include "nabts_record.h"
 #include "naplps_interpreter.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc {
 

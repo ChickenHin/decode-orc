@@ -12,7 +12,6 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +26,7 @@
 #include <thread>
 #include <vector>
 
+#include "vbi-services/teletext_slicer.h"
 #include "vbi_offset_calibration.h"
 #include "vbi_source_format.h"
 #include "vbi_source_stage.h"

@@ -10,11 +10,12 @@
 
 #include "nabts_record.h"
 
-#include <orc/support/teletext_slicer.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <array>
+
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 

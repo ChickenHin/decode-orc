@@ -11,8 +11,9 @@
 #include "teletext_analysis_presenter.h"
 
 #include <gtest/gtest.h>
-#include <orc/stage/analysis_sink_results.h>
-#include <orc/support/teletext_page_decoder.h>
+
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace gui_unit_test {
 

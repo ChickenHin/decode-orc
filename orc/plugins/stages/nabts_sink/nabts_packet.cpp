@@ -9,7 +9,7 @@
 
 #include "nabts_packet.h"
 
-#include <orc/support/teletext_page_decoder.h>
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 

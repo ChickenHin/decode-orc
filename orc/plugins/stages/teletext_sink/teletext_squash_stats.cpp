@@ -10,10 +10,11 @@
 
 #include "teletext_squash_stats.h"
 
-#include <orc/support/teletext_page_decoder.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
+
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 

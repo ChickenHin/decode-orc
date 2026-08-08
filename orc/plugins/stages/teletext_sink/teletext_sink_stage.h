@@ -14,7 +14,6 @@
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/plugin/orc_stage_tooling.h>
-#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/triggerable_stage.h>
@@ -28,6 +27,7 @@
 #include <vector>
 
 #include "teletext_sink_deps_interface.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc {
 

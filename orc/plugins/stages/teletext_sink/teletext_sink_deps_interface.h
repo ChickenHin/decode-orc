@@ -10,14 +10,15 @@
 #ifndef ORC_TELETEXT_SINK_DEPS_INTERFACE_H
 #define ORC_TELETEXT_SINK_DEPS_INTERFACE_H
 
-#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <atomic>
 #include <cstdint>
 #include <string>
+
+#include "vbi-services/teletext_slicer.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc {
 
@@ -65,7 +66,7 @@ struct TeletextSinkOptions {
   // tuning knob.
   int32_t decode_threads{0};
   // Combine repeated transmissions of each page row and write the combined
-  // form ("squashing", see orc/support/teletext_row_squasher.h). Costs a
+  // form ("squashing", see vbi-services/teletext_row_squasher.h). Costs a
   // second pass over the recovered packets, held in memory (~50 bytes each).
   bool squash_repeated_rows{true};
   // Decode the subtitle page alongside the packet export and write SubRip cues
@@ -108,7 +109,7 @@ struct TeletextSinkResult {
   uint64_t characters_written{0};
   uint64_t characters_damaged{0};
   // Human-readable diagnostic report of the run: what was exported, how the
-  // recovery went (orc/support/teletext_recovery_stats.h) and what combining
+  // recovery went (vbi-services/teletext_recovery_stats.h) and what combining
   // repeated rows changed (teletext_squash_stats.h). Logged by the stage at
   // debug level, and written to report_path when write_report is set.
   std::string report;

@@ -1,13 +1,13 @@
 /*
  * File:        nabts_page.cpp
- * Module:      decode-orc Plugin SDK (support)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     The NAPLPS default colour map and character repertoires
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <orc/support/nabts_page.h>
+#include "nabts_page.h"
 
 #include <algorithm>
 #include <cmath>

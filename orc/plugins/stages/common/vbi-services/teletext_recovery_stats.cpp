@@ -1,6 +1,6 @@
 /*
  * File:        teletext_recovery_stats.cpp
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     Accumulates WST teletext recovery outcomes into a
  *              diagnostic profile of a decoding run
  *
@@ -8,13 +8,15 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
+#include "teletext_recovery_stats.h"
+
 #include <fmt/format.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_recovery_stats.h>
 
 #include <algorithm>
 #include <string>
 #include <vector>
+
+#include "teletext_page_decoder.h"
 
 namespace orc {
 

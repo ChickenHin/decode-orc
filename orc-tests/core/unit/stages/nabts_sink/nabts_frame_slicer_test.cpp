@@ -22,8 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "../../common/vbi-services/teletext_line_synthesizer.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
-#include "../../support/teletext_line_synthesizer.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Invoke;

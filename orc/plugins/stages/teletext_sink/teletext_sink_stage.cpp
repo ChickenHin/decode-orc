@@ -12,7 +12,6 @@
 #include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
-#include <orc/support/teletext_page_decoder.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -23,6 +22,7 @@
 
 #include "teletext_frame_slicer.h"
 #include "teletext_sink_deps.h"
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 

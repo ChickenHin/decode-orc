@@ -19,7 +19,6 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <algorithm>
 #include <array>
@@ -31,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "vbi-services/teletext_slicer.h"
 #include "vbi_output_frame.h"
 #include "vbi_source_format.h"
 #include "vbi_synthetic_line.h"

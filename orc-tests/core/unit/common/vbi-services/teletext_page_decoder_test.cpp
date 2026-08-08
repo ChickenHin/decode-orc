@@ -14,9 +14,9 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
+#include "vbi-services/teletext_page_decoder.h"
+
 #include <gtest/gtest.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_row_squasher.h>
 
 #include <array>
 #include <cstdint>
@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "teletext_line_synthesizer.h"
+#include "vbi-services/teletext_row_squasher.h"
 
 namespace orc_unit_test {
 
@@ -374,7 +375,7 @@ TEST_F(TeletextPageDecoderTest, RowReceivedMarksTheRowsThatArrived) {
 
 // With a squasher attached, rows recovered during an earlier transmission
 // stay available when a later one is clipped, and repeated copies of a row
-// correct each other (orc/support/teletext_row_squasher.h).
+// correct each other (vbi-services/teletext_row_squasher.h).
 TEST_F(TeletextPageDecoderTest, SquasherKeepsRowsAcrossClippedTransmissions) {
   orc::TeletextRowSquasher squasher;
   decoder_.set_row_squasher(&squasher);

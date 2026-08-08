@@ -1,6 +1,6 @@
 /*
  * File:        teletext_page_decoder.h
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     WST (System B) teletext magazine/page decoder producing Level 1
  *              page snapshots and subtitle cues
  *
@@ -11,8 +11,10 @@
 #ifndef ORC_TELETEXT_PAGE_DECODER_H
 #define ORC_TELETEXT_PAGE_DECODER_H
 
-// SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
-// ABI; changes never force an ABI bump (recompile the plugin at your leisure).
+// Shared plugin-side library, NOT part of the SDK contract: it compiles
+// against the public SDK headers only and is linked privately into the stage
+// plugins that need it. Nothing here crosses the plugin boundary, so changes
+// never force an ABI bump.
 
 #include <array>
 #include <cstdint>

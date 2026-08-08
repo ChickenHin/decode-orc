@@ -11,11 +11,11 @@
 #ifndef ORC_TELETEXT_SCAN_STATE_H
 #define ORC_TELETEXT_SCAN_STATE_H
 
-#include <orc/support/teletext_slicer.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
+
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 

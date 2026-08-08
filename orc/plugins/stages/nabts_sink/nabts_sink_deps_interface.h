@@ -10,14 +10,15 @@
 #ifndef ORC_NABTS_SINK_DEPS_INTERFACE_H
 #define ORC_NABTS_SINK_DEPS_INTERFACE_H
 
-#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <atomic>
 #include <cstdint>
 #include <string>
+
+#include "vbi-services/teletext_slicer.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc {
 
@@ -85,7 +86,7 @@ struct NabtsSinkResult {
   // carry data on — an estimate of what was lost.
   uint64_t lost_packets_estimate{0};
   // Human-readable diagnostic report of the run: what was exported and how the
-  // recovery went (orc/support/teletext_recovery_stats.h). Logged by the stage
+  // recovery went (vbi-services/teletext_recovery_stats.h). Logged by the stage
   // at debug level, and written to report_path when write_report is set.
   std::string report;
   // Path the report was written to, empty when write_report is off or the

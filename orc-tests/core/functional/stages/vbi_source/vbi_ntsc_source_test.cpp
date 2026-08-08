@@ -13,9 +13,6 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_row_squasher.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -27,6 +24,9 @@
 #include <vector>
 
 #include "teletext_frame_slicer.h"
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/teletext_row_squasher.h"
+#include "vbi-services/teletext_slicer.h"
 #include "vbi_cri_correlator.h"
 #include "vbi_cri_template.h"
 #include "vbi_output_frame.h"

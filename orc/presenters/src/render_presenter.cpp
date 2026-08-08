@@ -18,6 +18,9 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
 
+// Plugin-side, not SDK: the teletext and NABTS catalogue contracts live with
+// their sink plugins (orc-vbi-services). Reached here by dynamic_cast, exactly
+// as the three SDK analysis-sink interfaces above are.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -56,6 +59,7 @@
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
 #include "teletext_analysis_presenter.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc::presenters {
 

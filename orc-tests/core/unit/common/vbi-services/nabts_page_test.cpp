@@ -7,8 +7,9 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
+#include "vbi-services/nabts_page.h"
+
 #include <gtest/gtest.h>
-#include <orc/support/nabts_page.h>
 
 #include <cstdint>
 

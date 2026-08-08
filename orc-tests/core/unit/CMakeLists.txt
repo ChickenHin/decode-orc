@@ -37,6 +37,13 @@ function(orc_add_core_unit_tests target labels)
                 target_link_libraries(${target} orc-audio-resample)
         endif()
 
+        # WST/NABTS decoding chain. Formerly resolved through orc-core (which
+        # linked orc-sdk-support); now a shared plugin-side library, so the
+        # test binaries link it directly.
+        if(TARGET orc-vbi-services)
+                target_link_libraries(${target} orc-vbi-services)
+        endif()
+
         if(TARGET orc-vbi-source)
                 target_link_libraries(${target} orc-vbi-source)
         endif()
@@ -455,12 +462,21 @@ orc_add_core_unit_tests(
         "unit"
 
         support/log_destination_test.cpp
-        support/nabts_page_test.cpp
-        support/nabts_repertoire_test.cpp
-        support/teletext_slicer_test.cpp
-        support/teletext_page_decoder_test.cpp
-        support/teletext_recovery_stats_test.cpp
-        support/teletext_row_squasher_test.cpp
+)
+
+# orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink
+# and nabts_sink plugins. Plugin-side rather than SDK, so these live under
+# common/ to mirror orc/plugins/stages/common/vbi-services.
+orc_add_core_unit_tests(
+        orc-core-unit-tests-vbi-services
+        "unit"
+
+        common/vbi-services/nabts_page_test.cpp
+        common/vbi-services/nabts_repertoire_test.cpp
+        common/vbi-services/teletext_slicer_test.cpp
+        common/vbi-services/teletext_page_decoder_test.cpp
+        common/vbi-services/teletext_recovery_stats_test.cpp
+        common/vbi-services/teletext_row_squasher_test.cpp
 )
 
 orc_add_core_unit_tests(

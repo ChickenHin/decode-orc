@@ -1,6 +1,6 @@
 /*
  * File:        teletext_slicer.h
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     WST (System B) teletext data-line slicer producing T42 packets,
  *              on 625-line and 525-line television systems
  *
@@ -11,8 +11,10 @@
 #ifndef ORC_TELETEXT_SLICER_H
 #define ORC_TELETEXT_SLICER_H
 
-// SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
-// ABI; changes never force an ABI bump (recompile the plugin at your leisure).
+// Shared plugin-side library, NOT part of the SDK contract: it compiles
+// against the public SDK headers only and is linked privately into the stage
+// plugins that need it. Nothing here crosses the plugin boundary, so changes
+// never force an ABI bump.
 
 #include <array>
 #include <cstddef>
@@ -455,7 +457,7 @@ struct TeletextLineResult {
   // than merely observed: parity says a byte is wrong, and this says which bit
   // of it to doubt (see TeletextSlicerOptions::parity_repair). It also weights
   // the vote when repeated copies of a row are combined (see
-  // orc/support/teletext_row_squasher.h).
+  // vbi-services/teletext_row_squasher.h).
   TeletextPacketConfidence byte_confidence{};
 
   // Data bytes whose least-confident bit was flipped to restore odd parity

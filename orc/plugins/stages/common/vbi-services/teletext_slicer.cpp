@@ -1,6 +1,6 @@
 /*
  * File:        teletext_slicer.cpp
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     WST (System B) teletext data-line slicer producing T42 packets,
  *              on 625-line and 525-line television systems
  *
@@ -8,7 +8,7 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <orc/support/teletext_slicer.h>
+#include "teletext_slicer.h"
 
 #include <algorithm>
 #include <array>

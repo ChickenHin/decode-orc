@@ -497,12 +497,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Thread-safe least-recently-used cache"
-  - path: orc/support/nabts_page.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "A decoded NAPLPS presentation record as a resolved display list in unit space"
   - path: orc/support/preview_helpers.h
     tier: support
     domain: ""
@@ -515,30 +509,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Runtime loader for a stage's instructions.md (platform file I/O)"
-  - path: orc/support/teletext_page_decoder.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "WST teletext page decoder (625 and 525 line) producing Level 1 snapshots and subtitle cues"
-  - path: orc/support/teletext_recovery_stats.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "Accumulates teletext recovery outcomes into a diagnostic profile of a run"
-  - path: orc/support/teletext_row_squasher.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "Combines repeated copies of a teletext page row into one best-estimate row"
-  - path: orc/support/teletext_slicer.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "WST teletext data-line slicer producing 42-byte (625 line) or 34-byte (525 line) packets"
   - path: orc/support/vbi_types.h
     tier: support
     domain: ""

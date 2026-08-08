@@ -1,6 +1,6 @@
 /*
  * File:        teletext_page_decoder.cpp
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     WST (System B) teletext magazine/page decoder producing
  *              Level 1 page snapshots and subtitle cues
  *
@@ -8,7 +8,7 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <orc/support/teletext_page_decoder.h>
+#include "teletext_page_decoder.h"
 
 #include <algorithm>
 #include <utility>

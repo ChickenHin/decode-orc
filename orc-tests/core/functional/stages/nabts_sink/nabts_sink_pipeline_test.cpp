@@ -10,11 +10,9 @@
 
 #include <gtest/gtest.h>
 #include <orc/plugin/orc_stage_services.h>
-#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +29,8 @@
 #include "nabts_sink_stage.h"
 #include "naplps_state.h"
 #include "sha256_hash.h"
+#include "vbi-services/teletext_slicer.h"
+#include "vbi-services/vbi_analysis_results.h"
 #include "vbi_source_stage.h"
 
 namespace orc {

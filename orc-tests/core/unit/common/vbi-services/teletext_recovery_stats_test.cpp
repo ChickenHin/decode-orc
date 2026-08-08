@@ -10,16 +10,17 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
+#include "vbi-services/teletext_recovery_stats.h"
+
 #include <gtest/gtest.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_recovery_stats.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <array>
 #include <cstdint>
 #include <string>
 
 #include "teletext_line_synthesizer.h"
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 namespace tests {

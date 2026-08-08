@@ -1,6 +1,6 @@
 /*
  * File:        teletext_row_squasher.cpp
- * Module:      decode-orc Plugin SDK (support tier)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     Combine repeated copies of a teletext page row into one
  *              best-estimate row ("squashing")
  *
@@ -12,11 +12,12 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_row_squasher.h>
+#include "teletext_row_squasher.h"
 
 #include <algorithm>
 #include <array>
+
+#include "teletext_page_decoder.h"
 
 namespace orc {
 

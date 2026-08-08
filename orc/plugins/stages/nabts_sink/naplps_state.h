@@ -11,14 +11,13 @@
 #ifndef ORC_NAPLPS_STATE_H
 #define ORC_NAPLPS_STATE_H
 
-#include <orc/support/nabts_page.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
 #include "naplps_pdi.h"
+#include "vbi-services/nabts_page.h"
 
 namespace orc {
 

@@ -10,9 +10,10 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
+#include "vbi-services/teletext_slicer.h"
+
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <algorithm>
 #include <array>

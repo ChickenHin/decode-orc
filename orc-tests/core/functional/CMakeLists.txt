@@ -150,6 +150,9 @@ if(TARGET orc-vbi-source)
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source
+        # The slicer and page decoder the 525-line recovery check verifies
+        # against; the PUBLIC include directory comes with the link.
+        orc-vbi-services
         GTest::gmock_main
     )
     if(TARGET orc-stage-plugin-vbi-source)
@@ -187,6 +190,7 @@ if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-nabts-sink)
         orc-core
         orc-vbi-source
         orc-stage-plugin-nabts-sink
+        orc-vbi-services
         GTest::gmock_main
     )
     if(TARGET orc-stage-plugin-vbi-source)
@@ -216,6 +220,7 @@ if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-sink)
         orc-core
         orc-vbi-source
         orc-stage-plugin-teletext-sink
+        orc-vbi-services
         GTest::gmock_main
     )
     if(TARGET orc-stage-plugin-vbi-source)

@@ -1,18 +1,18 @@
 /*
  * File:        nabts_captions.cpp
- * Module:      decode-orc Plugin SDK (support)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     The NABTS caption service as a cue list (CEA-516 §7.3.10)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <orc/stage/analysis_sink_results.h>
-#include <orc/support/nabts_page.h>
-
 #include <algorithm>
 #include <cstddef>
 #include <utility>
+
+#include "nabts_page.h"
+#include "vbi_analysis_results.h"
 
 namespace orc {
 

@@ -11,8 +11,6 @@
 
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/support/logging.h>
-#include <orc/support/teletext_recovery_stats.h>
-#include <orc/support/teletext_slicer.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
@@ -26,6 +24,8 @@
 #include "nabts_block_scanner.h"
 #include "nabts_frame_slicer.h"
 #include "nabts_packet.h"
+#include "vbi-services/teletext_recovery_stats.h"
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 

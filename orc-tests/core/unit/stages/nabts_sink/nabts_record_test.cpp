@@ -647,7 +647,7 @@ TEST(NabtsApplicationRecord, ClosesADescriptorWhoseDelimiterWasLost) {
 // byte becomes a descriptor of its own, so a record with one damaged byte lists
 // one spurious argumentless descriptor. That is affordable only because these
 // are listed for a reader and never executed — see NabtsRecordFunction in
-// orc/stage/analysis_sink_results.h. Dropping the rest of the record instead
+// vbi-services/vbi_analysis_results.h. Dropping the rest of the record instead
 // would lose real descriptors to local damage, which is the worse trade.
 TEST(NabtsApplicationRecord,
      AnIllegalCodeEndsItsDescriptorWithoutLosingTheRest) {

@@ -11,12 +11,12 @@
 #ifndef ORC_TELETEXT_SQUASH_STATS_H
 #define ORC_TELETEXT_SQUASH_STATS_H
 
-#include <orc/support/teletext_row_squasher.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+
+#include "vbi-services/teletext_row_squasher.h"
 
 namespace orc {
 

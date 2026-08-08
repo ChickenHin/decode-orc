@@ -14,8 +14,6 @@
 
 #pragma once
 
-#include <orc/support/teletext_slicer.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -23,6 +21,7 @@
 
 #include "nabts_packet.h"
 #include "nabts_record.h"
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc_unit_test {
 namespace nabts {

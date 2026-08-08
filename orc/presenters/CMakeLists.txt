@@ -77,6 +77,10 @@ target_link_libraries(orc-presenters
         orc-stage-plugin-dropout-analysis-sink
         orc-stage-plugin-snr-analysis-sink
         orc-stage-plugin-burst-level-analysis-sink
+        # The teletext and NABTS catalogue contracts, and the page-number
+        # parser the GUI uses. Plugin-side rather than SDK; PUBLIC so the
+        # include directory and nabts_caption_cues() reach the GUI targets.
+        orc-vbi-services
     PRIVATE
         orc-core    # Core implementation hidden from GUI/CLI
 )

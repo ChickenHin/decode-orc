@@ -7,11 +7,13 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
+#include "vbi-services/teletext_row_squasher.h"
+
 #include <gtest/gtest.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_row_squasher.h>
 
 #include <string>
+
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 namespace tests {

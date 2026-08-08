@@ -12,10 +12,6 @@
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_recovery_stats.h>
-#include <orc/support/teletext_row_squasher.h>
-#include <orc/support/teletext_slicer.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
@@ -34,6 +30,10 @@
 #include "teletext_frame_slicer.h"
 #include "teletext_page_catalogue.h"
 #include "teletext_squash_stats.h"
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/teletext_recovery_stats.h"
+#include "vbi-services/teletext_row_squasher.h"
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 

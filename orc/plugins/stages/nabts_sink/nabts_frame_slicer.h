@@ -13,7 +13,6 @@
 #include <orc/stage/common_types.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <array>
 #include <cstddef>
@@ -22,6 +21,7 @@
 #include <vector>
 
 #include "nabts_scan_state.h"
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 

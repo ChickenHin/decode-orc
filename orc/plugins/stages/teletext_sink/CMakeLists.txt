@@ -14,4 +14,7 @@ orc_add_stage_plugin(
     OUTPUT_NAME orc-stage-plugin-teletext-sink
     PLUGIN_VERSION "${ORC_VERSION}"
     SOURCES ${STAGE_PLUGIN_SOURCES}
+    # WST slicing, page decoding, row squashing and recovery statistics, shared
+    # with nabts_sink (see orc/plugins/stages/common/vbi-services).
+    LINK_LIBRARIES orc-vbi-services
 )

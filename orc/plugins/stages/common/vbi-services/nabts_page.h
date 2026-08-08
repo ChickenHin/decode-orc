@@ -1,6 +1,6 @@
 /*
  * File:        nabts_page.h
- * Module:      decode-orc Plugin SDK (support)
+ * Module:      orc-vbi-services (shared plugin library)
  * Purpose:     A decoded NAPLPS presentation record as a resolved display list
  *              in unit space
  *

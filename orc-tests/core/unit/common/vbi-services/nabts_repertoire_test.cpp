@@ -9,12 +9,13 @@
  */
 
 #include <gtest/gtest.h>
-#include <orc/stage/analysis_sink_results.h>
-#include <orc/support/nabts_page.h>
 
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "vbi-services/nabts_page.h"
+#include "vbi-services/vbi_analysis_results.h"
 
 namespace orc {
 namespace {

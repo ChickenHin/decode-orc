@@ -9,8 +9,6 @@
 
 #include "teletextdialog.h"
 
-#include <orc/support/teletext_page_decoder.h>
-
 #include <QAbstractItemView>
 #include <QBrush>
 #include <QHBoxLayout>
@@ -23,6 +21,7 @@
 #include <cstddef>
 
 #include "teletextpagewidget.h"
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace {
 

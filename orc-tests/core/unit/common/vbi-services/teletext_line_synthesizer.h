@@ -11,14 +11,15 @@
 #pragma once
 
 #include <orc/stage/cvbs_signal_constants.h>
-#include <orc/support/teletext_page_decoder.h>
-#include <orc/support/teletext_slicer.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <vector>
+
+#include "vbi-services/teletext_page_decoder.h"
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 namespace tests {

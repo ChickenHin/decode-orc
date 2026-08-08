@@ -102,7 +102,7 @@ measured description of the service:
 
 So the generator side is done and measured; this plan is the reader side. Two in-code statements go
 stale and must change with it: the `SystemGeometry` comment in
-[teletext_slicer.cpp](../orc/sdk/src/teletext_slicer.cpp) that names NABTS as "the obvious candidate"
+[teletext_slicer.cpp](../orc/plugins/stages/common/vbi-services/teletext_slicer.cpp) that names NABTS as "the obvious candidate"
 for a third row (Task 1.2 is exactly that row), and the class comment in
 [teletext_frame_slicer.h](../orc/plugins/stages/teletext_sink/teletext_frame_slicer.h) saying NABTS
 lines "are seen and rejected rather than decoded".
@@ -123,16 +123,32 @@ boundary.**
 > plugin can depend on the SDK but not on `orc/plugins/stages/common/` — a shared in-tree library is
 > a tie that has to be cut at exactly the moment the two stages are hardest to separate. Point 4
 > below still holds for what it actually names: the expensive, subtle part is the bit detectors, and
-> those are in the SDK (`orc/support/teletext_slicer.h`), shared and staying shared. It is the thin
+> those were in the SDK (`orc/support/teletext_slicer.h`), shared and staying shared. It is the thin
 > frame-and-block loop above them that is duplicated, and duplicating it bought each copy its own
 > shape — see the table in §2.1.
+>
+> **Amended 2026-08-08 (same day).** The bit detectors are no longer in the SDK: Phase 1 of
+> [the externalisation plan](teletext-nabts-externalisation-plan.md) moved them, the page decoder,
+> the row squasher, the recovery statistics and the NAPLPS display-list model into
+> `orc/plugins/stages/common/vbi-services` (`orc-vbi-services`). Format-specific decoding for two
+> stages has no third-party value, and the catalogue contracts sitting in the ABI-frozen stage tier
+> meant a teletext change bumped the host ABI for every plugin in the ecosystem — abi 12 and 13 were
+> both exactly that.
+>
+> This does not reinstate the tie the paragraph above was written to avoid, because the two sinks
+> leave the tree *together*: `vbi-services` moves with them into their repository (Phase 4), where
+> it stays a shared library between two plugins that were always going to ship as a pair. What the
+> earlier decision correctly refused was a shared library binding an external plugin back to the
+> *host* tree, and nothing here does that — `orc-vbi-services` compiles against the public SDK
+> alone. The `Nabts`-prefixed copies of the frame pass stay copies; only the layers named above are
+> shared.
 
 The alternative — a `service` parameter on `teletext_sink` selecting WST or NABTS — was assessed
 and rejected. The evidence:
 
 1. **Nothing above the packet is shared, and that is most of a sink stage.** The WST sink's page
-   catalogue (`teletext_page_catalogue`), row squasher (`orc/support/teletext_row_squasher.h`),
-   page decoder (`orc/support/teletext_page_decoder.h`), squash statistics, subtitle export and page
+   catalogue (`teletext_page_catalogue`), row squasher (`vbi-services/teletext_row_squasher.h`),
+   page decoder (`vbi-services/teletext_page_decoder.h`), squash statistics, subtitle export and page
    viewer all encode the Level 1 model. NABTS replaces every one of them with a different mechanism:
    data-group reassembly, longitudinal-parity correction, continuity-index loss detection, record
    linking, and a NAPLPS interpreter.
@@ -155,8 +171,8 @@ and rejected. The evidence:
 
 4. **What *is* shared is not stage code.** The expensive, subtle part — the threshold and MLSE bit
    detectors, the phase hint, the amplitude gates, the per-line scan state, the block-parallel frame
-   pass and the recovery statistics — already lives in `orc/support/teletext_slicer.h`,
-   `orc/support/teletext_recovery_stats.h` and the plugin-side `teletext_frame_slicer` /
+   pass and the recovery statistics — already lives in `vbi-services/teletext_slicer.h`,
+   `vbi-services/teletext_recovery_stats.h` and the plugin-side `teletext_frame_slicer` /
    `teletext_scan_state`. Phase 2 promotes the plugin-side pair into
    `orc/plugins/stages/common/`, alongside `audio-resample` and `efm-decode`, so both sinks compile
    one copy. Commit 54f1658f removed teletext code duplication once already; re-introducing it is
@@ -174,9 +190,9 @@ tool menu and results interface are each half inapplicable at any moment.
 
 | Layer | WST (exists) | NABTS (new) | Shared |
 |---|---|---|---|
-| Bit recovery | `orc/support/teletext_slicer.h` | — | extended with System C (Phase 1) |
+| Bit recovery | `vbi-services/teletext_slicer.h` | — | extended with System C (Phase 1) |
 | Frame pass | `teletext_frame_slicer`, `teletext_scan_state`, `teletext_block_scanner` | `nabts_frame_slicer`, `nabts_scan_state`, `nabts_block_scanner` (Phase 2) | — |
-| Diagnostics | `orc/support/teletext_recovery_stats.h` | — | service-aware parity profile (Phase 1) |
+| Diagnostics | `vbi-services/teletext_recovery_stats.h` | — | service-aware parity profile (Phase 1) |
 | Stage | `teletext_sink` | `nabts_sink` (Phase 3) | — |
 | Packet → structure | `teletext_page_decoder` | `nabts_record_assembler` (Phase 4) | — |
 | Presentation | Level 1 cell grid | `naplps_interpreter` → display list (Phase 5) | — |
@@ -270,12 +286,12 @@ Extends the SDK slicer so that a NABTS data line is recovered as a 33-byte packe
 ### Task 1.1 — `TeletextSystem::kNabts525` and its public constants
 
 Add `kNabtsPacketBytes = 33` and the `kNabts525` enumerator to
-[teletext_slicer.h](../orc/sdk/include/orc/support/teletext_slicer.h); extend `teletext_bit_rate()`
+[teletext_slicer.h](../orc/plugins/stages/common/vbi-services/teletext_slicer.h); extend `teletext_bit_rate()`
 and `teletext_packet_bytes()`. Cite CEA-516 §1.3, §3.1 at each constant.
 
 *Acceptance:* `teletext_packet_bytes(kNabts525) == 33`, `teletext_bit_rate(kNabts525) ==
 kTeletext525BitRate`; the existing `static_assert` block in
-[teletext_slicer.cpp](../orc/sdk/src/teletext_slicer.cpp) is extended to cover the new row and
+[teletext_slicer.cpp](../orc/plugins/stages/common/vbi-services/teletext_slicer.cpp) is extended to cover the new row and
 compiles.
 
 ### Task 1.2 — Per-system framing code and prefix length in `SystemGeometry`
@@ -347,9 +363,9 @@ non-zero `packets()`.
 ### Task 1.7 — Unit tests
 
 Add `nabts_synth_options()` and a NABTS transmission-packet builder to
-[teletext_line_synthesizer.h](../orc-tests/core/unit/support/teletext_line_synthesizer.h) (framing
+[teletext_line_synthesizer.h](../orc-tests/core/unit/common/vbi-services/teletext_line_synthesizer.h) (framing
 byte 0xE7 on the wire, 33 payload bytes, Hamming-coded prefix), and extend
-`orc-tests/core/unit/support/teletext_slicer_test.cpp`.
+`orc-tests/core/unit/common/vbi-services/teletext_slicer_test.cpp`.
 
 Coverage: clean round-trip at both detectors; band-limited round-trip at MLSE; noise rejection;
 timing tolerance across the ± 0.34 µs of CEA-516 §1.3; and — the test that matters most — **cross
@@ -724,7 +740,7 @@ Not in the original plan. Task 6.2 called for the presenter to map code points t
 6.5 needs the same mapping to write caption text out of the *stage* — where a presenter does not
 reach. Two implementations that must agree is the outcome to avoid, so the mapping went into the
 support tier instead, beside the display list it reads:
-[nabts_page.h](../orc/sdk/include/orc/support/nabts_page.h) gains `nabts_primary_to_unicode()`,
+[nabts_page.h](../orc/plugins/stages/common/vbi-services/nabts_page.h) gains `nabts_primary_to_unicode()`,
 `nabts_supplementary_to_unicode()`, `nabts_supplementary_is_nonspacing()`, `nabts_is_mosaic_code()`,
 `nabts_mosaic_sixels()`, `nabts_character_to_utf8()` and `nabts_page_text()`.
 
@@ -913,7 +929,7 @@ teletext path's, unchanged.
 ### Task 6.5 — Captioning
 
 The caption service is surfaced twice from one implementation: `nabts_caption_cues()` in the SDK
-([nabts_captions.cpp](../orc/sdk/src/nabts_captions.cpp)) reads a catalogue into cues, and both the
+([nabts_captions.cpp](../orc/plugins/stages/common/vbi-services/nabts_captions.cpp)) reads a catalogue into cues, and both the
 viewer's caption track and the stage's new `export_captions` parameter go through it — so the file
 and the screen cannot disagree about what the service said.
 
@@ -958,6 +974,17 @@ entry, so none is expected, but the `CLI.PluginUxCapabilityParity` gate decides.
 
 *Acceptance:* `ctest -L contracts` green; `mkdocs build` clean.
 
+**The viewer did not go in `dialogues/`.** That directory holds the dialogues that attach to a
+previewed stage — Preview, Frame-timing, Line-scope and the main window — and each of its pages says
+so of itself. A stage tool is a different thing, and the precedent is already set: the Teletext Pages
+viewer is documented under **Stage tools** within its stage's section of `sink-core-stages.md`, not
+as a dialogue. NABTS Records follows it. `plugin_ux_capabilities.yaml` needed no entry either, for
+the reason the task anticipated: it records the plugin- and stage-*management* capabilities that
+`orc-gui` and `orc-cli` must keep in parity, and a per-stage viewer is not one of them.
+
+`sink-analysis-stages.md` also carried a sentence explaining why the Teletext Sink lives under sink
+stages despite offering a batch-analysis dialog; that now covers both stages.
+
 ### Task 7.3 — Validation sweep
 
 Full gate set from AGENTS.md §4.6: build, `ctest --output-on-failure`, `MVPArchitectureCheck`,
@@ -966,3 +993,47 @@ reference captures (the WST goldens must be unchanged by Phases 1-2).
 
 *Acceptance:* all green; the WST golden stream hashes in `teletext_sink_pipeline_test.cpp` are the
 values recorded before this work began.
+
+Result: 3028 tests pass, 0 fail. `MVPArchitectureCheck` 1/1, `-L sdk` 9/9, `-L gui` 469/469 offscreen,
+`mkdocs build` clean. All 11 NABTS functional tests and all 8 WST ones ran — none skipped — and
+`teletext_sink_pipeline_test.cpp` has not been touched by any commit in this series, so the four WST
+golden stream hashes are literally the pre-work values and the shared-slicer changes of Phases 1-2
+did not move the recovered stream.
+
+### What a marginal recording looks like, measured
+
+Recorded here because it is the question a user asks first, and the answer is not in the code.
+
+The NBC Teletext capture is VHS at **EP**, and it browses as nonsense: 239 records catalogued, 212 of
+them drawing something, almost none legible. That is the recording, not the decode. Both captures,
+decoded end to end at identical settings:
+
+| | ExtraVision (VHS SP) | NBC Teletext (VHS EP) |
+|-|-|-|
+| MLSE decision confidence | 0.55 | 0.22 |
+| record data bytes failing odd parity (§3.3) | 0.024 % (65/270425) | 7.10 % (9053/127554) |
+| packets orphaned rather than placed in a group | 0.09 % (277/293575) | 62 % (111351/178730) |
+| record headers refused | 1 of 7736 groups | 866 of 2824 |
+| linked series joined | 1246 | 0 |
+| blocks mended by the §3.4 product code | 768 | 0 (the service sends no suffix) |
+
+The first row is the one to read. `AWstCaptureYieldsAlmostNothing` already records that a World System
+Teletext recording read as NABTS — pure noise fitted by MLSE — arrives at a mean decision confidence
+of 0.21. The EP tape is at 0.22: its bit decisions are at the noise floor.
+
+Why 7 % of bytes destroys a page rather than blemishing it is the difference between the two services.
+A WST page is a grid of independent parity-coded bytes, so damage stays where it lands. A NABTS record
+is a stateful byte stream — opcodes, operand counts and coordinates — so one wrong byte changes how
+the several after it are read. Record 000/001 has a row reading `EECFMAC 15, 1983` against a broadcast
+`DECEMBER 15, 1983` (D→E, E→F, B→A, E→C, one or two bit flips each), and its whole content collapses
+into the top eight rows because the positioning codes are hit too.
+
+**The one thing that would help and is not done.** NBC runs a carousel: each record arrives 8 to 19
+times. `NabtsRecordCatalogue::copy_is_better` keeps exactly one copy — the intact one if there is one,
+otherwise the longest. No NBC record ever arrives intact, so it is always "longest wins", and length
+is uncorrelated with correctness. Combining the copies would be a large win, and parity makes it cheap:
+odd parity flags roughly seven of every eight corrupted bytes, so per byte offset one could take the
+first copy that passes, or majority-vote among those that do. The obstacles are real though — copies
+differ in length, alignment is not guaranteed where a group boundary was misdetected, and versions must
+stay separate (they already are, being distinct catalogue keys). It is the same idea as
+`squash_repeated_rows` in the teletext sink, one layer up.
