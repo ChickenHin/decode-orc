@@ -154,14 +154,14 @@ SourceParameters params_for(VideoSystem system) {
 }
 
 // Independent restatement of the applicability contract (Observer::applies_to
-// per observer): fm_code/white_flag are NTSC-only, everything else applies to
-// every system. A drift in either direction fails this test.
+// per observer): fm_code/white_flag are NTSC-only, closed_caption is 525-line
+// only (NTSC + PAL_M), everything else applies to every system. A drift in
+// either direction fails this test.
 const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
     {"white_snr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"black_psnr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"burst_level", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
-    {"closed_caption",
-     {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"closed_caption", {VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"biphase", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"colour_frame_phase",
      {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
@@ -203,6 +203,7 @@ TEST(FilterApplicableObservers, DropsInapplicableObserversPerSystem) {
   auto pal_expected = kExpectedObserverIds;
   pal_expected.erase("fm_code");
   pal_expected.erase("white_flag");
+  pal_expected.erase("closed_caption");
   EXPECT_EQ(
       id_set(filter_applicable_observers(all, params_for(VideoSystem::PAL))),
       pal_expected);

@@ -51,13 +51,19 @@ namespace orc {
 class TeletextPageCatalogue {
  public:
   /**
-   * Upper bound on catalogued sub-pages. A full carousel is a few hundred
-   * pages; the cap keeps a multi-service recording from growing the catalogue
-   * without limit (each entry holds a 40x25 page grid). When full, the least
+   * Upper bound on catalogued sub-pages. The cap keeps a multi-service or
+   * noisily sliced recording from growing the catalogue without limit (each
+   * entry holds a 40x25 page grid, so ~1 KB apiece). When full, the least
    * recently seen sub-page is dropped — with its page, if it was the last one —
    * and the dataset is flagged truncated.
+   *
+   * A single service can address 800 display pages (8 magazines x 100 BCD page
+   * numbers), so this sits above a full carousel with room for sub-pages and
+   * for a second service to share the recording, at ~2 MB of grids. It is well
+   * under the spec-conformant worst case of 800 x 79 sub-pages, which no real
+   * transmission approaches.
    */
-  static constexpr std::size_t kMaxCataloguedSubPages = 512;
+  static constexpr std::size_t kMaxCataloguedSubPages = 2048;
 
   /**
    * Upper bound on the sub-pages held for any one page number, so that a page

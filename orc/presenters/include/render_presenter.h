@@ -105,21 +105,13 @@ class RenderPresenter {
   // === DAG Management ===
 
   /**
-   * @brief Update the internal DAG from the current project state
+   * @brief Adopt a DAG and rebuild the renderers and observation pipeline.
    *
    * Call this whenever the project changes (nodes added/removed/modified).
-   * This rebuilds the internal DAG and rendering state.
+   * The DAG is built and owned elsewhere — ProjectPresenter::buildDAG() /
+   * getDAG() — so that one graph backs every presenter looking at the project.
    *
-   * @return true if DAG was built successfully
-   */
-  bool updateDAG();
-
-  /**
-   * @brief Set the DAG directly (for coordination with external DAG management)
    * @param dag_handle Opaque handle to DAG
-   *
-   * @note Used for coordination with external DAG management.
-   * The DAG is typically obtained from ProjectPresenter.
    */
   void setDAG(std::shared_ptr<void> dag_handle);
 
@@ -130,7 +122,7 @@ class RenderPresenter {
    *
    * The callback fires whenever a DAG rebuild changes one or more nodes'
    * provenance fingerprints (a parameter or topology edit). It is invoked
-   * synchronously on the thread that calls updateDAG()/setDAG(); subscribers
+   * synchronously on the thread that calls setDAG(); subscribers
    * must marshal to their own thread. The first DAG build does not notify (it
    * populates rather than invalidates).
    *
@@ -396,7 +388,7 @@ class RenderPresenter {
    * observation sidecar and starts the worker-pool scheduler with its
    * background sweeps. Auxiliary presenters that only render frames or read
    * parameters (the dropout editor's, and MainWindow's short-lived helper
-   * presenters) must disable this *before* the first setDAG()/updateDAG():
+   * presenters) must disable this *before* the first setDAG():
    * they then run with a small in-memory store only — no sidecar attach, no
    * version purge/GC against a potentially multi-GB database, no scheduler,
    * no sweeps — keeping construction cheap enough for the GUI thread and
@@ -415,7 +407,7 @@ class RenderPresenter {
    * function to stop observing.
    *
    * The callback survives DAG rebuilds — it is reinstalled on the renderer
-   * every setDAG()/updateDAG().
+   * every setDAG().
    *
    * Thread-safety: invoked synchronously on the thread driving the query; the
    * setter is expected to be called from that same thread (the render

@@ -13,11 +13,13 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -404,6 +406,128 @@ TEST_F(SqliteSidecarTest, CorruptedDatabase_RecoversByRebuilding) {
                      loaded = std::move(rec);
                    });
   EXPECT_EQ(loaded, all_variants_record());
+}
+
+// ---------------------------------------------------------------------------
+// Read-connection pool
+// ---------------------------------------------------------------------------
+
+TEST_F(SqliteSidecarTest, ConcurrentReadsDuringWrites_ReturnCorrectRecords) {
+  // Reads run on pooled connections while the writer commits on its own. Both
+  // must stay correct: a probe sees either the last committed state or the
+  // record it is looking for, never a torn one, and never a wrong record's
+  // values (the pooled statements are reused, so a missed rebind would show up
+  // here as another key's data).
+  SqliteObservationPersistence db(db_path_);
+
+  constexpr int kFields = 400;
+  std::vector<PersistedObservation> seed;
+  seed.reserve(kFields);
+  for (int i = 0; i < kFields; ++i) {
+    ObservationRecord record;
+    record["ns"]["field"] = static_cast<int32_t>(i);
+    seed.push_back(PersistedObservation{
+        key("fpX", static_cast<uint64_t>(i), "obs", "1"), std::move(record)});
+  }
+  db.save(seed);
+
+  std::atomic<bool> stop{false};
+  std::atomic<int> mismatches{0};
+
+  // Keep committing while the readers run, so every probe has a live writer to
+  // contend with.
+  std::thread writer([&] {
+    for (int round = 0; round < 20 && !stop.load(); ++round) {
+      std::vector<PersistedObservation> batch;
+      for (int i = 0; i < kFields; ++i) {
+        ObservationRecord record;
+        record["ns"]["field"] = static_cast<int32_t>(i);
+        batch.push_back(PersistedObservation{
+            key("fpY", static_cast<uint64_t>(round * kFields + i), "obs", "1"),
+            std::move(record)});
+      }
+      db.save(batch);
+    }
+  });
+
+  std::vector<std::thread> readers;
+  for (int t = 0; t < 8; ++t) {
+    readers.emplace_back([&, t] {
+      for (int pass = 0; pass < 40; ++pass) {
+        for (int i = t; i < kFields; i += 8) {
+          const auto k = key("fpX", static_cast<uint64_t>(i), "obs", "1");
+          if (!db.exists(k)) {
+            ++mismatches;
+            continue;
+          }
+          const auto record = db.load_one(k);
+          if (!record || record->at("ns").at("field") !=
+                             ObservationValue{static_cast<int32_t>(i)}) {
+            ++mismatches;
+          }
+          // A key that was never written must read as absent, whatever the
+          // writer is doing.
+          if (db.exists(key("fpZ", static_cast<uint64_t>(i), "obs", "1"))) {
+            ++mismatches;
+          }
+        }
+      }
+    });
+  }
+
+  for (auto& reader : readers) reader.join();
+  stop.store(true);
+  writer.join();
+
+  EXPECT_EQ(mismatches.load(), 0);
+}
+
+TEST_F(SqliteSidecarTest, PooledReadsDoNotPinTheWriteAheadLog) {
+  // A pooled connection is returned to the pool after every read, so its
+  // statements must be reset — a statement stopped mid-row (exists() hits its
+  // LIMIT 1 and stops) holds a read snapshot open, and an idle connection
+  // holding one stops SQLite ever checkpointing the WAL. The symptom is a -wal
+  // file that grows for the life of the session instead of being recycled.
+  SqliteObservationPersistence db(db_path_);
+
+  const auto probe = key("fp", 0, "obs", "1");
+  ObservationRecord record;
+  record["ns"]["v"] = static_cast<int32_t>(1);
+  db.save({PersistedObservation{probe, record}});
+
+  // Take a hit on the pooled connection, then commit far more data than the
+  // autocheckpoint threshold. If the probe pinned the log, none of it can be
+  // checkpointed away.
+  ASSERT_TRUE(db.exists(probe));
+
+  constexpr int kRounds = 160;
+  constexpr int kPerRound = 200;
+  for (int round = 0; round < kRounds; ++round) {
+    std::vector<PersistedObservation> batch;
+    batch.reserve(kPerRound);
+    for (int i = 0; i < kPerRound; ++i) {
+      ObservationRecord payload;
+      payload["ns"]["text"] = std::string(512, 'x');
+      batch.push_back(PersistedObservation{
+          key("fpBulk", static_cast<uint64_t>(round * kPerRound + i), "obs",
+              "1"),
+          std::move(payload)});
+    }
+    db.save(batch);
+  }
+
+  std::error_code ec;
+  const auto wal_bytes = std::filesystem::file_size(db_path_ + "-wal", ec);
+  ASSERT_FALSE(ec)
+      << "no -wal file: the sidecar is expected to run in WAL mode";
+  // A checkpointing WAL settles at SQLite's autocheckpoint threshold whatever
+  // the volume written; a pinned one has to hold every byte of it. Well over
+  // 16 MB of payload went in above, so the two outcomes are far apart.
+  constexpr std::uintmax_t kPayloadBytes =
+      static_cast<std::uintmax_t>(kRounds) * kPerRound * 512;
+  EXPECT_LT(wal_bytes, kPayloadBytes / 2)
+      << "the write-ahead log holds essentially everything written, so a "
+         "pooled read connection is pinning a snapshot against checkpointing";
 }
 
 }  // namespace

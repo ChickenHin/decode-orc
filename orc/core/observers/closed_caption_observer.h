@@ -13,13 +13,29 @@
 
 namespace orc {
 
+/**
+ * @brief Observer for EIA-608 closed captions (525-line line 21).
+ *
+ * Observations (namespace "closed_caption"):
+ * - present (bool, optional): true when a caption pair was decoded
+ * - data0 / data1 (int32, optional): the two EIA-608 bytes
+ * - parity0_valid / parity1_valid (bool, optional): per-byte parity validity
+ */
 class ClosedCaptionObserver : public Observer {
  public:
   ClosedCaptionObserver() = default;
   ~ClosedCaptionObserver() override = default;
 
   std::string observer_name() const override { return "ClosedCaptionObserver"; }
-  std::string observer_version() const override { return "1.0.0"; }
+  std::string observer_version() const override { return "1.1.0"; }
+
+  // EIA-608 captions are carried on line 21 of 525-line systems only
+  // [CTA-608-E §4.1]. 625-line PAL has no equivalent line-21 service, so the
+  // decode can only ever waste work and record present=false there.
+  bool applies_to(const SourceParameters& params) const override {
+    return params.system == VideoSystem::NTSC ||
+           params.system == VideoSystem::PAL_M;
+  }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;

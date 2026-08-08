@@ -48,7 +48,6 @@
 #include "../core/include/preview_renderer.h"
 #include "../core/include/preview_view_registry.h"
 #include "../core/include/project.h"
-#include "../core/include/project_to_dag.h"
 #include "../core/include/sqlite_observation_persistence.h"
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
@@ -1686,16 +1685,6 @@ RenderPresenter::~RenderPresenter() = default;
 RenderPresenter::RenderPresenter(RenderPresenter&&) noexcept = default;
 RenderPresenter& RenderPresenter::operator=(RenderPresenter&&) noexcept =
     default;
-
-bool RenderPresenter::updateDAG() {
-  try {
-    impl_->getConcreteDAG() = orc::project_to_dag(*impl_->project_);
-    impl_->rebuildRenderersFromDAG();
-    return true;
-  } catch (const std::exception&) {
-    return false;
-  }
-}
 
 void RenderPresenter::setDAG(std::shared_ptr<void> dag_handle) {
   impl_->dag_void_ = std::move(dag_handle);
