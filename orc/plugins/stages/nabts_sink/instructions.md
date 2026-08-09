@@ -41,6 +41,8 @@ Recovering a line reads that line's samples and nothing else, so frames are deco
 
 The record viewer for this node. Triggering the node opens it automatically, which is how the records are reached — leave `output_path` empty and triggering is a decode-and-browse that writes no file.
 
+The catalogue stays with the stage after the run, so closing the viewer and picking **NABTS Records** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced rather than decoding the source again. That menu entry only ever reads: on a node that has not been triggered it says there is nothing to show instead of starting the decode, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open viewers with them — trigger again for a catalogue that matches the new settings.
+
 The viewer lists every record the range carried: its channel and record address, its version, the record type, how often it was seen and over which frames, and the classification flags the service set on it. Because the catalogue comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel rather than whatever happened to be on screen.
 
 Selecting a record shows what it carries:

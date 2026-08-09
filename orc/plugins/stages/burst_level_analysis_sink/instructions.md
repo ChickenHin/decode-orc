@@ -45,7 +45,9 @@ frame_number,median_burst_10bit
 ## Tools
 
 ### Burst Level Analysis
-Displays per-frame colour-burst amplitude measurements in a chart window. This tool is automatically invoked after the stage is triggered. It can also be opened manually at any time from the Stage Tools menu once results are available.
+Displays per-frame colour-burst amplitude measurements in a chart window. This tool is automatically invoked after the stage is triggered.
+
+The dataset stays with the stage afterwards, so closing the window and picking **Burst Level Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without measuring again. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 
 ## Notes
 
