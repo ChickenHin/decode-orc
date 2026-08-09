@@ -138,6 +138,7 @@ if(TARGET orc-vbi-source)
         stages/vbi_source/vbi_calibration_test.cpp
         stages/vbi_source/vbi_source_pipeline_test.cpp
         stages/vbi_source/vbi_ntsc_source_test.cpp
+        stages/vbi_source/vbi_secam_source_test.cpp
         # The teletext sink's frame slicer is what the 525-line
         # recovery check drives; compiled in directly rather than linked
         # because it is a self-contained plugin-local module. It learns

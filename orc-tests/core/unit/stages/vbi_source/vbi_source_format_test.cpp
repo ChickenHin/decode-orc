@@ -90,6 +90,83 @@ TEST(VBISourceFormat, Bt8x8PALPresetCarriesCleanSourceCalibrationThresholds) {
   EXPECT_GT(format.calibration.minimum_acceptance_fraction, 0.0);
 }
 
+// The SECAM entry is the same container: the driver's SECAM television norm
+// shares the PAL one's sampling clock, its vbipack and its vbistart, so a byte
+// of one dump is a byte of the other. A preset that quietly differed anywhere
+// else would be describing a container nobody has measured.
+TEST(VBISourceFormat, Bt8x8SECAMPresetIsTheSameContainerAsPAL) {
+  VBISourceFormat pal;
+  VBISourceFormat secam;
+  std::string error;
+
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", pal, error))
+      << error;
+  ASSERT_TRUE(expand_vbi_source_preset(
+      "bt8x8 card dump, 8-bit (WST, SECAM source)", secam, error))
+      << error;
+
+  EXPECT_DOUBLE_EQ(secam.sample_rate_hz, pal.sample_rate_hz);
+  EXPECT_EQ(secam.line_length, pal.line_length);
+  EXPECT_EQ(secam.valid_samples, pal.valid_samples);
+  EXPECT_EQ(secam.sample_format, pal.sample_format);
+  EXPECT_EQ(secam.field_lines, pal.field_lines);
+  EXPECT_EQ(secam.field_range.start, pal.field_range.start);
+  EXPECT_EQ(secam.field_range.end, pal.field_range.end);
+  EXPECT_EQ(secam.frame_trailer_bytes, pal.frame_trailer_bytes);
+  EXPECT_EQ(secam.frame_trailer_is_counter, pal.frame_trailer_is_counter);
+  EXPECT_EQ(secam.first_field, pal.first_field);
+  EXPECT_EQ(secam.capture_offset_is_auto, pal.capture_offset_is_auto);
+  EXPECT_DOUBLE_EQ(secam.capture_offset_samples, pal.capture_offset_samples);
+
+  // Post-decode SECAM is a 625-line signal carrying the same World System
+  // Teletext, so it is placed on PAL frames by the same card-capture path.
+  EXPECT_EQ(secam.tv_system, VBITVSystem::kPAL);
+  EXPECT_EQ(secam.tt_system, VBITeletextSystem::kWST);
+  EXPECT_EQ(secam.family, VBISourceFamily::kCardCapture);
+}
+
+// The one thing that does differ. A SECAM transmission with vertical colour
+// identification spends field lines 8-15 — records 1 to 8 of every stored
+// field — on the identification signal, and the reference tape leaves only
+// records 12-14 carrying teletext. The share of records the run-in can be
+// found on is therefore a fraction of a PAL capture's, and it is the only
+// calibration threshold that can be relaxed without weakening the checks that
+// actually catch a wrong container: the spread, the drift and the absolute
+// floor of accepted records are untouched.
+TEST(VBISourceFormat, Bt8x8SECAMPresetExpectsFewerLinesToCarryTeletext) {
+  VBISourceFormat pal;
+  VBISourceFormat secam;
+  std::string error;
+
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", pal, error))
+      << error;
+  ASSERT_TRUE(expand_vbi_source_preset(
+      "bt8x8 card dump, 8-bit (WST, SECAM source)", secam, error))
+      << error;
+
+  EXPECT_LT(secam.calibration.minimum_acceptance_fraction,
+            pal.calibration.minimum_acceptance_fraction);
+  EXPECT_GT(secam.calibration.minimum_acceptance_fraction, 0.0);
+
+  // Three teletext lines of the sixteen records a field stores is 18,75% of
+  // them before a single line is lost to tape, which is what the PAL figure
+  // rejects and this one has to admit.
+  EXPECT_LT(secam.calibration.minimum_acceptance_fraction, 3.0 / 16.0);
+
+  EXPECT_DOUBLE_EQ(secam.calibration.acceptance_correlation,
+                   pal.calibration.acceptance_correlation);
+  EXPECT_DOUBLE_EQ(secam.calibration.search_tolerance_samples,
+                   pal.calibration.search_tolerance_samples);
+  EXPECT_DOUBLE_EQ(secam.calibration.tight_spread_samples,
+                   pal.calibration.tight_spread_samples);
+  EXPECT_DOUBLE_EQ(secam.calibration.maximum_spread_samples,
+                   pal.calibration.maximum_spread_samples);
+  EXPECT_DOUBLE_EQ(secam.calibration.maximum_drift_samples,
+                   pal.calibration.maximum_drift_samples);
+}
+
 // A bt8x8 PAL frame is 65 536 bytes: sixteen 2048-byte records in each of two
 // fields, with the frame counter inside the final record's padding rather
 // than appended to the frame.
@@ -136,9 +213,11 @@ TEST(VBISourceFormat, UnknownPresetIsRejectedAndListsTheKnownNames) {
 TEST(VBISourceFormat, PresetNamesAreTheWholeChoiceAndAllExpand) {
   const std::vector<std::string> names = vbi_source_preset_names();
 
-  EXPECT_EQ(names, (std::vector<std::string>{"bt8x8 card dump, 8-bit (WST)",
-                                             ".tbc VBI crop, 16-bit (WST)",
-                                             ".tbc VBI crop, 16-bit (NABTS)"}));
+  EXPECT_EQ(names, (std::vector<std::string>{
+                       "bt8x8 card dump, 8-bit (WST)",
+                       "bt8x8 card dump, 8-bit (WST, SECAM source)",
+                       ".tbc VBI crop, 16-bit (WST)",
+                       ".tbc VBI crop, 16-bit (NABTS)"}));
 
   for (const std::string& name : names) {
     VBISourceFormat format;
@@ -164,9 +243,12 @@ TEST(VBISourceFormat, PresetNamesAreFilteredByTelevisionSystem) {
   const std::vector<std::string> ntsc =
       vbi_source_preset_names(VBITVSystem::kNTSC);
 
-  // A PAL project is offered one format; an NTSC project is offered the choice
-  // between the two services its captures might carry.
-  EXPECT_EQ(pal, (std::vector<std::string>{"bt8x8 card dump, 8-bit (WST)"}));
+  // A PAL project is offered the one card container in its two source
+  // flavours; an NTSC project is offered the choice between the two services
+  // its captures might carry.
+  EXPECT_EQ(pal, (std::vector<std::string>{
+                     "bt8x8 card dump, 8-bit (WST)",
+                     "bt8x8 card dump, 8-bit (WST, SECAM source)"}));
   EXPECT_EQ(ntsc, (std::vector<std::string>{".tbc VBI crop, 16-bit (WST)",
                                             ".tbc VBI crop, 16-bit (NABTS)"}));
 

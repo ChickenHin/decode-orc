@@ -292,7 +292,8 @@ TEST(VBISourceStageParameters, OffersEveryKnownContainerPreset) {
 
 // A capture's television system fixes the geometry of the frames it is placed
 // on, so a project is offered the formats of its own system and nothing else.
-// That is the whole of the choice: a PAL project has one, an NTSC project two.
+// That is the whole of the choice: a PAL project is offered the card container
+// in its two source flavours, an NTSC project the two services its crops carry.
 TEST(VBISourceStageParameters, TheFormatsOfferedFollowTheProjectSystem) {
   VBISourceStage stage;
 

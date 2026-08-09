@@ -57,6 +57,20 @@ constexpr double kBt8x8PALSearchToleranceSamples = 48.0;
 // rate, which walks the position clean out of the search window.
 constexpr double kBt8x8PALMaximumSpreadSamples = 8.0;
 
+// Fraction of the sampled records a 625-line card capture must lock before its
+// fit is trusted.  A PAL broadcaster has the whole of the WST line list to use
+// and the material in circulation uses most of it, so a quarter is a low bar
+// that only a wrong configuration falls under.
+constexpr double kBt8x8PALMinimumAcceptanceFraction = 0.25;
+
+// The same figure for a SECAM source, where it cannot be anything like as high
+// (see make_bt8x8_secam below for why).  It is deliberately not zero: the fit
+// still has to lock on something repeatable, and the absolute floor of eight
+// accepted records, the spread limit and the drift check are what actually
+// catch a wrong container, rate or system.  This one figure only asks that at
+// least one record of every other frame carried the data service.
+constexpr double kBt8x8SECAMMinimumAcceptanceFraction = 0.03;
+
 struct PresetEntry {
   const char* name;
   VBISourceFormat format;
@@ -96,6 +110,40 @@ VBISourceFormat make_bt8x8_pal() {
   format.calibration.tight_spread_samples = 0.5;
   format.calibration.maximum_spread_samples = kBt8x8PALMaximumSpreadSamples;
   format.calibration.maximum_drift_samples = kBt8x8PALMaximumSpreadSamples;
+  format.calibration.minimum_acceptance_fraction =
+      kBt8x8PALMinimumAcceptanceFraction;
+  return format;
+}
+
+// A bt8x8 dump of a SECAM source.  The container is the PAL one byte for byte:
+// the driver's SECAM entry (Linux bttv_tvnorms[]) carries the same 35 468 950
+// Hz sampling clock, the same vbipack of 255 and the same vbistart of {7, 320}
+// as its PAL entry, so the record stride, the field stride, the frame trailer
+// and the lines the sixteen records cover are all unchanged.  Post-decode SECAM
+// is a 625-line signal carrying the same World System Teletext, so the output
+// geometry and the data service are the PAL ones too.
+//
+// What differs is how much of the line list can carry teletext.  A SECAM
+// transmission with vertical colour identification puts the identification
+// signal — a continuous 4,4 MHz burst, the "green bottles" — on frame lines
+// 8-15 and 321-328, which is records 1 to 8 of each stored field.  Half of the
+// sixteen records are therefore spoken for before any teletext is inserted, and
+// broadcasters using those idents typically left the remainder to test signals
+// and a very few teletext lines: the Russian tape this preset was measured on
+// carries teletext on records 12-14 only (frame lines 19-21 and 332-334), with
+// a VITS and a white bar on records 9-11.
+//
+// That makes the acceptance fraction — the share of sampled records the clock
+// run-in is found on — the one calibration threshold that cannot be shared with
+// PAL.  Three lines of sixteen is 19% before a single line is lost to tape, and
+// the PAL preset's quarter rejects the fit outright even though it is a good
+// one: on the reference tape it lands on 57 records with a spread of under two
+// samples and no drift, which is a healthy fit by every other measure the
+// stage has.
+VBISourceFormat make_bt8x8_secam() {
+  VBISourceFormat format = make_bt8x8_pal();
+  format.calibration.minimum_acceptance_fraction =
+      kBt8x8SECAMMinimumAcceptanceFraction;
   return format;
 }
 
@@ -164,6 +212,7 @@ const std::vector<PresetEntry>& presets() {
   // carries; the geometry behind each is in the parameter description.
   static const std::vector<PresetEntry> kPresets = {
       {"bt8x8 card dump, 8-bit (WST)", make_bt8x8_pal()},
+      {"bt8x8 card dump, 8-bit (WST, SECAM source)", make_bt8x8_secam()},
       {".tbc VBI crop, 16-bit (WST)",
        make_tbc_vbi_ntsc(VBITeletextSystem::kWST)},
       {".tbc VBI crop, 16-bit (NABTS)",

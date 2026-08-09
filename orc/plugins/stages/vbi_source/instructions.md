@@ -17,7 +17,7 @@ There are three. Everything else about a capture — its geometry, its sampling 
 | Parameter | Meaning |
 |-----------|---------|
 | VBI Capture Path (`input_path`) | Path to the capture. FLAC-wrapped files are unwrapped transparently; the wrapper's declared sample rate is a conventional placeholder and is never used for timing. |
-| Capture Format (`format`) | What the capture is. Only the formats belonging to the project's television system are offered, so a PAL project has one choice and an NTSC project two. |
+| Capture Format (`format`) | What the capture is. Only the formats belonging to the project's television system are offered, so a PAL project is offered the card container in its two source flavours and an NTSC project the two services its crops might carry. |
 | Dropped Frames (`drops`) | `preserve` (default) emits only the frames present; `pad` emits a blank frame in each gap so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter cannot report drops at all, so neither policy has anything to act on. |
 
 ## The capture formats
@@ -27,6 +27,14 @@ There are three. Everything else about a capture — its geometry, its sampling 
 A 625-line capture-card dump. 2048 samples per record of which 2044 are real, unsigned 8-bit, at 8×fsc (35 468 950 Hz); 16 records per field carrying field lines 7–22, which is the whole of the WST line list.
 
 The card's own time from 0H is documented but unreliable — the driver's source calls its own datasheet figure wrong — so it is measured from the clock run-in when the capture is opened, and the run stops with a diagnostic if that measurement cannot be trusted. Logic levels are estimated per line, because a card's levels move with its gain control. The last four bytes of every frame are the driver's frame sequence number, which is what makes dropped frames detectable at all.
+
+### `bt8x8 card dump, 8-bit (WST, SECAM source)` — PAL projects
+
+The same container, byte for byte, from a SECAM source. The driver's SECAM television norm shares the PAL one's 8×fsc sampling clock, its `vbipack` and its `vbistart`, so the record stride, the field stride, the frame trailer and the lines the sixteen records cover are all unchanged — and post-decode SECAM is a 625-line signal carrying the same World System Teletext, which is why it is placed on PAL frames.
+
+What differs is how much of the line list can carry teletext. A SECAM transmission with vertical colour identification puts the identification signal — a continuous 4,4 MHz burst, the "green bottles" — on field lines 8–15 and 321–328, which is records 1 to 8 of every stored field. Half the records are spoken for before any teletext is inserted, and broadcasters using those idents typically left the rest to test signals and a very few teletext lines: the Russian tape this entry was measured on carries teletext on records 12–14 only (field lines 19–21 and 332–334), with a VITS and a white bar on records 9–11.
+
+That is a fifth of the records at best, where a PAL capture uses most of them, and the run-in is looked for on every stored record. So this entry expects the run-in on far fewer of them before it trusts a fit. Nothing else about the calibration is relaxed: the same search window, the same acceptance correlation, the same spread and drift limits, and the same absolute floor of accepted records. Pick this entry when your capture came from a SECAM broadcast or tape; picking the PAL one instead gets you a healthy fit rejected on the line count alone, and picking this one for PAL material only makes the least important of the checks less likely to fire.
 
 ### `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` — NTSC projects
 
