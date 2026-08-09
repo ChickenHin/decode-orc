@@ -6,7 +6,7 @@
   QString::toStdString() is UTF-8, and every core/plugin call site feeds those
   straight into std::ifstream / std::filesystem / fopen).  On Windows the CRT
   and MSVC's std::filesystem convert a narrow path to UTF-16 using the process
-  ANSI code page, which is CP1252 (or similar) by default -- so a UTF-8 path
+  ANSI code page, which is CP1252 (or similar) by default, so a UTF-8 path
   containing any non-ASCII character is decoded as mojibake and the file is
   reported as missing.
 
