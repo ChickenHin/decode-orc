@@ -6,7 +6,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     qtnodes = {
-      # Pinned commit; keep in sync with io.github.simoninns.decode-orc.yml
+      # Pinned commit; keep in sync with io.github.decode_orc.decode-orc.yml
       # and the QtNodes fetch steps in .github/workflows/package-{macos,windows}.yml.
       url = "github:paceholder/nodeeditor/1b173f885b52e4fd9616f663ea288435ccf1d0d8";
       flake = false;
@@ -334,7 +334,7 @@
 
           meta = with pkgs.lib; {
             description = "Decode-Orc - LaserDisc and tape decoding orchestration framework";
-            homepage = "https://github.com/simoninns/decode-orc";
+            homepage = "https://github.com/decode-orc/decode-orc";
             license = licenses.gpl3Plus;
             platforms = platforms.linux ++ platforms.darwin;
             maintainers = [ ];
@@ -366,7 +366,7 @@
 
           meta = with pkgs.lib; {
             description = "Decode-Orc documentation site";
-            homepage = "https://github.com/simoninns/decode-orc";
+            homepage = "https://github.com/decode-orc/decode-orc";
             license = licenses.gpl3Plus;
             platforms = platforms.all;
             maintainers = [ ];

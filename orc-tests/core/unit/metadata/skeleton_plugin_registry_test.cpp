@@ -23,10 +23,10 @@ plugins:
   - plugin_id: org.decodeorc.stage.skeleton_passthrough
     plugin_version: 0.1.0
     artifact_source: github_release_asset
-    release_asset_url: https://github.com/simoninns/orc-plugin_skeleton/releases/download/v0.1.0/orc-plugin_skeleton_passthrough_linux.so
+    release_asset_url: https://github.com/decode-orc/orc-plugin_skeleton/releases/download/v0.1.0/orc-plugin_skeleton_passthrough_linux.so
     release_asset_name: orc-plugin_skeleton_passthrough_linux.so
     target_platform: linux
-    source_repo_url: https://github.com/simoninns/orc-plugin_skeleton
+    source_repo_url: https://github.com/decode-orc/orc-plugin_skeleton
     release_tag: v0.1.0
     local_dev_path: /tmp/orc-plugin_skeleton_passthrough_linux.so
     enabled: true
@@ -45,7 +45,7 @@ plugins:
   EXPECT_EQ(result.entries[0].plugin_version, "0.1.0");
   EXPECT_EQ(result.entries[0].release_tag, "v0.1.0");
   EXPECT_EQ(result.entries[0].source_repo_url,
-            "https://github.com/simoninns/orc-plugin_skeleton");
+            "https://github.com/decode-orc/orc-plugin_skeleton");
   EXPECT_EQ(result.entries[0].path,
             "/tmp/orc-plugin_skeleton_passthrough_linux.so");
 }

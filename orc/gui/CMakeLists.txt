@@ -348,7 +348,7 @@ if(APPLE)
     # Set bundle properties for macOS
     set_target_properties(orc-gui PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Decode Orc"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.simoninns.decode-orc"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.decode_orc.decode-orc"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_LONG_VERSION_STRING "${PROJECT_VERSION}"
@@ -432,23 +432,23 @@ install(TARGETS orc-gui
 
 # Linux desktop integration files
 if(UNIX AND NOT APPLE)
-    install(FILES io.github.simoninns.decode-orc.desktop
+    install(FILES io.github.decode_orc.decode-orc.desktop
         DESTINATION share/applications
     )
 
     install(FILES ${CMAKE_SOURCE_DIR}/assets/orc-gui-icon-256.png
         DESTINATION share/icons/hicolor/256x256/apps
-        RENAME io.github.simoninns.decode-orc.png
+        RENAME io.github.decode_orc.decode-orc.png
     )
 
     if(EXISTS ${CMAKE_SOURCE_DIR}/assets/orc-gui-icon.svg)
         install(FILES ${CMAKE_SOURCE_DIR}/assets/orc-gui-icon.svg
             DESTINATION share/icons/hicolor/scalable/apps
-            RENAME io.github.simoninns.decode-orc.svg
+            RENAME io.github.decode_orc.decode-orc.svg
         )
     endif()
 
-    install(FILES io.github.simoninns.decode-orc.metainfo.xml
+    install(FILES io.github.decode_orc.decode-orc.metainfo.xml
         DESTINATION share/metainfo
     )
 endif()

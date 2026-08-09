@@ -42,7 +42,7 @@ HttpFetchResult CurlHttpFetcher::fetch(const std::string& url) const {
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
   curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
   curl_easy_setopt(curl, CURLOPT_USERAGENT,
-                   "decode-orc/1.0 (+https://github.com/simoninns/decode-orc)");
+                   "decode-orc/1.0 (+https://github.com/decode-orc/decode-orc)");
 
   const CURLcode res = curl_easy_perform(curl);
   if (res != CURLE_OK) {

@@ -72,7 +72,7 @@ a separate per-application registry.
 Every plugin and stage action is available from both front ends, in the same
 words, and both derive an entry's state from one presenter-computed value
 rather than re-deriving it. The capability set is recorded in
-[`orc/plugin_ux_capabilities.yaml`](https://github.com/simoninns/decode-orc/blob/main/orc/plugin_ux_capabilities.yaml){target="_blank"},
+[`orc/plugin_ux_capabilities.yaml`](https://github.com/decode-orc/decode-orc/blob/main/orc/plugin_ux_capabilities.yaml){target="_blank"},
 which names the command and the control for each capability; the
 `CLI.PluginUxCapabilityParity` CTest (label `unit;cli`) fails when a recorded
 command disappears from `orc-cli plugins --help` / `orc-cli stages --help`, or
@@ -401,7 +401,7 @@ release publishes an asset following the plugin naming convention), and a
 maintainer's merge is the curation decision. **The merge endorses the
 repository, not a reviewed binary**: every future release the repository
 publishes becomes installable immediately. See
-[`orc-plugin-registry/README.md`](https://github.com/simoninns/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}.
+[`orc-plugin-registry/README.md`](https://github.com/decode-orc/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}.
 
 ### Distribution integrity
 
@@ -596,7 +596,7 @@ Enforcement happens at two levels:
 ## Third-Party Plugin Repositories
 
 An official skeleton template lives at
-[simoninns/orc-plugin_skeleton](https://github.com/simoninns/orc-plugin_skeleton).
+[decode-orc/orc-plugin_skeleton](https://github.com/decode-orc/orc-plugin_skeleton).
 It provides:
 
 - Minimal buildable plugin scaffold (CMake + SDK-only includes + sample stage)

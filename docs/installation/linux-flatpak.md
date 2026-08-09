@@ -2,7 +2,7 @@
 
 ## Download the latest release
 
-1. Open the GitHub releases page: [Decode-Orc Releases](https://github.com/simoninns/decode-orc/releases){target="_blank"}
+1. Open the GitHub releases page: [Decode-Orc Releases](https://github.com/decode-orc/decode-orc/releases){target="_blank"}
 2. In the latest release, download the Flatpak bundle named like `Decode-Orc-<version>-linux.flatpak`.
 
 ## Install the Flatpak bundle
@@ -25,7 +25,7 @@ flatpak install flathub org.kde.Platform//6.9
 Launch the GUI:
 
 ```bash
-flatpak run io.github.simoninns.decode-orc
+flatpak run io.github.decode_orc.decode-orc
 ```
 
 ## Use `orc-cli` from the command line
@@ -33,13 +33,13 @@ flatpak run io.github.simoninns.decode-orc
 `orc-cli` is available inside the Flatpak sandbox. Run it like this:
 
 ```bash
-flatpak run --command=orc-cli io.github.simoninns.decode-orc --help
+flatpak run --command=orc-cli io.github.decode_orc.decode-orc --help
 ```
 
 If you want a convenience wrapper, add a shell alias:
 
 ```bash
-alias orc-cli='flatpak run --command=orc-cli io.github.simoninns.decode-orc'
+alias orc-cli='flatpak run --command=orc-cli io.github.decode_orc.decode-orc'
 ```
 
 ## Troubleshooting: "file not found" when opening TBC files
@@ -51,7 +51,7 @@ to your home directory and to drives mounted under `/run/media`, `/media`,
 and `/mnt`. If your captures live somewhere else, grant access manually:
 
 ```bash
-flatpak override --user --filesystem=/path/to/your/captures io.github.simoninns.decode-orc
+flatpak override --user --filesystem=/path/to/your/captures io.github.decode_orc.decode-orc
 ```
 
 ### Network drives (SMB/NFS)
@@ -68,5 +68,5 @@ flatpak override --user --filesystem=/path/to/your/captures io.github.simoninns.
 ## Uninstall
 
 ```bash
-flatpak uninstall --user io.github.simoninns.decode-orc
+flatpak uninstall --user io.github.decode_orc.decode-orc
 ```

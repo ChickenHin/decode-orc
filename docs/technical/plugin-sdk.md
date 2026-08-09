@@ -25,7 +25,7 @@ tests and CI workflows (note: the skeleton repository may lag the SDK — the
 in-repo fixture above is always in sync with the installed package):
 
 ```bash
-git clone https://github.com/simoninns/orc-plugin_skeleton my-orc-plugin
+git clone https://github.com/decode-orc/orc-plugin_skeleton my-orc-plugin
 ```
 
 ## SDK Headers
@@ -813,7 +813,7 @@ exactly what is and is not verified.
 ### Curated index and discovery
 
 To reach users without hand-written YAML, list your plugin in the curated
-index ([`orc-plugin-registry/`](https://github.com/simoninns/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}). Open a
+index ([`orc-plugin-registry/`](https://github.com/decode-orc/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}). Open a
 pull request adding an entry naming your repository; a maintainer's merge
 publishes it immediately, and every release you publish afterwards is
 installable without a further index change. Users then discover and install it

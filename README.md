@@ -7,7 +7,7 @@
 It aims to brings structure and consistency to complex decoding processes, making them easier to run, repeat, and understand.
 
 > [!IMPORTANT]
-> [Click here for the documentation](https://simoninns.github.io/decode-orc/)
+> [Click here for the documentation](https://decode-orc.github.io/decode-orc/)
 
 `Decode-Orc` is a direct replacement for the existing ld-decode-tools, coordinating each step of the process and keeping track of inputs, outputs, and results.
 
@@ -22,19 +22,19 @@ Both a graphical interface (orc-gui) and command-line interface (orc-cli) are im
 
 ## User documentation
 
-The user documentation is available via [GitHub Pages](https://simoninns.github.io/decode-orc/)
+The user documentation is available via [GitHub Pages](https://decode-orc.github.io/decode-orc/)
 
 # Installation
 
 The Decode-Orc project provides ready-to-install packages for Mac OS (DMG).
 
-The release packages can be found in the [release section](https://github.com/simoninns/decode-orc/releases) of the Github repository.
+The release packages can be found in the [release section](https://github.com/decode-orc/decode-orc/releases) of the Github repository.
 
 For instructions on how to install please see the documentation for your preferred platform:
 
-- [Linux Flatpak installation](https://simoninns.github.io/decode-orc/installation/linux-flatpak/)
-- [MacOS DMG installation](https://simoninns.github.io/decode-orc/installation/macos-dmg/)
-- [Windows MSI installation](https://simoninns.github.io/decode-orc/installation/windows-msi/)
+- [Linux Flatpak installation](https://decode-orc.github.io/decode-orc/installation/linux-flatpak/)
+- [MacOS DMG installation](https://decode-orc.github.io/decode-orc/installation/macos-dmg/)
+- [Windows MSI installation](https://decode-orc.github.io/decode-orc/installation/windows-msi/)
 
 ## Building from Source
 
@@ -51,7 +51,7 @@ required.
 
 Canonical starter template repository:
 
-- `https://github.com/simoninns/orc-plugin_skeleton`
+- `https://github.com/decode-orc/orc-plugin_skeleton`
 
 Decode-Orc host integration consumes pre-compiled plugin artifacts from release
 assets (or a local pre-compiled path for development/testing).
@@ -91,7 +91,7 @@ The crash bundle is saved as a ZIP file in:
 - **orc-gui**: `~/Documents/decode-orc-crashes/` (or your home directory)
 - **orc-cli**: Current working directory
 
-When reporting a crash issue on [GitHub Issues](https://github.com/simoninns/decode-orc/issues), please:
+When reporting a crash issue on [GitHub Issues](https://github.com/decode-orc/decode-orc/issues), please:
 1. Attach the crash bundle ZIP file (or upload to a file sharing service if too large)
 2. Describe what you were doing when the crash occurred
 3. Include the contents of `crash_info.txt` from the bundle in your issue description

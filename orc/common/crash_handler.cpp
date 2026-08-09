@@ -643,7 +643,7 @@ static std::string create_bundle_zip(const std::string& crash_info_content,
     readme << "     (gdb) list      # Show source code around that frame\n\n";
     readme << "TO REPORT THIS ISSUE:\n";
     readme << "---------------------\n";
-    readme << "1. Go to https://github.com/simoninns/decode-orc/issues\n";
+    readme << "1. Go to https://github.com/decode-orc/decode-orc/issues\n";
     readme << "2. Click 'New Issue'\n";
     readme
         << "3. Attach this ZIP file or upload it to a file sharing service\n";
@@ -883,7 +883,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* context) {
     const char* msg3 =
         "\n==================================================\n\n";
     const char* msg4 = "Please report this issue at:\n";
-    const char* msg5 = "https://github.com/simoninns/decode-orc/issues\n\n";
+    const char* msg5 = "https://github.com/decode-orc/decode-orc/issues\n\n";
 
     if (write(STDERR_FILENO, msg1, strlen(msg1)) < 0) {
     }

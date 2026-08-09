@@ -37,7 +37,7 @@ The crash bundle is a ZIP file containing:
 
 ### How to Report a Crash
 
-1. Go to the [GitHub Issues page](https://github.com/simoninns/decode-orc/issues){target="_blank"}
+1. Go to the [GitHub Issues page](https://github.com/decode-orc/decode-orc/issues){target="_blank"}
 
 2. Click **"New Issue"** and select the bug report template
 
@@ -154,6 +154,6 @@ For new features or enhancements, please describe:
 
 For questions or help using Decode Orc (not bugs):
 
-- Check the [user documentation](https://simoninns.github.io/decode-orc/)
-- Review existing [GitHub Issues](https://github.com/simoninns/decode-orc/issues){target="_blank"} (someone may have had the same question)
+- Check the [user documentation](https://decode-orc.github.io/decode-orc/)
+- Review existing [GitHub Issues](https://github.com/decode-orc/decode-orc/issues){target="_blank"} (someone may have had the same question)
 - [The Domesday86 Discord Server](https://discord.com/invite/pVVrrxd){target="_blank"}

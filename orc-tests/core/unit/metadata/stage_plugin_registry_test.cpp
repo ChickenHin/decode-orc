@@ -22,7 +22,7 @@ plugins:
   - plugin_id: core.ntsc.source
     plugin_version: 1.2.3
     path: /plugins/libcore_ntsc_source.so
-    source_repo_url: https://github.com/simoninns/orc-plugin_core-ntsc-source
+    source_repo_url: https://github.com/decode-orc/orc-plugin_core-ntsc-source
     artifact_source: github_release_asset
     release_asset_url: https://example.invalid/core-plugin/releases/download/v1.2.3/orc-plugin_ntsc-comp-source_linux-x86_64.so
     release_tag: v1.2.3
@@ -48,7 +48,7 @@ plugins:
   EXPECT_EQ(entry.plugin_version, "1.2.3");
   EXPECT_EQ(entry.path, "/plugins/libcore_ntsc_source.so");
   EXPECT_EQ(entry.source_repo_url,
-            "https://github.com/simoninns/orc-plugin_core-ntsc-source");
+            "https://github.com/decode-orc/orc-plugin_core-ntsc-source");
   EXPECT_EQ(entry.artifact_source, "github_release_asset");
   EXPECT_EQ(entry.release_asset_url,
             "https://example.invalid/core-plugin/releases/download/v1.2.3/"
@@ -141,7 +141,7 @@ TEST(StagePluginRegistryTest, Serialize_YamlRoundTripsRegistryEntries) {
   entry.plugin_version = "0.9.0";
   entry.path = "/plugins/libthirdparty_decoder.so";
   entry.source_repo_url =
-      "https://github.com/simoninns/orc-plugin_thirdparty-decoder";
+      "https://github.com/decode-orc/orc-plugin_thirdparty-decoder";
   entry.artifact_source = "github_release_asset";
   entry.release_asset_url =
       "https://example.invalid/thirdparty-decoder/releases/download/v0.9.0/"
@@ -195,7 +195,7 @@ plugins:
     enabled: true
   - plugin_id: prefixed.repo.name
     path: /plugins/libprefixed.so
-    source_repo_url: https://github.com/simoninns/orc-plugin_valid-stage
+    source_repo_url: https://github.com/decode-orc/orc-plugin_valid-stage
     enabled: true
 )yaml";
 

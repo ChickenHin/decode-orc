@@ -791,7 +791,7 @@ void PluginManagerDialog::onAddPlugin() {
   url_dialog.setInputMode(QInputDialog::TextInput);
   url_dialog.setTextEchoMode(QLineEdit::Normal);
   url_dialog.setTextValue(
-      "https://github.com/simoninns/orc-plugin_skeleton/releases");
+      "https://github.com/decode-orc/orc-plugin_skeleton/releases");
   url_dialog.resize(900, url_dialog.sizeHint().height());
   url_dialog.setMinimumWidth(900);
 

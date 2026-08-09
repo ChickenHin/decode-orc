@@ -74,8 +74,8 @@ The application uses an automated icon generation system that creates platform-s
 ### Flatpak Considerations
 
 The Flatpak build requires:
-- Desktop file name must match app-id: `io.github.simoninns.decode-orc.desktop`
-- Icon name must match app-id: `io.github.simoninns.decode-orc`
+- Desktop file name must match app-id: `io.github.decode_orc.decode-orc.desktop`
+- Icon name must match app-id: `io.github.decode_orc.decode-orc`
 - Icons must be square (enforced by Flatpak validator)
 
 The build system automatically handles renaming icons for Flatpak packaging.

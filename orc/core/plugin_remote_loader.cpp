@@ -131,7 +131,7 @@ bool fetch_text_url(const std::string& url, std::string* body,
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
   curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
   curl_easy_setopt(curl, CURLOPT_USERAGENT,
-                   "decode-orc/1.0 (+https://github.com/simoninns/decode-orc)");
+                   "decode-orc/1.0 (+https://github.com/decode-orc/decode-orc)");
 
   CURLcode res = curl_easy_perform(curl);
   if (res != CURLE_OK) {
@@ -587,7 +587,7 @@ PluginRemoteLoader::DownloadResult PluginRemoteLoader::download_release_asset(
 
   // Add User-Agent to be respectful
   curl_easy_setopt(curl, CURLOPT_USERAGENT,
-                   "decode-orc/1.0 (+https://github.com/simoninns/decode-orc)");
+                   "decode-orc/1.0 (+https://github.com/decode-orc/decode-orc)");
 
   // Perform download
   CURLcode res = curl_easy_perform(curl);

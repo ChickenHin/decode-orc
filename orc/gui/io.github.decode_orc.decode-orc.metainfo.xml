@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.simoninns.decode-orc</id>
+  <id>io.github.decode_orc.decode-orc</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>Decode Orc</name>
@@ -22,13 +22,13 @@
       <li>Source alignment for multi-source workflows</li>
     </ul>
   </description>
-  <launchable type="desktop-id">io.github.simoninns.decode-orc.desktop</launchable>
+  <launchable type="desktop-id">io.github.decode_orc.decode-orc.desktop</launchable>
   <provides>
     <binary>orc-gui</binary>
     <binary>orc-cli</binary>
   </provides>
-  <url type="homepage">https://github.com/simoninns/decode-orc</url>
-  <url type="bugtracker">https://github.com/simoninns/decode-orc/issues</url>
+  <url type="homepage">https://github.com/decode-orc/decode-orc</url>
+  <url type="bugtracker">https://github.com/decode-orc/decode-orc/issues</url>
   <developer_name>Simon Inns</developer_name>
   <categories>
     <category>AudioVideo</category>

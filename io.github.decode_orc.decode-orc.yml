@@ -1,4 +1,4 @@
-app-id: io.github.simoninns.decode-orc
+app-id: io.github.decode_orc.decode-orc
 runtime: org.kde.Platform
 runtime-version: '6.9'
 sdk: org.kde.Sdk
