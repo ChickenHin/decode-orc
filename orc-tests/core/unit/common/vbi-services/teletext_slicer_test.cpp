@@ -584,7 +584,7 @@ TEST(TeletextInterpolateSample, SineErrorIsFarBelowLinearInterpolation) {
   constexpr double kToneHz = 2.5e6;
   constexpr double kAmplitude = 400.0;
   constexpr double kPi = 3.14159265358979323846;
-  const auto truth = [](double t) {
+  const auto truth = [&](double t) {
     return kAmplitude * std::sin(2.0 * kPi * kToneHz * t / kPalSampleRate);
   };
 

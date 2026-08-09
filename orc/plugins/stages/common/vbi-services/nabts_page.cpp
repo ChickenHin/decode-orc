@@ -310,13 +310,18 @@ std::string nabts_character_to_utf8(uint8_t code,
   return " ";
 }
 
-std::string nabts_page_text(const NabtsPageSnapshot& page) {
-  // Unit-space slack for deciding whether two characters share a baseline.
-  // Table D1 item 8 puts the nominal resolution at 256 x 200, so one pixel is
-  // about 1/256; this is far below that and absorbs only the arithmetic of
-  // resolving a relative coordinate.
-  constexpr double kEpsilon = 1e-6;
+namespace {
 
+// Unit-space slack for deciding whether two characters share a baseline.
+// Table D1 item 8 puts the nominal resolution at 256 x 200, so one pixel is
+// about 1/256; this is far below that and absorbs only the arithmetic of
+// resolving a relative coordinate.  Kept at namespace scope because MSVC
+// rejects reading a function-local constexpr from a capture-less lambda.
+constexpr double kEpsilon = 1e-6;
+
+}  // namespace
+
+std::string nabts_page_text(const NabtsPageSnapshot& page) {
   struct Placed {
     double y = 0.0;
     double x = 0.0;
