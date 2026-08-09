@@ -206,15 +206,12 @@ class MainWindow : public QMainWindow {
                                   orc::FrameLineNavigationResult result);
   void onDropoutDataReady(uint64_t request_id,
                           orc::presenters::DropoutDisplaySeries series);
-  void onDropoutProgress(size_t current, size_t total, QString message);
   void onSNRDataReady(uint64_t request_id,
                       orc::presenters::SNRDisplaySeries series);
-  void onSNRProgress(size_t current, size_t total, QString message);
   void onBurstLevelDataReady(uint64_t request_id,
                              orc::presenters::BurstLevelDisplaySeries series);
-  void onBurstLevelProgress(size_t current, size_t total, QString message);
   void onCatalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
-  void onCatalogueProgress(size_t current, size_t total, QString message);
+  void onResultsNotAvailable(uint64_t request_id);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
   void onCoordinatorError(uint64_t request_id, QString message);
@@ -279,8 +276,26 @@ class MainWindow : public QMainWindow {
   void updateProjectLoadProgressLabel();
   void endProjectLoadProgress();
   void closeAllDialogs();  ///< Close all open dialogs when switching projects
+
+  /// Close every analysis and catalogue viewer, and drop the reads in flight
+  ///
+  /// Called whenever the DAG is rebuilt: the results these windows display
+  /// belong to stage objects the rebuild has replaced.
+  void closeResultViewers();
   void createAndShowAnalysisDialog(const orc::NodeID& node_id,
                                    const std::string& stage_name);
+
+  /// Tell a failed results read's viewer why nothing arrived
+  ///
+  /// Returns true when |request_id| was one of the four results reads, so the
+  /// caller knows the failure has been reported.
+  bool reportFailedResultsRead(uint64_t request_id, const QString& message);
+
+  /// Drop |request_id| from whichever results-read map holds it
+  ///
+  /// Returns the node it was issued for, or nullopt when the id is not a
+  /// results read (a stale response, or some other request's).
+  std::optional<orc::NodeID> takePendingResultsRead(uint64_t request_id);
 
   // Line scope helpers
   void requestLineSamplesForNavigation(uint64_t field_index, int line_number,
@@ -462,16 +477,6 @@ class MainWindow : public QMainWindow {
   QString project_load_stage_label_;  ///< Stage the worker last reported
   qulonglong project_load_current_{0};
   qulonglong project_load_total_{0};
-
-  // Analysis progress dialogs per node (QPointer auto-nulls when deleted)
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      dropout_progress_dialogs_;
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      snr_progress_dialogs_;
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      burst_level_progress_dialogs_;
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      catalogue_progress_dialogs_;
 };
 
 #endif  // MAINWINDOW_H

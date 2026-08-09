@@ -230,6 +230,34 @@ TEST(CatalogueDialogTest, InconsistentDatasetIsRefused) {
   EXPECT_TRUE(dialog.headlineText().contains("inconsistent"));
 }
 
+// A trigger that fails leaves the viewer open on a pending state it must be
+// told to abandon, or it reads as a decode still running.
+TEST(CatalogueDialogTest, ErrorReplacesThePendingState) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.showPending();
+
+  dialog.showError("The report file needs an output file");
+
+  EXPECT_TRUE(dialog.listedItems().empty());
+  EXPECT_EQ(dialog.headlineText(), "The report file needs an output file");
+}
+
+// A failure after a good run replaces that run rather than leaving stale pages
+// on display under an error message.
+TEST(CatalogueDialogTest, ErrorClearsAPreviousCatalogue) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(3));
+  ASSERT_EQ(dialog.listedItems().size(), 3u);
+
+  dialog.showError("Trigger failed");
+
+  EXPECT_TRUE(dialog.listedItems().empty());
+  EXPECT_EQ(dialog.currentItemIndex(), -1);
+  EXPECT_EQ(dialog.headlineText(), "Trigger failed");
+}
+
 TEST(CatalogueDialogTest, ItemsAreTabulatedInDatasetOrder) {
   ensureApplication();
   CatalogueDialog dialog;

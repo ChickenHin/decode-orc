@@ -8,9 +8,11 @@
  */
 
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QStatusBar>
 #include <algorithm>
 #include <limits>
+#include <optional>
 
 #include "burstlevelanalysisdialog.h"
 #include "cataloguedialog.h"
@@ -595,6 +597,87 @@ void MainWindow::onTriggerComplete(uint64_t request_id, bool success,
   pending_trigger_node_id_ = orc::NodeID();
 }
 
+std::optional<orc::NodeID> MainWindow::takePendingResultsRead(
+    uint64_t request_id) {
+  const auto take =
+      [request_id](std::unordered_map<uint64_t, orc::NodeID>& pending)
+      -> std::optional<orc::NodeID> {
+    auto it = pending.find(request_id);
+    if (it == pending.end()) {
+      return std::nullopt;
+    }
+    const orc::NodeID node_id = it->second;
+    pending.erase(it);
+    return node_id;
+  };
+
+  if (const auto node_id = take(pending_dropout_requests_)) return node_id;
+  if (const auto node_id = take(pending_snr_requests_)) return node_id;
+  if (const auto node_id = take(pending_burst_level_requests_)) return node_id;
+  if (const auto node_id = take(pending_catalogue_requests_)) return node_id;
+  return std::nullopt;
+}
+
+void MainWindow::onResultsNotAvailable(uint64_t request_id) {
+  const auto node_id = takePendingResultsRead(request_id);
+  if (!node_id) {
+    return;  // stale response, or not a results read
+  }
+
+  ORC_LOG_DEBUG("Results read {} for node '{}' found nothing to read",
+                request_id, node_id->to_string());
+
+  // Not an error: the node simply has not been triggered since the DAG was
+  // last built, which is also what a parameter edit leaves behind.
+  const QString advice =
+      tr("This stage has not been triggered yet, so there are no results to "
+         "show.\n\nRight-click the stage and choose Trigger Stage to "
+         "produce them.");
+
+  auto dialog_it = catalogue_dialogs_.find(*node_id);
+  if (dialog_it != catalogue_dialogs_.end() && dialog_it->second) {
+    dialog_it->second->showError(advice);
+  }
+
+  // Deferred for the reason spelled out in onTriggerComplete: a modal opened
+  // on this stack could nest an event loop under a live setValue() frame.
+  QMetaObject::invokeMethod(
+      this,
+      [this, advice]() {
+        QMessageBox::information(this, tr("Nothing to Show"), advice);
+      },
+      Qt::QueuedConnection);
+}
+
+bool MainWindow::reportFailedResultsRead(uint64_t request_id,
+                                         const QString& message) {
+  const auto node_id = takePendingResultsRead(request_id);
+  if (!node_id) {
+    return false;
+  }
+
+  ORC_LOG_ERROR("Results read {} for node '{}' failed: {}", request_id,
+                node_id->to_string(), message.toStdString());
+
+  // The catalogue viewer opens empty and pending; without this it would sit on
+  // "Decoding..." for a read that has already failed.
+  auto dialog_it = catalogue_dialogs_.find(*node_id);
+  if (dialog_it != catalogue_dialogs_.end() && dialog_it->second) {
+    dialog_it->second->showError(message);
+  }
+
+  // The reader asked for this and is waiting on it, so say so where they are
+  // looking rather than in a status-bar message they may never see. Deferred
+  // for the reason spelled out in onTriggerComplete.
+  QMetaObject::invokeMethod(
+      this,
+      [this, message]() {
+        QMessageBox::warning(this, tr("Analysis Failed"), message);
+      },
+      Qt::QueuedConnection);
+  return true;
+}
+
 void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // Check if this is a line sample request error
   if (request_id == pending_line_sample_request_id_) {
@@ -656,6 +739,13 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // so leaving it up would wedge the application.
   endProjectLoadProgress();
 
+  // A results read that failed outright (rather than simply finding nothing)
+  // resolves through this signal, and its viewer is sitting open and empty
+  // waiting for data that is not coming.
+  if (reportFailedResultsRead(request_id, message)) {
+    return;
+  }
+
   // Show error in status bar for other errors
   statusBar()->showMessage(QString("Error: %1").arg(message), 5000);
 }
@@ -678,20 +768,6 @@ void MainWindow::onDropoutDataReady(
 
   ORC_LOG_DEBUG("onDropoutDataReady for node '{}': {} points, total={}",
                 node_id.to_string(), series.points.size(), total_frames);
-
-  // Close progress dialog safely (matches onTriggerComplete pattern)
-  // Erase from map FIRST so any re-entrant onDropoutProgress calls see an empty
-  // map. Do NOT call setValue() before hide() — modal
-  // QProgressDialog::setValue() calls QCoreApplication::processEvents()
-  // internally, which can re-entrantly modify the map.
-  auto prog_it = dropout_progress_dialogs_.find(node_id);
-  if (prog_it != dropout_progress_dialogs_.end() && prog_it->second) {
-    QProgressDialog* pd = prog_it->second.data();
-    dropout_progress_dialogs_.erase(prog_it);
-    pd->blockSignals(true);
-    pd->hide();
-    pd->deleteLater();
-  }
 
   // Find the dialog for this stage
   auto dialog_it = dropout_analysis_dialogs_.find(node_id);
@@ -755,19 +831,6 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   ORC_LOG_DEBUG("onSNRDataReady for node '{}': {} points, total={}",
                 node_id.to_string(), series.points.size(), total_frames);
 
-  // Close progress dialog safely (matches onTriggerComplete pattern)
-  // Erase from map FIRST. Do NOT call setValue() before hide() — modal
-  // QProgressDialog::setValue() calls processEvents() internally, which can
-  // re-entrantly modify the map and invalidate live references.
-  auto prog_it = snr_progress_dialogs_.find(node_id);
-  if (prog_it != snr_progress_dialogs_.end() && prog_it->second) {
-    QProgressDialog* pd = prog_it->second.data();
-    snr_progress_dialogs_.erase(prog_it);
-    pd->blockSignals(true);
-    pd->hide();
-    pd->deleteLater();
-  }
-
   // Find the dialog for this stage
   auto dialog_it = snr_analysis_dialogs_.find(node_id);
   if (dialog_it == snr_analysis_dialogs_.end() || !dialog_it->second ||
@@ -817,45 +880,6 @@ void MainWindow::onSNRDataReady(uint64_t request_id,
   dialog->activateWindow();
 }
 
-void MainWindow::onDropoutProgress(size_t current, size_t total,
-                                   QString message) {
-  if (total == 0) return;
-  int percentage = static_cast<int>((current * 100) / total);
-  if (percentage >= 100) percentage = 99;
-
-  // Snapshot QPointers by value before calling setValue().
-  // Modal QProgressDialog::setValue() calls QCoreApplication::processEvents()
-  // internally, which can re-entrantly invoke onDropoutDataReady() and erase
-  // entries from dropout_progress_dialogs_ — invalidating any reference or
-  // iterator into the map that is live on this call stack.
-  std::vector<QPointer<QProgressDialog>> snapshot;
-  snapshot.reserve(dropout_progress_dialogs_.size());
-  for (auto& [id, pd] : dropout_progress_dialogs_) {
-    if (pd) snapshot.push_back(pd);
-  }
-  for (QPointer<QProgressDialog>& pd : snapshot) {
-    if (pd) pd->setValue(percentage);
-    if (pd) pd->setLabelText(message);
-  }
-}
-
-void MainWindow::onSNRProgress(size_t current, size_t total, QString message) {
-  if (total == 0) return;
-  int percentage = static_cast<int>((current * 100) / total);
-  if (percentage >= 100) percentage = 99;
-
-  // Snapshot QPointers by value — see onDropoutProgress for reasoning.
-  std::vector<QPointer<QProgressDialog>> snapshot;
-  snapshot.reserve(snr_progress_dialogs_.size());
-  for (auto& [id, pd] : snr_progress_dialogs_) {
-    if (pd) snapshot.push_back(pd);
-  }
-  for (QPointer<QProgressDialog>& pd : snapshot) {
-    if (pd) pd->setValue(percentage);
-    if (pd) pd->setLabelText(message);
-  }
-}
-
 void MainWindow::onBurstLevelDataReady(
     uint64_t request_id, orc::presenters::BurstLevelDisplaySeries series) {
   // Find which node this request was for
@@ -874,19 +898,6 @@ void MainWindow::onBurstLevelDataReady(
 
   ORC_LOG_DEBUG("onBurstLevelDataReady for node '{}': {} points, total={}",
                 node_id.to_string(), series.points.size(), total_frames);
-
-  // Close progress dialog safely (matches onTriggerComplete pattern)
-  // Erase from map FIRST. Do NOT call setValue() before hide() — modal
-  // QProgressDialog::setValue() calls processEvents() internally, which can
-  // re-entrantly modify the map and invalidate live references.
-  auto prog_it = burst_level_progress_dialogs_.find(node_id);
-  if (prog_it != burst_level_progress_dialogs_.end() && prog_it->second) {
-    QProgressDialog* pd = prog_it->second.data();
-    burst_level_progress_dialogs_.erase(prog_it);
-    pd->blockSignals(true);
-    pd->hide();
-    pd->deleteLater();
-  }
 
   // Find the dialog for this stage
   auto dialog_it = burst_level_analysis_dialogs_.find(node_id);
@@ -948,24 +959,6 @@ void MainWindow::onBurstLevelDataReady(
   dialog->activateWindow();
 }
 
-void MainWindow::onBurstLevelProgress(size_t current, size_t total,
-                                      QString message) {
-  if (total == 0) return;
-  int percentage = static_cast<int>((current * 100) / total);
-  if (percentage >= 100) percentage = 99;
-
-  // Snapshot QPointers by value — see onDropoutProgress for reasoning.
-  std::vector<QPointer<QProgressDialog>> snapshot;
-  snapshot.reserve(burst_level_progress_dialogs_.size());
-  for (auto& [id, pd] : burst_level_progress_dialogs_) {
-    if (pd) snapshot.push_back(pd);
-  }
-  for (QPointer<QProgressDialog>& pd : snapshot) {
-    if (pd) pd->setValue(percentage);
-    if (pd) pd->setLabelText(message);
-  }
-}
-
 void MainWindow::onCatalogueDataReady(uint64_t request_id,
                                       orc::CatalogueDataset data) {
   // Find which node this request was for
@@ -982,17 +975,6 @@ void MainWindow::onCatalogueDataReady(uint64_t request_id,
   ORC_LOG_DEBUG("onCatalogueDataReady for node '{}': {} items",
                 node_id.to_string(), data.items.size());
 
-  // Close progress dialog safely (matches onTriggerComplete pattern). Erase
-  // from the map FIRST so a re-entrant progress callback sees it gone.
-  auto prog_it = catalogue_progress_dialogs_.find(node_id);
-  if (prog_it != catalogue_progress_dialogs_.end() && prog_it->second) {
-    QProgressDialog* pd = prog_it->second.data();
-    catalogue_progress_dialogs_.erase(prog_it);
-    pd->blockSignals(true);
-    pd->hide();
-    pd->deleteLater();
-  }
-
   // Find the viewer for this node
   auto dialog_it = catalogue_dialogs_.find(node_id);
   if (dialog_it == catalogue_dialogs_.end() || !dialog_it->second) {
@@ -1005,22 +987,4 @@ void MainWindow::onCatalogueDataReady(uint64_t request_id,
   // Bring the viewer to the front now that it has data
   dialog->raise();
   dialog->activateWindow();
-}
-
-void MainWindow::onCatalogueProgress(size_t current, size_t total,
-                                     QString message) {
-  if (total == 0) return;
-  int percentage = static_cast<int>((current * 100) / total);
-  if (percentage >= 100) percentage = 99;
-
-  // Snapshot QPointers by value — see onDropoutProgress for reasoning.
-  std::vector<QPointer<QProgressDialog>> snapshot;
-  snapshot.reserve(catalogue_progress_dialogs_.size());
-  for (auto& [id, pd] : catalogue_progress_dialogs_) {
-    if (pd) snapshot.push_back(pd);
-  }
-  for (QPointer<QProgressDialog>& pd : snapshot) {
-    if (pd) pd->setValue(percentage);
-    if (pd) pd->setLabelText(message);
-  }
 }

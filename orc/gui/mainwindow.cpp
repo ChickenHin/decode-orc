@@ -449,20 +449,14 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onWaveformMonitorDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::dropoutDataReady, this,
           &MainWindow::onDropoutDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::dropoutProgress, this,
-          &MainWindow::onDropoutProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::snrDataReady, this,
           &MainWindow::onSNRDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::snrProgress, this,
-          &MainWindow::onSNRProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::burstLevelDataReady,
           this, &MainWindow::onBurstLevelDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::burstLevelProgress,
-          this, &MainWindow::onBurstLevelProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::catalogueDataReady,
           this, &MainWindow::onCatalogueDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::catalogueProgress,
-          this, &MainWindow::onCatalogueProgress, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::resultsNotAvailable,
+          this, &MainWindow::onResultsNotAvailable, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
           &MainWindow::onTriggerProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerComplete, this,
@@ -1324,44 +1318,44 @@ void MainWindow::closeAllDialogs() {
     dialog->close();
   }
 
-  // Close all progress dialogs
+  // Close the trigger progress dialog. Results reads have none of their own:
+  // they only ever read what a trigger already produced, so there is no work
+  // to report progress on.
   if (trigger_progress_dialog_) {
     trigger_progress_dialog_->close();
     delete trigger_progress_dialog_;
     trigger_progress_dialog_ = nullptr;
   }
+}
 
-  for (auto& pair : dropout_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
+void MainWindow::closeResultViewers() {
+  // Collect first, then close: closing deletes the dialog, whose destroyed
+  // handler erases its own map entry, which would invalidate a live iterator.
+  std::vector<QWidget*> viewers;
+  const auto collect = [&viewers](auto& dialogs) {
+    for (auto& [node_id, dialog] : dialogs) {
+      if (dialog) {
+        viewers.push_back(dialog);
+      }
     }
-  }
-  dropout_progress_dialogs_.clear();
+    dialogs.clear();
+  };
+  collect(dropout_analysis_dialogs_);
+  collect(snr_analysis_dialogs_);
+  collect(burst_level_analysis_dialogs_);
+  collect(catalogue_dialogs_);
 
-  for (auto& pair : snr_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
-    }
-  }
-  snr_progress_dialogs_.clear();
+  // Drop the reads still in flight with them: their answers describe stage
+  // objects that no longer exist, and without this a late response would
+  // report "nothing to show" about a window the reader never asked to close.
+  pending_dropout_requests_.clear();
+  pending_snr_requests_.clear();
+  pending_burst_level_requests_.clear();
+  pending_catalogue_requests_.clear();
 
-  for (auto& pair : burst_level_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
-    }
+  for (auto* viewer : viewers) {
+    viewer->close();
   }
-  burst_level_progress_dialogs_.clear();
-
-  for (auto& pair : catalogue_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
-    }
-  }
-  catalogue_progress_dialogs_.clear();
 }
 
 void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
@@ -1370,16 +1364,15 @@ void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
       project_.presenter()->getCoreProjectHandle());
   const auto tools = analysis_presenter.getToolsForStage(stage_name);
 
-  // Descriptor-driven routing: pick the first advertised batch-analysis tool.
-  const auto tool_it = std::find_if(
-      tools.begin(), tools.end(), [](const orc::AnalysisToolInfo& tool) {
-        return tool.stage_tool_kind == "batch_analysis";
-      });
+  // Descriptor-driven routing: pick the first advertised viewer over the
+  // results this trigger has just produced — a batch analysis or a catalogue
+  // browser. Stages offering neither simply have nothing to show.
+  const auto tool_it =
+      std::find_if(tools.begin(), tools.end(), orc::isTriggerResultViewer);
 
   if (tool_it == tools.end()) {
     ORC_LOG_DEBUG(
-        "No descriptor-advertised batch analysis tool for stage '{}' (node "
-        "'{}')",
+        "No descriptor-advertised result viewer for stage '{}' (node '{}')",
         stage_name, node_id.to_string());
     return;
   }
@@ -3635,6 +3628,13 @@ void MainWindow::updatePreviewRenderer() {
     preview_dialog_->invalidateAudioSource();
   }
 
+  // Same reasoning for the result viewers. Every caller of this function has
+  // just rebuilt the DAG, which replaces every stage object and with it every
+  // cached analysis and catalogue — so what these windows are showing was
+  // produced by parameters that are no longer set. They close rather than sit
+  // there looking current; triggering the node again fills fresh ones.
+  closeResultViewers();
+
   // Get the DAG - could be null for empty projects, that's fine
   auto dag = project_.hasSource() ? project_.getDAG() : nullptr;
 
@@ -4211,33 +4211,13 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       dialog->setAttribute(Qt::WA_DeleteOnClose, true);
 
       // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed, [this, node_id]() {
-        dropout_analysis_dialogs_.erase(node_id);
-        dropout_progress_dialogs_.erase(node_id);
-      });
+      connect(dialog, &QObject::destroyed,
+              [this, node_id]() { dropout_analysis_dialogs_.erase(node_id); });
 
       dropout_analysis_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this stage
-    auto& prog_dialog = dropout_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog("Loading dropout analysis data...",
-                                      QString(), 0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the dialog (but it will be empty until data arrives)
     dialog->show();
@@ -4288,24 +4268,6 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
               [this, node_id, dialog]() {
                 if (dialog->isVisible()) {
                   // Show progress dialog for this stage
-                  auto& prog_dialog = snr_progress_dialogs_[node_id];
-                  if (prog_dialog) {
-                    delete prog_dialog;
-                  }
-                  prog_dialog = new QProgressDialog(
-                      "Loading SNR analysis data...", QString(), 0, 100, this);
-                  prog_dialog->setWindowTitle(dialog->windowTitle());
-                  prog_dialog->setWindowModality(Qt::ApplicationModal);
-                  prog_dialog->setMinimumDuration(0);
-                  prog_dialog->setCancelButton(nullptr);
-                  prog_dialog->setValue(0);
-                  // No activateWindow(): requesting activation on a short-lived
-                  // modal leaves the GNOME/Wayland startup "busy" cursor
-                  // spinner stuck after it closes.
-                  prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-                  prog_dialog->show();
-                  prog_dialog->raise();
-
                   auto mode = dialog->getCurrentMode();
                   uint64_t request_id =
                       render_coordinator_->requestSNRData(node_id, mode);
@@ -4314,33 +4276,13 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
               });
 
       // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed, [this, node_id]() {
-        snr_analysis_dialogs_.erase(node_id);
-        snr_progress_dialogs_.erase(node_id);
-      });
+      connect(dialog, &QObject::destroyed,
+              [this, node_id]() { snr_analysis_dialogs_.erase(node_id); });
 
       snr_analysis_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this stage
-    auto& prog_dialog = snr_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog("Loading SNR analysis data...", QString(),
-                                      0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the dialog (but it will be empty until data arrives)
     dialog->show();
@@ -4389,31 +4331,12 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       // Connect destroyed signal to clean up map entry
       connect(dialog, &QObject::destroyed, [this, node_id]() {
         burst_level_analysis_dialogs_.erase(node_id);
-        burst_level_progress_dialogs_.erase(node_id);
       });
 
       burst_level_analysis_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this stage
-    auto& prog_dialog = burst_level_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog("Loading burst level analysis data...",
-                                      QString(), 0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the dialog (but it will be empty until data arrives)
     dialog->show();
@@ -4459,32 +4382,13 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       dialog->setAttribute(Qt::WA_DeleteOnClose, true);
 
       // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed, [this, node_id]() {
-        catalogue_dialogs_.erase(node_id);
-        catalogue_progress_dialogs_.erase(node_id);
-      });
+      connect(dialog, &QObject::destroyed,
+              [this, node_id]() { catalogue_dialogs_.erase(node_id); });
 
       catalogue_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this node
-    auto& prog_dialog = catalogue_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog(tr("Decoding…"), QString(), 0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the viewer (empty until the catalogue arrives)
     dialog->showPending();

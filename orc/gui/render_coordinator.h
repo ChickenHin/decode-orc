@@ -739,7 +739,8 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request dropout analysis data for all fields (async)
    *
-   * Result will be emitted via dropoutDataReady signal.
+   * Reads what the node's last trigger produced; emits resultsNotAvailable
+   * when it has not been triggered. Result via dropoutDataReady.
    *
    * @param node_id Node to analyze dropout from
    * @param mode Analysis mode (full field or visible area)
@@ -751,7 +752,8 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request SNR analysis data for all fields (async)
    *
-   * Result will be emitted via snrDataReady signal.
+   * Reads what the node's last trigger produced; emits resultsNotAvailable
+   * when it has not been triggered. Result via snrDataReady.
    *
    * @param node_id Node to analyze SNR from
    * @param mode Analysis mode (white, black, or both)
@@ -763,7 +765,8 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request burst level analysis data for all fields (async)
    *
-   * Result will be emitted via burstLevelDataReady signal.
+   * Reads what the node's last trigger produced; emits resultsNotAvailable
+   * when it has not been triggered. Result via burstLevelDataReady.
    *
    * @param node_id Node to analyze burst level from
    * @return Request ID for matching response
@@ -773,9 +776,9 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request the browsable catalogue of a stage (async)
    *
-   * Fetch-or-trigger: a node that has not been triggered is triggered first
-   * (progress via catalogueProgress) and the catalogue read back. Result is
-   * emitted via catalogueDataReady.
+   * A read, never a run: serves the catalogue the node's last trigger left
+   * behind via catalogueDataReady, or emits resultsNotAvailable when the node
+   * has not been triggered since the DAG was last built.
    *
    * @param node_id Node whose stage offers orc::ICatalogueResults
    * @return Request ID
@@ -1022,20 +1025,10 @@ class RenderCoordinator : public QObject {
                         orc::presenters::DropoutDisplaySeries series);
 
   /**
-   * @brief Emitted during dropout analysis progress
-   */
-  void dropoutProgress(size_t current, size_t total, QString message);
-
-  /**
    * @brief Emitted when SNR analysis data is ready
    */
   void snrDataReady(uint64_t request_id,
                     orc::presenters::SNRDisplaySeries series);
-
-  /**
-   * @brief Emitted during SNR analysis progress
-   */
-  void snrProgress(size_t current, size_t total, QString message);
 
   /**
    * @brief Emitted when burst level analysis data is ready
@@ -1044,19 +1037,18 @@ class RenderCoordinator : public QObject {
                            orc::presenters::BurstLevelDisplaySeries series);
 
   /**
-   * @brief Emitted during burst level analysis progress
-   */
-  void burstLevelProgress(size_t current, size_t total, QString message);
-
-  /**
    * @brief Emitted when a stage's catalogue is ready
    */
   void catalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
 
   /**
-   * @brief Emitted while an untriggered catalogue stage is decoding
+   * @brief Emitted when a results read found nothing to read
+   *
+   * The node's stage has not been triggered since the DAG was last built, so
+   * there is nothing to show. Distinct from error(): nothing has gone wrong,
+   * the reader simply needs to trigger the stage first.
    */
-  void catalogueProgress(size_t current, size_t total, QString message);
+  void resultsNotAvailable(uint64_t request_id);
 
   /**
    * @brief Emitted when available outputs query completes

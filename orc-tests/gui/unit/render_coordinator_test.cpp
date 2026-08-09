@@ -672,54 +672,18 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
   coordinator.stop();
 }
 
-// Opening the viewer on a node that has never been triggered decodes the
-// range first, then reads the catalogue back (fetch-or-trigger).
-TEST(RenderCoordinatorTest, CatalogueRequest_TriggersThenRetries) {
+// Reading the catalogue of a node that has never been triggered runs nothing:
+// the reader is told there is nothing to show, and the decode stays behind the
+// Trigger Stage action where the reader put it.
+TEST(RenderCoordinatorTest, CatalogueRequest_NeverTriggers) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  {
-    InSequence sequence;
-    EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3)))
-        .WillOnce(Return(std::nullopt));
-    EXPECT_CALL(*mock_presenter, triggerStage(orc::NodeID(3), ::testing::_))
-        .WillOnce(Return(1));
-    EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3)))
-        .WillOnce(Return(makeCatalogue("888")));
-  }
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  coordinator.requestCatalogueData(orc::NodeID(3));
-
-  ASSERT_TRUE(waitForCount(data_spy, 1));
-  const auto data = data_spy.at(0).at(1).value<orc::CatalogueDataset>();
-  ASSERT_EQ(data.items.size(), 1u);
-  EXPECT_EQ(data.items[0].id, "888");
-
-  coordinator.stop();
-}
-
-// A node that yields nothing even after triggering is an error, not an empty
-// catalogue: its stage does not offer one, or the trigger failed.
-TEST(RenderCoordinatorTest, CatalogueRequest_ReportsFailureAfterTrigger) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(4)))
-      .WillRepeatedly(Return(std::nullopt));
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3)))
+      .WillOnce(Return(std::nullopt));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
 
   RenderCoordinator coordinator(
       [mock_presenter](
@@ -729,6 +693,43 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ReportsFailureAfterTrigger) {
 
   QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
   QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
+  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id = coordinator.requestCatalogueData(orc::NodeID(3));
+
+  ASSERT_TRUE(waitForCount(absent_spy, 1));
+  EXPECT_EQ(absent_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_EQ(data_spy.count(), 0);
+  // Nothing to show is not a failure — the reader gets guidance, not an error.
+  EXPECT_EQ(error_spy.count(), 0);
+
+  coordinator.stop();
+}
+
+// A read that throws is still an error, and stays distinct from one that
+// simply found nothing: something went wrong, rather than nothing having been
+// produced yet.
+TEST(RenderCoordinatorTest, CatalogueRequest_ThrowingReadIsAnError) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(4)))
+      .WillOnce(::testing::Throw(std::runtime_error("catalogue read blew up")));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
+  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
+  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
 
   coordinator.start();
   coordinator.setProject(reinterpret_cast<void*>(0x1));
@@ -739,6 +740,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ReportsFailureAfterTrigger) {
   ASSERT_TRUE(waitForCount(error_spy, 1));
   EXPECT_EQ(error_spy.at(0).at(0).toULongLong(), request_id);
   EXPECT_EQ(data_spy.count(), 0);
+  EXPECT_EQ(absent_spy.count(), 0);
 
   coordinator.stop();
 }

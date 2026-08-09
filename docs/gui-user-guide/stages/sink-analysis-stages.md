@@ -14,7 +14,7 @@ They are typically used to:
 * Validate signal stability and decode quality
 * Quantify the effects of transform stages such as stacking or dropout correction
 
-Every analysis sink works the same way: trigger the stage to compute the dataset, after which its dialog opens automatically. The dataset is cached in the stage and the dialog can be re-opened at any time from the **Stage Tools** menu; opening it there on a node that has not been triggered runs the analysis first, with progress and cancel.
+Every analysis sink works the same way: trigger the stage to compute the dataset, after which its dialog opens automatically. The dataset stays with the stage, so closing the dialog and picking the tool again from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without recomputing. That menu entry only ever reads: on a node that has not been triggered it says so rather than starting a decode, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open viewers with them — trigger again to get a dataset that matches the new settings.
 
 The burst level, dropout and SNR sinks measure the signal and present a chart with an optional CSV export.
 
@@ -56,7 +56,7 @@ This stage measures the amplitude of the colour burst for each field and generat
 
 **Stage tools**
 
-* **Burst Level Analysis** — displays per-frame colour-burst amplitude measurements in a chart window. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+* **Burst Level Analysis** — displays per-frame colour-burst amplitude measurements in a chart window. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
 **Notes**
 
@@ -115,7 +115,7 @@ Separate from the per-frame CSV, the detail report records *where* each individu
 
 **Stage tools**
 
-* **Dropout Analysis** — displays dropout frequency, size, and distribution charts. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+* **Dropout Analysis** — displays dropout frequency, size, and distribution charts. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
 **Where the analysis reads its data**
 
@@ -163,7 +163,7 @@ This stage estimates signal-to-noise ratio using spatial and temporal analysis o
 
 **Stage tools**
 
-* **SNR Analysis** — displays white SNR and black SNR metrics over time in a chart window. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+* **SNR Analysis** — displays white SNR and black SNR metrics over time in a chart window. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
 **Notes**
 

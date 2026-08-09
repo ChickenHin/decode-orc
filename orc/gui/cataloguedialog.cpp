@@ -261,6 +261,14 @@ void CatalogueDialog::showPending() {
   status_label_->setVisible(true);
 }
 
+void CatalogueDialog::showError(const QString& message) {
+  // Replaces the pending state: the viewer was opened empty on the promise of
+  // a catalogue that is not coming, so it must say so rather than sit on
+  // "Decoding…" forever.
+  clearContent();
+  headline_label_->setText(message);
+}
+
 void CatalogueDialog::clearContent() {
   data_ = orc::CatalogueDataset{};
   has_data_ = false;

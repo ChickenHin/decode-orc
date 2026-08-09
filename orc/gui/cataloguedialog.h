@@ -62,6 +62,9 @@ class CatalogueDialog : public QDialog {
   /// Show a "decoding" pending state while the stage trigger is in flight
   void showPending();
 
+  /// Replace the pending state with why no catalogue is coming
+  void showError(const QString& message);
+
   /// Clear the payload, the item list and the readouts
   void clearContent();
 
