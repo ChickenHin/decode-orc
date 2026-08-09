@@ -110,6 +110,18 @@ brew install cmake ninja qt@6 spdlog fmt sqlite yaml-cpp libpng fftw ffmpeg
 **Windows (vcpkg):**
 See `vcpkg.json` for the manifest-based dependency list and CI workflow details.
 
+**Windows: UTF-8 code page**
+
+`orc-gui.exe` and `orc-cli.exe` embed `cmake/windows/orc-utf8.manifest`, which
+sets the process active code page to UTF-8 (Windows 10 1903+). File paths
+travel through the codebase as UTF-8 `std::string`, and without this the CRT
+and `std::filesystem` decode them as CP1252, so any path containing a
+non-ASCII character appears to be missing. `orc_apply_utf8_manifest()` in
+`cmake/WindowsUtf8Manifest.cmake` attaches it (linker manifest input under
+MSVC, an `RT_MANIFEST` resource under MinGW); a new Windows executable target
+should call it, and stage plugin DLLs need nothing as they inherit the code
+page of the process that loads them.
+
 **Windows (MinGW-w64/gcc):**
 Building with MinGW-w64/gcc instead of MSVC needs vcpkg cloned into the repo
 root and bootstrapped, and QtNodes cloned manually (see step 2 below — despite

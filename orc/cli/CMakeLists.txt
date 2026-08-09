@@ -38,6 +38,10 @@ elseif(UNIX AND NOT WIN32)
     set_target_properties(orc-cli PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib;\$ORIGIN/../lib/orc-stage-plugins")
 endif()
 
+# Run with UTF-8 as the process code page so non-ASCII paths given on the
+# command line reach the filesystem intact (no-op off Windows).
+orc_apply_utf8_manifest(orc-cli)
+
 # Section: Install rules
 if(APPLE)
     # Embed CLI inside the macOS app bundle so drag-and-drop install contains both tools

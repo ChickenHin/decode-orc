@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Per-process UTF-8 code page for the Decode-Orc executables.
+
+  The codebase passes file paths around as UTF-8 std::string (Qt's
+  QString::toStdString() is UTF-8, and every core/plugin call site feeds those
+  straight into std::ifstream / std::filesystem / fopen).  On Windows the CRT
+  and MSVC's std::filesystem convert a narrow path to UTF-16 using the process
+  ANSI code page, which is CP1252 (or similar) by default -- so a UTF-8 path
+  containing any non-ASCII character is decoded as mojibake and the file is
+  reported as missing.
+
+  activeCodePage makes GetACP() return 65001 for this process, so the CRT,
+  std::filesystem, argv, and any *A Win32 call in a dependency all agree with
+  what the code already produces.  Supported from Windows 10 version 1903;
+  earlier releases ignore the setting and keep the legacy behaviour.
+
+  Deliberately minimal: no DPI settings (Qt sets awareness at runtime) and no
+  assemblyIdentity (the MSVC linker merges this file with its own generated
+  manifest, and a second identity would conflict).
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
