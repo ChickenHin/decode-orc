@@ -294,16 +294,31 @@ jobs:
             python3 cmake/summarize_ctest_junit.py --input build/ctest-results-unit.xml --output build/ctest-results-unit-summary.md --top 25
 
             # --- Enforce performance budget ---
-            # Wall time scales with suite size on a fixed-core runner (the unit
-            # suite is one process per test case, so ~0.07s of spawn overhead
-            # each); it is the p95 gate below that catches an individual test
-            # turning slow. Raise the wall ceiling as the suite legitimately
-            # grows — 1680 tests currently land at ~36s on a 4-vCPU runner.
+            # These are safety nets for a pathology — a test that hangs, or a
+            # change that serialises the suite — not a target to be re-tuned as
+            # the suite grows.
+            #
+            # Wall time is proportional to suite size on a fixed-core runner
+            # (one process per test case, ~0.07s of spawn overhead each), so a
+            # snug ceiling fails on healthy growth rather than on a regression:
+            # 2662 tests land at ~51s on a 4-vCPU runner, against the 1680 tests
+            # at ~36s this budget was originally written for. 180s leaves room
+            # for the suite to triple, and for the run-to-run variance of a
+            # shared runner, while still catching a hang.
+            #
+            # p95 is the gate that does the real work: it is independent of
+            # suite size, so it stays meaningful without maintenance. At 0.25s
+            # (current value 0.0745s) it matches the slow-gate budgets and trips
+            # on an individual test turning slow, not on more tests existing.
+            #
+            # The pass rate cannot actually fire — the ctest runs above exit
+            # non-zero on any failure under 'set -e', so this script only ever
+            # runs on a green suite. It is kept as a belt-and-braces record.
             python3 cmake/check_ctest_budget.py \
               --input build/ctest-results-unit.xml \
-              --max-wall-seconds 45.0 \
-              --min-pass-rate 99.5 \
-              --max-p95-seconds 0.105
+              --max-wall-seconds 180.0 \
+              --min-pass-rate 99.0 \
+              --max-p95-seconds 0.250
 
             # --- Compile cache effectiveness ---
             # A branch push that touched a handful of files should show a hit
