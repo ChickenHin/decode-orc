@@ -444,27 +444,34 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       ParameterDescriptor{
           "encoder_crf",
           "Encoder CRF",
-          "Constant Rate Factor for quality (0-51, lower=better). Typical: "
-          "18-28. 0 = use bitrate instead",
+          "Constant Rate Factor for quality-based encoding (0-51, "
+          "lower=better).\n"
+          "AV1 compact delivery typically uses 30-35.\n"
+          "Rate-control precedence: lossless mode, non-zero target bitrate, "
+          "then CRF quality.",
           ParameterType::INT32,
           {0,
            51,
            18,
            {},
            false,
-           ParameterDependency{"ffmpeg_format", {"mp4-h264", "mkv-ffv1"}}}},
+           ParameterDependency{"ffmpeg_format",
+                               {"mp4-h264", "mkv-ffv1", "mp4-av1"}}}},
       ParameterDescriptor{
           "encoder_bitrate",
           "Encoder Bitrate",
-          "Target bitrate in bits/sec (0 = use CRF instead). Example: 10000000 "
-          "= 10 Mbps",
+          "Target bitrate in bits/sec.\n"
+          "A non-zero value takes precedence over CRF; lossless mode takes "
+          "precedence over both.\n"
+          "0 uses CRF quality. Example: 10000000 = 10 Mbps.",
           ParameterType::INT32,
           {0,
            100000000,
            0,
            {},
            false,
-           ParameterDependency{"ffmpeg_format", {"mp4-h264", "mkv-ffv1"}}}},
+           ParameterDependency{"ffmpeg_format",
+                               {"mp4-h264", "mkv-ffv1", "mp4-av1"}}}},
       ParameterDescriptor{
           "hardware_encoder",
           "Hardware Encoder",
@@ -495,7 +502,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "use_lossless_mode",
           "Use Lossless Mode",
           "Enable mathematically lossless encoding (H.264/H.265/AV1 only, "
-          "overrides CRF)",
+          "overrides bitrate and CRF)",
           ParameterType::BOOL,
           {{},
            {},
