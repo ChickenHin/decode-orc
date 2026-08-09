@@ -140,6 +140,151 @@ constexpr std::array<std::array<char32_t, 13>, 7> kNationalOptionSubsets = {{
      U'š'},
 }};
 
+// The three Cyrillic G0 primary sets, ETSI EN 300 706 §15.6.4 to §15.6.6
+// Tables 38, 39 and 40, as the 96 code points of positions 2/0 to 7/F in
+// ascending code order.
+//
+// Unlike the Latin set these reserve no positions for national option
+// sub-sets: each is a complete alphabet in its own right, chosen by the
+// character set *designation* rather than by the header's C12-C14 bits (§15.2
+// Table 32, designation 0100). Every one of them therefore has to be written
+// out in full — the letters are not an ASCII-compatible permutation of
+// anything, and only positions 2/0-2/5, 2/7-2/9, 2/B-3/F agree with Latin.
+//
+// Common to all three (each table's NOTE 1 to NOTE 3):
+//   - 2/0 is SPACE;
+//   - 2/A is the asterisk, replaced by '@' only when the set is reached
+//     through a packet X/26 column address triplet, which a Level 1 page has
+//     no way to send;
+//   - 7/F is a filled rectangle, as it is in the Latin set.
+
+// Table 38 — Option 1, Serbian/Croatian. The Macedonian Ѓ/Ќ at 5/7 and 5/1
+// come with it. The block at 7/F takes the position lowercase џ would have
+// held, so this set has Џ and no џ; that is the table as printed, not an
+// omission here.
+constexpr std::array<char32_t, 96> kCyrillic1G0 = {
+    /* 2/0 */ U' ', U'!', U'"', U'#', U'$', U'%', U'&', U'\'',
+    /* 2/8 */ U'(', U')', U'*', U'+', U',', U'-', U'.', U'/',
+    /* 3/0 */ U'0', U'1', U'2', U'3', U'4', U'5', U'6', U'7',
+    /* 3/8 */ U'8', U'9', U':', U';', U'<', U'=', U'>', U'?',
+    /* 4/0 */ U'Ч', U'А', U'Б', U'Ц', U'Д', U'Е', U'Ф', U'Г',
+    /* 4/8 */ U'Х', U'И', U'Ј', U'К', U'Л', U'М', U'Н', U'О',
+    /* 5/0 */ U'П', U'Ќ', U'Р', U'С', U'Т', U'У', U'В', U'Ѓ',
+    /* 5/8 */ U'Љ', U'Њ', U'З', U'Ћ', U'Ж', U'Ђ', U'Ш', U'Џ',
+    /* 6/0 */ U'ч', U'а', U'б', U'ц', U'д', U'е', U'ф', U'г',
+    /* 6/8 */ U'х', U'и', U'ј', U'к', U'л', U'м', U'н', U'о',
+    /* 7/0 */ U'п', U'ќ', U'р', U'с', U'т', U'у', U'в', U'ѓ',
+    /* 7/8 */ U'љ', U'њ', U'з', U'ћ', U'ж', U'ђ', U'ш', U'■',
+};
+
+// Table 39 — Option 2, Russian/Bulgarian. The alphabet is laid out as KOI-7
+// lays it out, except that Ъ and Ы are the other way round (5/9 and 5/F) and
+// the block at 7/F displaces lowercase ы to 2/6, where the Latin set has '&'.
+constexpr std::array<char32_t, 96> kCyrillic2G0 = {
+    /* 2/0 */ U' ', U'!', U'"', U'#', U'$', U'%', U'ы', U'\'',
+    /* 2/8 */ U'(', U')', U'*', U'+', U',', U'-', U'.', U'/',
+    /* 3/0 */ U'0', U'1', U'2', U'3', U'4', U'5', U'6', U'7',
+    /* 3/8 */ U'8', U'9', U':', U';', U'<', U'=', U'>', U'?',
+    /* 4/0 */ U'Ю', U'А', U'Б', U'Ц', U'Д', U'Е', U'Ф', U'Г',
+    /* 4/8 */ U'Х', U'И', U'Й', U'К', U'Л', U'М', U'Н', U'О',
+    /* 5/0 */ U'П', U'Я', U'Р', U'С', U'Т', U'У', U'Ж', U'В',
+    /* 5/8 */ U'Ь', U'Ъ', U'З', U'Ш', U'Э', U'Щ', U'Ч', U'Ы',
+    /* 6/0 */ U'ю', U'а', U'б', U'ц', U'д', U'е', U'ф', U'г',
+    /* 6/8 */ U'х', U'и', U'й', U'к', U'л', U'м', U'н', U'о',
+    /* 7/0 */ U'п', U'я', U'р', U'с', U'т', U'у', U'ж', U'в',
+    /* 7/8 */ U'ь', U'ъ', U'з', U'ш', U'э', U'щ', U'ч', U'■',
+};
+
+// Table 40 — Option 3, Ukrainian. Option 2's layout with the letters Ukrainian
+// does not use replaced by the ones it does: І at 5/9 for Ъ, Є at 5/C for Э,
+// Ї at 5/F for Ы, and ї at 2/6 for ы.
+constexpr std::array<char32_t, 96> kCyrillic3G0 = {
+    /* 2/0 */ U' ', U'!', U'"', U'#', U'$', U'%', U'ї', U'\'',
+    /* 2/8 */ U'(', U')', U'*', U'+', U',', U'-', U'.', U'/',
+    /* 3/0 */ U'0', U'1', U'2', U'3', U'4', U'5', U'6', U'7',
+    /* 3/8 */ U'8', U'9', U':', U';', U'<', U'=', U'>', U'?',
+    /* 4/0 */ U'Ю', U'А', U'Б', U'Ц', U'Д', U'Е', U'Ф', U'Г',
+    /* 4/8 */ U'Х', U'И', U'Й', U'К', U'Л', U'М', U'Н', U'О',
+    /* 5/0 */ U'П', U'Я', U'Р', U'С', U'Т', U'У', U'Ж', U'В',
+    /* 5/8 */ U'Ь', U'І', U'З', U'Ш', U'Є', U'Щ', U'Ч', U'Ї',
+    /* 6/0 */ U'ю', U'а', U'б', U'ц', U'д', U'е', U'ф', U'г',
+    /* 6/8 */ U'х', U'и', U'й', U'к', U'л', U'м', U'н', U'о',
+    /* 7/0 */ U'п', U'я', U'р', U'с', U'т', U'у', U'ж', U'в',
+    /* 7/8 */ U'ь', U'і', U'з', U'ш', U'є', U'щ', U'ч', U'■',
+};
+
+// Lowest G0 code the tables above start at: everything below 2/0 is a spacing
+// attribute rather than a character (§15.5).
+constexpr uint8_t kFirstG0Code = 0x20;
+
+const std::array<char32_t, 96>* cyrillic_table(TeletextG0Set g0_set) {
+  switch (g0_set) {
+    case TeletextG0Set::Cyrillic1:
+      return &kCyrillic1G0;
+    case TeletextG0Set::Cyrillic2:
+      return &kCyrillic2G0;
+    case TeletextG0Set::Cyrillic3:
+      return &kCyrillic3G0;
+    case TeletextG0Set::Latin:
+      break;
+  }
+  return nullptr;
+}
+
+// The G0 set names the parameter surface and the project file use. They name
+// the languages rather than the standard's option numbers, because "Cyrillic
+// option 2" tells a user nothing about whether it is the one their recording
+// needs.
+struct G0SetName {
+  TeletextG0Set set;
+  const char* name;
+};
+
+constexpr std::array<G0SetName, 4> kG0SetNames = {{
+    {TeletextG0Set::Latin, "Latin"},
+    {TeletextG0Set::Cyrillic1, "Cyrillic (Serbian/Croatian)"},
+    {TeletextG0Set::Cyrillic2, "Cyrillic (Russian/Bulgarian)"},
+    {TeletextG0Set::Cyrillic3, "Cyrillic (Ukrainian)"},
+}};
+
+// ETSI EN 300 706 §15.2 Table 32: the G0 set a *Default G0 and G2 Character
+// Set Designation and National Option Selection* value selects. |designation|
+// is triplet 1 bits 14-11 and |national_option| bits 10-8.
+//
+// Only the Cyrillic rows are distinguished. Every other designation carries a
+// Latin G0 set — including the four Latin rows of designation 0100 itself —
+// and the national option sub-set of a Latin page keeps coming from the
+// header's C12-C14 bits, as it does at Level 1 (§15.2). The Latin sub-sets
+// that only some designations reach (Polish, Turkish, Estonian,
+// Lettish/Lithuanian, Romanian) are not modelled; such a page displays in the
+// designation-0000 sub-set its header bits name, which is what it did before.
+TeletextG0Set g0_set_for_designation(int designation, int national_option) {
+  if (designation == 0b0100) {
+    switch (national_option) {
+      case 0b000:
+        return TeletextG0Set::Cyrillic1;
+      case 0b100:
+        return TeletextG0Set::Cyrillic2;
+      case 0b101:
+        return TeletextG0Set::Cyrillic3;
+      default:
+        break;
+    }
+  }
+  return TeletextG0Set::Latin;
+}
+
+// Designation codes and packet numbers of the two packets that can carry a
+// character set designation (§9.1 Table 1, §9.4.2, §9.5).
+constexpr int kPacketX28 = 28;
+constexpr int kPacketM29 = 29;
+constexpr int kDesignationCodeZero = 0;
+
+// X/28/0 carries Format 1 — the format Table 4 codes, and the only one with a
+// character set designation in it — when triplet 1's Page Function bits say
+// the page is a basic Level 1 teletext page (§9.4.2.1 Table 3, code 0000).
+constexpr int kPageFunctionBasicLevel1 = 0;
+
 }  // namespace
 
 bool teletext_odd_parity_valid(uint8_t byte) {
@@ -165,13 +310,40 @@ uint8_t teletext_odd_parity_encode(uint8_t value) {
   return byte;
 }
 
-char32_t teletext_latin_g0_to_unicode(uint8_t code,
-                                      int national_option_subset) {
+std::string to_string(TeletextG0Set g0_set) {
+  for (const G0SetName& entry : kG0SetNames) {
+    if (entry.set == g0_set) {
+      return entry.name;
+    }
+  }
+  return kG0SetNames.front().name;
+}
+
+std::optional<TeletextG0Set> teletext_g0_set_from_string(
+    std::string_view name) {
+  for (const G0SetName& entry : kG0SetNames) {
+    if (name == entry.name) {
+      return entry.set;
+    }
+  }
+  return std::nullopt;
+}
+
+char32_t teletext_g0_to_unicode(uint8_t code, TeletextG0Set g0_set,
+                                int national_option_subset) {
   const uint8_t c = static_cast<uint8_t>(code & 0x7F);
   // Codes 0/0-1/F are spacing attributes, not characters (§15.5).
-  if (c < 0x20) {
+  if (c < kFirstG0Code) {
     return U' ';
   }
+
+  // A Cyrillic set defines all 96 of its positions, so it is a lookup and the
+  // national option sub-set has no part in it.
+  if (const std::array<char32_t, 96>* table = cyrillic_table(g0_set);
+      table != nullptr) {
+    return (*table)[static_cast<size_t>(c - kFirstG0Code)];
+  }
+
   // §15.6.1 Table 35 NOTE 4: 7/F is a rectangle filling the character area.
   if (c == 0x7F) {
     return U'■';
@@ -191,10 +363,10 @@ char32_t teletext_latin_g0_to_unicode(uint8_t code,
   return static_cast<char32_t>(c);
 }
 
-std::string teletext_latin_g0_to_utf8(uint8_t code,
-                                      int national_option_subset) {
+std::string teletext_g0_to_utf8(uint8_t code, TeletextG0Set g0_set,
+                                int national_option_subset) {
   const char32_t cp =
-      teletext_latin_g0_to_unicode(code, national_option_subset);
+      teletext_g0_to_unicode(code, g0_set, national_option_subset);
   std::string out;
   // Table 36 reaches U+2016 at most, so two continuation bytes suffice; the
   // three-byte branch is written out anyway rather than assuming that.
@@ -325,12 +497,94 @@ void TeletextPageDecoder::process_packet(
   } else if (packet_number >= 1 &&
              packet_number < TeletextPageSnapshot::kRows) {
     // X/1 to X/24: directly displayable rows (EN 300 706 §9.3.2). X/25
-    // (key-word search labels) and X/26-X/31 (enhancement / non-display
-    // packets, §9.4-§9.8) are outside the Level 1 grid and are ignored.
+    // (key-word search labels) and X/26, X/27 and X/30-X/31 (enhancement,
+    // editorial linking and independent data, §9.4-§9.8) are outside the
+    // Level 1 grid and are ignored.
     handle_display_packet(magazine, packet_number, packet, field_index,
                           source == kAutoSource ? next_source_++ : source,
                           confidence);
+  } else if (packet_number == kPacketX28 || packet_number == kPacketM29) {
+    // Not display data, but the one thing outside the Level 1 grid that
+    // changes how the grid is read: which G0 set its codes are in (§15.2).
+    handle_character_set_designation(magazine, packet,
+                                     packet_number == kPacketM29);
   }
+}
+
+void TeletextPageDecoder::handle_character_set_designation(
+    int transmission_magazine,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet,
+    bool magazine_wide) {
+  // Byte 6 of the packet — index 2 here, the MRAG being bytes 4 and 5 — is the
+  // designation code, Hamming 8/4 (§9.4.1 figure 11). Only designation 0
+  // carries a character set designation in the bits below; X/28/1 to X/28/4
+  // and M/29/1 to M/29/4 code other things at other positions, so anything
+  // else is left alone rather than guessed at.
+  const int designation_code = teletext_hamming84_decode(packet[2]);
+  if (designation_code != kDesignationCodeZero) {
+    return;
+  }
+
+  // Before believing anything the packet says, require the whole of it to be
+  // what it claims: §9.4.1 codes all 39 bytes after the designation code as
+  // thirteen Hamming 24/18 triplets, so on a genuine packet every one of them
+  // decodes and on a damaged one the drop costs nothing — it is re-sent with
+  // every cycle of the page.
+  //
+  // This is not pedantry but the noise gate. On a tape recovery the MRAG's
+  // Hamming 8/4 mis-corrects bursts into valid addresses, and a long capture
+  // yields hundreds of garbage packets numbered 28 or 29 (the reference SECAM
+  // capture: 246 over 80 677 frames). A random triplet passes 24/18 about 39%
+  // of the time, so gating on triplet 1 alone let roughly one in forty of
+  // those through — and one fake M/29/0 re-designates a whole magazine for
+  // the rest of the recording, which on the reference capture silently undid
+  // the configured Cyrillic set. All thirteen triplets at once is a pass rate
+  // of about 5 in a million, and none of the observed fakes decodes more than
+  // seven.
+  for (size_t byte = 3; byte + 2 < kTeletextPacketBytes; byte += 3) {
+    if (teletext_hamming2418_decode(packet[byte], packet[byte + 1],
+                                    packet[byte + 2]) < 0) {
+      return;
+    }
+  }
+
+  // Triplet 1 is bytes 7 to 9 (indices 3 to 5), Hamming 24/18. An
+  // uncorrectable triplet is dropped: a mis-read designation would change the
+  // alphabet of every page in the magazine, and the packet is re-sent with the
+  // page.
+  const int32_t triplet =
+      teletext_hamming2418_decode(packet[3], packet[4], packet[5]);
+  if (triplet < 0) {
+    return;
+  }
+
+  // X/28/0 is Format 1 — the format that carries a designation — only when its
+  // Page Function says a basic Level 1 page (§9.4.2.1 Table 3). M/29/0 carries
+  // no page function at all (§9.1 Table 1: "the same functions apart from page
+  // function and coding"), so its triplet 1 bits 1-7 are not read.
+  if (!magazine_wide && (triplet & 0xF) != kPageFunctionBasicLevel1) {
+    return;
+  }
+
+  // Triplet 1 bits 8-14: the 7-bit Table 32 value, four designation bits
+  // (14-11) over three national option bits (10-8).
+  const int value = (triplet >> 7) & 0x7F;
+  const TeletextG0Set g0_set =
+      g0_set_for_designation((value >> 3) & 0xF, value & 0x7);
+
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  if (magazine_wide) {
+    // M/29/0 sets the magazine's default. It does not reach back into a page
+    // already open: that page's rows were addressed under the set it was
+    // opened with, and §15.2 gives the page's own X/28/0 the higher priority
+    // anyway.
+    state.magazine_g0_set = g0_set;
+    return;
+  }
+  // X/28/0 belongs to the page it was transmitted with, so it applies to the
+  // open page immediately — it may well arrive after some of the page's rows,
+  // and the page is only rendered when it terminates.
+  state.g0_set = g0_set;
 }
 
 int TeletextPageDecoder::erase_epoch(const PageIdentity& identity) const {
@@ -465,6 +719,17 @@ void TeletextPageDecoder::handle_header_packet(
   state.national_option_subset = (((c11_c14 >> 1) & 0x1) << 2) |  // C12
                                  (((c11_c14 >> 2) & 0x1) << 1) |  // C13
                                  ((c11_c14 >> 3) & 0x1);          // C14
+
+  // The G0 set the page opens in: the magazine's designation if an M/29/0 has
+  // established one, otherwise the local Code of Practice (§15.2). A packet
+  // X/28/0 for this page overrides it if one arrives before the page is
+  // rendered — but only for this page, which is why it is taken afresh here
+  // rather than left at whatever the previous page settled on. A rolling
+  // header re-sent mid-page is the exception: it is the same transmission, so
+  // an X/28/0 already received for it must survive.
+  if (!same_page_continues) {
+    state.g0_set = state.magazine_g0_set.value_or(default_g0_set_);
+  }
   // The header that *opened* this transmission stamps it, so a rolling header
   // re-sent while the rows are still going out does not make the same
   // appearance of the page look like a series of new ones.
@@ -702,6 +967,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   snapshot.inhibit_display = state.inhibit_display;
   snapshot.magazine_serial = state.magazine_serial;
   snapshot.national_option_subset = state.national_option_subset;
+  snapshot.g0_set = state.g0_set;
   snapshot.header_field_index = state.header_field_index;
   snapshot.last_field_index = state.last_field_index;
   snapshot.columns = columns_;
@@ -1020,8 +1286,8 @@ std::string TeletextPageDecoder::extract_subtitle_text(
           !cell.double_height_lower && !cell.parity_error &&
           (!boxed_only || cell.boxed) && cell.character > 0x20 &&
           cell.character < 0x7F) {
-        glyph = teletext_latin_g0_to_utf8(cell.character,
-                                          snapshot.national_option_subset);
+        glyph = teletext_g0_to_utf8(cell.character, snapshot.g0_set,
+                                    snapshot.national_option_subset);
       }
       if (glyph.empty()) {
         if (!last_was_space) {

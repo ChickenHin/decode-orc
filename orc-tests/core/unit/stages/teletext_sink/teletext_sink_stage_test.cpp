@@ -167,7 +167,7 @@ TEST_F(TeletextSinkStage, Results_AreEmptyUntilTriggered) {
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 16u);
+  ASSERT_EQ(descriptors.size(), 17u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
@@ -198,74 +198,86 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   EXPECT_EQ(std::get<std::string>(*descriptors[4].constraints.default_value),
             "Automatic");
 
-  EXPECT_EQ(descriptors[5].name, "tolerant_framing");
-  EXPECT_EQ(descriptors[5].type, orc::ParameterType::BOOL);
+  EXPECT_EQ(descriptors[5].name, "character_set");
+  EXPECT_EQ(descriptors[5].type, orc::ParameterType::STRING);
+  // Latin first because it is the default and the overwhelmingly common case,
+  // then the Cyrillic sets in the order material for them is likely to turn up.
+  EXPECT_EQ(descriptors[5].constraints.allowed_strings,
+            (std::vector<std::string>{"Latin", "Cyrillic (Russian/Bulgarian)",
+                                      "Cyrillic (Ukrainian)",
+                                      "Cyrillic (Serbian/Croatian)"}));
   ASSERT_TRUE(descriptors[5].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[5].constraints.default_value), false);
+  EXPECT_EQ(std::get<std::string>(*descriptors[5].constraints.default_value),
+            "Latin");
 
-  EXPECT_EQ(descriptors[6].name, "require_valid_mrag");
+  EXPECT_EQ(descriptors[6].name, "tolerant_framing");
   EXPECT_EQ(descriptors[6].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[6].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), true);
+  EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[7].name, "repair_damaged_bytes");
+  EXPECT_EQ(descriptors[7].name, "require_valid_mrag");
   EXPECT_EQ(descriptors[7].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[7].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[7].constraints.default_value), true);
-  ASSERT_TRUE(descriptors[7].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[7].constraints.depends_on->parameter_name, "detector");
 
-  EXPECT_EQ(descriptors[8].name, "pin_data_phase");
+  EXPECT_EQ(descriptors[8].name, "repair_damaged_bytes");
   EXPECT_EQ(descriptors[8].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[8].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[8].constraints.default_value), true);
+  ASSERT_TRUE(descriptors[8].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[8].constraints.depends_on->parameter_name, "detector");
 
-  EXPECT_EQ(descriptors[9].name, "learn_active_lines");
+  EXPECT_EQ(descriptors[9].name, "pin_data_phase");
   EXPECT_EQ(descriptors[9].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[9].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[9].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[10].name, "decode_threads");
-  EXPECT_EQ(descriptors[10].type, orc::ParameterType::INT32);
+  EXPECT_EQ(descriptors[10].name, "learn_active_lines");
+  EXPECT_EQ(descriptors[10].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[10].constraints.default_value.has_value());
-  // 0 is "one per processor"; the recovered stream does not depend on it.
-  EXPECT_EQ(std::get<int32_t>(*descriptors[10].constraints.default_value), 0);
-  ASSERT_TRUE(descriptors[10].constraints.min_value.has_value());
-  EXPECT_EQ(std::get<int32_t>(*descriptors[10].constraints.min_value), 0);
+  EXPECT_EQ(std::get<bool>(*descriptors[10].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[11].name, "squash_repeated_rows");
-  EXPECT_EQ(descriptors[11].type, orc::ParameterType::BOOL);
+  EXPECT_EQ(descriptors[11].name, "decode_threads");
+  EXPECT_EQ(descriptors[11].type, orc::ParameterType::INT32);
   ASSERT_TRUE(descriptors[11].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[11].constraints.default_value), true);
+  // 0 is "one per processor"; the recovered stream does not depend on it.
+  EXPECT_EQ(std::get<int32_t>(*descriptors[11].constraints.default_value), 0);
+  ASSERT_TRUE(descriptors[11].constraints.min_value.has_value());
+  EXPECT_EQ(std::get<int32_t>(*descriptors[11].constraints.min_value), 0);
 
-  EXPECT_EQ(descriptors[12].name, "write_report");
+  EXPECT_EQ(descriptors[12].name, "squash_repeated_rows");
   EXPECT_EQ(descriptors[12].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[12].constraints.default_value), false);
+  EXPECT_EQ(std::get<bool>(*descriptors[12].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[13].name, "export_subtitles");
+  EXPECT_EQ(descriptors[13].name, "write_report");
   EXPECT_EQ(descriptors[13].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[13].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[13].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[14].name, "subtitle_page");
-  EXPECT_EQ(descriptors[14].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[14].name, "export_subtitles");
+  EXPECT_EQ(descriptors[14].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[14].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[14].constraints.default_value),
-            "888");
-  ASSERT_TRUE(descriptors[14].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[14].constraints.depends_on->parameter_name,
-            "export_subtitles");
+  EXPECT_EQ(std::get<bool>(*descriptors[14].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[15].name, "subtitle_format");
+  EXPECT_EQ(descriptors[15].name, "subtitle_page");
   EXPECT_EQ(descriptors[15].type, orc::ParameterType::STRING);
-  ASSERT_EQ(descriptors[15].constraints.allowed_strings.size(), 1u);
-  EXPECT_EQ(descriptors[15].constraints.allowed_strings[0], "SRT");
   ASSERT_TRUE(descriptors[15].constraints.default_value.has_value());
   EXPECT_EQ(std::get<std::string>(*descriptors[15].constraints.default_value),
-            "SRT");
+            "888");
   ASSERT_TRUE(descriptors[15].constraints.depends_on.has_value());
   EXPECT_EQ(descriptors[15].constraints.depends_on->parameter_name,
+            "export_subtitles");
+
+  EXPECT_EQ(descriptors[16].name, "subtitle_format");
+  EXPECT_EQ(descriptors[16].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[16].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[16].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[16].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[16].constraints.default_value),
+            "SRT");
+  ASSERT_TRUE(descriptors[16].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[16].constraints.depends_on->parameter_name,
             "export_subtitles");
 }
 
@@ -728,7 +740,7 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
   for (const auto system : {orc::VideoSystem::NTSC, orc::VideoSystem::PAL_M}) {
     const auto descriptors =
         instance_->get_parameter_descriptors(system, orc::SourceType::Unknown);
-    ASSERT_EQ(descriptors.size(), 13u) << static_cast<int>(system);
+    ASSERT_EQ(descriptors.size(), 14u) << static_cast<int>(system);
 
     EXPECT_EQ(descriptors[0].name, "output_path");
     EXPECT_EQ(descriptors[0].file_extension_hint, ".t34");
@@ -751,10 +763,72 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
 TEST_F(TeletextSinkStage, ParameterDescriptors_DefaultToThe625Service) {
   const auto descriptors = instance_->get_parameter_descriptors(
       orc::VideoSystem::PAL, orc::SourceType::Unknown);
-  ASSERT_EQ(descriptors.size(), 16u);
+  ASSERT_EQ(descriptors.size(), 17u);
   EXPECT_EQ(descriptors[0].file_extension_hint, ".t42");
   EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 6);
   EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 22);
+}
+
+// The last two links of the character-set chain, which nothing else covers:
+// the parameter reaching the options the pass is given, and the pass's pages
+// reaching the grid the viewer draws.
+TEST_F(TeletextSinkStage, Trigger_PassesTheCharacterSetToThePass) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"character_set", std::string("Cyrillic (Russian/Bulgarian)")}},
+      mockObservationContext_));
+
+  EXPECT_EQ(captured.character_set, orc::TeletextG0Set::Cyrillic2);
+}
+
+TEST_F(TeletextSinkStage, Catalogue_DrawsThePagesInTheirOwnCharacterSet) {
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.magazine = 1;
+  snapshot.page_number = 0x00;
+  snapshot.g0_set = orc::TeletextG0Set::Cyrillic2;
+  snapshot.row_received[1] = true;
+  const std::string codes = "Wtornik";
+  for (size_t column = 0; column < codes.size(); ++column) {
+    snapshot.cells[1][column].character = static_cast<uint8_t>(codes[column]);
+  }
+
+  orc::TeletextCataloguedSubPage subpage;
+  subpage.page = snapshot;
+  orc::TeletextCataloguedPage page;
+  page.magazine = snapshot.magazine;
+  page.page_number = snapshot.page_number;
+  page.times_seen = 1;
+  page.subpages.push_back(std::move(subpage));
+
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.dataset.pages.push_back(std::move(page));
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"character_set", std::string("Cyrillic (Russian/Bulgarian)")}},
+      mockObservationContext_));
+
+  const orc::CatalogueDataset& catalogue = instance_->catalogue();
+  const orc::CatalogueCellGrid* grid = nullptr;
+  for (const orc::CataloguePayload& payload : catalogue.payloads) {
+    if (payload.kind == orc::CataloguePayload::Kind::kCellGrid) {
+      grid = &payload.grid;
+      break;
+    }
+  }
+  ASSERT_NE(grid, nullptr);
+  // "Вторник" — the first letter is enough to tell the alphabets apart, and
+  // char32_t comparison keeps the assertion free of encoding questions.
+  EXPECT_EQ(grid->at(1, 0).character, U'В');
+  EXPECT_EQ(grid->at(1, 1).character, U'т');
 }
 
 // The viewer reads the catalogue off the stage after the trigger, so a

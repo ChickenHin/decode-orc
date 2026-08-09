@@ -137,6 +137,25 @@ uint8_t teletext_hamming84_encode(uint8_t value);
 // -1 when the byte is uncorrectable (double-bit error).
 int teletext_hamming84_decode(uint8_t byte);
 
+// Encode 18 data bits as a Hamming 24/18 protected triplet.
+// ETSI EN 300 706 §8.3: over three consecutive bytes, transmission-order bits
+// 1, 2, 4, 8, 16 and 24 are the protection bits P1-P6 and the remaining
+// eighteen carry D1-D18. |value| supplies D1 (its bit 0) to D18 (its bit 17);
+// bits above that are ignored. |out_bytes| receives the three bytes in
+// transmission order.
+void teletext_hamming2418_encode(uint32_t value, uint8_t out_bytes[3]);
+
+// Decode a Hamming 24/18 protected triplet (ETSI EN 300 706 §8.3), given the
+// three bytes in transmission order. Single-bit errors are identified and
+// corrected; double-bit errors are detected. Returns the 18-bit value with D1
+// in bit 0, or -1 when the triplet is uncorrectable.
+//
+// The returned value is what the standard's packet tables address as "triplet
+// bits 1 to 18", so a field at bits m-n is read as (value >> (m - 1)) masked
+// to n - m + 1 bits.
+int32_t teletext_hamming2418_decode(uint8_t byte_n, uint8_t byte_n1,
+                                    uint8_t byte_n2);
+
 // Confidence quantisation of an observation string: one hex digit per byte, so
 // 16 levels from 0 (the detector could as well have decided otherwise) to 15
 // (as sure as an undamaged signal makes it). A recovered packet is 42 bytes and

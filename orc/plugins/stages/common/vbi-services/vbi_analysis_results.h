@@ -136,6 +136,16 @@ struct TeletextRecoverySummary {
   /// True when the sub-page cap was reached and the least recently seen ones
   /// were dropped, so the catalogue is not the whole set the range carried.
   bool pages_truncated = false;
+
+  /// G0 character set the pages were read in — the alphabet, not the data.
+  ///
+  /// Reported because it is the one thing about a rendered page that cannot be
+  /// checked by looking at it: a Cyrillic service read as Latin produces
+  /// pronounceable nonsense rather than anything obviously wrong, and half the
+  /// Cyrillic capitals are drawn identically to their Latin counterparts, so
+  /// even a correctly read page can look untouched. Saying which set was used
+  /// turns "is this right?" into something the reader can answer.
+  TeletextG0Set character_set = TeletextG0Set::Latin;
 };
 
 /// Everything the teletext sink caches from one trigger run.

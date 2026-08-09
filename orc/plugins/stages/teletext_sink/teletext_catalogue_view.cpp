@@ -195,6 +195,10 @@ std::string run_headline(const TeletextRecoverySummary& summary) {
   if (summary.pages_truncated) {
     parts.push_back("page list truncated at the catalogue limit");
   }
+  // Last, because it is a statement about the run rather than a count from it —
+  // and the one thing a reader cannot check by looking at the page (see
+  // TeletextRecoverySummary::character_set).
+  parts.push_back("read as " + to_string(summary.character_set));
   std::string text = parts.front();
   for (size_t i = 1; i < parts.size(); ++i) {
     text += "; " + parts[i];
@@ -256,10 +260,11 @@ CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
         out.mosaic_separated = cell.separated_mosaic;
         out.character = U' ';
       } else {
-        // The page's own G0 set: the national option sub-set its header
-        // selected, not a fixed English one (§15.2, §15.6.2).
-        out.character = orc::teletext_latin_g0_to_unicode(
-            cell.character, snapshot.national_option_subset);
+        // The page's own G0 set: the alphabet the service designated and the
+        // national option sub-set its header selected, not a fixed English one
+        // (§15.2, §15.6.2).
+        out.character = orc::teletext_g0_to_unicode(
+            cell.character, snapshot.g0_set, snapshot.national_option_subset);
       }
     }
   }

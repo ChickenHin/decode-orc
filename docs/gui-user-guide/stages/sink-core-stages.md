@@ -485,6 +485,9 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 * `detector` (string)
     - How data bits are recovered: `Threshold` (slice at bit centres; exact on discs and direct captures), `MLSE` (fit the recording's frequency response to the known start of each line, detect against it, then refit that response to the whole packet just read and read it again; recovers teletext from tape, where limited bandwidth smears bits into their neighbours), or `Automatic` (threshold first, MLSE only where it fails — same behaviour and cost as threshold alone on a disc source).
     - Default: `Automatic`.
+* `character_set` (string)
+    - Which alphabet the page codes are read in: `Latin`, `Cyrillic (Russian/Bulgarian)`, `Cyrillic (Ukrainian)` or `Cyrillic (Serbian/Croatian)`. A display code means nothing on its own — 4/4 is `D` in the Latin set and `Д` in the Russian one — and a service that says which set it uses (a packet X/28/0 or M/29/0, ETSI EN 300 706 §15.2) is always believed, so this is consulted only for pages that designate nothing. That is most of what survives on tape: those packets are a Level 2.5 facility, and for Level 1 the standard falls back on "a local Code of Practice" — the region the receiver was sold in. Nothing in the recording can settle it, so the choice has to be yours. It affects only the pages you read and any subtitles exported from them; the exported packet stream is the transmitted bytes and carries no character set. Within Latin, the national option sub-set (`£` for a UK service, `é` for a French one) still comes from each page's own header bits and needs no setting.
+    - Default: `Latin`.
 * `tolerant_framing` (boolean)
     - Accept framing codes with one bit error (more packets from noisy sources, higher false-positive rate).
     - Default: `false`.
@@ -515,7 +518,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
     - Damage is counted by the odd parity every display byte carries, over the display rows as written. It is a floor rather than an exact count — a byte damaged in two bits passes parity — and it says nothing about rows that never arrived.
     - Default: `false`.
 * `export_subtitles` (boolean)
-    - Decode the subtitle page alongside the packet export and write timed cues to a `.srt` file next to the output. Offered on 625-line projects only: the cue timing derives from 50 fields per second.
+    - Decode the subtitle page alongside the packet export and write timed cues to a `.srt` file next to the output. Offered on 625-line projects only: the cue timing derives from 50 fields per second. Text is written as UTF-8 through the page's own character set, so a UK page's `£` and a Cyrillic service's cues both reach the file as themselves.
     - Default: `false`.
 * `subtitle_page` (string)
     - Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`.

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <string>
 
+#include "vbi-services/teletext_page_decoder.h"
 #include "vbi-services/teletext_slicer.h"
 #include "vbi-services/vbi_analysis_results.h"
 
@@ -65,6 +66,11 @@ struct TeletextSinkOptions {
   // what makes that true — so it is a claim on the machine rather than a
   // tuning knob.
   int32_t decode_threads{0};
+  // G0 primary character set pages are displayed in when the service
+  // designates none of its own (TeletextPageDecoder::set_default_g0_set).
+  // Affects rendered pages and subtitle text only: the exported packet stream
+  // is the transmitted bytes and carries no character set.
+  TeletextG0Set character_set{TeletextG0Set::Latin};
   // Combine repeated transmissions of each page row and write the combined
   // form ("squashing", see vbi-services/teletext_row_squasher.h). Costs a
   // second pass over the recovered packets, held in memory (~50 bytes each).

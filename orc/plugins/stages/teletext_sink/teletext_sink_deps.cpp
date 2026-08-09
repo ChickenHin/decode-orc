@@ -218,12 +218,19 @@ std::string TeletextSinkDeps::build_report(
       "  Frames:        {}\n"
       "  VBI lines:     {}-{} of each field (1-based)\n"
       "  Detector:      {}\n"
+      // Which alphabet the catalogued pages were read in. Worth stating even
+      // at its default: it cannot be recovered from the packet stream, which
+      // is the transmitted bytes and carries no character set, and a reader
+      // comparing pages against a photograph of the same service has no other
+      // way to know what was assumed. Qualified because a service that
+      // designates its own set (a packet X/28/0 or M/29/0) overrides this.
+      "  Character set: {} (unless a page designates its own)\n"
       "  Packets:       {} written, {} fields carried data",
       result.output_path.empty() ? std::string("(none; pages browsed only)")
                                  : result.output_path,
       total_frames, options.first_field_line + 1, options.last_field_line + 1,
-      detector_name(options.detector), result.packets_written,
-      result.fields_with_data);
+      detector_name(options.detector), to_string(options.character_set),
+      result.packets_written, result.fields_with_data);
   if (options.keep_empty_packets) {
     report += " (empty candidate lines padded)";
   }
@@ -461,6 +468,10 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // second one would re-derive page assembly from scratch to no purpose.
   TeletextPageCatalogue catalogue;
   TeletextPageDecoder output_decoder;
+  // Only the decoder whose pages are rendered needs the fallback alphabet: the
+  // squash pass exists to attribute rows to pages, which the character set has
+  // no part in.
+  output_decoder.set_default_g0_set(options.character_set);
   if (squash) {
     output_decoder.set_row_squasher(&squasher);
   }
@@ -508,6 +519,9 @@ TeletextSinkResult TeletextSinkDeps::analyse(
       }
     }
     partial.dataset.summary.pages_truncated = catalogue.truncated();
+    // The alphabet the pages above were read in, carried to the viewer so the
+    // reader is told rather than left to judge it from the glyphs.
+    partial.dataset.summary.character_set = options.character_set;
     partial.dataset.summary.packets_recovered = partial.packets_written;
     partial.dataset.summary.fields_with_data = partial.fields_with_data;
     partial.dataset.summary.packets_corrected = partial.packets_corrected;

@@ -22,6 +22,45 @@ namespace {
 constexpr int kHintColumns = 40;
 constexpr int kHintRows = 25;
 
+// The fixed-pitch font the cells are drawn in, with families named after the
+// platform's own so a glyph it lacks is still drawn by something.
+//
+// A cell grid is not ASCII and never was. The Latin G0 set of a teletext page
+// reaches the arrows, the vulgar fractions and the double vertical bar of
+// ETSI EN 300 706 Table 36, every set puts a filled rectangle at 7/F, and a
+// page in one of the Cyrillic G0 sets is Cyrillic throughout. Which of that a
+// platform's fixed font covers is not something this widget can assume — a
+// missing glyph is drawn as a box, or as nothing at all, and either reads as a
+// decoding fault rather than as the font problem it is.
+//
+// Naming fallbacks is what fixes it: Qt matches the families in order per
+// character, so the platform font still draws everything it can and only the
+// characters it cannot fall through to the broad-coverage families after it.
+QFont cell_grid_font() {
+  QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+
+  QStringList families = font.families();
+  if (families.isEmpty() && !font.family().isEmpty()) {
+    families << font.family();
+  }
+  // Broad-coverage monospaced faces, then the generic alias fontconfig and the
+  // other platforms resolve to whatever is installed. Each is skipped when the
+  // platform font is already it, so the common case names one family.
+  for (const char* fallback :
+       {"DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Consolas",
+        "Menlo", "Courier New", "monospace"}) {
+    const QString name = QString::fromLatin1(fallback);
+    if (!families.contains(name, Qt::CaseInsensitive)) {
+      families << name;
+    }
+  }
+  font.setFamilies(families);
+  // Says what the fallbacks are for, so a substitution Qt makes on its own
+  // stays fixed-pitch and the columns keep their alignment.
+  font.setStyleHint(QFont::Monospace);
+  return font;
+}
+
 QColor palette_colour(const orc::CatalogueCellGrid& grid, uint8_t index) {
   if (grid.palette.empty()) {
     return index == 0 ? QColor(0, 0, 0) : QColor(255, 255, 255);
@@ -160,7 +199,7 @@ void CatalogueCellGridWidget::paintEvent(QPaintEvent* /*event*/) {
   // squeezed if the font is wider than the cell, so neighbouring characters
   // never overlap. Double height reuses this glyph under a 2x vertical scale:
   // height doubles, width does not.
-  QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+  QFont mono = cell_grid_font();
   mono.setPixelSize(qMax(1, static_cast<int>(cell_h)));
   const QFontMetricsF metrics(mono);
   const qreal advance = metrics.horizontalAdvance(QChar(u'M'));

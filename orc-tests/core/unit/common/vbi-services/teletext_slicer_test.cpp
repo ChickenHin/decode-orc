@@ -90,6 +90,75 @@ TEST(TeletextHamming84, DoubleBitErrorsAreRejected) {
   EXPECT_EQ(teletext_hamming84_decode(code ^ 0b10000001), -1);
 }
 
+TEST(TeletextHamming2418, EncodeDecodeRoundTrip) {
+  // The 18 data bits go out and come back unchanged, at the extremes and over
+  // a spread of patterns that exercises every bit in both states.
+  for (const uint32_t value : {0x00000u, 0x3FFFFu, 0x2AAAAu, 0x15555u, 0x00001u,
+                               0x20000u, 0x12345u, 0x2CB9Eu}) {
+    uint8_t bytes[3] = {};
+    teletext_hamming2418_encode(value, bytes);
+    EXPECT_EQ(teletext_hamming2418_decode(bytes[0], bytes[1], bytes[2]),
+              static_cast<int32_t>(value))
+        << "value=" << std::hex << value;
+  }
+}
+
+TEST(TeletextHamming2418, ProtectionBitsSitWhereTheStandardPutsThem) {
+  // EN 300 706 §8.3: transmission-order bits 1, 2, 4, 8, 16 and 24 are P1-P6
+  // and the other eighteen carry D1-D18 in order. Encoding a single data bit
+  // therefore has to light exactly one of the data positions.
+  constexpr std::array<int, 18> kDataBits = {
+      3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23};
+  for (size_t index = 0; index < kDataBits.size(); ++index) {
+    uint8_t bytes[3] = {};
+    teletext_hamming2418_encode(1u << index, bytes);
+    const uint32_t bits = static_cast<uint32_t>(bytes[0]) |
+                          (static_cast<uint32_t>(bytes[1]) << 8) |
+                          (static_cast<uint32_t>(bytes[2]) << 16);
+    uint32_t data_mask = 0;
+    for (const int position : kDataBits) {
+      data_mask |= 1u << (position - 1);
+    }
+    EXPECT_EQ(bits & data_mask, 1u << (kDataBits[index] - 1))
+        << "D" << (index + 1);
+  }
+}
+
+TEST(TeletextHamming2418, SingleBitErrorsAreCorrectedAtEveryPosition) {
+  // Including errors in the protection bits themselves, which must leave the
+  // data intact rather than be "corrected" into it.
+  for (const uint32_t value : {0x00000u, 0x3FFFFu, 0x12345u, 0x2CB9Eu}) {
+    uint8_t bytes[3] = {};
+    teletext_hamming2418_encode(value, bytes);
+    for (int bit = 0; bit < 24; ++bit) {
+      uint8_t damaged[3] = {bytes[0], bytes[1], bytes[2]};
+      damaged[bit / 8] ^= static_cast<uint8_t>(1u << (bit % 8));
+      EXPECT_EQ(teletext_hamming2418_decode(damaged[0], damaged[1], damaged[2]),
+                static_cast<int32_t>(value))
+          << "value=" << std::hex << value << " flipped bit=" << std::dec
+          << bit;
+    }
+  }
+}
+
+TEST(TeletextHamming2418, DoubleBitErrorsAreRejected) {
+  // §8.3: two errors are detected, not corrected. Every pair of positions is
+  // checked, because a code that corrected one of them would put a silently
+  // wrong triplet into the decoder.
+  uint8_t bytes[3] = {};
+  teletext_hamming2418_encode(0x12345u, bytes);
+  for (int first = 0; first < 24; ++first) {
+    for (int second = first + 1; second < 24; ++second) {
+      uint8_t damaged[3] = {bytes[0], bytes[1], bytes[2]};
+      damaged[first / 8] ^= static_cast<uint8_t>(1u << (first % 8));
+      damaged[second / 8] ^= static_cast<uint8_t>(1u << (second % 8));
+      EXPECT_EQ(teletext_hamming2418_decode(damaged[0], damaged[1], damaged[2]),
+                -1)
+          << "flipped bits " << first << " and " << second;
+    }
+  }
+}
+
 TEST(TeletextHex, PacketRoundTrip) {
   const auto payload = make_test_payload();
   const std::string hex = teletext_packet_to_hex(payload);

@@ -30,7 +30,7 @@ The pass also learns about the recording as it goes, and spends less on later fr
 
 Recovering a line reads that line's samples and nothing else, so frames are decoded on several threads at once while the packets are written from one, in the order they were transmitted (`decode_threads`). The recovered stream does not depend on how many threads were used — see that parameter for what makes that true. Learning and threading together take a pass over the 625-line reference capture from 1970 ms to 295 ms, and the 525-line one from 946 ms to 156 ms.
 
-On a 625-line source the stage can additionally decode the subtitle page (pages flagged C6 in the header control bits, conventionally page 888 in the UK) and write the recovered subtitles as a SubRip (`.srt`) file next to the packet stream. Cue timing derives from the field number at 50 fields/s, which is why the option is not offered on 525-line sources; colour, positioning, and other Level 1 presentation attributes are dropped — SRT carries the plain text. Text is written as UTF-8 through the national option sub-set the page header selects (ETSI EN 300 706 §15.6.2 Table 36), so a UK page's `£`, `½` and `¼` reach the file as themselves rather than as the ASCII the transmitted codes would be.
+On a 625-line source the stage can additionally decode the subtitle page (pages flagged C6 in the header control bits, conventionally page 888 in the UK) and write the recovered subtitles as a SubRip (`.srt`) file next to the packet stream. Cue timing derives from the field number at 50 fields/s, which is why the option is not offered on 525-line sources; colour, positioning, and other Level 1 presentation attributes are dropped — SRT carries the plain text. Text is written as UTF-8 through the page's own G0 character set — the alphabet of `character_set` below, and within Latin the national option sub-set the page header selects (ETSI EN 300 706 §15.6.2 Table 36) — so a UK page's `£`, `½` and `¼` reach the file as themselves rather than as the ASCII the transmitted codes would be, and a Cyrillic service's cues reach it in Cyrillic.
 
 ## Tools
 
@@ -68,6 +68,17 @@ How data bits are recovered from each line. Default: `Automatic`.
 * `Threshold` — locks to the clock run-in and slices at bit centres. Exact on a source that passes the whole data band, which is what a disc or a direct capture gives you, and the cheapest option.
 * `MLSE` — fits the recording's frequency response to the 24 known bits every teletext line starts with, then picks the payload bit sequence that response most likely produced. This is what recovers teletext from tape, where the limited bandwidth smears each bit into its neighbours. Nothing is trained or configured beforehand: each line carries the reference used to fit its own channel. It then refits that response against the whole packet it has just read and reads the packet again, which is where most of its accuracy on a tape comes from: 24 known bits pin a frequency response far less well than 360 do. Costs roughly ten times the work per line and, because it fits rather than matching an exact framing code, it locks onto a noise-only line a few times in a hundred (5 of 64 synthesized noise lines here, and none at all on the tens of thousands of real non-teletext data lines measured) — `require_valid_mrag` and an internal parity plausibility check are what hold that down.
 * `Automatic` — try `Threshold` first and fall back to `MLSE` only on lines it could not lock. A disc source therefore behaves and costs exactly as it did before, and a tape source gets the fallback without being told to.
+
+### character_set (string)
+Which alphabet the recovered page codes are read in. Default: `Latin`. The other three are `Cyrillic (Russian/Bulgarian)`, `Cyrillic (Ukrainian)` and `Cyrillic (Serbian/Croatian)`.
+
+A page's forty display codes are seven bits each, and what they mean depends entirely on which G0 character set the service used: code 4/4 is `D` in the Latin set and `Д` in the Russian one. ETSI EN 300 706 §15.2 lets a service say which, in a packet X/28/0 or M/29/0, **and this stage always believes it when it does** — the setting here is consulted only for pages that designate nothing. That is most of what survives on tape: those packets are a Level 2.5 facility and a Level 1 service transmits neither, which is why the standard falls back on "a local Code of Practice", meaning the region the receiver was sold in. Nothing in a recording distinguishes the alphabets, so there is nothing this stage could measure and the choice has to be yours.
+
+Get it wrong on a Cyrillic service and the pages come out as readable-looking Latin gibberish — `Петербург` arrives as `Peterburg` — which is exactly what a western receiver showed on the same broadcast. Get it wrong the other way and a Latin service comes out as Cyrillic gibberish. It changes nothing about what is *recovered*: the exported packet stream is the transmitted bytes and carries no character set at all, so a `.t42` written under the wrong setting is not damaged and never needs exporting again. What it does affect is the pages you read and any subtitles exported from them, and those come from the decode — so correcting the setting means triggering the node again.
+
+Within the Latin set the *national option sub-set* — which puts `£` at 2/3 for a UK service and `é` for a French one — still comes from each page's own header bits (C12–C14) and needs no setting. The Cyrillic sets reserve no such positions, so those bits are ignored for them.
+
+Only the three Cyrillic sets are implemented alongside Latin. The standard also defines Greek, Arabic and Hebrew G0 sets; a page designating one of those is shown as Latin.
 
 ### tolerant_framing (boolean)
 Accept framing codes with one bit error. Recovers more packets from noisy sources at the cost of a higher false-positive rate. Default: `false`.
@@ -142,7 +153,7 @@ Teletext analysis report
 
 Damage is counted by the odd parity the standard already puts on every display byte (§8.1), over the display rows of the stream as written. Read it as *of the characters this export produced, this share are known wrong*. Two caveats, both in the conservative direction: it is a floor, because a byte damaged in two bits passes parity and is counted as good; and it says nothing about rows that never arrived, which are absent from both sides of the ratio.
 
-Below the headline the report gives what was exported (output path, frames, VBI window, detector, packet and field counts, pages catalogued), how recovery went (the profile described under Notes below), and the detail behind the headline — the share of rows the vote changed, and how many copies each row was combined from:
+Below the headline the report gives what was exported (output path, frames, VBI window, detector, character set, packet and field counts, pages catalogued), how recovery went (the profile described under Notes below), and the detail behind the headline — the share of rows the vote changed, and how many copies each row was combined from:
 
 ```
 Teletext squashing: 264 row packets over 1 page run; 246 rewritten (93.2%),

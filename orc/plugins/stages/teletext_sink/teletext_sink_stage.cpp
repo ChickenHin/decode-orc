@@ -217,6 +217,32 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "character_set";
+    desc.display_name = "Character Set";
+    desc.description =
+        "Which alphabet the page codes are read in when the service does not "
+        "say. A service that says so is always believed: if it transmits a "
+        "packet X/28/0 or M/29/0 designating its character set, that is what "
+        "is used and this setting is ignored. Level 1 services — which is "
+        "most of what survives on tape — transmit neither, and the standard "
+        "leaves the choice to \"a local Code of Practice\": the region the "
+        "receiver was sold in. Nothing in the recording can settle it, so it "
+        "has to be set here. Latin covers western Europe and is what every "
+        "page was shown as before; pick a Cyrillic option for a Russian, "
+        "Bulgarian, Ukrainian or ex-Yugoslav service, which would otherwise "
+        "read as transliterated nonsense. The national option sub-set within "
+        "Latin still comes from each page's own header bits";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {to_string(TeletextG0Set::Latin),
+                                        to_string(TeletextG0Set::Cyrillic2),
+                                        to_string(TeletextG0Set::Cyrillic3),
+                                        to_string(TeletextG0Set::Cyrillic1)};
+    desc.constraints.default_value = to_string(TeletextG0Set::Latin);
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "tolerant_framing";
     desc.display_name = "Tolerant Framing";
     desc.description =
@@ -461,6 +487,14 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
     options.detector = TeletextDetector::kMlse;
   } else {
     throw std::runtime_error("Unknown bit detector: " + detector);
+  }
+
+  const std::string character_set = get_string_or(
+      parameters, "character_set", to_string(TeletextG0Set::Latin));
+  if (const auto g0_set = teletext_g0_set_from_string(character_set)) {
+    options.character_set = *g0_set;
+  } else {
+    throw std::runtime_error("Unknown character set: " + character_set);
   }
 
   options.squash_repeated_rows =
