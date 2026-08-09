@@ -3,23 +3,149 @@ name: Build and Test (Nix)
 on:
   workflow_call:
 
+# Three independent jobs run concurrently rather than one serial 48-minute step.
+#
+#   static-gates   configure-only source scans; finishes in ~3 minutes, so a
+#                  formatting or architecture slip fails while the build is
+#                  still compiling instead of 40 minutes later
+#   noshims-build  a second build tree that shares nothing with the first
+#   unit-gate      the long pole: build, tests, installed-package validation
+#
+# Nothing is duplicated by the split: static-gates never builds, and the
+# no-shims tree was already a separate configure inside the old serial step.
 jobs:
-  unit-gate:
-    name: Unit + Architecture Gates
+  # ---------------------------------------------------------------------------
+  # Architecture, SDK and format hard gates.
+  #
+  # Every test behind these three labels is a script that scans the source tree
+  # (cmake/check_*.sh) or a clang-format --dry-run, so a configured build tree is
+  # enough -- nothing here needs a compiled object. Configuring with the test
+  # trees off keeps it to ~20s of cmake plus ~15s of ctest.
+  # ---------------------------------------------------------------------------
+  static-gates:
+    name: Architecture + SDK + Format Gates
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
+        with:
+          nix_path: nixpkgs=channel:nixos-25.11
+
+      - name: Configure and Run Gates
+        run: |
+          nix develop .#ci -c bash -lc "
+            set -euo pipefail
+
+            cmake -S . -B build-gates \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DBUILD_UNIT_TESTS=OFF \
+              -DBUILD_GUI_TESTS=OFF \
+              -DBUILD_INTEGRATION_TESTS=OFF \
+              -DBUILD_FUNCTIONAL_TESTS=OFF
+
+            ctest --test-dir build-gates -L mvp --output-on-failure --output-junit \${PWD}/build-gates/ctest-results-mvp.xml
+            ctest --test-dir build-gates -L sdk --output-on-failure --output-junit \${PWD}/build-gates/ctest-results-sdk.xml
+            ctest --test-dir build-gates -L format --output-on-failure --output-junit \${PWD}/build-gates/ctest-results-format.xml
+          "
+
+      - name: Upload Static Gate Artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ctest-artifacts-static-gates
+          if-no-files-found: warn
+          path: |
+            build-gates/ctest-results-mvp.xml
+            build-gates/ctest-results-sdk.xml
+            build-gates/ctest-results-format.xml
+
+  # ---------------------------------------------------------------------------
+  # Tiered-SDK validation (deprecated pre-tier shims disabled).
+  #
+  # A build with ORC_SDK_DEPRECATED_INCLUDE_SHIMS=OFF proves no bundled plugin
+  # compiles through a deprecation shim: every pre-tier include path becomes a
+  # hard #error for SDK-linked targets. The unit-gate build keeps shims ON (the
+  # shipped default the installed package exports for third-party source
+  # compatibility), so this tree shares no object with it and gets its own job.
+  # ---------------------------------------------------------------------------
+  noshims-build:
+    name: Tiered-SDK Plugin Build (shims off)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
+        with:
+          nix_path: nixpkgs=channel:nixos-25.11
+
+      # Separate cache key from unit-gate: the two jobs compile the same sources
+      # with different preprocessor state, so they would evict each other's
+      # entries if they shared one.
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-noshims-${{ github.sha }}
+          restore-keys: |
+            ccache-noshims-
+
+      - name: Build Bundled Plugins Without Shims
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 1G
+        run: |
+          nix develop .#ci -c bash -lc "
+            set -euo pipefail
+
+            export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+            ccache --zero-stats > /dev/null
+
+            BUILD_JOBS=\"\$(nproc)\"
+            if [ -z \"\$BUILD_JOBS\" ] || [ \"\$BUILD_JOBS\" -lt 2 ]; then
+              BUILD_JOBS=2
+            fi
+
+            cmake -S . -B build-noshims \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DBUILD_UNIT_TESTS=OFF \
+              -DBUILD_GUI=OFF \
+              -DORC_SDK_DEPRECATED_INCLUDE_SHIMS=OFF
+            cmake --build build-noshims --target orc-stage-plugins --parallel \"\$BUILD_JOBS\"
+            echo 'Bundled plugins build clean with pre-tier shims disabled'
+
+            ccache --show-stats
+          "
+
+  # ---------------------------------------------------------------------------
+  # The long pole: full Debug build with GUI tests, the test suites that need
+  # compiled binaries, and the installed-package / SDK-tarball validation that
+  # consumes this job's install tree.
+  # ---------------------------------------------------------------------------
+  unit-gate:
+    name: Unit + Functional Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           # Full history so the ABI bump-procedure guard can diff contract
-          # headers against origin/main.
+          # headers against origin/main, and so git describe can version the
+          # SDK tarball.
           fetch-depth: 0
 
       # Pure-bash guard (no build): fails when the ABI/API header constants,
       # abi_history.yaml, and the generated docs table drift, or when a contract
-      # header changed without an acknowledged history edit. Runs before the
-      # expensive Nix build so an ABI-procedure slip fails fast.
+      # header changed without an acknowledged history edit. Kept in this job
+      # rather than moved to static-gates because it costs nothing and failing
+      # here stops the expensive build immediately.
       - name: ABI bump procedure guard
         run: bash tools/check_abi_bump.sh .
 
@@ -28,13 +154,42 @@ jobs:
         with:
           nix_path: nixpkgs=channel:nixos-25.11
 
+      # Object cache for the compile step. Every run configures from scratch, so
+      # without this the whole tree is recompiled each time; with it, a branch
+      # push recompiles only the translation units it actually touched. The key
+      # is per-commit so the entry is always written back, and restore-keys
+      # falls back to the newest earlier cache of this job.
+      #
+      # Note this caches compilation only: CMAKE_CXX_CLANG_TIDY is a separate
+      # command that CMake runs alongside the compiler, so the host tree still
+      # pays for its per-file analysis on a cache hit.
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-unit-gate-${{ github.sha }}
+          restore-keys: |
+            ccache-unit-gate-
+
       # All work runs inside a single nix develop shell to avoid paying the
       # per-step flake evaluation overhead (was 4 separate nix develop calls).
       # The .#ci shell keeps CI tooling streamlined.
       - name: Build, Test and Validate
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          # A repository only gets 10 GB across all its cache keys, shared with
+          # the noshims job and the packaging workflows, so cap this well inside
+          # that.
+          CCACHE_MAXSIZE: 2G
         run: |
           nix develop .#ci -c bash -lc "
             set -euo pipefail
+
+            # Route every compile through the cache restored above. Exporting it
+            # rather than passing -D means all three cmake configures below pick
+            # it up, including the out-of-tree fixture plugin builds.
+            export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+            ccache --zero-stats > /dev/null
 
             BUILD_JOBS=\"\$(nproc)\"
             if [ -z \"\$BUILD_JOBS\" ] || [ \"\$BUILD_JOBS\" -lt 2 ]; then
@@ -42,21 +197,32 @@ jobs:
             fi
 
             # --- Configure ---
-            # GUI tests are built only in this job; link pool caps simultaneous
-            # linker processes to avoid OOM on the 2-vCPU/7-GB GitHub runner.
+            # GUI tests are built only in this job. The generator comes from the
+            # .#ci shell (Ninja); mold is on its PATH, so the root CMakeLists
+            # selects it as the linker.
+            #
+            # This used to pass -DCMAKE_JOB_POOLS='link=2' to cap simultaneous
+            # linkers against OOM on what the comment called a 2-vCPU/7-GB
+            # runner. Job pools are Ninja-only and the shell set no generator,
+            # so the cap never actually applied; ubuntu-latest is now 4-vCPU and
+            # 16 GB, and mold peaks in the tens of MB linking the largest (138
+            # MB) test binary. Measured at -j4 on a warm cache, reinstating the
+            # cap costs 59% (41s -> 65s) because the link phase serialises, so
+            # the build runs unpooled.
             cmake -S . -B build \
               -DCMAKE_BUILD_TYPE=Debug \
               -DBUILD_UNIT_TESTS=ON \
               -DBUILD_GUI_TESTS=ON \
               -DBUILD_INTEGRATION_TESTS=OFF \
-              -DBUILD_FUNCTIONAL_TESTS=ON \
-              -DCMAKE_JOB_POOLS='link=2' \
-              -DCMAKE_JOB_POOL_LINK=link
+              -DBUILD_FUNCTIONAL_TESTS=ON
 
             # --- Build ---
             cmake --build build --parallel \"\$BUILD_JOBS\"
 
             # --- Assert fine-grained CTest labels are present ---
+            # mvp/sdk/format are asserted here even though the static-gates job
+            # runs them: this build tree must still register them, or a label
+            # rename would silently empty that job.
             labels_output=\"\$(ctest --test-dir build --print-labels)\"
             expected_labels=(unit gui sources transforms sinks contracts preview gui-logic gui-model gui-widget mvp sdk functional format)
             missing=()
@@ -78,11 +244,6 @@ jobs:
 
             # --- Functional tests (filesystem / plugin-loading contracts) ---
             ctest --test-dir build -L functional --parallel \"\$BUILD_JOBS\" --output-on-failure --output-junit \${PWD}/build/ctest-results-functional.xml
-
-            # --- Architecture, SDK and format hard gates ---
-            ctest --test-dir build -L mvp --parallel \"\$BUILD_JOBS\" --output-on-failure --output-junit \${PWD}/build/ctest-results-mvp.xml
-            ctest --test-dir build -L sdk --parallel \"\$BUILD_JOBS\" --output-on-failure --output-junit \${PWD}/build/ctest-results-sdk.xml
-            ctest --test-dir build -L format --output-on-failure --output-junit \${PWD}/build/ctest-results-format.xml
 
             # --- Installed-package validation (out-of-tree plugin SDK) ---
             # Install to a scratch prefix, build the fixture plugin against the
@@ -129,22 +290,6 @@ jobs:
             cmake --build build/external-plugin-pkg --parallel \"\$BUILD_JOBS\"
             echo 'Standalone SDK package validation passed'
 
-            # --- Tiered-SDK validation (deprecated pre-tier shims disabled) ---
-            # A separate build with ORC_SDK_DEPRECATED_INCLUDE_SHIMS=OFF proves
-            # no bundled plugin compiles through a deprecation shim: every
-            # pre-tier include path becomes a hard #error for SDK-linked targets.
-            # The primary build above keeps shims ON (the shipped default the
-            # installed package exports for third-party source compatibility).
-            cmake -S . -B build-noshims \
-              -DCMAKE_BUILD_TYPE=Debug \
-              -DBUILD_UNIT_TESTS=OFF \
-              -DBUILD_GUI=OFF \
-              -DORC_SDK_DEPRECATED_INCLUDE_SHIMS=OFF \
-              -DCMAKE_JOB_POOLS='link=2' \
-              -DCMAKE_JOB_POOL_LINK=link
-            cmake --build build-noshims --target orc-stage-plugins --parallel \"\$BUILD_JOBS\"
-            echo 'Bundled plugins build clean with pre-tier shims disabled'
-
             # --- CTest timing summary ---
             python3 cmake/summarize_ctest_junit.py --input build/ctest-results-unit.xml --output build/ctest-results-unit-summary.md --top 25
 
@@ -159,6 +304,12 @@ jobs:
               --max-wall-seconds 45.0 \
               --min-pass-rate 99.5 \
               --max-p95-seconds 0.105
+
+            # --- Compile cache effectiveness ---
+            # A branch push that touched a handful of files should show a hit
+            # rate in the high nineties; a run-wide miss means the cache key or
+            # the compiler identity moved.
+            ccache --show-stats
           "
 
       - name: Upload Unit Gate Artifacts
@@ -170,9 +321,6 @@ jobs:
           path: |
             build/ctest-results-unit.xml
             build/ctest-results-functional.xml
-            build/ctest-results-mvp.xml
-            build/ctest-results-sdk.xml
-            build/ctest-results-format.xml
             build/ctest-results-unit-summary.md
             build/Testing/Temporary/LastTest.log
             build/Testing/Temporary/CTestCostData.txt

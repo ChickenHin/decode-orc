@@ -466,9 +466,17 @@
           packages = with pkgs; [
             cmake-format
             clang-tools
+            # Object cache for the CI build; the workflow persists $CCACHE_DIR
+            # between runs and sets CMAKE_CXX_COMPILER_LAUNCHER.
+            ccache
             ninja
             zip
             git
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # The root CMakeLists sets CMAKE_LINKER_TYPE=MOLD when it finds mold
+            # on PATH; without it here CI linked the debug test binaries with
+            # BFD ld. Matches the default dev shell.
+            mold
           ];
 
           shellHook = ''
@@ -482,6 +490,12 @@
           '';
 
           CMAKE_EXPORT_COMPILE_COMMANDS = 1;
+          # Without this CI configured with the Unix Makefiles generator, whose
+          # per-directory recursion also gives every translation unit a
+          # different working directory -- which ccache folds into its hash when
+          # debug info is on, so the two generators cannot share a cache.
+          # Matches the default dev shell.
+          CMAKE_GENERATOR = "Ninja";
           QT_QPA_PLATFORM = pkgs.lib.optionalString pkgs.stdenv.isLinux "xcb";
         };
 

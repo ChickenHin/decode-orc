@@ -1,0 +1,22 @@
+# clang-tidy configuration for the test tree.
+#
+# clang-tidy resolves its configuration by walking up the directory tree from
+# each source file. Without this file that search leaves the repository without
+# finding anything (orc/.clang-tidy covers the host tree only), so clang-tidy
+# falls back to its built-in default: the whole path-sensitive
+# `clang-analyzer-*` suite, which is by far the most expensive analysis it
+# offers -- measured at 5-127 s per test translation unit against 3-8 s for the
+# orc/ check list. The findings were never enforced either, because a fallback
+# configuration carries no WarningsAsErrors, so CI paid that cost on every test
+# translation unit and discarded the output.
+#
+# Test sources are deliberately not held to the orc/ check list: they emit
+# hundreds of diagnostics under its `WarningsAsErrors: '*'`. The single check
+# below is cheap, AST-only and already clean across the tree; it is present
+# because clang-tidy refuses to run with no checks enabled at all.
+#
+# This file governs editor/clangd analysis and the repo-wide `clang-tidy-check`
+# target. Per-file analysis during the build is switched off for this tree
+# outright -- see the CMAKE_CXX_CLANG_TIDY reset in orc-tests/CMakeLists.txt.
+Checks: '-*,modernize-use-override'
+WarningsAsErrors: ''
