@@ -294,4 +294,66 @@ TEST(ThemeManagerTest, ResolutionDark_IsDarkIsTrue) {
   EXPECT_TRUE(resolution.isDark);
 }
 
+// =============================================================================
+// Native Style Fallback Tests
+// =============================================================================
+
+TEST(ThemeManagerTest, StyleFallback_WindowsVistaDark_NeedsFallback) {
+  // The Windows 10 style has no dark rendering at all, so a dark palette on top
+  // of it leaves unreadable light chrome (issue #250).
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback("windowsvista", true,
+                                                      Qt::ColorScheme::Dark));
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback("windowsvista", true,
+                                                      Qt::ColorScheme::Light));
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback(
+      "windowsvista", true, Qt::ColorScheme::Unknown));
+}
+
+TEST(ThemeManagerTest, StyleFallback_WindowsVistaLight_KeepsNativeStyle) {
+  EXPECT_FALSE(ThemeManager::styleNeedsPaletteFallback("windowsvista", false,
+                                                       Qt::ColorScheme::Light));
+  EXPECT_FALSE(ThemeManager::styleNeedsPaletteFallback("windowsvista", false,
+                                                       Qt::ColorScheme::Dark));
+}
+
+TEST(ThemeManagerTest, StyleFallback_Windows11MatchingScheme_KeepsNativeStyle) {
+  // The Windows 11 style paints whichever scheme Qt reports for the desktop.
+  EXPECT_FALSE(ThemeManager::styleNeedsPaletteFallback("windows11", true,
+                                                       Qt::ColorScheme::Dark));
+  EXPECT_FALSE(ThemeManager::styleNeedsPaletteFallback("windows11", false,
+                                                       Qt::ColorScheme::Light));
+}
+
+TEST(ThemeManagerTest, StyleFallback_Windows11OpposedScheme_NeedsFallback) {
+  // Forcing a theme the desktop is not using cannot be done natively.
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback("windows11", true,
+                                                      Qt::ColorScheme::Light));
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback("windows11", false,
+                                                      Qt::ColorScheme::Dark));
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback(
+      "windows11", true, Qt::ColorScheme::Unknown));
+}
+
+TEST(ThemeManagerTest, StyleFallback_StyleNameIsCaseInsensitive) {
+  EXPECT_TRUE(ThemeManager::styleNeedsPaletteFallback(" WindowsVista ", true,
+                                                      Qt::ColorScheme::Dark));
+}
+
+TEST(ThemeManagerTest, StyleFallback_PaletteDrivenStyles_KeepNativeStyle) {
+  // Fusion and the Linux desktop styles follow the palette; macOS handles both
+  // schemes itself. None of them need replacing.
+  for (const char* styleName : {"fusion", "macos", "breeze", "windows", ""}) {
+    EXPECT_FALSE(ThemeManager::styleNeedsPaletteFallback(
+        styleName, true, Qt::ColorScheme::Light))
+        << styleName;
+    EXPECT_FALSE(ThemeManager::styleNeedsPaletteFallback(styleName, false,
+                                                         Qt::ColorScheme::Dark))
+        << styleName;
+  }
+}
+
+TEST(ThemeManagerTest, StyleFallback_FallbackStyleIsFusion) {
+  EXPECT_EQ(ThemeManager::paletteFallbackStyleName().toStdString(), "Fusion");
+}
+
 }  // namespace gui_unit_test
