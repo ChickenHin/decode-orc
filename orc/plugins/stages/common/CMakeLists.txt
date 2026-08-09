@@ -7,3 +7,4 @@
 
 add_subdirectory(audio-resample)
 add_subdirectory(efm-decode)
+add_subdirectory(vbi-services)

@@ -1802,7 +1802,15 @@ orc::ConfigurationStatus ProjectPresenter::getNodeConfigurationStatus(
 
     auto* param_stage = dynamic_cast<orc::ParameterizedStage*>(stage.get());
     if (param_stage) {
-      param_stage->set_parameters(node_it->parameters);
+      // The stored parameters hold paths as the user gave them, which for a
+      // saved project is relative to the project directory. A stage judges its
+      // input file by opening it, so it has to be handed the same resolved
+      // paths execution hands it or it reports a perfectly good source as
+      // unconfigured.
+      auto parameters = node_it->parameters;
+      orc::resolve_path_parameters(parameters,
+                                   getProject()->get_project_root());
+      param_stage->set_parameters(parameters);
     }
 
     return stage->get_configuration_status();

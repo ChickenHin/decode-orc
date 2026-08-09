@@ -11,12 +11,12 @@
 #ifndef ORC_TELETEXT_SQUASH_STATS_H
 #define ORC_TELETEXT_SQUASH_STATS_H
 
-#include <orc/support/teletext_row_squasher.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+
+#include "vbi-services/teletext_row_squasher.h"
 
 namespace orc {
 
@@ -64,9 +64,14 @@ class TeletextSquashStats {
    *               (they are written, so their damage is in the output) but not
    *               towards the copies distribution, which describes what the
    *               vote had to work with.
+   * @param columns Display bytes the packet actually carried: 40 on a 625-line
+   *               service (ETSI EN 300 706 §9.3.2), 32 on a 525-line one
+   *               (ITU-R BT.653 Table 1b). Positions past it were never
+   *               transmitted, and counting them as damaged — a zero byte
+   *               fails odd parity — would put a fault on every 525-line row.
    */
   void add_row(const TeletextRowBytes& before, const TeletextRowBytes& after,
-               size_t copies);
+               size_t copies, size_t columns = kTeletextRowBytes);
 
   /**
    * @brief Record one row packet written without the rewrite pass
@@ -75,8 +80,9 @@ class TeletextSquashStats {
    * combined, so the pass-through configuration feeds them too. Nothing was
    * voted on, so the row counts as its own before and after.
    */
-  void add_written_row(const TeletextRowBytes& row) {
-    add_row(row, row, /*copies=*/0);
+  void add_written_row(const TeletextRowBytes& row,
+                       size_t columns = kTeletextRowBytes) {
+    add_row(row, row, /*copies=*/0, columns);
   }
 
   /// Row packets recorded
@@ -87,7 +93,7 @@ class TeletextSquashStats {
   uint64_t rows_rewritten() const { return rows_rewritten_; }
   /// Display bytes the vote replaced
   uint64_t bytes_changed() const { return bytes_changed_; }
-  /// Display bytes examined (40 per row packet)
+  /// Display bytes examined (40 per 625-line row packet, 32 per 525-line one)
   uint64_t bytes_total() const { return bytes_total_; }
   /// Display bytes failing odd parity before the rewrite
   uint64_t parity_failures_before() const { return parity_before_; }

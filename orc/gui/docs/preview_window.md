@@ -93,13 +93,10 @@ dialogs that update as you navigate frames.
 | VBI Decoder | Ctrl+Shift+V | Decode Vertical Blanking Interval data: closed captions, VITC timecode, teletext, and LaserDisc programme metadata. |
 | Quality Metrics | Ctrl+Shift+M | Per-frame signal quality statistics: SNR, colour burst level, and dropout sample count. |
 | NTSC Observer | Ctrl+Shift+N | NTSC-specific frame metadata: FM code status and white flag bit. |
-| Teletext Pages | Ctrl+Shift+X | Render PAL World System Teletext pages recovered from the VBI of recent frames. |
 | Closed Captions | Ctrl+Shift+C | Decode the EIA-608 line 21 caption service into a running transcript. |
 
-NTSC Observer and Closed Captions are available only on NTSC projects, and
-Teletext Pages only on PAL projects; the standard the entry does not apply to
-leaves it greyed out. PAL-M is 525-line and carries neither, so all three are
-unavailable there.
+NTSC Observer and Closed Captions are available only on NTSC projects; on a
+project of another standard the entry is greyed out.
 
 ## Hints Menu
 
@@ -143,8 +140,10 @@ Only available for stages that output separate Y and C channels.
 ### VBI Decoder
 
 Decodes and displays Vertical Blanking Interval content for the current frame,
-including closed captions, VITC timecode, teletext lines, and LaserDisc
-programme metadata such as chapter and frame numbers.
+including closed captions, VITC timecode, and LaserDisc programme metadata such
+as chapter and frame numbers. Teletext itself is decoded by the Teletext Sink
+stage rather than here; what this dialog shows is the LaserDisc
+programme-status flag saying whether the disc carries a teletext service.
 
 ### Quality Metrics
 
@@ -159,34 +158,6 @@ Per-frame signal quality data:
 ### NTSC Observer
 
 Shows NTSC-specific frame metadata including the FM code status and white flag bit.
-
-### Teletext Pages
-
-Renders the requested teletext page (PAL World System Teletext, Level 1) from
-the packets recovered in a trailing window of frames ending at the current
-frame. Enter the page number in the conventional magazine + two-hex-digit form
-(for example 100 or 888). Teletext is a carousel medium, so random access is
-approximate: the dialog reports the frame at which the page transmission was
-actually seen, and pages not yet met are reported as not seen. Sequential
-playback behaves like live reception, and everything decoded along the way is
-kept, so the page list keeps growing until you jump somewhere unrelated.
-
-A page is transmitted a packet at a time, and a source carrying only a couple
-of teletext lines per field takes several frames to send one. Stepping through
-those frames shows the page filling in, so the status bar says whether the
-transmission has finished: **Complete** once the service has moved on to the
-next page, **Partial - still arriving** while more rows are yet to come. Rows
-that have not been sent yet look exactly like transmitted blank ones, so this
-is the only way to tell "wait" from "damaged". The page list marks a page in
-that state with an ellipsis after its frame number.
-
-**Show data errors** outlines characters whose byte failed its parity check.
-It bands whole rows only when the page's transmission lost packets — a page
-leaving rows out is normal rather than a fault, because services omit the
-blank lines that space a page out instead of transmitting a row of spaces.
-Loss is detected from the VBI packet slots the transmission's own fields gave
-up, so a recording that inserts on fewer lines is not accused of losing the
-rest.
 
 ### Video Parameter Hints
 

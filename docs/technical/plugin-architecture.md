@@ -164,14 +164,11 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `11` (`FrameDescriptor` dropped the `colour_frame_index`,
-`frame_number`, and `timecode` fields — colour-sequence phase is measured via
-the host `colour_frame_phase` observer through
-`<orc/stage/observation/colour_frame_phase_query.h>`, and VBI picture numbers /
-timecodes come from the `biphase` observer's interpreted `vbi.*` keys; the
-analysis-sink result types in `<orc/stage/common_types.h>` also became canonical
-per-frame records with the aggregated per-bucket fields removed). The
-authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
+**Current value:** `13` (the format-specific results contracts left
+`<orc/stage/analysis_sink_results.h>` for the generic `ICatalogueResults` of
+`<orc/stage/tooling/catalogue_results.h>`, so a stage hands the host a
+browsable catalogue instead of the host knowing the stage's own result type).
+The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
 Bumped when any of the following change:

@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 
+# Per-file clang-tidy (cmake/ClangTidy.cmake sets CMAKE_CXX_CLANG_TIDY at the
+# top level) is a host-tree gate: it enforces orc/.clang-tidy, whose check list
+# runs with WarningsAsErrors: '*' and which test sources do not satisfy. Leaving
+# the hook enabled here did not analyse tests against that list -- clang-tidy
+# found no configuration above orc-tests/ and fell back to its built-in default,
+# the full clang-analyzer suite, at tens of seconds per translation unit with
+# nothing enforcing the result. Clearing the variable for this directory (and,
+# by inheritance, every test subdirectory) keeps the analysis where it is
+# enforced. See orc-tests/.clang-tidy for the editor/run-clang-tidy side.
+set(CMAKE_CXX_CLANG_TIDY "")
+
 function(orc_fail_if_integration_tests_are_in_unit_tree unit_tree_path)
     file(GLOB_RECURSE _misplaced_integration_tests
         CONFIGURE_DEPENDS

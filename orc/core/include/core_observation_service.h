@@ -50,7 +50,7 @@ class CoreObservationService final : public IObservationService {
 
 // True when the standard observer identified by @p observer_id can ever
 // produce observations for a source with video parameters @p params (e.g.
-// "teletext" is PAL-only, "fm_code"/"white_flag" are NTSC-only). Core-private
+// "fm_code"/"white_flag" are NTSC-only). Core-private
 // applicability query — deliberately NOT part of the SDK service surface.
 // Unknown ids (e.g. observers injected by a test service) are always
 // applicable. Thread-safe.

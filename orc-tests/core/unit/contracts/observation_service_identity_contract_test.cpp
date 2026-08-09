@@ -24,7 +24,6 @@
 #include <gtest/gtest.h>
 #include <observer.h>
 #include <orc/stage/observation/observation_service_interface.h>
-#include <teletext_observer.h>
 #include <white_flag_observer.h>
 #include <white_snr_observer.h>
 
@@ -61,7 +60,6 @@ std::vector<ExpectedObserver> expected_observers() {
       {"disc_quality", [] { return std::make_unique<FieldQualityObserver>(); }},
       {"fm_code", [] { return std::make_unique<FmCodeObserver>(); }},
       {"white_flag", [] { return std::make_unique<WhiteFlagObserver>(); }},
-      {"teletext", [] { return std::make_unique<TeletextObserver>(); }},
   };
 }
 

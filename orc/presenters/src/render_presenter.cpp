@@ -14,6 +14,7 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/preview/stage_preview_capability.h>
 #include <orc/stage/stage.h>
+#include <orc/stage/tooling/catalogue_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
@@ -23,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -40,13 +42,13 @@
 #include "../core/include/dag_frame_renderer.h"
 #include "../core/include/frame_provenance.h"
 #include "../core/include/observation_cache.h"
+#include "../core/include/observation_cache_retention.h"
 #include "../core/include/observation_invalidation.h"
 #include "../core/include/observation_scheduler.h"
 #include "../core/include/observation_store.h"
 #include "../core/include/preview_renderer.h"
 #include "../core/include/preview_view_registry.h"
 #include "../core/include/project.h"
-#include "../core/include/project_to_dag.h"
 #include "../core/include/sqlite_observation_persistence.h"
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
@@ -193,6 +195,12 @@ std::vector<orc::presenters::BurstLevelDisplayPoint> decimate_burst_series(
 // Observer::process_frame() and DAGFrameRenderer's store keying.
 constexpr orc::FieldID::value_type kFieldsPerFrame = 2;
 
+// The two phases a sink trigger reports before the sink itself runs. Both are
+// metered against the same frame total, so the progress bar moves continuously
+// from the first phase into the second.
+constexpr const char* kCheckingMessage = "Checking cached observations…";
+constexpr const char* kComputingMessage = "Computing observations…";
+
 // User config directory (same resolution rules as the plugin registry:
 // XDG_CONFIG_HOME / ~/.config on POSIX, APPDATA on Windows, cwd fallback).
 std::filesystem::path resolveUserConfigDir() {
@@ -261,7 +269,7 @@ std::string perSourceSidecarPath(const orc::DAG& dag) {
     const std::filesystem::path dir =
         resolveUserConfigDir() / "observation-cache";
     std::filesystem::create_directories(dir);
-    return (dir / (std::string("quick-") + digest + ".orc-obs.sqlite"))
+    return (dir / (std::string("quick-") + digest + orc::kSidecarSuffix))
         .string();
   } catch (const std::exception& e) {
     ORC_LOG_WARN(
@@ -472,6 +480,27 @@ class RenderPresenter::Impl {
 
   // Meta key prefix for durable sweep-complete markers.
   static constexpr const char* kSweptMetaPrefix = "swept:";
+
+  // Whether a node of @p total frames is short enough to sweep in the
+  // background. The policy would decline to plan the sweep anyway (see
+  // DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames for why); asking
+  // the same question here keeps this class's sweep bookkeeping honest, since
+  // registerPendingSweep would otherwise be left waiting forever on
+  // completions for frames nobody enqueued. Reported once per node, so a
+  // dialog showing only the scrubbed neighbourhood has a stated reason.
+  bool sweepableLength(NodeID node_id, std::uint64_t total) {
+    if (total <= orc::DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames) {
+      return true;
+    }
+    ORC_LOG_INFO(
+        "RenderPresenter: node '{}' holds {} frames, beyond the {}-frame limit "
+        "on whole-node background observation; its observations will be "
+        "gathered around the preview position as you scrub rather than over "
+        "the whole source",
+        node_id.to_string(), total,
+        orc::DefaultObservationSchedulingPolicy::kMaxWholeNodeFrames);
+    return false;
+  }
 
   // A frame observation awaited by an async requestObservations() caller.
   struct PendingObservationRequest {
@@ -759,6 +788,12 @@ class RenderPresenter::Impl {
     if (total == 0) {
       return;
     }
+    if (!sweepableLength(node_id, total)) {
+      // Recorded as swept so the refusal is decided (and reported) once per
+      // provenance rather than on every dialog request for the node.
+      sched_swept_[node_id] = fp;
+      return;
+    }
     if (sweepMarkerValid(fp, total, observersForNode(node_id, fp))) {
       sched_swept_[node_id] = fp;  // completed in an earlier session
       return;
@@ -948,6 +983,20 @@ class RenderPresenter::Impl {
       }
       if (!db_path.empty()) {
         try {
+          // Retire sidecars for sources the user has moved on from before
+          // adding another. Nothing else prunes this directory: the store's
+          // garbage collection only ever works *inside* the open project's own
+          // database, so without a pass here every source ever opened leaves a
+          // file behind for good — and a feature-length one runs to several
+          // gigabytes. The sidecar this session is about to use is spared, and
+          // stamping it as used keeps a sidecar another instance has open out
+          // of reach of the limits (an open sidecar is always among the most
+          // recently used).
+          orc::enforceSidecarRetention(
+              std::filesystem::path(db_path).parent_path().string(),
+              orc::SidecarRetentionPolicy{}, db_path);
+          orc::touchSidecar(db_path);
+
           obs_persistence_ =
               std::make_shared<orc::SqliteObservationPersistence>(db_path);
           obs_store_->set_persistence(obs_persistence_);
@@ -1174,7 +1223,12 @@ class RenderPresenter::Impl {
             }
           }
         }
-        if (total != 0) {
+        // The re-observation covers the whole node, so it is subject to the
+        // same length limit as the sweep that first observed it. Refusing
+        // leaves the stale sched_swept_ fingerprints in place, which is what
+        // makes a later dialog request re-decide (and re-report) through
+        // sweepNodeForObservation.
+        if (total != 0 && sweepableLength(reobserve.front(), total)) {
           for (const NodeID node : reobserve) {
             const orc::NodeFingerprint fp = fingerprintOf(node);
             sched_swept_[node] = fp;
@@ -1320,16 +1374,170 @@ class RenderPresenter::Impl {
     }
   }
 
+  // Fill @p missing with every frame of @p range that is not already covered
+  // by a stored record for all of @p observers at @p fingerprint.
+  //
+  // The obvious implementation — probe the store once per frame — is what this
+  // replaces, and it is why triggering a sink on a feature-length node used to
+  // sit silently for minutes. Coverage is a question about record *identity*,
+  // never their values, but the store's has() is a read-through: each probe
+  // that misses memory materialises the record's values, installs it in the
+  // LRU and evicts something else. At two fields times a dozen observers per
+  // frame that is millions of point queries, millions of nested-map builds,
+  // and a cache thrashed by the very scan meant to exploit it.
+  //
+  // So the sidecar is asked for its record keys in one ordered, index-only
+  // walk (load_stored_keys) and coverage is accumulated into a bit per
+  // observer per field — 8 bytes a field, and no value is ever read. Because
+  // keys arrive in field order, the same pass yields honest progress. A
+  // backend that cannot answer in bulk falls back to presence-only probes,
+  // which are metered the same way.
+  //
+  // Records written this session may not have reached the sidecar yet, so
+  // anything the bulk pass reports as uncovered is confirmed against the store
+  // (memory first) before being called missing.
+  //
+  // Returns false if the scan was cancelled, in which case @p missing is not
+  // meaningful. Runs on the coordinator worker thread.
+  bool scanStoredCoverage(const orc::NodeFingerprint& fingerprint,
+                          const std::vector<orc::ObserverInfo>& observers,
+                          const orc::FrameIDRange& range,
+                          const ProgressCallback& callback,
+                          std::vector<orc::FrameID>& missing) {
+    // One bit per observer, so the bulk path needs the applicable set to fit a
+    // mask word. Real sets are ~a dozen; anything larger takes the probe path.
+    constexpr std::size_t kMaxMaskedObservers = 64;
+    const std::uint64_t total_frames = range.count();
+
+    const auto report = [&](std::uint64_t frames_done) {
+      if (callback) {
+        callback(static_cast<std::size_t>(frames_done),
+                 static_cast<std::size_t>(total_frames), kCheckingMessage);
+      }
+    };
+    report(0);
+
+    bool covered_by_bulk = false;
+    std::vector<std::uint64_t> field_mask;
+    if (obs_persistence_ && !observers.empty() &&
+        observers.size() <= kMaxMaskedObservers) {
+      // Observer sets are a dozen entries at most, so the sink below matches
+      // by linear scan: hashing would mean building a composite key string per
+      // record, and there are millions of records.
+      const auto bit_of_observer =
+          [&observers](const std::string& id,
+                       const std::string& version) -> std::size_t {
+        for (std::size_t i = 0; i < observers.size(); ++i) {
+          if (observers[i].id == id && observers[i].version == version) {
+            return i;
+          }
+        }
+        return observers.size();  // not applicable here; contributes no bit
+      };
+
+      const std::uint64_t first_field = range.first * kFieldsPerFrame;
+      field_mask.assign(total_frames * kFieldsPerFrame, 0);
+
+      bool cancelled = false;
+      std::uint64_t keys_seen = 0;
+      covered_by_bulk = obs_persistence_->load_stored_keys(
+          fingerprint, [&](orc::FieldID field, const std::string& observer_id,
+                           const std::string& observer_version) {
+            // Cancellation and progress are checked on a coarse key stride:
+            // this lambda runs millions of times and holds the sidecar lock.
+            if ((++keys_seen & 0xFFFFU) == 0) {
+              if (trigger_cancel_requested_.load()) {
+                cancelled = true;
+                return false;
+              }
+              const std::uint64_t value = field.value();
+              report(value > first_field
+                         ? std::min((value - first_field) / kFieldsPerFrame,
+                                    total_frames)
+                         : 0);
+            }
+            const std::uint64_t value = field.value();
+            if (value < first_field ||
+                value - first_field >= field_mask.size()) {
+              return true;  // outside the range this trigger covers
+            }
+            const std::size_t bit =
+                bit_of_observer(observer_id, observer_version);
+            if (bit < observers.size()) {
+              field_mask[value - first_field] |= std::uint64_t{1} << bit;
+            }
+            return true;
+          });
+      if (cancelled) {
+        return false;
+      }
+      if (!covered_by_bulk) {
+        field_mask.clear();
+        field_mask.shrink_to_fit();
+      }
+    }
+
+    const std::uint64_t full_mask =
+        observers.size() >= kMaxMaskedObservers
+            ? ~std::uint64_t{0}
+            : (std::uint64_t{1} << observers.size()) - 1;
+
+    // Cancellation is checked on a frame stride; progress is reported on the
+    // same stride but only once a probe has actually been paid for, so the
+    // fast all-covered walk-through does not drag the bar back from the 100%
+    // the key walk just reached.
+    constexpr std::uint64_t kConfirmStride = 512;
+    std::uint64_t probes = 0;
+    std::uint64_t index = 0;
+    for (orc::FrameID frame = range.first;; ++frame, ++index) {
+      if (index % kConfirmStride == 0) {
+        if (trigger_cancel_requested_.load()) {
+          return false;
+        }
+        if (probes > 0 || !covered_by_bulk) {
+          report(index);
+        }
+      }
+      bool needs_probe = true;
+      if (covered_by_bulk) {
+        const std::size_t top =
+            static_cast<std::size_t>(index) * kFieldsPerFrame;
+        needs_probe =
+            field_mask[top] != full_mask || field_mask[top + 1] != full_mask;
+      }
+      probes += needs_probe ? 1 : 0;
+      // The sidecar's answer is only half the picture: a record put() this
+      // session may still be queued for the write-behind thread, so confirm
+      // an apparent miss against the store (which checks memory first) rather
+      // than re-observing a frame that is already in hand.
+      if (needs_probe &&
+          !store_frame_is_stored(*obs_store_, observers, fingerprint, frame)) {
+        missing.push_back(frame);
+      }
+      if (frame == range.last) {
+        break;
+      }
+    }
+    report(total_frames);
+    return true;
+  }
+
   // Fill the store with every observation a sink trigger will read, in
   // parallel across a temporary pool of task runners, before the sink runs.
-  // The sink's serial loop then finds every frame pre-observed (via
-  // preloadStoredObservations) and computes nothing — turning a cold first
-  // trigger from a single-threaded pass into an N-way parallel one, and a
-  // warm trigger into a pure store read. Frames already stored (background
+  // The sink's serial loop then finds every frame pre-observed (it reads
+  // through a store-backed context) and computes nothing — turning a cold
+  // first trigger from a single-threaded pass into an N-way parallel one, and
+  // a warm trigger into a pure store read. Frames already stored (background
   // sweep, previous trigger, pass-through alias) are skipped by the runner's
   // store fast-path, so this never repeats completed work. Runs on the
   // coordinator worker thread; progress is reported through @p callback and
   // cancellation honours trigger_cancel_requested_.
+  //
+  // Nothing is pre-loaded into memory here. Deciding coverage needs record
+  // identities, not values (see scanStoredCoverage), and the sink's
+  // store-backed context loads each field on first access — an eager warm of
+  // the whole node would only fill an LRU that cannot hold it, in the reverse
+  // of the order the sink then reads it.
   //
   // Returns false when cancelled mid-computation. Per-frame failures are
   // logged and left for the sink itself to surface.
@@ -1352,27 +1560,22 @@ class RenderPresenter::Impl {
       return true;
     }
 
-    // Make the input node's records memory-resident in ONE indexed bulk read
-    // from the sidecar before scanning coverage. Without this, a cold store
-    // (fresh app start) turns the scan below into ~a million read-through
-    // point queries — many silent seconds before the sink reports anything.
-    if (callback) {
-      callback(0, 1, "Checking cached observations…");
-    }
-    obs_store_->warm_start({fingerprint});
-
     // Frames the store does not fully cover yet, judged against the node's
     // applicable observer set (inapplicable observers store no records).
     const auto& observers = observersForNode(input_node, fingerprint);
     std::vector<orc::FrameID> missing;
-    for (orc::FrameID frame = range.first;; ++frame) {
-      if (!store_has_frame(*obs_store_, observers, fingerprint, frame)) {
-        missing.push_back(frame);
-      }
-      if (frame == range.last) {
-        break;
-      }
+    const auto scan_start = std::chrono::steady_clock::now();
+    if (!scanStoredCoverage(fingerprint, observers, range, callback, missing)) {
+      return false;  // cancelled during the coverage scan
     }
+    ORC_LOG_INFO(
+        "RenderPresenter: trigger precompute — coverage scan of {} frames at "
+        "node '{}' took {} ms, {} frame(s) uncovered",
+        range.count(), input_node.to_string(),
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - scan_start)
+            .count(),
+        missing.size());
     if (missing.empty()) {
       return true;
     }
@@ -1443,7 +1646,7 @@ class RenderPresenter::Impl {
     while (done.load() < missing.size() && !trigger_cancel_requested_.load()) {
       if (callback) {
         callback(static_cast<std::size_t>(done.load()), total,
-                 "Computing observations…");
+                 kComputingMessage);
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -1468,7 +1671,7 @@ class RenderPresenter::Impl {
       return false;
     }
     if (callback) {
-      callback(total, total, "Computing observations…");
+      callback(total, total, kComputingMessage);
     }
     return true;
   }
@@ -1482,16 +1685,6 @@ RenderPresenter::~RenderPresenter() = default;
 RenderPresenter::RenderPresenter(RenderPresenter&&) noexcept = default;
 RenderPresenter& RenderPresenter::operator=(RenderPresenter&&) noexcept =
     default;
-
-bool RenderPresenter::updateDAG() {
-  try {
-    impl_->getConcreteDAG() = orc::project_to_dag(*impl_->project_);
-    impl_->rebuildRenderersFromDAG();
-    return true;
-  } catch (const std::exception&) {
-    return false;
-  }
-}
 
 void RenderPresenter::setDAG(std::shared_ptr<void> dag_handle) {
   impl_->dag_void_ = std::move(dag_handle);
@@ -2536,6 +2729,30 @@ RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
   series.total_frames = sink->total_frames();
   series.decimated = series_is_decimated(series.points);
   return series;
+}
+
+std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
+    NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
+  }
+
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
+  if (!target_node) {
+    return std::nullopt;
+  }
+
+  auto* browser =
+      dynamic_cast<orc::ICatalogueResults*>(target_node->stage.get());
+  if (!browser || !browser->has_results()) {
+    return std::nullopt;
+  }
+
+  // Handed over whole: the stage has already bounded the catalogue by its own
+  // cap, and building the payloads is the stage's work rather than something
+  // the host repeats per item.
+  return browser->catalogue();
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

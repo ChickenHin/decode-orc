@@ -12,11 +12,13 @@
 #include <orc/support/logging.h>
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 
@@ -113,10 +115,68 @@ std::string column_text(sqlite3_stmt* stmt, int index) {
   return reinterpret_cast<const char*>(text);
 }
 
+// SQL of the two statements every read connection keeps prepared.
+constexpr const char* kExistsSql =
+    "SELECT 1 FROM observation_record"
+    " WHERE node_fingerprint = ? AND field_id = ?"
+    " AND observer_id = ? AND observer_version = ? LIMIT 1";
+constexpr const char* kLoadOneSql =
+    "SELECT namespace, key, value_type, value"
+    " FROM observation_record"
+    " WHERE node_fingerprint = ? AND field_id = ?"
+    " AND observer_id = ? AND observer_version = ?";
+
+// Bind a whole record key into the four leading parameters shared by both
+// point-query statements.
+void bind_record_key(sqlite3_stmt* stmt, const ObservationRecordKey& key) {
+  bind_text(stmt, 1, key.fingerprint.value);
+  sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(key.field_id.value()));
+  bind_text(stmt, 3, key.observer_id);
+  bind_text(stmt, 4, key.observer_version);
+}
+
+// Read a load_one result set (already stepped to its first row or not) into a
+// record. Returns false when the statement yielded no rows at all.
+bool collect_record(sqlite3_stmt* stmt, ObservationRecord& record) {
+  bool found = false;
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    found = true;
+    const int value_type = sqlite3_column_int(stmt, 2);
+    if (value_type == kEmptyRecord) continue;  // sentinel: present-but-empty
+    record[column_text(stmt, 0)][column_text(stmt, 1)] =
+        decode_value(value_type, column_text(stmt, 3));
+  }
+  return found;
+}
+
+// Upper bound on concurrently open read connections. The observation pool sizes
+// itself from the core count and each worker holds at most one lease at a time,
+// so this only has to cover the machine — a lease beyond it waits rather than
+// failing.
+std::size_t read_connection_cap() {
+  const unsigned hw = std::thread::hardware_concurrency();
+  return std::max<std::size_t>(4, hw == 0 ? 4 : hw + 2);
+}
+
 }  // namespace
 
+SqliteObservationPersistence::ReadConnection::~ReadConnection() {
+  if (exists_stmt) sqlite3_finalize(exists_stmt);
+  if (load_one_stmt) sqlite3_finalize(load_one_stmt);
+  if (db) sqlite3_close(db);
+}
+
+SqliteObservationPersistence::ReaderLease::ReaderLease(
+    SqliteObservationPersistence* owner,
+    std::unique_ptr<ReadConnection> connection)
+    : owner_(owner), connection_(std::move(connection)) {}
+
+SqliteObservationPersistence::ReaderLease::~ReaderLease() {
+  if (connection_) owner_->release_reader(std::move(connection_));
+}
+
 SqliteObservationPersistence::SqliteObservationPersistence(std::string db_path)
-    : db_path_(std::move(db_path)) {
+    : db_path_(std::move(db_path)), max_readers_(read_connection_cap()) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!try_open_and_verify()) {
     // Corrupt file or schema mismatch: discard and rebuild rather than fail.
@@ -129,11 +189,97 @@ SqliteObservationPersistence::SqliteObservationPersistence(std::string db_path)
 }
 
 SqliteObservationPersistence::~SqliteObservationPersistence() {
+  // Destruction happens after the store has joined its write-behind thread and
+  // dropped its handle, so no read can be in flight here.
+  close_readers();
   std::lock_guard<std::mutex> lock(mutex_);
   if (db_) {
     sqlite3_close(db_);
     db_ = nullptr;
   }
+}
+
+std::unique_ptr<SqliteObservationPersistence::ReadConnection>
+SqliteObservationPersistence::open_read_connection() {
+  auto connection = std::make_unique<ReadConnection>();
+  // Opened read-write rather than read-only on purpose: a WAL reader needs
+  // write access to the shared-memory index file, and the flag costs nothing
+  // because nothing on this path issues a write.
+  if (sqlite3_open_v2(db_path_.c_str(), &connection->db, SQLITE_OPEN_READWRITE,
+                      nullptr) != SQLITE_OK) {
+    return nullptr;
+  }
+
+  // Same page cache / mmap window as the writer (see configure_connection);
+  // journal_mode and synchronous are properties of the database file, already
+  // set by the writer, so they are not repeated here.
+  exec(connection->db, "PRAGMA cache_size=-65536");
+  exec(connection->db, "PRAGMA mmap_size=1073741824");
+  exec(connection->db, "PRAGMA temp_store=MEMORY");
+  sqlite3_busy_timeout(connection->db, 5000);
+
+  if (sqlite3_prepare_v2(connection->db, kExistsSql, -1,
+                         &connection->exists_stmt, nullptr) != SQLITE_OK ||
+      sqlite3_prepare_v2(connection->db, kLoadOneSql, -1,
+                         &connection->load_one_stmt, nullptr) != SQLITE_OK) {
+    return nullptr;
+  }
+  return connection;
+}
+
+SqliteObservationPersistence::ReaderLease
+SqliteObservationPersistence::acquire_reader() {
+  std::unique_lock<std::mutex> lock(read_mutex_);
+  for (;;) {
+    if (!idle_readers_.empty()) {
+      auto connection = std::move(idle_readers_.back());
+      idle_readers_.pop_back();
+      return ReaderLease(this, std::move(connection));
+    }
+    if (readers_unavailable_) {
+      return ReaderLease(this, nullptr);  // caller falls back to db_
+    }
+    if (open_readers_ < max_readers_) {
+      ++open_readers_;
+      lock.unlock();
+      auto connection = open_read_connection();
+      lock.lock();
+      if (!connection) {
+        // Opening failed (missing file, permissions, resource limit). Record
+        // it so every later reader takes the writer-connection fallback
+        // immediately instead of retrying a failing open per query.
+        --open_readers_;
+        readers_unavailable_ = true;
+        ORC_LOG_WARN(
+            "ObservationSidecar: cannot open a read connection to '{}'; "
+            "reads fall back to the shared write connection",
+            db_path_);
+        return ReaderLease(this, nullptr);
+      }
+      return ReaderLease(this, std::move(connection));
+    }
+    // Pool is at its cap and every connection is leased: wait for one back.
+    read_cv_.wait(lock);
+  }
+}
+
+void SqliteObservationPersistence::release_reader(
+    std::unique_ptr<ReadConnection> connection) {
+  {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    idle_readers_.push_back(std::move(connection));
+  }
+  read_cv_.notify_one();
+}
+
+void SqliteObservationPersistence::close_readers() {
+  std::vector<std::unique_ptr<ReadConnection>> doomed;
+  {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    doomed.swap(idle_readers_);
+    open_readers_ -= doomed.size();
+  }
+  doomed.clear();  // connections closed outside the lock
 }
 
 void SqliteObservationPersistence::configure_connection() {
@@ -198,6 +344,10 @@ bool SqliteObservationPersistence::try_open_and_verify() {
 }
 
 void SqliteObservationPersistence::rebuild() {
+  // The file itself is about to be replaced, so any pooled read connection
+  // still points at the discarded database. Only the constructor rebuilds, so
+  // no reader can be leased out at this point.
+  close_readers();
   if (db_) {
     sqlite3_close(db_);
     db_ = nullptr;
@@ -322,8 +472,20 @@ void SqliteObservationPersistence::save(
 void SqliteObservationPersistence::load_matching(
     const std::unordered_set<NodeFingerprint>& keep,
     const std::function<void(ObservationRecordKey, ObservationRecord)>& sink) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!db_ || keep.empty()) return;
+  if (keep.empty()) return;
+
+  // Warm-up streams a whole fingerprint (or the whole file) — long enough that
+  // running it on the writer connection would stall every write behind it.
+  auto reader = acquire_reader();
+  std::unique_lock<std::mutex> writer_lock(mutex_, std::defer_lock);
+  sqlite3* db = nullptr;
+  if (reader) {
+    db = reader->db;
+  } else {
+    writer_lock.lock();
+    db = db_;
+  }
+  if (!db) return;
 
   // Small keep sets stream just the wanted fingerprints through the
   // idx_obs_fingerprint index — a single-fingerprint warm-up on a multi-GB
@@ -344,7 +506,7 @@ void SqliteObservationPersistence::load_matching(
   }
   sql += " ORDER BY node_fingerprint, field_id, observer_id, observer_version";
 
-  Statement stmt(db_, sql.c_str());
+  Statement stmt(db, sql.c_str());
   if (!stmt) return;
   if (indexed) {
     int slot = 1;
@@ -394,53 +556,93 @@ void SqliteObservationPersistence::load_matching(
 
 std::optional<ObservationRecord> SqliteObservationPersistence::load_one(
     const ObservationRecordKey& key) {
+  ObservationRecord record;
+
+  // Pooled read connection with its statement already prepared: the hot path.
+  if (auto reader = acquire_reader()) {
+    sqlite3_stmt* stmt = reader->load_one_stmt;
+    bind_record_key(stmt, key);
+    const bool found = collect_record(stmt, record);
+    // Reset before the connection goes back to the pool: a statement left
+    // part-way through holds a read snapshot open, and an idle connection
+    // holding one would keep the WAL from ever checkpointing.
+    sqlite3_reset(stmt);
+    if (!found) return std::nullopt;
+    return record;
+  }
+
+  // Fallback: no read connection could be opened, so share the writer's.
   std::lock_guard<std::mutex> lock(mutex_);
   if (!db_) return std::nullopt;
-
-  Statement stmt(db_,
-                 "SELECT namespace, key, value_type, value"
-                 " FROM observation_record"
-                 " WHERE node_fingerprint = ? AND field_id = ?"
-                 " AND observer_id = ? AND observer_version = ?");
+  Statement stmt(db_, kLoadOneSql);
   if (!stmt) return std::nullopt;
-
-  bind_text(stmt.get(), 1, key.fingerprint.value);
-  sqlite3_bind_int64(stmt.get(), 2,
-                     static_cast<sqlite3_int64>(key.field_id.value()));
-  bind_text(stmt.get(), 3, key.observer_id);
-  bind_text(stmt.get(), 4, key.observer_version);
-
-  bool found = false;
-  ObservationRecord record;
-  while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-    found = true;
-    const int value_type = sqlite3_column_int(stmt.get(), 2);
-    if (value_type == kEmptyRecord) continue;  // sentinel: present-but-empty
-    record[column_text(stmt.get(), 0)][column_text(stmt.get(), 1)] =
-        decode_value(value_type, column_text(stmt.get(), 3));
-  }
-  if (!found) return std::nullopt;
+  bind_record_key(stmt.get(), key);
+  if (!collect_record(stmt.get(), record)) return std::nullopt;
   return record;
 }
 
 bool SqliteObservationPersistence::exists(const ObservationRecordKey& key) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!db_) return false;
-
   // Presence probe on the primary-key prefix; LIMIT 1 stops at the first
   // value row so a large record costs no more than an empty one.
-  Statement stmt(db_,
-                 "SELECT 1 FROM observation_record"
-                 " WHERE node_fingerprint = ? AND field_id = ?"
-                 " AND observer_id = ? AND observer_version = ? LIMIT 1");
-  if (!stmt) return false;
+  if (auto reader = acquire_reader()) {
+    sqlite3_stmt* stmt = reader->exists_stmt;
+    bind_record_key(stmt, key);
+    const bool found = sqlite3_step(stmt) == SQLITE_ROW;
+    // LIMIT 1 means a hit stops mid-statement, which holds a read snapshot
+    // open. Reset before returning the connection to the pool, or an idle
+    // reader would pin the WAL against checkpointing for the rest of the
+    // session.
+    sqlite3_reset(stmt);
+    return found;
+  }
 
-  bind_text(stmt.get(), 1, key.fingerprint.value);
-  sqlite3_bind_int64(stmt.get(), 2,
-                     static_cast<sqlite3_int64>(key.field_id.value()));
-  bind_text(stmt.get(), 3, key.observer_id);
-  bind_text(stmt.get(), 4, key.observer_version);
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!db_) return false;
+  Statement stmt(db_, kExistsSql);
+  if (!stmt) return false;
+  bind_record_key(stmt.get(), key);
   return sqlite3_step(stmt.get()) == SQLITE_ROW;
+}
+
+bool SqliteObservationPersistence::load_stored_keys(
+    const NodeFingerprint& fingerprint,
+    const std::function<bool(FieldID, const std::string&, const std::string&)>&
+        sink) {
+  // A whole-node key walk is long-running; on a pooled connection it no longer
+  // shuts the write-behind thread out for its whole duration.
+  auto reader = acquire_reader();
+  std::unique_lock<std::mutex> writer_lock(mutex_, std::defer_lock);
+  sqlite3* db = nullptr;
+  if (reader) {
+    db = reader->db;
+  } else {
+    writer_lock.lock();
+    db = db_;
+  }
+  if (!db) return false;
+
+  // field_id/observer_id/observer_version are a prefix of the primary key, so
+  // this is served entirely from the primary-key index: it walks index pages
+  // in order and never touches a table row, where the bulky value text lives.
+  // That is what makes a whole-node coverage answer cost one sequential scan
+  // instead of millions of point queries. DISTINCT collapses a record's
+  // per-value rows; the ORDER BY is the index's own order (so it is free) and
+  // is what lets the caller turn row arrival into progress.
+  Statement stmt(db,
+                 "SELECT DISTINCT field_id, observer_id, observer_version"
+                 " FROM observation_record WHERE node_fingerprint = ?"
+                 " ORDER BY field_id, observer_id, observer_version");
+  if (!stmt) return false;
+  bind_text(stmt.get(), 1, fingerprint.value);
+
+  while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+    const FieldID field(
+        static_cast<uint64_t>(sqlite3_column_int64(stmt.get(), 0)));
+    if (!sink(field, column_text(stmt.get(), 1), column_text(stmt.get(), 2))) {
+      break;  // caller cancelled; the walk itself still counts as performed
+    }
+  }
+  return true;
 }
 
 std::string SqliteObservationPersistence::get_meta(const std::string& key) {

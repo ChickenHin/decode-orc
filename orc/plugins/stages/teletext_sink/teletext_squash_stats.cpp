@@ -10,8 +10,11 @@
 
 #include "teletext_squash_stats.h"
 
-#include <orc/support/teletext_page_decoder.h>
 #include <spdlog/fmt/fmt.h>
+
+#include <algorithm>
+
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 
@@ -62,16 +65,17 @@ std::string grouped(uint64_t value) {
 }  // namespace
 
 void TeletextSquashStats::add_row(const TeletextRowBytes& before,
-                                  const TeletextRowBytes& after,
-                                  size_t copies) {
+                                  const TeletextRowBytes& after, size_t copies,
+                                  size_t columns) {
   ++rows_;
   if (copies > 0) {
     ++rows_attributed_;
     ++copies_[copy_bucket(copies)];
   }
 
+  const size_t examined = std::min(columns, kTeletextRowBytes);
   bool rewritten = false;
-  for (size_t position = 0; position < kTeletextRowBytes; ++position) {
+  for (size_t position = 0; position < examined; ++position) {
     ++bytes_total_;
     if (before[position] != after[position]) {
       ++bytes_changed_;

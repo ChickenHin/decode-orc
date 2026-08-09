@@ -29,15 +29,30 @@ struct AnalysisToolInfo {
   std::string category;     ///< Category for organization
   int priority;             ///< Menu ordering priority (lower = first)
   std::vector<std::string>
-      applicable_stages;  ///< Stage types this tool can analyze
-  std::string
-      stage_tool_kind;  ///< Optional SDK tool kind (config_dialog,
-                        ///< non_modal_editor, batch_analysis, preview_utility)
+      applicable_stages;            ///< Stage types this tool can analyze
+  std::string stage_tool_kind;      ///< Optional SDK tool kind (config_dialog,
+                                    ///< non_modal_editor, batch_analysis,
+                                    ///< preview_utility, catalogue_browser)
   std::string stage_tool_contract;  ///< Optional SDK tool contract id for
                                     ///< stable dispatch
   bool stage_tool_non_modal =
       false;  ///< True when the tool is intended to open non-modally
 };
+
+/**
+ * @brief True when a tool exists only to show what a trigger produced
+ *
+ * Batch analyses and catalogue browsers are both viewers over one trigger run's
+ * results: triggering the stage is what fills them, so the host opens them
+ * automatically when a trigger succeeds. Picking one from the menu afterwards
+ * re-opens those same results — a read, never a re-run, so it stays distinct
+ * from the Trigger Stage action and cannot serve results the current
+ * parameters did not produce.
+ */
+inline bool isTriggerResultViewer(const AnalysisToolInfo& tool) {
+  return tool.stage_tool_kind == "batch_analysis" ||
+         tool.stage_tool_kind == "catalogue_browser";
+}
 
 /**
  * @brief Analysis operation status

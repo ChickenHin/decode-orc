@@ -30,6 +30,7 @@
 
 #include "project.h"
 
+#include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/triggerable_stage.h>
@@ -616,6 +617,23 @@ Project load_project_from_yaml(const std::string& yaml_text,
         }
         node.parameters["output_mode"] = migrated_output_mode;
       }
+
+      // Migrate the legacy teletext_analysis_sink stage, which was renamed
+      // when it was recategorised from an analysis sink to a sink. Its stored
+      // node_type is corrected below, once the field has been parsed.
+      const bool migrated_teletext_sink =
+          (node.stage_name == "teletext_analysis_sink");
+      if (migrated_teletext_sink) {
+        ORC_LOG_INFO(
+            "Migrating legacy stage 'teletext_analysis_sink' (node {}) to "
+            "'teletext_sink'",
+            node.node_id.to_string());
+        node.stage_name = "teletext_sink";
+        if (node.display_name == "Teletext Analysis Sink") {
+          node.display_name = "Teletext Sink";
+        }
+      }
+
       node.user_label = node_yaml["user_label"].as<std::string>(
           node.display_name);  // Default to display_name if not present
       node.x_position = node_yaml["x"].as<double>(0.0);
@@ -628,6 +646,13 @@ Project load_project_from_yaml(const std::string& yaml_text,
       } else {
         // Default to TRANSFORM if not specified
         node.node_type = NodeType::TRANSFORM;
+      }
+
+      // A project saved before the recategorisation carries ANALYSIS_SINK for
+      // this node. The stored type decides which nodes the DAG treats as
+      // outputs, so leaving it would keep the migrated node out of that set.
+      if (migrated_teletext_sink) {
+        node.node_type = NodeType::SINK;
       }
 
       // Load parameters
@@ -998,7 +1023,7 @@ std::string serialize_project_to_yaml(const Project& project,
   return file_text.str();
 }
 
-void save_project(const Project& project, const std::string& filename) {
+void save_project(Project& project, const std::string& filename) {
   std::string yaml_text = serialize_project_to_yaml(project, filename);
 
   // Write to file
@@ -1008,6 +1033,14 @@ void save_project(const Project& project, const std::string& filename) {
   }
   file << yaml_text;
   file.close();
+
+  // Adopt the saved file's directory as the project root.  Relative file-path
+  // parameters are stored relative to the project file, and are resolved
+  // against project_root_ when the DAG is built (see project_to_dag.cpp).
+  // Without this a project created in-session — which has no root until it is
+  // reloaded from disk — leaves those paths unresolved, and every relative
+  // path appears to be missing until the user closes and reopens the project.
+  project.project_root_ = resolve_project_root_for_filename(filename).string();
 
   // Clear modification flag - project has been saved
   project.clear_modified_flag();
@@ -1859,6 +1892,28 @@ std::string find_source_file_for_node(const Project& project, NodeID node_id) {
   return "";
 }
 
+namespace {
+
+// Whether |stage| offers a batch-analysis tool, i.e. a run of it produces
+// something to look at in the host as well as (or instead of) a file. A
+// catalogue browser is such a tool — the browsable result *is* the output —
+// so a sink offering one is not required to name an output file either.
+bool stage_has_batch_analysis_tool(const DAGStage& stage) {
+  const auto* provider = dynamic_cast<const StageToolProvider*>(&stage);
+  if (provider == nullptr) {
+    return false;
+  }
+  for (const auto& tool : provider->get_stage_tools()) {
+    if (tool.kind == StageToolKind::BatchAnalysis ||
+        tool.kind == StageToolKind::CatalogueBrowser) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
 NodeCapabilities get_node_capabilities(const Project& project, NodeID node_id) {
   NodeCapabilities caps;
   caps.node_id = node_id;
@@ -1899,9 +1954,13 @@ NodeCapabilities get_node_capabilities(const Project& project, NodeID node_id) {
       if (!caps.can_trigger) {
         caps.trigger_reason = "Stage is not triggerable";
       } else {
-        // For sink stages, check if output filename is set
+        // For sink stages, check if output filename is set — unless the stage
+        // offers a batch-analysis tool, in which case a run with no output
+        // path still produces something the user asked for (the teletext sink
+        // decodes and catalogues the pages without writing a packet stream).
         auto node_type = stage->get_node_type_info().type;
-        if (node_type == NodeType::SINK) {
+        if (node_type == NodeType::SINK &&
+            !stage_has_batch_analysis_tool(*stage)) {
           // All sink stages use "output_path" parameter
           auto param_it = it->parameters.find("output_path");
           bool has_output = false;

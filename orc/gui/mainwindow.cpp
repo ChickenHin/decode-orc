@@ -14,6 +14,7 @@
 
 #include "audio_channel_pair_notice.h"
 #include "burstlevelanalysisdialog.h"
+#include "cataloguedialog.h"
 #include "closedcaptiondialog.h"
 #include "dropout_editor_dialog.h"
 #include "dropoutanalysisdialog.h"
@@ -44,7 +45,6 @@
 #include "snranalysisdialog.h"
 #include "stage_help_dialog.h"
 #include "stageparameterdialog.h"
-#include "teletextdialog.h"
 #include "theme_controller.h"
 #include "theme_manager.h"
 #include "vbidialog.h"
@@ -390,7 +390,6 @@ MainWindow::MainWindow(QWidget* parent)
       preview_dialog_(nullptr),
       vbi_dialog_(nullptr),
       ntsc_observer_dialog_(nullptr),
-      teletext_dialog_(nullptr),
       closed_caption_dialog_(nullptr),
       dag_view_(nullptr),
       dag_model_(nullptr),
@@ -433,8 +432,6 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onPreviewReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::vbiDataReady, this,
           &MainWindow::onVBIDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::teletextDataReady,
-          this, &MainWindow::onTeletextDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::closedCaptionDataReady,
           this, &MainWindow::onClosedCaptionDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::availableOutputsReady,
@@ -452,16 +449,14 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onWaveformMonitorDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::dropoutDataReady, this,
           &MainWindow::onDropoutDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::dropoutProgress, this,
-          &MainWindow::onDropoutProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::snrDataReady, this,
           &MainWindow::onSNRDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::snrProgress, this,
-          &MainWindow::onSNRProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::burstLevelDataReady,
           this, &MainWindow::onBurstLevelDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::burstLevelProgress,
-          this, &MainWindow::onBurstLevelProgress, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::catalogueDataReady,
+          this, &MainWindow::onCatalogueDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::resultsNotAvailable,
+          this, &MainWindow::onResultsNotAvailable, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
           &MainWindow::onTriggerProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerComplete, this,
@@ -563,10 +558,6 @@ MainWindow::~MainWindow() {
     delete ntsc_observer_dialog_;
     ntsc_observer_dialog_ = nullptr;
   }
-  if (teletext_dialog_) {
-    delete teletext_dialog_;
-    teletext_dialog_ = nullptr;
-  }
   if (closed_caption_dialog_) {
     delete closed_caption_dialog_;
     closed_caption_dialog_ = nullptr;
@@ -632,9 +623,6 @@ void MainWindow::setupUI() {
   // Create NTSC observer dialog (initially hidden)
   ntsc_observer_dialog_ = new NtscObserverDialog(this);
 
-  // Create teletext page preview dialog (initially hidden)
-  teletext_dialog_ = new TeletextDialog(this);
-
   // Create closed caption preview dialog (initially hidden)
   closed_caption_dialog_ = new ClosedCaptionDialog(this);
 
@@ -693,8 +681,6 @@ void MainWindow::setupUI() {
           &MainWindow::onShowVideoParameterObserverDialog);
   connect(preview_dialog_, &PreviewDialog::showNtscObserverDialogRequested,
           this, &MainWindow::onShowNtscObserverDialog);
-  connect(preview_dialog_, &PreviewDialog::showTeletextDialogRequested, this,
-          &MainWindow::onShowTeletextDialog);
   connect(preview_dialog_, &PreviewDialog::showClosedCaptionDialogRequested,
           this, &MainWindow::onShowClosedCaptionDialog);
   connect(preview_dialog_, &PreviewDialog::lineScopeRequested, this,
@@ -1288,9 +1274,6 @@ void MainWindow::closeAllDialogs() {
   if (ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible()) {
     ntsc_observer_dialog_->hide();
   }
-  if (teletext_dialog_ && teletext_dialog_->isVisible()) {
-    teletext_dialog_->hide();
-  }
   if (closed_caption_dialog_ && closed_caption_dialog_->isVisible()) {
     closed_caption_dialog_->hide();
   }
@@ -1318,47 +1301,61 @@ void MainWindow::closeAllDialogs() {
       dialogs_to_close.push_back(pair.second);
     }
   }
+  for (auto& pair : catalogue_dialogs_) {
+    if (pair.second) {
+      dialogs_to_close.push_back(pair.second);
+    }
+  }
   // Clear maps before closing to prevent destroyed signal handlers from
   // modifying them
   dropout_analysis_dialogs_.clear();
   snr_analysis_dialogs_.clear();
   burst_level_analysis_dialogs_.clear();
+  catalogue_dialogs_.clear();
 
   // Now safe to close all dialogs
   for (auto* dialog : dialogs_to_close) {
     dialog->close();
   }
 
-  // Close all progress dialogs
+  // Close the trigger progress dialog. Results reads have none of their own:
+  // they only ever read what a trigger already produced, so there is no work
+  // to report progress on.
   if (trigger_progress_dialog_) {
     trigger_progress_dialog_->close();
     delete trigger_progress_dialog_;
     trigger_progress_dialog_ = nullptr;
   }
+}
 
-  for (auto& pair : dropout_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
+void MainWindow::closeResultViewers() {
+  // Collect first, then close: closing deletes the dialog, whose destroyed
+  // handler erases its own map entry, which would invalidate a live iterator.
+  std::vector<QWidget*> viewers;
+  const auto collect = [&viewers](auto& dialogs) {
+    for (auto& [node_id, dialog] : dialogs) {
+      if (dialog) {
+        viewers.push_back(dialog);
+      }
     }
-  }
-  dropout_progress_dialogs_.clear();
+    dialogs.clear();
+  };
+  collect(dropout_analysis_dialogs_);
+  collect(snr_analysis_dialogs_);
+  collect(burst_level_analysis_dialogs_);
+  collect(catalogue_dialogs_);
 
-  for (auto& pair : snr_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
-    }
-  }
-  snr_progress_dialogs_.clear();
+  // Drop the reads still in flight with them: their answers describe stage
+  // objects that no longer exist, and without this a late response would
+  // report "nothing to show" about a window the reader never asked to close.
+  pending_dropout_requests_.clear();
+  pending_snr_requests_.clear();
+  pending_burst_level_requests_.clear();
+  pending_catalogue_requests_.clear();
 
-  for (auto& pair : burst_level_progress_dialogs_) {
-    if (pair.second) {
-      pair.second->close();
-      delete pair.second;
-    }
+  for (auto* viewer : viewers) {
+    viewer->close();
   }
-  burst_level_progress_dialogs_.clear();
 }
 
 void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
@@ -1367,16 +1364,15 @@ void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
       project_.presenter()->getCoreProjectHandle());
   const auto tools = analysis_presenter.getToolsForStage(stage_name);
 
-  // Descriptor-driven routing: pick the first advertised batch-analysis tool.
-  const auto tool_it = std::find_if(
-      tools.begin(), tools.end(), [](const orc::AnalysisToolInfo& tool) {
-        return tool.stage_tool_kind == "batch_analysis";
-      });
+  // Descriptor-driven routing: pick the first advertised viewer over the
+  // results this trigger has just produced — a batch analysis or a catalogue
+  // browser. Stages offering neither simply have nothing to show.
+  const auto tool_it =
+      std::find_if(tools.begin(), tools.end(), orc::isTriggerResultViewer);
 
   if (tool_it == tools.end()) {
     ORC_LOG_DEBUG(
-        "No descriptor-advertised batch analysis tool for stage '{}' (node "
-        "'{}')",
+        "No descriptor-advertised result viewer for stage '{}' (node '{}')",
         stage_name, node_id.to_string());
     return;
   }
@@ -2477,9 +2473,10 @@ bool MainWindow::checkUnsavedChanges() {
 
 void MainWindow::updatePreviewInfo() {
   // Update standard-specific observer menu availability: the NTSC observers
-  // (FM code, white flag) and closed captions are NTSC-only, teletext is
-  // PAL-only. Done before the early returns so the menu never keeps the
-  // previous project's availability while no stage is selected.
+  // (FM code, white flag) and closed captions are NTSC-only (see
+  // PreviewDialog::setObserverAvailabilityForFormat). Done before the early
+  // returns so the menu never keeps the previous project's availability while
+  // no stage is selected.
   auto video_format_presenter = project_.presenter()->getVideoFormat();
   preview_dialog_->setObserverAvailabilityForFormat(video_format_presenter);
 
@@ -3631,6 +3628,13 @@ void MainWindow::updatePreviewRenderer() {
     preview_dialog_->invalidateAudioSource();
   }
 
+  // Same reasoning for the result viewers. Every caller of this function has
+  // just rebuilt the DAG, which replaces every stage object and with it every
+  // cached analysis and catalogue — so what these windows are showing was
+  // produced by parameters that are no longer set. They close rather than sit
+  // there looking current; triggering the node again fills fresh ones.
+  closeResultViewers();
+
   // Get the DAG - could be null for empty projects, that's fine
   auto dag = project_.hasSource() ? project_.getDAG() : nullptr;
 
@@ -3892,6 +3896,11 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       tool_info.stage_tool_contract ==
           "decode-orc.stage-tools.burst-level-analysis.v1" ||
       tool_info.id == "burst_level_analysis";
+  // Any stage whose tool is a catalogue browser routes to the generic viewer;
+  // the host needs to know nothing about the service it catalogues.
+  const bool is_catalogue_tool =
+      tool_info.stage_tool_contract == orc::kCatalogueBrowserContractId ||
+      tool_info.stage_tool_kind == "catalogue_browser";
 
   ORC_LOG_DEBUG("Running analysis '{}' for node '{}'", tool_info.name,
                 node_id.to_string());
@@ -4202,33 +4211,13 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       dialog->setAttribute(Qt::WA_DeleteOnClose, true);
 
       // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed, [this, node_id]() {
-        dropout_analysis_dialogs_.erase(node_id);
-        dropout_progress_dialogs_.erase(node_id);
-      });
+      connect(dialog, &QObject::destroyed,
+              [this, node_id]() { dropout_analysis_dialogs_.erase(node_id); });
 
       dropout_analysis_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this stage
-    auto& prog_dialog = dropout_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog("Loading dropout analysis data...",
-                                      QString(), 0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the dialog (but it will be empty until data arrives)
     dialog->show();
@@ -4279,24 +4268,6 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
               [this, node_id, dialog]() {
                 if (dialog->isVisible()) {
                   // Show progress dialog for this stage
-                  auto& prog_dialog = snr_progress_dialogs_[node_id];
-                  if (prog_dialog) {
-                    delete prog_dialog;
-                  }
-                  prog_dialog = new QProgressDialog(
-                      "Loading SNR analysis data...", QString(), 0, 100, this);
-                  prog_dialog->setWindowTitle(dialog->windowTitle());
-                  prog_dialog->setWindowModality(Qt::ApplicationModal);
-                  prog_dialog->setMinimumDuration(0);
-                  prog_dialog->setCancelButton(nullptr);
-                  prog_dialog->setValue(0);
-                  // No activateWindow(): requesting activation on a short-lived
-                  // modal leaves the GNOME/Wayland startup "busy" cursor
-                  // spinner stuck after it closes.
-                  prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-                  prog_dialog->show();
-                  prog_dialog->raise();
-
                   auto mode = dialog->getCurrentMode();
                   uint64_t request_id =
                       render_coordinator_->requestSNRData(node_id, mode);
@@ -4305,33 +4276,13 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
               });
 
       // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed, [this, node_id]() {
-        snr_analysis_dialogs_.erase(node_id);
-        snr_progress_dialogs_.erase(node_id);
-      });
+      connect(dialog, &QObject::destroyed,
+              [this, node_id]() { snr_analysis_dialogs_.erase(node_id); });
 
       snr_analysis_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this stage
-    auto& prog_dialog = snr_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog("Loading SNR analysis data...", QString(),
-                                      0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the dialog (but it will be empty until data arrives)
     dialog->show();
@@ -4380,31 +4331,12 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       // Connect destroyed signal to clean up map entry
       connect(dialog, &QObject::destroyed, [this, node_id]() {
         burst_level_analysis_dialogs_.erase(node_id);
-        burst_level_progress_dialogs_.erase(node_id);
       });
 
       burst_level_analysis_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;
     }
-
-    // Create and show progress dialog for this stage
-    auto& prog_dialog = burst_level_progress_dialogs_[node_id];
-    if (prog_dialog) {
-      delete prog_dialog;
-    }
-    prog_dialog = new QProgressDialog("Loading burst level analysis data...",
-                                      QString(), 0, 100, this);
-    prog_dialog->setWindowTitle(dialog->windowTitle());
-    prog_dialog->setWindowModality(Qt::ApplicationModal);
-    prog_dialog->setMinimumDuration(0);
-    prog_dialog->setCancelButton(nullptr);
-    prog_dialog->setValue(0);
-    // No activateWindow(): requesting activation on a short-lived modal leaves
-    // the GNOME/Wayland startup "busy" cursor spinner stuck after it closes.
-    prog_dialog->setAttribute(Qt::WA_ShowWithoutActivating);
-    prog_dialog->show();
-    prog_dialog->raise();
 
     // Show the dialog (but it will be empty until data arrives)
     dialog->show();
@@ -4418,6 +4350,60 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     ORC_LOG_DEBUG(
         "Requested burst level analysis data for node '{}', request_id={}",
         node_id.to_string(), request_id);
+    return;
+  }
+
+  // Catalogue browser: decode the range and show the generic browser.
+  if (is_catalogue_tool) {
+    auto nodes = project_.presenter()->getNodes();
+    auto node_it = std::find_if(nodes.begin(), nodes.end(),
+                                [&node_id](const orc::presenters::NodeInfo& n) {
+                                  return n.node_id == node_id;
+                                });
+
+    QString node_label = QString::fromStdString(stage_name);
+    if (node_it != nodes.end()) {
+      node_label = QString::fromStdString(
+          node_it->label.empty() ? node_it->stage_name : node_it->label);
+    }
+    // The tool names itself — "Teletext Pages", "NABTS Records" — so the title
+    // says what the reader asked for without the host knowing what that is.
+    const QString title = QString("%1 - %2 (%3)")
+                              .arg(QString::fromStdString(tool_info.name))
+                              .arg(node_label)
+                              .arg(QString::fromStdString(node_id.to_string()));
+
+    // Get or create the viewer for this node
+    CatalogueDialog* dialog = nullptr;
+    auto it = catalogue_dialogs_.find(node_id);
+    if (it == catalogue_dialogs_.end()) {
+      dialog = new CatalogueDialog(this);
+      dialog->setWindowTitle(title);
+      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+
+      // Connect destroyed signal to clean up map entry
+      connect(dialog, &QObject::destroyed,
+              [this, node_id]() { catalogue_dialogs_.erase(node_id); });
+
+      catalogue_dialogs_[node_id] = dialog;
+    } else {
+      dialog = it->second;
+    }
+
+    // Show the viewer (empty until the catalogue arrives)
+    dialog->showPending();
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+
+    // Request the catalogue from the coordinator, which triggers the stage
+    // first when it has not been triggered yet.
+    const uint64_t request_id =
+        render_coordinator_->requestCatalogueData(node_id);
+    pending_catalogue_requests_[request_id] = node_id;
+
+    ORC_LOG_DEBUG("Requested catalogue for node '{}', request_id={}",
+                  node_id.to_string(), request_id);
     return;
   }
 
@@ -4546,20 +4532,6 @@ void MainWindow::onShowNtscObserverDialog() {
 
   // Update NTSC observer information after showing
   updateNtscObserverDialog();
-}
-
-void MainWindow::onShowTeletextDialog() {
-  if (!teletext_dialog_) {
-    return;
-  }
-
-  // Show the dialog first
-  teletext_dialog_->show();
-  teletext_dialog_->raise();
-  teletext_dialog_->activateWindow();
-
-  // Update teletext information after showing
-  updateTeletextDialog();
 }
 
 void MainWindow::onShowClosedCaptionDialog() {
@@ -5028,7 +5000,6 @@ void MainWindow::updateAllPreviewComponents() {
   updateVBIDialog();
   updateVideoParameterObserverDialog();
   updateNtscObserverDialog();
-  updateTeletextDialog();
   updateClosedCaptionDialog();
 
   // Notify line scope dialog that preview frame has changed
@@ -5231,37 +5202,6 @@ std::optional<uint64_t> MainWindow::previewFrameForObservers() const {
   return static_cast<uint64_t>(current_index);
 }
 
-void MainWindow::updateTeletextDialog() {
-  // Only update while the dialog is visible (observer-dialog convention).
-  if (!teletext_dialog_ || !teletext_dialog_->isVisible()) {
-    return;
-  }
-
-  if (!current_view_node_id_.is_valid()) {
-    pending_teletext_requests_.clear();
-    teletext_cache_node_id_ = orc::NodeID();
-    teletext_dialog_->clearContent();
-    return;
-  }
-
-  // The trailing-window packet cache only carries over while the view node
-  // is unchanged; a node switch means different observations.
-  if (teletext_cache_node_id_ != current_view_node_id_) {
-    teletext_cache_node_id_ = current_view_node_id_;
-    pending_teletext_requests_.clear();
-    teletext_dialog_->clearCache();
-  }
-
-  const auto current_frame = previewFrameForObservers();
-  if (!current_frame) {
-    teletext_dialog_->clearContent();
-    return;
-  }
-
-  teletext_dialog_->setCurrentFrame(*current_frame);
-  issueTeletextRequests();
-}
-
 void MainWindow::updateClosedCaptionDialog() {
   // Only update while the dialog is visible (observer-dialog convention).
   if (!closed_caption_dialog_ || !closed_caption_dialog_->isVisible()) {
@@ -5329,48 +5269,6 @@ void MainWindow::issueClosedCaptionRequests() {
     const uint64_t request_id = render_coordinator_->requestClosedCaptionData(
         current_view_node_id_, orc::FieldID(frame * 2));
     pending_closed_caption_requests_.emplace(request_id, frame);
-  }
-}
-
-void MainWindow::issueTeletextRequests() {
-  if (!teletext_dialog_ || !current_view_node_id_.is_valid()) {
-    return;
-  }
-
-  // Drop in-flight requests whose frame has left the window; keep the rest.
-  // Stepping forward slides the window by one frame, so cancelling the whole
-  // set each time would keep re-issuing reads that never get the chance to
-  // complete, and the dialog's page list would never fill. The upper bound is
-  // what the dialog will still accept rather than where the previewer is: a
-  // backward step does not make a read already in flight useless, and
-  // abandoning it only means issuing it again when the previewer comes back.
-  const uint64_t window_start = teletext_dialog_->windowStartFrame();
-  const uint64_t retained_limit = teletext_dialog_->retainedFrameLimit();
-  std::unordered_set<uint64_t> frames_in_flight;
-  for (auto it = pending_teletext_requests_.begin();
-       it != pending_teletext_requests_.end();) {
-    if (it->second < window_start || it->second > retained_limit) {
-      it = pending_teletext_requests_.erase(it);
-    } else {
-      frames_in_flight.insert(it->second);
-      ++it;
-    }
-  }
-
-  // Request only the window frames the dialog holds no packets for and has no
-  // outstanding request for. The dialog hands these out a batch at a time —
-  // the window spans minutes of video, and queuing every unread frame of it
-  // at once would put thousands of observation reads ahead of the previewer's
-  // own rendering. Each delivery calls back here for the next batch.
-  const auto needed_frames = teletext_dialog_->framesNeedingData();
-  teletext_dialog_->showPending();
-  for (const uint64_t frame : needed_frames) {
-    if (frames_in_flight.count(frame) != 0) {
-      continue;
-    }
-    const uint64_t request_id = render_coordinator_->requestTeletextData(
-        current_view_node_id_, orc::FieldID(frame * 2));
-    pending_teletext_requests_.emplace(request_id, frame);
   }
 }
 

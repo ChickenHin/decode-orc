@@ -55,6 +55,12 @@ std::string build_missing_stage_message(const Project& project,
          std::to_string(node.node_id.value());
 }
 
+// True for the parameter names that carry a filesystem path.
+bool is_file_path_parameter(const std::string& parameter_name) {
+  return parameter_name.find("_path") != std::string::npos ||
+         parameter_name == "output_path" || parameter_name == "input_path";
+}
+
 }  // namespace
 
 // Helper function to resolve paths relative to project root
@@ -92,6 +98,23 @@ static std::string resolve_path_for_execution(const std::string& path,
     return std::filesystem::weakly_canonical(resolved).string();
   } catch (const std::filesystem::filesystem_error&) {
     return resolved.string();
+  }
+}
+
+void resolve_path_parameters(std::map<std::string, ParameterValue>& parameters,
+                             const std::string& project_root) {
+  for (auto& [param_name, param_value] : parameters) {
+    if (!std::holds_alternative<std::string>(param_value)) {
+      continue;
+    }
+    if (!is_file_path_parameter(param_name)) {
+      continue;
+    }
+    const std::string path = std::get<std::string>(param_value);
+    if (path.empty()) {
+      continue;
+    }
+    param_value = resolve_path_for_execution(path, project_root);
   }
 }
 
@@ -150,27 +173,7 @@ std::shared_ptr<DAG> project_to_dag(const Project& project) {
     }
 
     // Resolve file paths relative to project root
-    for (auto& [param_name, param_value] : dag_node.parameters) {
-      if (std::holds_alternative<std::string>(param_value)) {
-        // Check if this is a file path parameter
-        bool is_file_path =
-            (param_name.find("_path") != std::string::npos ||
-             param_name == "output_path" || param_name == "input_path");
-
-        if (is_file_path) {
-          std::string path = std::get<std::string>(param_value);
-          if (!path.empty()) {
-            std::string resolved =
-                resolve_path_for_execution(path, project_root);
-            if (resolved != path) {
-              ORC_LOG_DEBUG("Node '{}':   Resolved path '{}' -> '{}'",
-                            proj_node.node_id, path, resolved);
-            }
-            param_value = resolved;
-          }
-        }
-      }
-    }
+    resolve_path_parameters(dag_node.parameters, project_root);
 
     for (const auto& [key, value] : dag_node.parameters) {
       std::visit(

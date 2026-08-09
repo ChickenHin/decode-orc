@@ -23,11 +23,11 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
+#include <orc/stage/tooling/catalogue_results.h>
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
 #include <orc_closed_caption.h>   // Closed caption observation view types
 #include <orc_preview_views.h>
-#include <orc_teletext.h>  // Teletext observation view types
 
 #include <QObject>
 #include <QString>
@@ -66,15 +66,15 @@ enum class RenderRequestType {
   RenderPreview,         // Render a preview image
   GetObservations,       // Fetch a frame's observations (async, non-blocking)
   GetVBIData,            // Decode VBI data for a field
-  GetTeletextData,       // Fetch teletext packets for a frame (async)
   GetClosedCaptionData,  // Fetch closed caption bytes for a frame (async)
   GetDropoutData,        // Get dropout analysis data
   GetSNRData,            // Get SNR analysis data
   GetBurstLevelData,     // Get burst level analysis data
-  TriggerStage,          // Trigger a stage (batch processing)
-  CancelTrigger,         // Cancel ongoing trigger
-  GetAvailableOutputs,   // Query available preview outputs
-  GetAudioChannelPairs,  // Query the node's audio channel pairs
+  GetCatalogueData,  // Get the browsable catalogue of a stage that offers one
+  TriggerStage,      // Trigger a stage (batch processing)
+  CancelTrigger,     // Cancel ongoing trigger
+  GetAvailableOutputs,      // Query available preview outputs
+  GetAudioChannelPairs,     // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
   GetLineSamples,           // Get 16-bit samples for a line
   GetFrameTiming,           // Get all frame samples for timing view
@@ -157,19 +157,6 @@ struct GetVBIDataRequest : public RenderRequest {
 };
 
 /**
- * @brief Request to fetch teletext packets for the frame containing a field
- */
-struct GetTeletextDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::FieldID field_id;
-
-  GetTeletextDataRequest(uint64_t id, orc::NodeID node, orc::FieldID fid)
-      : RenderRequest(RenderRequestType::GetTeletextData, id),
-        node_id(std::move(node)),
-        field_id(fid) {}
-};
-
-/**
  * @brief Request to fetch closed caption bytes for the frame containing a field
  */
 struct GetClosedCaptionDataRequest : public RenderRequest {
@@ -217,6 +204,17 @@ struct GetBurstLevelDataRequest : public RenderRequest {
 
   GetBurstLevelDataRequest(uint64_t id, orc::NodeID node)
       : RenderRequest(RenderRequestType::GetBurstLevelData, id),
+        node_id(std::move(node)) {}
+};
+
+/**
+ * @brief Request to get the browsable catalogue of a stage that offers one
+ */
+struct GetCatalogueDataRequest : public RenderRequest {
+  orc::NodeID node_id;
+
+  GetCatalogueDataRequest(uint64_t id, orc::NodeID node)
+      : RenderRequest(RenderRequestType::GetCatalogueData, id),
         node_id(std::move(node)) {}
 };
 
@@ -537,6 +535,8 @@ class IRenderPresenter {
       NodeID node_id) = 0;
   virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(NodeID node_id) = 0;
+  virtual std::optional<orc::CatalogueDataset> getCatalogueData(
+      NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -707,21 +707,6 @@ class RenderCoordinator : public QObject {
   uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
 
   /**
-   * @brief Request teletext packets for the frame containing a field (async)
-   *
-   * Answered from the provenance-keyed store when present, otherwise computed
-   * on the background scheduler (same delivery path as requestObservations()).
-   * One request covers both fields of the field's parent frame; the extracted
-   * per-field packet views are emitted via teletextDataReady.
-   *
-   * @param node_id  Node whose output frame is observed
-   * @param field_id Any field of the frame of interest
-   * @return Request ID for matching / discarding stale responses
-   */
-  uint64_t requestTeletextData(const orc::NodeID& node_id,
-                               orc::FieldID field_id);
-
-  /**
    * @brief Request closed caption bytes for the frame containing a field
    *        (async)
    *
@@ -754,7 +739,8 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request dropout analysis data for all fields (async)
    *
-   * Result will be emitted via dropoutDataReady signal.
+   * Reads what the node's last trigger produced; emits resultsNotAvailable
+   * when it has not been triggered. Result via dropoutDataReady.
    *
    * @param node_id Node to analyze dropout from
    * @param mode Analysis mode (full field or visible area)
@@ -766,7 +752,8 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request SNR analysis data for all fields (async)
    *
-   * Result will be emitted via snrDataReady signal.
+   * Reads what the node's last trigger produced; emits resultsNotAvailable
+   * when it has not been triggered. Result via snrDataReady.
    *
    * @param node_id Node to analyze SNR from
    * @param mode Analysis mode (white, black, or both)
@@ -778,12 +765,25 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Request burst level analysis data for all fields (async)
    *
-   * Result will be emitted via burstLevelDataReady signal.
+   * Reads what the node's last trigger produced; emits resultsNotAvailable
+   * when it has not been triggered. Result via burstLevelDataReady.
    *
    * @param node_id Node to analyze burst level from
    * @return Request ID for matching response
    */
   uint64_t requestBurstLevelData(const orc::NodeID& node_id);
+
+  /**
+   * @brief Request the browsable catalogue of a stage (async)
+   *
+   * A read, never a run: serves the catalogue the node's last trigger left
+   * behind via catalogueDataReady, or emits resultsNotAvailable when the node
+   * has not been triggered since the DAG was last built.
+   *
+   * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @return Request ID
+   */
+  uint64_t requestCatalogueData(const orc::NodeID& node_id);
 
   /**
    * @brief Request available outputs for a node (async)
@@ -997,28 +997,6 @@ class RenderCoordinator : public QObject {
                     orc::presenters::VBIFieldInfoView info);
 
   /**
-   * @brief Emitted (on the GUI thread) when a requestTeletextData() response
-   *        is ready
-   *
-   * Carries the recovered T42 packet views for both fields of the requested
-   * frame, in temporal order (field1 precedes field2).
-   *
-   * @param request_id      Id returned by requestTeletextData()
-   * @param available       True when the frame's observations were produced
-   * @param field1_id_value First field of the frame (FieldID::value())
-   * @param field1          Packet view for the first field
-   * @param field2_id_value Second field of the frame
-   * @param field2          Packet view for the second field
-   *
-   * Marshalled from the worker/scheduler thread via a queued connection.
-   */
-  void teletextDataReady(uint64_t request_id, bool available,
-                         qulonglong field1_id_value,
-                         orc::presenters::TeletextFieldPacketsView field1,
-                         qulonglong field2_id_value,
-                         orc::presenters::TeletextFieldPacketsView field2);
-
-  /**
    * @brief Emitted (on the GUI thread) when a requestClosedCaptionData()
    *        response is ready
    *
@@ -1047,20 +1025,10 @@ class RenderCoordinator : public QObject {
                         orc::presenters::DropoutDisplaySeries series);
 
   /**
-   * @brief Emitted during dropout analysis progress
-   */
-  void dropoutProgress(size_t current, size_t total, QString message);
-
-  /**
    * @brief Emitted when SNR analysis data is ready
    */
   void snrDataReady(uint64_t request_id,
                     orc::presenters::SNRDisplaySeries series);
-
-  /**
-   * @brief Emitted during SNR analysis progress
-   */
-  void snrProgress(size_t current, size_t total, QString message);
 
   /**
    * @brief Emitted when burst level analysis data is ready
@@ -1069,9 +1037,18 @@ class RenderCoordinator : public QObject {
                            orc::presenters::BurstLevelDisplaySeries series);
 
   /**
-   * @brief Emitted during burst level analysis progress
+   * @brief Emitted when a stage's catalogue is ready
    */
-  void burstLevelProgress(size_t current, size_t total, QString message);
+  void catalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
+
+  /**
+   * @brief Emitted when a results read found nothing to read
+   *
+   * The node's stage has not been triggered since the DAG was last built, so
+   * there is nothing to show. Distinct from error(): nothing has gone wrong,
+   * the reader simply needs to trigger the stage first.
+   */
+  void resultsNotAvailable(uint64_t request_id);
 
   /**
    * @brief Emitted when available outputs query completes
@@ -1249,11 +1226,6 @@ class RenderCoordinator : public QObject {
   void handleGetVBIData(const GetVBIDataRequest& req);
 
   /**
-   * @brief Handle GetTeletextData request
-   */
-  void handleGetTeletextData(const GetTeletextDataRequest& req);
-
-  /**
    * @brief Handle GetClosedCaptionData request
    */
   void handleGetClosedCaptionData(const GetClosedCaptionDataRequest& req);
@@ -1272,6 +1244,11 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetBurstLevelData request
    */
   void handleGetBurstLevelData(const GetBurstLevelDataRequest& req);
+
+  /**
+   * @brief Handle GetCatalogueData request
+   */
+  void handleGetCatalogueData(const GetCatalogueDataRequest& req);
 
   /**
    * @brief Handle GetAvailableOutputs request

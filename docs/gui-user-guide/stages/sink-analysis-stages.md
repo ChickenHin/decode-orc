@@ -6,7 +6,7 @@ Analysis sinks:
 
 * Do not modify video, audio, or metadata
 * Do not produce outputs that can be connected further downstream
-* Display results in a chart window and can optionally write a CSV file
+* Display their results in a dialog of their own and write them to a file
 
 They are typically used to:
 
@@ -14,7 +14,11 @@ They are typically used to:
 * Validate signal stability and decode quality
 * Quantify the effects of transform stages such as stacking or dropout correction
 
-All three analysis sinks work the same way: trigger the stage to compute the dataset, after which the matching analysis chart dialog opens automatically. The dataset is cached in the stage and the chart can be re-opened at any time from the **Stage Tools** menu.
+Every analysis sink works the same way: trigger the stage to compute the dataset, after which its dialog opens automatically. The dataset stays with the stage, so closing the dialog and picking the tool again from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without recomputing. That menu entry only ever reads: on a node that has not been triggered it says so rather than starting a decode, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open viewers with them — trigger again to get a dataset that matches the new settings.
+
+The burst level, dropout and SNR sinks measure the signal and present a chart with an optional CSV export.
+
+A batch-analysis dialog is not the same thing as an analysis sink, and two stages that offer one live elsewhere: the **Teletext Sink** and the **NABTS Sink** are documented under [Sink Stages](sink-core-stages.md) because writing the packet stream is their product, and their page and record viewers are by-products of the same pass rather than the reason for it.
 
 **CSV output format.** Each CSV is written from the full-resolution, canonical per-frame dataset — **one row per frame** (every analysis sink analyses every frame), with the frame's true (1-based) frame number in the first column. Units are carried in the header names (`_samples`, `_db`, `_10bit`) and values are plain numbers. A metric that was not measured for a frame is written as an **empty field** (never the string `nan`). The CSV is independent of the display decimation used to draw the chart, so it always contains every frame regardless of the on-screen point count.
 
@@ -52,7 +56,7 @@ This stage measures the amplitude of the colour burst for each field and generat
 
 **Stage tools**
 
-* **Burst Level Analysis** — displays per-frame colour-burst amplitude measurements in a chart window. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+* **Burst Level Analysis** — displays per-frame colour-burst amplitude measurements in a chart window. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
 **Notes**
 
@@ -111,7 +115,7 @@ Separate from the per-frame CSV, the detail report records *where* each individu
 
 **Stage tools**
 
-* **Dropout Analysis** — displays dropout frequency, size, and distribution charts. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+* **Dropout Analysis** — displays dropout frequency, size, and distribution charts. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
 **Where the analysis reads its data**
 
@@ -159,7 +163,7 @@ This stage estimates signal-to-noise ratio using spatial and temporal analysis o
 
 **Stage tools**
 
-* **SNR Analysis** — displays white SNR and black SNR metrics over time in a chart window. Invoked automatically after triggering; can be re-opened from the Stage Tools menu.
+* **SNR Analysis** — displays white SNR and black SNR metrics over time in a chart window. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
 **Notes**
 

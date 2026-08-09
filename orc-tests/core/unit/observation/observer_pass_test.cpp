@@ -243,15 +243,15 @@ TEST(RunFrameObserverPassPadding, NonPaddingDescriptorStillRunsObservers) {
 
 TEST(RunFrameObserverPassApplicability, InapplicableObserverNeverRunsOrStores) {
   SpyObservationService spy;
-  // "teletext" is PAL-only in the standard registry; "white_snr" applies to
+  // "fm_code" is NTSC-only in the standard registry; "white_snr" applies to
   // every system. The spy service runs whatever it is asked to run — the skip
   // decision under test lives in the pass itself.
-  spy.observers = {make_observer_info("teletext", "1.0.0"),
+  spy.observers = {make_observer_info("fm_code", "1.0.0"),
                    make_observer_info("white_snr", "1.0.0")};
   ObservationStore store;
   FakeVideoFrameRepresentation vfr;
   SourceParameters params;
-  params.system = VideoSystem::NTSC;
+  params.system = VideoSystem::PAL;
   vfr.video_parameters = params;
   const NodeFingerprint fp{"fp"};
   const FrameID frame = 0;
@@ -260,13 +260,13 @@ TEST(RunFrameObserverPassApplicability, InapplicableObserverNeverRunsOrStores) {
   run_frame_observer_pass(spy, spy.observers, vfr, frame, &fp, &store, ctx);
 
   EXPECT_EQ(spy.total_runs, 1);
-  EXPECT_EQ(spy.runs_by_id.count("teletext"), 0u);
+  EXPECT_EQ(spy.runs_by_id.count("fm_code"), 0u);
   EXPECT_EQ(spy.runs_by_id.at("white_snr"), 1);
 
   // No records under the skipped observer — coverage probes filtered by the
   // same predicate must not find (or demand) them.
   for (FieldID::value_type f = 0; f < 2; ++f) {
-    EXPECT_FALSE(store.has({fp, FieldID(f), "teletext", "1.0.0"}))
+    EXPECT_FALSE(store.has({fp, FieldID(f), "fm_code", "1.0.0"}))
         << "field " << f;
     EXPECT_TRUE(store.has({fp, FieldID(f), "white_snr", "1.0.0"}))
         << "field " << f;
@@ -275,7 +275,7 @@ TEST(RunFrameObserverPassApplicability, InapplicableObserverNeverRunsOrStores) {
 
 TEST(RunFrameObserverPassApplicability, NoVideoParametersFailsOpen) {
   SpyObservationService spy;
-  spy.observers = {make_observer_info("teletext", "1.0.0")};
+  spy.observers = {make_observer_info("black_psnr", "1.0.0")};
   ObservationStore store;
   FakeVideoFrameRepresentation vfr;  // video_parameters unset
   const NodeFingerprint fp{"fp"};
@@ -287,7 +287,7 @@ TEST(RunFrameObserverPassApplicability, NoVideoParametersFailsOpen) {
 
 TEST(RunFrameObserverPassApplicability, ApplicableSystemStillRuns) {
   SpyObservationService spy;
-  spy.observers = {make_observer_info("teletext", "1.0.0")};
+  spy.observers = {make_observer_info("black_psnr", "1.0.0")};
   ObservationStore store;
   FakeVideoFrameRepresentation vfr;
   SourceParameters params;
@@ -298,18 +298,18 @@ TEST(RunFrameObserverPassApplicability, ApplicableSystemStillRuns) {
   ObservationContext ctx;
   run_frame_observer_pass(spy, spy.observers, vfr, 0, &fp, &store, ctx);
   EXPECT_EQ(spy.total_runs, 1);
-  EXPECT_TRUE(store.has({fp, FieldID(0), "teletext", "1.0.0"}));
+  EXPECT_TRUE(store.has({fp, FieldID(0), "black_psnr", "1.0.0"}));
 }
 
 TEST(RunFrameObserverPassApplicability, PaddingStoresNoPadRecordWhenSkipped) {
   SpyObservationService spy;
-  spy.observers = {make_observer_info("teletext", "1.0.0"),
+  spy.observers = {make_observer_info("fm_code", "1.0.0"),
                    make_observer_info("white_snr", "1.0.0")};
   ObservationStore store;
   FakeVideoFrameRepresentation vfr;
   mark_as_padding(vfr);
   SourceParameters params;
-  params.system = VideoSystem::NTSC;
+  params.system = VideoSystem::PAL;
   vfr.video_parameters = params;
   const NodeFingerprint fp{"fp"};
 
@@ -318,7 +318,7 @@ TEST(RunFrameObserverPassApplicability, PaddingStoresNoPadRecordWhenSkipped) {
   EXPECT_EQ(spy.total_runs, 0);
 
   for (FieldID::value_type f = 0; f < 2; ++f) {
-    EXPECT_FALSE(store.has({fp, FieldID(f), "teletext", "1.0.0"}))
+    EXPECT_FALSE(store.has({fp, FieldID(f), "fm_code", "1.0.0"}))
         << "field " << f;
     const auto rec = store.get({fp, FieldID(f), "white_snr", "1.0.0"});
     ASSERT_TRUE(rec.has_value()) << "field " << f;

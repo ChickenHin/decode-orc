@@ -120,13 +120,15 @@ set(ORC_GUI_LIB_SOURCES
     ntscobserverdialog.cpp
     ntscobserverdialog.h
 
-    # Teletext page preview dialog
-    teletext_page_assembler.cpp
-    teletext_page_assembler.h
-    teletextpagewidget.cpp
-    teletextpagewidget.h
-    teletextdialog.cpp
-    teletextdialog.h
+    # Generic catalogue browser: the viewer for any stage advertising
+    # StageToolKind::CatalogueBrowser, plus the two payload renderers it
+    # switches between.
+    cataloguecellgridwidget.cpp
+    cataloguecellgridwidget.h
+    cataloguedisplaylistwidget.cpp
+    cataloguedisplaylistwidget.h
+    cataloguedialog.cpp
+    cataloguedialog.h
 
     # Closed caption preview dialog
     closed_caption_assembler.cpp

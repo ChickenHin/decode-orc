@@ -98,13 +98,11 @@ class FFmpegOutputBackend : public OutputBackend {
   std::string audio_channel_pairs_option_;  // "all" or comma-separated indices
   double audio_gain_ = 1.0;  // Linear gain applied to embedded audio samples
 
-  // Subtitle structures (closed captions and teletext subtitles share the
-  // single mov_text stream and the pending-cue queue)
+  // Subtitle structures (closed captions decoded to a single mov_text stream
+  // fed from the pending-cue queue)
   AVCodecContext* subtitle_codec_ctx_ = nullptr;
   AVStream* subtitle_stream_ = nullptr;
   bool embed_closed_captions_ = false;
-  bool embed_teletext_subtitles_ = false;
-  std::string teletext_subtitle_page_ = "888";
   uint64_t current_field_for_captions_ = 0;
   std::unique_ptr<EIA608Decoder> eia608_decoder_;
   std::vector<CaptionCue> pending_cues_;

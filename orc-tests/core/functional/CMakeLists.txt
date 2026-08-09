@@ -112,6 +112,7 @@ gtest_discover_tests(orc-core-functional-tests-plugin-isolation
 # files on disk, so they are functional (not unit). No stage plugins needed.
 add_executable(orc-core-functional-tests-observation
     observation_persistence_sqlite_test.cpp
+    observation_cache_retention_fs_test.cpp
 )
 target_include_directories(orc-core-functional-tests-observation PRIVATE
     ${CMAKE_SOURCE_DIR}/orc/core/include
@@ -125,3 +126,112 @@ gtest_discover_tests(orc-core-functional-tests-observation
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;observation")
+
+# Raw VBI capture transport and the stage over it: both are verified against
+# the reference bt8x8 PAL sample, which is real media on disk and therefore
+# functional. The sample is not checked in (test-data/ is ignored), so the
+# tests skip when it is absent. The stage plugin target is linked directly so
+# the stage class can be driven in-process.
+if(TARGET orc-vbi-source)
+    add_executable(orc-core-functional-tests-vbi-source
+        stages/vbi_source/vbi_flac_transport_test.cpp
+        stages/vbi_source/vbi_calibration_test.cpp
+        stages/vbi_source/vbi_source_pipeline_test.cpp
+        stages/vbi_source/vbi_ntsc_source_test.cpp
+        # The teletext sink's frame slicer is what the 525-line
+        # recovery check drives; compiled in directly rather than linked
+        # because it is a self-contained plugin-local module. It learns
+        # through the scan state, so that comes with it.
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink/teletext_frame_slicer.cpp
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink/teletext_scan_state.cpp
+    )
+    target_include_directories(orc-core-functional-tests-vbi-source PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
+    )
+    target_link_libraries(orc-core-functional-tests-vbi-source
+        orc-vbi-source
+        # The slicer and page decoder the 525-line recovery check verifies
+        # against; the PUBLIC include directory comes with the link.
+        orc-vbi-services
+        GTest::gmock_main
+    )
+    if(TARGET orc-stage-plugin-vbi-source)
+        # orc-core supplies the concrete ObservationContext the stage's
+        # execute() signature takes; at runtime the host provides it.
+        target_link_libraries(orc-core-functional-tests-vbi-source
+            orc-stage-plugin-vbi-source
+            orc-core)
+    endif()
+    target_compile_definitions(orc-core-functional-tests-vbi-source PRIVATE
+        ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
+    )
+    gtest_discover_tests(orc-core-functional-tests-vbi-source
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;sources")
+endif()
+
+# The teletext sink end to end: the reference 625-line and 525-line
+# WST captures, read through the VBI source stage and decoded by the sink, with
+# the exported packet stream compared against golden data. Real media on disk,
+# so functional; the samples are not checked in (test-data/ is ignored), so the
+# tests skip when they are absent.
+if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-nabts-sink)
+    add_executable(orc-core-functional-tests-nabts-sink
+        stages/nabts_sink/nabts_sink_pipeline_test.cpp
+    )
+    target_include_directories(orc-core-functional-tests-nabts-sink PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/core/include
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-core-functional-tests-nabts-sink
+        orc-core
+        orc-vbi-source
+        orc-stage-plugin-nabts-sink
+        orc-vbi-services
+        GTest::gmock_main
+    )
+    if(TARGET orc-stage-plugin-vbi-source)
+        target_link_libraries(orc-core-functional-tests-nabts-sink
+            orc-stage-plugin-vbi-source)
+    endif()
+    target_compile_definitions(orc-core-functional-tests-nabts-sink PRIVATE
+        ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
+    )
+    gtest_discover_tests(orc-core-functional-tests-nabts-sink
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;sinks")
+endif()
+
+if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-sink)
+    add_executable(orc-core-functional-tests-teletext-sink
+        stages/teletext_sink/teletext_sink_pipeline_test.cpp
+    )
+    target_include_directories(orc-core-functional-tests-teletext-sink PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/core/include
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-core-functional-tests-teletext-sink
+        orc-core
+        orc-vbi-source
+        orc-stage-plugin-teletext-sink
+        orc-vbi-services
+        GTest::gmock_main
+    )
+    if(TARGET orc-stage-plugin-vbi-source)
+        target_link_libraries(orc-core-functional-tests-teletext-sink
+            orc-stage-plugin-vbi-source)
+    endif()
+    target_compile_definitions(orc-core-functional-tests-teletext-sink PRIVATE
+        ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
+    )
+    gtest_discover_tests(orc-core-functional-tests-teletext-sink
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;sinks")
+endif()

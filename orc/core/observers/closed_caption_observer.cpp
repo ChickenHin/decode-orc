@@ -30,6 +30,12 @@ void ClosedCaptionObserver::process_frame(
   }
   const auto& vp = vp_opt.value();
 
+  // Captions are 525-line only (see applies_to()); callers normally skip the
+  // observer entirely, this early-return is defence in depth.
+  if (!applies_to(vp)) {
+    return;
+  }
+
   size_t f1_lines = field1_lines(vp.system);
   size_t line_width = static_cast<size_t>(vp.frame_width_nominal);
 
@@ -44,17 +50,18 @@ void ClosedCaptionObserver::process_frame(
                               ? f1_lines
                               : static_cast<size_t>(vp.frame_height) - f1_lines;
 
-    // Closed captions are NTSC only; field 2 (field_idx=1) is skipped as
-    // captions appear on VFR field 1 (the top spatial / even-scan field).
-    if (vp.system == VideoSystem::NTSC && field_idx == 1) {
-      ORC_LOG_DEBUG("Field {}: Skipping field 2 (no NTSC captions)",
+    // Field 2 (field_idx=1) is skipped: the CC1/CC2 caption service appears on
+    // VFR field 1 (the top spatial / even-scan field). Field 2 line 21 carries
+    // CC3/CC4 and XDS, which this observer does not decode.
+    if (field_idx == 1) {
+      ORC_LOG_DEBUG("Field {}: Skipping field 2 (no CC1/CC2 captions)",
                     derived_fid.value());
       context.set(derived_fid, "closed_caption", "present", false);
       continue;
     }
 
-    // Line 21 for NTSC, line 22 for PAL (0-based: 20, 21)
-    size_t line_num = (vp.system == VideoSystem::NTSC) ? 20 : 21;
+    // Line 21 of the 525-line frame (0-based: 20) [CTA-608-E §4.1].
+    constexpr size_t line_num = 20;
 
     if (line_num >= field_height) {
       ORC_LOG_DEBUG("Field {}: Line {} >= field height {}", derived_fid.value(),

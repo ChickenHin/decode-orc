@@ -2,7 +2,6 @@ set(CHROMA_DECODER_SHARED_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/../common/output_backend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../common/raw_output_backend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../common/ffmpeg_output_backend.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/../common/teletext_subtitle_feed.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../common/video_sink_stage.cpp
 )
 

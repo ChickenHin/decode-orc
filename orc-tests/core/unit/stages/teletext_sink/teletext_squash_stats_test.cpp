@@ -14,9 +14,10 @@
 #include "teletext_squash_stats.h"
 
 #include <gtest/gtest.h>
-#include <orc/support/teletext_page_decoder.h>
 
 #include <string>
+
+#include "vbi-services/teletext_page_decoder.h"
 
 // using different namespace from module-under-test so that we can use the same
 // class names in the tests as in the module-under-test

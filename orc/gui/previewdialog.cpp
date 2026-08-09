@@ -133,13 +133,8 @@ void PreviewDialog::setObserverAvailabilityForFormat(
   // SMPTE 170M-2004 §8.4 / CEA-608-E §4: the NTSC-specific observers (FM code,
   // white flag) and line 21 closed captions exist only on 525-line NTSC.
   const bool is_ntsc = (format == orc::presenters::VideoFormat::NTSC);
-  // ETSI EN 300 706 §1: System B teletext is carried on 625-line PAL only, so
-  // PAL-M (525-line) is deliberately excluded here.
-  const bool is_pal = (format == orc::presenters::VideoFormat::PAL);
-
   show_ntsc_observer_action_->setEnabled(is_ntsc);
   show_closed_caption_action_->setEnabled(is_ntsc);
-  show_teletext_action_->setEnabled(is_pal);
 }
 
 PreviewDialog::~PreviewDialog() = default;
@@ -214,12 +209,6 @@ void PreviewDialog::setupUI() {
       QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_H));
   connect(show_video_parameter_observer_action_, &QAction::triggered, this,
           &PreviewDialog::showVideoParameterObserverDialogRequested);
-
-  show_teletext_action_ = observersMenu->addAction("&Teletext Pages");
-  show_teletext_action_->setShortcut(
-      QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X));
-  connect(show_teletext_action_, &QAction::triggered, this,
-          &PreviewDialog::showTeletextDialogRequested);
 
   show_closed_caption_action_ = observersMenu->addAction("&Closed Captions");
   show_closed_caption_action_->setShortcut(
