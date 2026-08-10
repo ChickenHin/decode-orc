@@ -200,9 +200,21 @@ struct NabtsPrimitive {
 
   NabtsColourMode colour_mode = NabtsColourMode::kDirect;
   /// Drawing colour, resolved through the colour map where the mode says to.
+  /// In modes 1 and 2 the resolution is against the map as it stood at the
+  /// *end* of the record: X3.110 §5.3.2.5 makes a map write retroactive — "A
+  /// change in the color map will immediately be reflected in the color of all
+  /// pixels whose associated color map address points to the color map entry
+  /// that has been changed" — so the final map is the one that was on screen.
   NabtsColour colour;
-  /// Background colour; meaningful only in colour mode 2.
+  /// Background colour; meaningful only in colour mode 2. Resolved like
+  /// |colour|.
   NabtsColour background;
+  /// Colour map address |colour| was resolved from, or -1 where the colour was
+  /// specified directly (mode 0). Carried so a consumer can tell a mapped
+  /// colour from a direct one; the resolution itself has already been done.
+  int16_t colour_map_address = -1;
+  /// Colour map address |background| was resolved from, or -1 outside mode 2.
+  int16_t background_map_address = -1;
   /// X3.110 §6.2.8.1: this primitive is part of a blink process, alternating
   /// between |colour| and nominal black (or the background in colour mode 2).
   bool blinking = false;

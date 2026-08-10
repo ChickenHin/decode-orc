@@ -670,6 +670,74 @@ TEST(CatalogueDisplayListWidgetTest, WalksEveryOperation) {
   EXPECT_EQ(widget.opsPainted(), 3);
 }
 
+// X3.110 §5.3.3.5.1: "For filled polygons, the area enclosed by the outline
+// (including the region of the outline traced by the logical pel) is filled",
+// and §5.3.2.4.3 makes that region what the pel sweeps along the outline.
+//
+// The regression this pins: a service draws a letterform as a path that
+// encloses almost nothing and lets the pel give it its weight — the NCAA
+// roundel of the reference ExtraVision recording draws every letter that way.
+// Filling the enclosed area alone left the letters as disconnected slivers.
+// The path here is the degenerate case in miniature: out and back along the
+// same line, enclosing no area at all, so anything drawn is the pel's doing.
+TEST(CatalogueDisplayListWidgetTest, AFilledFigureIncludesItsPelTracedOutline) {
+  ensureApplication();
+
+  const auto strokeOnlyPolygon = [](double pel) {
+    orc::CatalogueDisplayList list;
+    list.aspect_height = 1.0;
+    orc::CatalogueDrawOp op;
+    op.kind = orc::CatalogueDrawKind::kPolygon;
+    op.filled = true;
+    op.colour = orc::CatalogueColour{255, 255, 255};
+    op.pen_size = orc::CatalogueSize{pel, pel};
+    // Down the middle and back: zero enclosed area.
+    op.points = {orc::CataloguePoint{0.5, 0.2}, orc::CataloguePoint{0.5, 0.8},
+                 orc::CataloguePoint{0.5, 0.2}};
+    list.ops.push_back(op);
+    return list;
+  };
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(strokeOnlyPolygon(0.05));
+  const QImage traced = renderWidget(widget, 200, 200);
+  EXPECT_GT(traced.pixelColor(100, 100).red(), 0)
+      << "the pel traced no outline, so the figure drew nothing at all";
+
+  // A dimensionless pel (§5.3.2.2.6's default) traces nothing, so the same
+  // path draws nothing — the stroke is the pel's, not a minimum line width's.
+  CatalogueDisplayListWidget dimensionless;
+  dimensionless.setDisplayList(strokeOnlyPolygon(0.0));
+  const QImage untraced = renderWidget(dimensionless, 200, 200);
+  EXPECT_EQ(untraced.pixelColor(100, 100).red(), 0);
+}
+
+// The traced outline is part of the filled area, so it takes the fill's
+// colour — not the black a highlight would put there (§5.3.2.4.3 makes the
+// black outline the highlight attribute's doing, and it is off by default).
+TEST(CatalogueDisplayListWidgetTest, ThePelTracedOutlineTakesTheFillColour) {
+  ensureApplication();
+  CatalogueDisplayListWidget widget;
+
+  orc::CatalogueDisplayList list;
+  list.aspect_height = 1.0;
+  orc::CatalogueDrawOp op;
+  op.kind = orc::CatalogueDrawKind::kRectangle;
+  op.filled = true;
+  op.origin = orc::CataloguePoint{0.3, 0.3};
+  op.size = orc::CatalogueSize{0.4, 0.4};
+  op.colour = orc::CatalogueColour{0, 255, 0};
+  op.pen_size = orc::CatalogueSize{0.06, 0.06};
+  list.ops.push_back(op);
+  widget.setDisplayList(list);
+
+  const QImage image = renderWidget(widget, 200, 200);
+  // On the rectangle's own edge, which is the middle of the traced band.
+  const QColor edge = image.pixelColor(60, 100);
+  EXPECT_GT(edge.green(), 0);
+  EXPECT_EQ(edge.red(), 0);
+}
+
 // The drawable area follows the payload's own aspect, not the widget's.
 TEST(CatalogueDisplayListWidgetTest, DrawableAreaFollowsThePayloadAspect) {
   ensureApplication();

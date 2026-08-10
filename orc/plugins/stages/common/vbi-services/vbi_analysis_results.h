@@ -216,6 +216,9 @@ struct NabtsCataloguedRecord {
   bool alarm = false;
   bool update = false;
   bool support_record = false;
+  /// §5.2.7.9: the Data Channel's Support Record must be executed before this
+  /// record is — it defines macros, DRCS or colour maps this record invokes.
+  bool support_needed = false;
   bool index = false;
   bool more = false;
 
@@ -230,6 +233,24 @@ struct NabtsCataloguedRecord {
   uint64_t times_seen = 0;
   /// Copies that arrived whole and undamaged, of @ref times_seen.
   uint64_t times_intact = 0;
+
+  /// §5.2.8.4: a header extension field naming this record's More Record
+  /// explicitly, which §7.3.4 has the receiver consult before the More Flag.
+  /// The address is in long form, same data channel. False when the record
+  /// carried no such extension.
+  bool has_more_address = false;
+  uint64_t more_address = 0;
+
+  /// The base of the More chain this record belongs to — the chain each
+  /// member names its successor of, by an explicit More address (§5.2.8.4) or
+  /// by the More Flag's algorithmic long-address-plus-one (§5.2.7.6, the last
+  /// two digits counted in decimal per §7.3.4). Equal to @ref address for a
+  /// record that starts a chain or stands alone. A continuation is rendered
+  /// over the accumulated display of the chain members before it, so its
+  /// @ref page is the screen a viewer stepping through the page would see.
+  uint64_t chain_base_address = 0;
+  /// Steps from the chain base: 0 for the base itself or a standalone record.
+  uint32_t chain_position = 0;
 
   /// Records in the linked series (§5.2.6); 1 for an unlinked record.
   uint32_t records_in_message = 0;

@@ -61,6 +61,11 @@ void NaplpsColourState::reset_map() {
   }
 }
 
+void NaplpsColourState::reset_drawing_to_white() {
+  mode_ = NabtsColourMode::kDirect;
+  direct_colour_ = kNabtsNominalWhite;
+}
+
 void NaplpsColourState::select_direct_mode() {
   mode_ = NabtsColourMode::kDirect;
 }
@@ -135,6 +140,13 @@ void NaplpsColourState::set_colour(const NabtsColour& colour) {
   // the drawing color is established in an implementation-dependent manner."
   // The direct colour is kept, which is what a mode-0 primitive is drawn in
   // anyway.
+}
+
+void NaplpsColourState::write_map_entry(uint32_t address,
+                                        const NabtsColour& colour) {
+  const uint32_t index = address % kNabtsColourMapEntries;
+  map_[index] = colour;
+  used_[index] = true;
 }
 
 void NaplpsColourState::set_transparent() {
@@ -360,6 +372,18 @@ void NaplpsState::clear_drcs() {
     }
     entry = NabtsDrcsCharacter{};
   }
+}
+
+void NaplpsState::free_drcs(uint8_t code) {
+  const size_t index = index_of_code(code);
+  if (index >= drcs_.size()) {
+    return;
+  }
+  NabtsDrcsCharacter& entry = drcs_[index];
+  if (entry.defined()) {
+    storage_used_ -= std::min(storage_used_, kDrcsBytesPerCharacter);
+  }
+  entry = NabtsDrcsCharacter{};
 }
 
 std::vector<NabtsDrcsCharacter> NaplpsState::defined_drcs() const {

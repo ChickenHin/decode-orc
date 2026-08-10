@@ -24,7 +24,17 @@ namespace orc {
 /**
  * @brief Runs a NAPLPS presentation record and emits what it drew
  *
- * One instance per record. The record is a program (CEA-516 §6.1, ANSI
+ * One instance per *service*, not per record: macros, DRCS characters, the
+ * programmable texture masks and the colour map persist across records unless
+ * a RESET clears them. CEA-516 §8.7.2.3.1 spells out what the recommended
+ * per-page NSR leaves alone — "without affecting macros, DRCS, texture
+ * definitions, color map or the currently displayed image" — and §8.7.1.4's
+ * Support Record exists precisely to define macros other pages then invoke.
+ * A caller therefore chooses where the resets fall: reset_decoder() is the
+ * receiver's general reset (power-up or channel change, CEA-516 §8.5), and
+ * run() executes one record from wherever the state currently stands.
+ *
+ * The record is a program (CEA-516 §6.1, ANSI
  * X3.110-1983), and running it means walking the byte stream while three things
  * change underneath: which G-set a byte belongs to (NaplpsCodeEnvironment),
  * what the presentation attributes are (NaplpsState), and where the drawing
@@ -49,6 +59,30 @@ class NaplpsInterpreter {
   NaplpsInterpreter();
 
   /**
+   * @brief The general reset of CEA-516 §8.5
+   *
+   * "On power-up or TV-channel change ... A general reset is equivalent to a
+   * NSR, followed by a RESET command with two operands consisting of all 1s" —
+   * everything to its default, macros, DRCS, texture masks and colour map
+   * included. Call before the first record of an independent presentation;
+   * do not call between records that share state (a Support Record and the
+   * pages that need it).
+   */
+  void reset_decoder();
+
+  /**
+   * @brief The Caption Record preset of CEA-516 §5.2.7.3
+   *
+   * A receiver executing a caption record "first executes a Non-Selective
+   * Reset (NSR)" and is then left with the cursor and drawing point at (0,0),
+   * map entries 0, 1 and 7 loaded with transparent, black and white, colour
+   * mode 2 drawing white over black, and the code environment at its defaults.
+   * Call after reset_decoder() (and after any Support Record), before running
+   * a record whose Caption Flag is set.
+   */
+  void apply_caption_state();
+
+  /**
    * @brief Run |record| and return what it drew
    *
    * @param record Record data as CEA-516 §5.3 delivers it — the record header
@@ -61,8 +95,25 @@ class NaplpsInterpreter {
    *
    * Never throws. A record that runs out mid-sequence yields the primitives it
    * managed, with the shortfall in the diagnostics.
+   *
+   * Persistent state — macros, DRCS, texture masks, the colour map and the
+   * presentation attributes — is carried in from previous runs and left in
+   * place afterwards; only the per-record transients (the display list, open
+   * definitions, execution frames) start fresh. The snapshot's colour map,
+   * DRCS set and texture masks therefore include whatever earlier records
+   * defined, which is what a page drawn against a Support Record needs.
+   *
+   * |keep_display| carries the previous run's display list in as the starting
+   * canvas, which is how a More Record is presented: CEA-516 §5.2.7.8 has it
+   * "presented after the completion of the presentation of the current
+   * Record", drawing over what is already on screen rather than over a
+   * cleared one — the record's own CS or RESET is what clears, when it wants
+   * to. The carried primitives keep their colour map addresses, so a map
+   * write in the continuation retro-colours them exactly as it would the
+   * pixels of a real display. Diagnostics always describe this record alone.
    */
-  NabtsPageSnapshot run(const std::vector<uint8_t>& record);
+  NabtsPageSnapshot run(const std::vector<uint8_t>& record,
+                        bool keep_display = false);
 
   /// The state after the last run(), for a test that wants to inspect it.
   const NaplpsState& state() const { return state_; }
@@ -98,6 +149,20 @@ class NaplpsInterpreter {
   void execute_escape();
   void execute_c1(NaplpsC1 control);
   void execute_graphic(uint8_t byte);
+
+  /// The reset half of NSR (§6.1.6.5 items 1-5): code environment, DOMAIN,
+  /// text parameters and the active field, TEXTURE attributes, and colour mode
+  /// 0 with a white drawing colour. The colour map, programmable masks, macros
+  /// and DRCS are left alone — which is what makes them persist between pages.
+  void apply_nsr_reset();
+
+  /// Drop everything drawn so far and, where |colour| is what the display was
+  /// cleared to, record the clear as a full-display-area filled rectangle so a
+  /// renderer shows the cleared colour rather than its own canvas.
+  /// |map_address| is the colour's map address, or -1 for a direct colour;
+  /// nominal black with no address emits nothing, black being what a renderer
+  /// shows for an empty list anyway.
+  void clear_display(const NabtsColour& colour, int map_address);
 
   // ---- PDI ----------------------------------------------------------------
 
@@ -168,6 +233,25 @@ class NaplpsInterpreter {
   /// where §5.3.2.3.6 says a forward step should.
   void move_cursor_by(CursorMove move);
 
+  /**
+   * @brief §5.3.2.3.6's suppression of the explicit APR APD after an automatic
+   *        one
+   *
+   * "If an explicit APR APD (or APD APR) sequence is received after an
+   * automatic APR APD is executed but before the character field origin is
+   * moved, aligned, or set by any other received command or sequence, the
+   * explicit APR APD (or APD APR) sequence shall be executed as a null
+   * operation." A service writes every line flush to its field and ends it
+   * with CR LF; without this rule each exactly-full line gains a blank row and
+   * everything below it lands on top of the page's positioned elements.
+   */
+  enum class WrapSuppress : uint8_t {
+    kNone,    ///< No automatic APR APD outstanding.
+    kArmed,   ///< An automatic APR APD ran; an explicit pair would be null.
+    kSawApr,  ///< First half (APR) of the suppressed pair consumed.
+    kSawApd,  ///< First half (APD) of the suppressed pair consumed.
+  };
+
   /// Advance the cursor one character along the character path (§5.3.2.3.3).
   void advance_cursor() { move_cursor_by(CursorMove::kForward); }
 
@@ -200,6 +284,15 @@ class NaplpsInterpreter {
   std::vector<uint8_t> definition_body_;
   uint8_t definition_code_ = 0;
   bool definition_is_transmit_ = false;
+  /// Frame the open definition is collecting from. Bytes executed from deeper
+  /// frames — a macro expanding inside a DEFP MACRO body — are executed but not
+  /// stored, which is §6.2.2.1's "storage of that reference only, not the
+  /// expansion".
+  size_t defining_frame_index_ = 0;
+  /// Whether any presentation layer code has arrived inside the open DRCS
+  /// definition. §6.2.3 frees the character's buffer when a definition is
+  /// terminated with none.
+  bool definition_had_code_ = false;
   /// The DRCS character or texture mask being written into.
   NabtsDrcsCharacter* drcs_target_ = nullptr;
   NabtsTextureMask* mask_target_ = nullptr;
@@ -213,6 +306,8 @@ class NaplpsInterpreter {
   /// The last graphic byte executed, which REPEAT (§6.2.7.2) repeats.
   uint8_t last_graphic_ = 0;
   bool have_last_graphic_ = false;
+
+  WrapSuppress wrap_suppress_ = WrapSuppress::kNone;
 };
 
 }  // namespace orc

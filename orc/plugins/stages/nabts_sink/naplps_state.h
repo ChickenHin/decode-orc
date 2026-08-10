@@ -146,6 +146,12 @@ class NaplpsColourState {
   /// Reload the default colour map of §5.3.2.5.2 without touching the mode.
   void reset_map();
 
+  /// §6.1.6.5(5), the NSR case: "The color mode is set to color mode 0 and the
+  /// drawing color is set to nominal white. The color map is not changed." A
+  /// plain set_colour(white) would touch the map's used-entry accounting, which
+  /// NSR must not.
+  void reset_drawing_to_white();
+
   NabtsColourMode mode() const { return mode_; }
 
   /// §5.3.2.6: no operand selects mode 0, one selects mode 1, two select
@@ -167,6 +173,23 @@ class NaplpsColourState {
   NabtsColour drawing_colour() const;
   /// The background, which is meaningful only in mode 2.
   NabtsColour background_colour() const;
+
+  /// The map address the drawing colour currently points at. Meaningful in
+  /// modes 1 and 2, where §5.3.2.5 makes a later map write at this address
+  /// retroactive over what was drawn with it.
+  uint32_t drawing_address() const {
+    return drawing_address_ % kNabtsColourMapEntries;
+  }
+  /// The map address of the mode-2 background colour.
+  uint32_t map_background_address() const {
+    return background_address_ % kNabtsColourMapEntries;
+  }
+
+  /// Write |colour| at |address| directly, marking the entry used. This is the
+  /// implicit-repeat write of §5.3.2.5.1, which walks addresses of its own
+  /// without moving the drawing colour's, and the caption preset of CEA-516
+  /// §5.2.7.3, which loads three stated entries.
+  void write_map_entry(uint32_t address, const NabtsColour& colour);
 
   const NabtsColour* map() const { return map_; }
   void copy_map_to(NabtsColour (&out)[kNabtsColourMapEntries]) const;
@@ -275,6 +298,11 @@ class NaplpsState {
 
   /// §5.3.2.9.3 b6: clear every DRCS character.
   void clear_drcs();
+
+  /// §6.2.3: "If a DRCS definition is immediately terminated with no
+  /// intervening presentation layer code, the buffer space allocated to that
+  /// character is freed." Undefines the character and refunds its storage.
+  void free_drcs(uint8_t code);
 
   /// The DRCS characters actually defined, ascending by code.
   std::vector<NabtsDrcsCharacter> defined_drcs() const;

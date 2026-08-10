@@ -651,5 +651,248 @@ TEST(NabtsRecordCatalogue, HoldsAtLeastOneRecordWhateverTheCapAsksFor) {
   EXPECT_FALSE(catalogue.truncated());
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+// The Support Record (§5.2.7.9, §8.7.1.4)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// NAPLPS defining a macro at 2/0 whose body switches to text and draws 'X':
+/// ESC DEF-MACRO, name, SI 'X', ESC END.
+std::vector<uint8_t> macro_definition() {
+  return {0x1B, 0x40, 0x20, 0x0F, 'X', 0x1B, 0x45};
+}
+
+/// NAPLPS invoking the macro at 2/0: designate the macro set into G1
+/// (ESC 2/9 7/10), SO, name.
+std::vector<uint8_t> macro_invocation() {
+  return {0x1B, 0x29, 0x7A, 0x0E, 0x20};
+}
+
+// §8.7.1.4: "the Support Record contain[s] one or more macro definitions ...
+// invoked directly by other Presentation Records in the same Data Channel",
+// and §5.2.7.9 has the receiver execute it before a record whose
+// Support-Needed Flag is set. A page invoking a support-record macro must
+// therefore draw what the macro defines.
+TEST(NabtsRecordCatalogue, ASupportRecordsMacrosReachThePagesThatNeedThem) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto support = message(0x000, 0xFFF, 0, macro_definition());
+  support.classification.support_record = true;
+  catalogue.merge(support, 0);
+
+  auto page = message(0x000, 0x100, 0, macro_invocation());
+  page.classification.support_needed = true;
+  catalogue.merge(page, 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  // Map order is ascending by address, so the page comes first.
+  const auto& page_record = records[0];
+  ASSERT_EQ(page_record.address_text, "100");
+  ASSERT_EQ(page_record.page.primitives.size(), 1u)
+      << "the support record's macro never reached the page";
+  EXPECT_EQ(page_record.page.primitives[0].character, 'X');
+  EXPECT_EQ(page_record.page.diagnostics.unresolved_macros, 0u);
+}
+
+// §5.2.7.9: "If the Support-Needed Flag is 0 or absent, then the Support
+// Record shall not be processed before the Record is processed" — a page that
+// does not ask for support is presented without it.
+TEST(NabtsRecordCatalogue, APageWithoutTheFlagIsPresentedWithoutSupport) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto support = message(0x000, 0xFFF, 0, macro_definition());
+  support.classification.support_record = true;
+  catalogue.merge(support, 0);
+
+  catalogue.merge(message(0x000, 0x100, 0, macro_invocation()), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  EXPECT_TRUE(records[0].page.primitives.empty());
+  EXPECT_EQ(records[0].page.diagnostics.unresolved_macros, 1u);
+}
+
+// The support record serves pages in its own Data Channel; a page on another
+// channel asking for support has none to draw on (§8.7.1.4: "one unique
+// Record per Data Channel").
+TEST(NabtsRecordCatalogue, SupportDoesNotLeakAcrossDataChannels) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto support = message(0x000, 0xFFF, 0, macro_definition());
+  support.classification.support_record = true;
+  catalogue.merge(support, 0);
+
+  auto page = message(0x200, 0x100, 0, macro_invocation());
+  page.classification.support_needed = true;
+  catalogue.merge(page, 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  const auto& page_record =
+      records[0].address_text == "100" ? records[0] : records[1];
+  EXPECT_TRUE(page_record.page.primitives.empty());
+  EXPECT_EQ(page_record.page.diagnostics.unresolved_macros, 1u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// More chains (§5.2.7.6, §5.2.7.8)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// NAPLPS drawing one character from the primary set: SI, the character.
+std::vector<uint8_t> draw_letter(char letter) {
+  return {0x0F, static_cast<uint8_t>(letter)};
+}
+
+/// A message at the nine-digit long address |address| (§5.2.5).
+orc::NabtsMessage long_address_message(uint16_t channel, uint64_t address,
+                                       uint8_t version,
+                                       std::vector<uint8_t> data) {
+  orc::NabtsMessage out = message(channel, 0, version, std::move(data));
+  out.address.value = address;
+  out.address.long_form = true;
+  return out;
+}
+
+// §5.2.7.6 links a record whose More Flag is set to the record at its long
+// address plus one, and §5.2.7.8 presents that successor "after the completion
+// of the presentation of the current Record" — over the standing display. The
+// continuation's page must therefore carry what its predecessor drew.
+TEST(NabtsRecordCatalogue, AMoreRecordIsPresentedOverItsPredecessorsDisplay) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto base = message(0x000, 0x044, 0, draw_letter('X'));
+  base.classification.more = true;
+  catalogue.merge(base, 0);
+  catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+
+  const auto& first = records[0];
+  EXPECT_EQ(first.chain_base_address, 0x4400u);
+  EXPECT_EQ(first.chain_position, 0u);
+  ASSERT_EQ(first.page.primitives.size(), 1u);
+  EXPECT_EQ(first.page.primitives[0].character, 'X');
+
+  const auto& continuation = records[1];
+  EXPECT_EQ(continuation.chain_base_address, 0x4400u);
+  EXPECT_EQ(continuation.chain_position, 1u);
+  ASSERT_EQ(continuation.page.primitives.size(), 2u)
+      << "the base record's drawing did not reach the continuation";
+  EXPECT_EQ(continuation.page.primitives[0].character, 'X');
+  EXPECT_EQ(continuation.page.primitives[1].character, 'Y');
+}
+
+// §5.2.7.6: the chain exists only where the predecessor declares it. A record
+// at a continuation-shaped address whose predecessor has no More Flag stands
+// alone.
+TEST(NabtsRecordCatalogue, ARecordWithoutAMoreFlaggedPredecessorStandsAlone) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  catalogue.merge(message(0x000, 0x044, 0, draw_letter('X')), 0);
+  catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  const auto& lone = records[1];
+  EXPECT_EQ(lone.chain_base_address, 0x4401u);
+  EXPECT_EQ(lone.chain_position, 0u);
+  ASSERT_EQ(lone.page.primitives.size(), 1u);
+  EXPECT_EQ(lone.page.primitives[0].character, 'Y');
+}
+
+// §7.3.4 consults a header extension naming the More Record explicitly
+// (§5.2.8.4, EI meaning 001) before the More Flag — and a service may use the
+// extension alone, as the reference CBS ExtraVision recording does: its
+// chains carry no More Flags at all.
+TEST(NabtsRecordCatalogue, AMoreHeaderExtensionLinksAChainWithoutTheFlag) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto base = message(0x000, 0x044, 0, draw_letter('X'));
+  // EI meaning 1, nine data nibbles: long address 000004401.
+  base.extensions.push_back(
+      orc::NabtsHeaderExtension{1, 9, {0, 0, 0, 0, 0, 4, 4, 0, 1}});
+  catalogue.merge(base, 0);
+  catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  const auto& continuation = records[1];
+  EXPECT_EQ(continuation.chain_base_address, 0x4400u);
+  EXPECT_EQ(continuation.chain_position, 1u);
+  ASSERT_EQ(continuation.page.primitives.size(), 2u)
+      << "the extension-linked predecessor's drawing did not carry";
+  EXPECT_EQ(continuation.page.primitives[0].character, 'X');
+}
+
+// §7.3.4: for the More Flag's algorithmic address, "the last two digits shall
+// be regarded as decimal numbers" — 09 steps to 10, not to 0A.
+TEST(NabtsRecordCatalogue, TheAlgorithmicMoreAddressCountsInDecimal) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto ninth = long_address_message(0x000, 0x4409, 0, draw_letter('X'));
+  ninth.classification.more = true;
+  catalogue.merge(ninth, 0);
+  catalogue.merge(long_address_message(0x000, 0x4410, 0, draw_letter('Y')), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  const auto& continuation = records[1];
+  EXPECT_EQ(continuation.chain_position, 1u)
+      << "09 must step to 10 in decimal, not to 0A in hex";
+  ASSERT_EQ(continuation.page.primitives.size(), 2u);
+  EXPECT_EQ(continuation.page.primitives[0].character, 'X');
+}
+
+// A closed loop of More links — the rotating set of §7.3.4's Random More
+// note; the reference CBS recording carries a four-record ring — must come
+// out as one chain, not as one single-member "chain" per member: every member
+// takes the smallest address as the base.
+TEST(NabtsRecordCatalogue, ARingOfMoreLinksSharesOneCanonicalBase) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto first = long_address_message(0x000, 0x4409, 0, draw_letter('X'));
+  first.extensions.push_back(
+      orc::NabtsHeaderExtension{1, 9, {0, 0, 0, 0, 0, 4, 5, 0, 9}});
+  catalogue.merge(first, 0);
+  auto second = long_address_message(0x000, 0x4509, 0, draw_letter('Y'));
+  second.extensions.push_back(
+      orc::NabtsHeaderExtension{1, 9, {0, 0, 0, 0, 0, 4, 4, 0, 9}});
+  catalogue.merge(second, 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  EXPECT_EQ(records[0].chain_base_address, 0x4409u);
+  EXPECT_EQ(records[0].chain_position, 0u);
+  EXPECT_EQ(records[1].chain_base_address, 0x4409u)
+      << "each ring member walked to a different stop";
+  EXPECT_EQ(records[1].chain_position, 1u);
+  // The base is presented alone; the other member over the base's display.
+  EXPECT_EQ(records[0].page.primitives.size(), 1u);
+  EXPECT_EQ(records[1].page.primitives.size(), 2u);
+}
+
+// A chain follows the newest version of each member (§5.2.7.6 addresses the
+// record, not a version of it), so a revised predecessor is what the
+// continuation is presented over.
+TEST(NabtsRecordCatalogue, AChainFollowsTheNewestVersionOfEachMember) {
+  orc::NabtsRecordCatalogue catalogue;
+
+  auto old_base = message(0x000, 0x044, 1, draw_letter('A'));
+  old_base.classification.more = true;
+  catalogue.merge(old_base, 0);
+  auto new_base = message(0x000, 0x044, 2, draw_letter('B'));
+  new_base.classification.more = true;
+  catalogue.merge(new_base, 1);
+  catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 2);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 3u);
+  const auto& continuation = records[2];
+  ASSERT_EQ(continuation.page.primitives.size(), 2u);
+  EXPECT_EQ(continuation.page.primitives[0].character, 'B')
+      << "the continuation was presented over an outdated predecessor";
+}
+
 }  // namespace
 }  // namespace orc_unit_test

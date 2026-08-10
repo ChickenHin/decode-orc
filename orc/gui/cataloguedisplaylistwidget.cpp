@@ -388,6 +388,39 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
     return outline;
   };
 
+  /**
+   * The pen that traces a filled figure's own outline.
+   *
+   * X3.110 §5.3.3.3, §5.3.3.4.1, §5.3.3.5.1 and §5.3.3.6.5 all put "the region
+   * of the outline traced by the logical pel" *inside* the filled area, and
+   * §5.3.2.4.3 defines that region as what the pel sweeps along the outline. A
+   * filled figure is therefore its enclosed area plus a stroke of the pel, in
+   * the same colour and texture — not the enclosed area alone.
+   *
+   * That is not a refinement at the edges. A service draws a letterform or a
+   * thin mark as a path that encloses almost nothing and lets the pel give it
+   * its weight: the NCAA roundel of the reference ExtraVision recording draws
+   * each letter this way, and filling the enclosed area alone leaves a few
+   * disconnected slivers where the letter should be.
+   *
+   * A dimensionless pel (the default 0,0 of §5.3.2.2.6) traces nothing, so it
+   * gets no stroke — unlike an outlined figure, which needs a visible minimum
+   * because the stroke is all there is of it.
+   */
+  const qreal traced_width = std::max(pel_w, pel_h);
+  const auto fill_outline_pen = [&](const QBrush& brush) {
+    if (traced_width <= 0.0) {
+      return QPen(Qt::NoPen);
+    }
+    QPen traced(brush, traced_width);
+    // Solid whatever the line texture: this region is part of the fill, not a
+    // textured line.
+    traced.setStyle(Qt::SolidLine);
+    traced.setCapStyle(Qt::FlatCap);
+    traced.setJoinStyle(Qt::MiterJoin);
+    return traced;
+  };
+
   switch (op.kind) {
     case CatalogueDrawKind::kPoint: {
       if (points.isEmpty()) {
@@ -429,15 +462,30 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
         path = QPainterPath(points[0]);
         path.lineTo(points[1]);
       }
-      if (op.filled) {
-        path.closeSubpath();
-        painter.setPen(op.outlined ? outline_pen() : QPen(Qt::NoPen));
-        painter.setBrush(texture_brush(op, list, colour));
-      } else {
+      if (!op.filled) {
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
+        painter.drawPath(path);
+        return;
       }
-      painter.drawPath(path);
+
+      // §5.3.3.3: "the area enclosed by the outline and the chord (including
+      // the region of the outline and the chord traced by the logical pel)".
+      QPainterPath closed = path;
+      closed.closeSubpath();
+      const QBrush brush = texture_brush(op, list, colour);
+      painter.setBrush(brush);
+      painter.setPen(fill_outline_pen(brush));
+      painter.drawPath(closed);
+
+      if (op.outlined) {
+        // §5.3.2.4.3's highlight, over the fill. §5.3.3.3 keeps the chord out
+        // of it — "the chord is not considered a part of the arc and, as such,
+        // is not highlighted" — so the open arc is stroked, not the closure.
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(outline_pen());
+        painter.drawPath(path);
+      }
       return;
     }
 
@@ -449,8 +497,9 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
                         origin.y() - op.size.dy * unit);
       const QRectF box = QRectF(origin, far).normalized();
       if (op.filled) {
-        painter.setPen(op.outlined ? outline_pen() : QPen(Qt::NoPen));
-        painter.setBrush(texture_brush(op, list, colour));
+        const QBrush brush = texture_brush(op, list, colour);
+        painter.setPen(op.outlined ? outline_pen() : fill_outline_pen(brush));
+        painter.setBrush(brush);
       } else {
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
@@ -465,8 +514,9 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       }
       const QPolygonF polygon(points);
       if (op.filled) {
-        painter.setPen(op.outlined ? outline_pen() : QPen(Qt::NoPen));
-        painter.setBrush(texture_brush(op, list, colour));
+        const QBrush brush = texture_brush(op, list, colour);
+        painter.setPen(op.outlined ? outline_pen() : fill_outline_pen(brush));
+        painter.setBrush(brush);
         painter.drawPolygon(polygon);
       } else {
         painter.setPen(pen);

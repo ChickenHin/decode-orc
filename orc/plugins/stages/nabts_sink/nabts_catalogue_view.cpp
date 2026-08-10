@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -404,6 +405,7 @@ std::vector<std::string> classification_flags(
   if (record.alarm) flags.emplace_back("alarm");
   if (record.update) flags.emplace_back("update");
   if (record.support_record) flags.emplace_back("support record");
+  if (record.support_needed) flags.emplace_back("support needed");
   if (record.index) flags.emplace_back("index");
   if (record.more) flags.emplace_back("more");
   return flags;
@@ -655,6 +657,24 @@ CatalogueDisplayList nabts_page_display_list(
   return out;
 }
 
+namespace {
+
+/// "CCC/AAA" for a chain base address — the short form where the base is one,
+/// the nine-digit long form otherwise (§5.2.5).
+std::string chain_base_label(uint16_t channel, uint64_t base) {
+  char buffer[24];
+  if ((base & 0xFFu) == 0 && (base >> 8) <= 0xFFFu) {
+    std::snprintf(buffer, sizeof(buffer), "%03X/%03llX", channel & 0xFFF,
+                  static_cast<unsigned long long>(base >> 8));
+  } else {
+    std::snprintf(buffer, sizeof(buffer), "%03X/%09llX", channel & 0xFFF,
+                  static_cast<unsigned long long>(base));
+  }
+  return buffer;
+}
+
+}  // namespace
+
 CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
   CatalogueDataset out;
 
@@ -665,16 +685,129 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
       CatalogueColumn{"frames", "Frames", true},
   };
   out.schema.item_noun = "Record";
+  out.schema.variant_noun = "Sub-page";
   out.schema.highlight_label = "Show display area";
   out.schema.empty_message = "No NABTS records were recovered";
 
+  // The More chains (§5.2.7.6) with more than one catalogued member. Each is
+  // presented as one page whose members are stepped through as sub-pages —
+  // which is what the records are: §5.2.7.8 presents each More Record over
+  // the display its predecessor left.
+  std::set<std::pair<uint16_t, uint64_t>> chains;
   for (const auto& record : data.records) {
+    if (type_is_presentation(record.record_type) && record.chain_position > 0) {
+      chains.insert({record.channel, record.chain_base_address});
+    }
+  }
+  std::set<std::pair<uint16_t, uint64_t>> chain_parents_emitted;
+
+  // Records are listed in catalogue order, except that a chain's members are
+  // emitted together behind their page row and ordered by chain position —
+  // the order the stepper walks them — rather than by address, which an
+  // explicitly-linked chain (§5.2.8.4) need not follow.
+  std::map<std::pair<uint16_t, uint64_t>, std::vector<size_t>> members_of;
+  for (size_t i = 0; i < data.records.size(); ++i) {
+    const auto& record = data.records[i];
+    if (type_is_presentation(record.record_type)) {
+      members_of[{record.channel, record.chain_base_address}].push_back(i);
+    }
+  }
+  std::vector<size_t> emit_order;
+  emit_order.reserve(data.records.size());
+  std::vector<bool> scheduled(data.records.size(), false);
+  for (size_t i = 0; i < data.records.size(); ++i) {
+    if (scheduled[i]) {
+      continue;
+    }
+    const auto& record = data.records[i];
+    const std::pair<uint16_t, uint64_t> key{record.channel,
+                                            record.chain_base_address};
+    if (type_is_presentation(record.record_type) && chains.count(key) > 0) {
+      std::vector<size_t> member_indices = members_of[key];
+      // Stable, so versions of one position keep their ascending order.
+      std::stable_sort(member_indices.begin(), member_indices.end(),
+                       [&data](size_t a, size_t b) {
+                         return data.records[a].chain_position <
+                                data.records[b].chain_position;
+                       });
+      for (const size_t member : member_indices) {
+        emit_order.push_back(member);
+        scheduled[member] = true;
+      }
+    } else {
+      emit_order.push_back(i);
+      scheduled[i] = true;
+    }
+  }
+
+  for (const size_t record_index : emit_order) {
+    const auto& record = data.records[record_index];
     const bool presentation = type_is_presentation(record.record_type);
     const std::string identity = record_identity(record);
+
+    const std::pair<uint16_t, uint64_t> chain_key{record.channel,
+                                                  record.chain_base_address};
+    const bool in_chain = presentation && chains.count(chain_key) > 0;
+    if (in_chain && chain_parents_emitted.insert(chain_key).second) {
+      // The chain's page row, emitted before its first member. It draws
+      // nothing itself; the host shows the first sub-page when it is selected.
+      uint64_t seen = 0;
+      uint64_t first_frame = 0;
+      uint64_t last_frame = 0;
+      size_t members = 0;
+      uint8_t base_type = record.record_type;
+      for (const auto& member : data.records) {
+        if (member.channel != record.channel ||
+            member.chain_base_address != record.chain_base_address ||
+            !type_is_presentation(member.record_type)) {
+          continue;
+        }
+        seen += member.times_seen;
+        first_frame = members == 0
+                          ? member.first_seen_frame
+                          : std::min(first_frame, member.first_seen_frame);
+        last_frame = std::max(last_frame, member.last_seen_frame);
+        ++members;
+      }
+      const std::string label =
+          chain_base_label(record.channel, record.chain_base_address);
+
+      CatalogueItem parent;
+      // A marker byte keeps the id outside the "CCC/AAA vN" identity space.
+      parent.id = std::string(1, '\x02') + label;
+      parent.find_key = label;
+      parent.values = {
+          label,
+          short_type_name(base_type),
+          std::to_string(seen),
+          frame_range(first_frame, last_frame),
+      };
+      // Marked in the list itself: the members are reached through the
+      // sub-page stepper rather than listed as rows, so without this nothing
+      // says the page holds more than one screen.
+      parent.badges.push_back(plural(members, "sub-page", "sub-pages"));
+      parent.tooltip =
+          "This page is a chain of " + plural(members, "record", "records") +
+          " linked as More Records (CEA-516 §5.2.7.6, §5.2.8.4). Each is "
+          "presented over the display its predecessor left (§5.2.7.8); step "
+          "through them under the page display.";
+      out.items.push_back(std::move(parent));
+      out.payloads.emplace_back();
+    }
 
     CatalogueItem item;
     item.id = identity;
     item.find_key = identity;
+    if (in_chain) {
+      item.parent_id =
+          std::string(1, '\x02') +
+          chain_base_label(record.channel, record.chain_base_address);
+      char suffix[16];
+      // Positions count in decimal, as §7.3.4 has the address suffix do.
+      std::snprintf(suffix, sizeof(suffix), "%02u v%u",
+                    record.chain_position % 100, record.version);
+      item.variant_label = suffix;
+    }
     item.values = {
         identity,
         short_type_name(record.record_type),
