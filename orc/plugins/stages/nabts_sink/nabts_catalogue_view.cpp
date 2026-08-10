@@ -151,6 +151,7 @@ void copy_attributes(const NabtsPrimitive& from, CatalogueDrawOp& to) {
       from.colour_mode == NabtsColourMode::kMappedWithBackground;
   to.background = to_colour(from.background);
   to.blinking = from.blinking;
+  to.blink_to = to_colour(from.blink_to);
   to.rotation_degrees = rotation_degrees(from.rotation);
   to.reverse_video = from.reverse_video;
   to.underlined = from.underlined;
@@ -164,6 +165,7 @@ bool attributes_match(const CatalogueDrawOp& run,
          run.has_background == candidate.has_background &&
          run.background == candidate.background &&
          run.blinking == candidate.blinking &&
+         run.blink_to == candidate.blink_to &&
          run.rotation_degrees == candidate.rotation_degrees &&
          run.reverse_video == candidate.reverse_video &&
          run.underlined == candidate.underlined &&

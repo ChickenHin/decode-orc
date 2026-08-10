@@ -147,6 +147,12 @@ NabtsPageSnapshot NaplpsInterpreter::run(const std::vector<uint8_t>& record,
       primitive.background =
           final_map[primitive.background_map_address % kNabtsColourMapEntries];
     }
+    // A blink-to entry can be rewritten after the process starts, and the
+    // process reads the map rather than a copy of the colour it held.
+    if (primitive.blink_to_map_address >= 0) {
+      primitive.blink_to =
+          final_map[primitive.blink_to_map_address % kNabtsColourMapEntries];
+    }
   }
 
   snapshot_.diagnostics.bytes_read = record_.size();
@@ -651,12 +657,24 @@ void NaplpsInterpreter::execute_c1(NaplpsC1 control) {
       state_.text.character_field = NaplpsTextState::double_size_field();
       return;
 
-    // §6.2.8.1-2.
+    // §6.2.8.1: "creates a blink process in which: the blink-from color is the
+    // drawing color; the blink-to color is nominal black in color modes 0 and 1
+    // or the background color in color mode 2; the on and off intervals are
+    // implementation-dependent; and the phase delay is 0."
     case NaplpsC1::kBlinkStart:
-      state_.blinking = true;
+      if (state_.colour.mode() == NabtsColourMode::kMappedWithBackground) {
+        // The background has a map address of its own, so the process follows
+        // a later write to it the way the drawing colour does.
+        state_.start_blinking(state_.colour.map_background_address());
+      } else {
+        state_.start_blinking_to_colour(kNabtsNominalBlack);
+      }
       return;
+    // §6.2.8.2: "turns off any currently active blink processes utilizing the
+    // drawing color as the blink-from color" — the drawing colour's, not every
+    // process running.
     case NaplpsC1::kBlinkStop:
-      state_.blinking = false;
+      state_.stop_blinking();
       return;
 
     // §6.2.7.11-16.
@@ -953,7 +971,9 @@ void NaplpsInterpreter::pdi_reset(NaplpsOperandReader& reader) {
     move_cursor(state_.home_position());
   }
   if (bit(byte2, 2)) {
-    state_.blinking = false;
+    // §5.3.2.9.3: "all blink processes are terminated" — every one, not just
+    // the drawing colour's.
+    state_.blink_from.fill(NaplpsState::BlinkProcess{});
   }
   // b3 protects unprotected fields, which Table D1 item 12(1) makes a no-op for
   // the teletext service.
@@ -1114,25 +1134,45 @@ void NaplpsInterpreter::pdi_blink(NaplpsOperandReader& reader,
   // processes utilizing the current drawing color as the blink-from color will
   // be terminated."
   if (reader.empty()) {
-    state_.blinking = false;
+    state_.stop_blinking();
     return;
   }
-  (void)operand_bytes;
-  // §5.3.2.7.3: a blink-to map address, then ON, OFF and start-delay intervals
-  // in tenths of a second. A display list carries no time, so the intervals are
-  // read past and what is recorded is that a blink process is running — which
-  // is what a still rendering of the page can show.
-  (void)reader.read_single_value();
-  const uint8_t on_interval = reader.empty() ? 0 : reader.read_fixed_byte();
-  if (!reader.empty()) {
-    (void)reader.read_fixed_byte();  // OFF
+
+  // §5.3.2.7.2: the blink-from colour is the one in use for drawing, and the
+  // process runs on that colour map entry. §5.3.2.7.5 then allows the command
+  // to be implicitly repeated for as long as operands keep arriving, "with the
+  // address of the blink-from color being automatically incremented (as in
+  // 5.3.2.5.1) ... The drawing color is not affected by this incrementing."
+  uint32_t blink_from = state_.colour.drawing_address();
+  while (true) {
+    // §5.3.2.7.3: a blink-to map address, then ON, OFF and start-delay
+    // intervals in tenths of a second. A display list carries no time, so the
+    // intervals decide only whether a process runs at all; the blink-to address
+    // is kept, because it is what the entry alternates to.
+    const uint32_t to_address = NaplpsColourState::address_from_operand(
+        reader.read_single_value(), operand_bytes);
+    const uint8_t on_interval = reader.empty() ? 0 : reader.read_fixed_byte();
+    const uint8_t off_interval = reader.empty() ? 0 : reader.read_fixed_byte();
+    if (!reader.empty()) {
+      (void)reader.read_fixed_byte();  // start delay
+    }
+    // "An ON or OFF interval of 0 is taken to mean termination of any active
+    // blink process on the blink-from/blink-to color pair."
+    NaplpsState::BlinkProcess& process =
+        state_.blink_from[blink_from % kNabtsColourMapEntries];
+    if (on_interval != 0 && off_interval != 0) {
+      process.active = true;
+      process.to_address =
+          static_cast<int16_t>(to_address % kNabtsColourMapEntries);
+    } else {
+      process = NaplpsState::BlinkProcess{};
+    }
+
+    if (reader.empty() ||
+        !NaplpsColourState::increment_map_address(blink_from)) {
+      return;
+    }
   }
-  if (!reader.empty()) {
-    (void)reader.read_fixed_byte();  // start delay
-  }
-  // "An ON or OFF interval of 0 is taken to mean termination of any active
-  // blink process on the blink-from/blink-to color pair."
-  state_.blinking = on_interval != 0;
 }
 
 void NaplpsInterpreter::pdi_wait(NaplpsOperandReader& reader) {
@@ -1505,7 +1545,18 @@ NabtsPrimitive NaplpsInterpreter::make_primitive(
     primitive.background_map_address =
         static_cast<int16_t>(state_.colour.map_background_address());
   }
-  primitive.blinking = state_.blinking;
+  // A blink process belongs to the colour map entry, so what decides this is
+  // the colour the primitive is being drawn in — not whether a BLINK command
+  // has been seen at some point earlier in the record.
+  const NaplpsState::BlinkProcess& blink = state_.blink_process();
+  primitive.blinking = blink.active;
+  if (blink.active) {
+    primitive.blink_to_map_address = blink.to_address;
+    primitive.blink_to =
+        blink.to_address >= 0
+            ? state_.colour.map()[blink.to_address % kNabtsColourMapEntries]
+            : blink.to_colour;
+  }
   return primitive;
 }
 

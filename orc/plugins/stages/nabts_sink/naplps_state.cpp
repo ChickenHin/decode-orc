@@ -234,7 +234,7 @@ void NaplpsState::reset_all() {
   // the two positions separately for the data syntaxes that have both).
   cursor = home_position();
   drawing_point = NabtsPoint{0.0, 0.0};
-  blinking = false;
+  blink_from.fill(BlinkProcess{});
   clear_macros();
   clear_drcs();
   for (NabtsTextureMask& mask : texture_masks) {

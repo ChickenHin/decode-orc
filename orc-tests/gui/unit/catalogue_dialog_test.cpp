@@ -969,11 +969,13 @@ TEST(CatalogueFlashClockTest, RunsWhileAnyViewIsSubscribed) {
   EXPECT_TRUE(clock.running());
 }
 
-// The NAPLPS blink process is the same idea: the blank phase draws the
-// operation in its background colour rather than dropping it.
-TEST(CatalogueDisplayListWidgetTest, BlinkingOpsGoDarkInTheBlankPhase) {
-  ensureApplication();
+namespace {
 
+/// A display list holding one filled square in |colour|, blinking to
+/// |blink_to| when |blinking|.
+orc::CatalogueDisplayList makeBlinkingSquare(
+    const orc::CatalogueColour& colour, const orc::CatalogueColour& blink_to,
+    bool blinking = true) {
   orc::CatalogueDisplayList list;
   list.aspect_height = 1.0;
   orc::CatalogueDrawOp op;
@@ -981,13 +983,46 @@ TEST(CatalogueDisplayListWidgetTest, BlinkingOpsGoDarkInTheBlankPhase) {
   op.origin = orc::CataloguePoint{0.1, 0.1};
   op.size = orc::CatalogueSize{0.5, 0.5};
   op.filled = true;
-  op.colour = orc::CatalogueColour{255, 255, 255};
-  op.blinking = true;
+  op.colour = colour;
+  op.blinking = blinking;
+  op.blink_to = blink_to;
   list.ops.push_back(op);
+  return list;
+}
+
+/// Colour of a pixel well inside that square.
+QColor squareCentre(const QImage& image) {
+  return image.pixelColor(image.width() / 3, image.height() / 2);
+}
+
+}  // namespace
+
+// The NAPLPS blink process alternates a colour map entry with the blink-to
+// entry the service named, so the other phase is a second colour rather than
+// the figure going away.
+TEST(CatalogueDisplayListWidgetTest, BlinkingOpsTakeTheirBlinkToColour) {
+  ensureApplication();
 
   CatalogueDisplayListWidget widget;
-  widget.setDisplayList(list);
+  widget.setDisplayList(makeBlinkingSquare(orc::CatalogueColour{0, 140, 220},
+                                           orc::CatalogueColour{255, 210, 0}));
   EXPECT_TRUE(widget.hasBlinkingOps());
+
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(0, 140, 220));
+  widget.setFlashLit(false);
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(255, 210, 0))
+      << "the other phase blanked the figure instead of recolouring it";
+}
+
+// Where the service means the figure to disappear it says so by blinking to
+// the ground colour, which is what the C1 BLINK START of X3.110 §6.2.8.1 does
+// and what the default black stands for.
+TEST(CatalogueDisplayListWidgetTest, BlinkingToBlackStillClearsTheFigure) {
+  ensureApplication();
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(makeBlinkingSquare(orc::CatalogueColour{255, 255, 255},
+                                           orc::CatalogueColour{0, 0, 0}));
 
   const auto lit_pixels = [](const QImage& image) {
     int count = 0;
@@ -1004,6 +1039,21 @@ TEST(CatalogueDisplayListWidgetTest, BlinkingOpsGoDarkInTheBlankPhase) {
   EXPECT_GT(lit_pixels(renderWidget(widget, 256, 256)), 0);
   widget.setFlashLit(false);
   EXPECT_EQ(lit_pixels(renderWidget(widget, 256, 256)), 0);
+}
+
+// A non-blinking operation is untouched by the phase, whatever blink_to holds.
+TEST(CatalogueDisplayListWidgetTest, ASteadyOpIgnoresTheBlinkPhase) {
+  ensureApplication();
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(makeBlinkingSquare(orc::CatalogueColour{0, 140, 220},
+                                           orc::CatalogueColour{255, 210, 0},
+                                           /*blinking=*/false));
+  EXPECT_FALSE(widget.hasBlinkingOps());
+
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(0, 140, 220));
+  widget.setFlashLit(false);
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(0, 140, 220));
 }
 
 // The switch belongs to the payload views, so it is offered where one of them

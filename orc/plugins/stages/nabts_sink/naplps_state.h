@@ -267,9 +267,67 @@ class NaplpsState {
   NabtsPoint field_origin{0.0, 0.0};
   NabtsSize field_size{1.0, 1.0};
 
-  /// §6.2.8.1: whether a blink process is running on the drawing colour, which
-  /// is all a display list can carry of a mechanism defined in terms of time.
-  bool blinking = false;
+  /**
+   * @brief A blink process running on one colour map entry
+   *
+   * X3.110 §5.3.2.7.2: the process "periodically overwrites the contents of the
+   * current in-use drawing color" — the blink-from entry — with the blink-to
+   * colour.
+   */
+  struct BlinkProcess {
+    bool active = false;
+    /// Map address the blink-to colour comes from, or -1 where the process
+    /// names no entry: §6.2.8.1's C1 form blinks to nominal black in colour
+    /// modes 0 and 1, which is a colour rather than an address.
+    int16_t to_address = -1;
+    /// The blink-to colour where @ref to_address is -1.
+    NabtsColour to_colour{};
+  };
+
+  /**
+   * @brief Colour map entries a blink process is running on
+   *
+   * A blink process is attached to a map *entry*, so what blinks is everything
+   * drawn in that entry, whenever it was drawn; it is not a mode that
+   * everything after the command inherits. §6.2.8.1 says so of the C1 form
+   * outright: "If the drawing color is changed, the old color remains blinking
+   * and the new drawing color does not blink."
+   *
+   * Indexed by map address, which every colour has: §5.3.2.5.1 has colour
+   * mode 0 find or claim an entry for the colour it sets, so a direct-mode
+   * drawing colour is addressable too.
+   */
+  std::array<BlinkProcess, kNabtsColourMapEntries> blink_from{};
+
+  /// The process on the current drawing colour.
+  const BlinkProcess& blink_process() const {
+    return blink_from[colour.drawing_address() % kNabtsColourMapEntries];
+  }
+  /// Whether a primitive drawn in the current drawing colour blinks.
+  bool blinking() const { return blink_process().active; }
+
+  /// Start a blink process on the current drawing colour, to the colour at map
+  /// address |to_address|.
+  void start_blinking(uint32_t to_address) {
+    BlinkProcess& process =
+        blink_from[colour.drawing_address() % kNabtsColourMapEntries];
+    process.active = true;
+    process.to_address =
+        static_cast<int16_t>(to_address % kNabtsColourMapEntries);
+  }
+  /// Start one to a colour the process names no map entry for.
+  void start_blinking_to_colour(const NabtsColour& to_colour) {
+    BlinkProcess& process =
+        blink_from[colour.drawing_address() % kNabtsColourMapEntries];
+    process.active = true;
+    process.to_address = -1;
+    process.to_colour = to_colour;
+  }
+  /// End any process on the current drawing colour.
+  void stop_blinking() {
+    blink_from[colour.drawing_address() % kNabtsColourMapEntries] =
+        BlinkProcess{};
+  }
 
   // ---- Storage -------------------------------------------------------------
 

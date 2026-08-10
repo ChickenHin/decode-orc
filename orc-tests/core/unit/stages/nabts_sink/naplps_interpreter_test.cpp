@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
 namespace orc {
@@ -106,8 +107,12 @@ TEST(NaplpsInterpreter, AFreshInterpreterMatchesTableII3) {
   EXPECT_EQ(state.colour.mode(), NabtsColourMode::kDirect);
   EXPECT_EQ(state.colour.drawing_colour(), kNabtsNominalWhite);
 
-  // flash-blink-state: off.
-  EXPECT_FALSE(state.blinking);
+  // flash-blink-state: off — on no colour map entry, not merely on the one
+  // being drawn in.
+  EXPECT_FALSE(state.blinking());
+  EXPECT_TRUE(std::none_of(
+      state.blink_from.begin(), state.blink_from.end(),
+      [](const NaplpsState::BlinkProcess& p) { return p.active; }));
 
   // basic-char-size-state: dx = 1/40, dy = 1/128 ... the table's own figure for
   // dy is 1/128, but X3.110 §5.3.2.3.9 and §6.2.7.8 both give 5/128 for the
@@ -1625,6 +1630,247 @@ TEST(NaplpsInterpreter, ADefpMacroBodyReplaysExactlyWhenInvoked) {
   EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.y,
                    snapshot.primitives[1].origin.y);
   EXPECT_EQ(snapshot.diagnostics.unresolved_macros, 0u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Blink processes (§5.3.2.7, §6.2.8)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// The regression the "TELETEXT is Animation!" record exposed. §5.3.2.7.2 runs a
+// blink process on a colour map *entry* — it "periodically overwrites the
+// contents of the current in-use drawing color" — so it is not a mode that
+// everything drawn after the command inherits. That record opens with one BLINK
+// and then draws a whole picture through 104 SELECT COLOR changes; read as a
+// sticky flag, every one of its 159 primitives blinks and the display flashes
+// whole.
+TEST(NaplpsInterpreter, BlinkFollowsTheColourMapEntryNotTheDrawingOrder) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      // Mode 1 at address 3, and start a blink process on it: blink-to
+      // address 6, ON 4 and OFF 6 tenths of a second, no start delay.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .byte(numeric(0b011000))
+      .byte(numeric(4))
+      .byte(numeric(6))
+      .byte(numeric(0))
+      // Drawn in entry 3, so it blinks.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      // Move to entry 7 and draw again: §6.2.8.1 — "If the drawing color is
+      // changed, the old color remains blinking and the new drawing color does
+      // not blink."
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b011100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010))
+      // Back to entry 3: the process is still running there.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b011, 0b011));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  EXPECT_TRUE(snapshot.primitives[0].blinking);
+  EXPECT_FALSE(snapshot.primitives[1].blinking)
+      << "a primitive drawn in another map entry inherited the blink";
+  EXPECT_TRUE(snapshot.primitives[2].blinking);
+  // §5.3.2.7.3's blink-to address, resolved through the map: entry 6 of the
+  // default colour map (§5.3.2.5.2).
+  EXPECT_EQ(snapshot.primitives[0].blink_to_map_address, 6);
+  EXPECT_EQ(snapshot.primitives[0].blink_to, snapshot.colour_map[6]);
+}
+
+// The blink-to colour is what makes a blink more than an appearance and a
+// disappearance. This is the "TELETEXT is Animation!" record's own shape: a
+// figure in one map entry alternating with another entry's colour, so the
+// baubles twinkle blue to yellow rather than vanishing.
+TEST(NaplpsInterpreter, BlinkCarriesTheColourTheEntryAlternatesTo) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      // Entry 6 is loaded with a colour of its own first, so the assertion is
+      // about this record's map rather than the default one.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b011000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b110000))
+      // Draw in entry 3, blinking to entry 6.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .byte(numeric(0b011000))
+      .byte(numeric(4))
+      .byte(numeric(6))
+      .byte(numeric(0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  ASSERT_TRUE(snapshot.primitives[0].blinking);
+  EXPECT_EQ(snapshot.primitives[0].blink_to.green, 5u);
+  EXPECT_EQ(snapshot.primitives[0].blink_to.red, 5u);
+  EXPECT_EQ(snapshot.primitives[0].blink_to.blue, 0u);
+}
+
+// §5.3.2.5 makes a colour map write retroactive, and a blink process reads the
+// map rather than a copy of what the entry held when it started — so rewriting
+// the blink-to entry after the fact changes what the figure alternates to.
+TEST(NaplpsInterpreter, ARewrittenBlinkToEntryChangesWhatTheBlinkShows) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .byte(numeric(0b011000))  // blink-to entry 6
+      .byte(numeric(4))
+      .byte(numeric(6))
+      .byte(numeric(0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      // Only now is entry 6 given its colour.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b011000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b001100));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  ASSERT_TRUE(snapshot.primitives[0].blinking);
+  // The operand's six bits are two GRB triples, so 001100 is G = 01, R = 00,
+  // B = 10 — a third and two thirds of full intensity, which §5.3.2.5.1's equal
+  // distribution puts at 2 and 5 of 7.
+  EXPECT_EQ(snapshot.primitives[0].blink_to.green, 2u);
+  EXPECT_EQ(snapshot.primitives[0].blink_to.red, 0u);
+  EXPECT_EQ(snapshot.primitives[0].blink_to.blue, 5u);
+  EXPECT_EQ(snapshot.primitives[0].blink_to, snapshot.colour_map[6]);
+  // §5.3.2.5.2's default entry 6 is grey level 6, so this could not have come
+  // from reading the map as it stood when the process started.
+  EXPECT_FALSE(snapshot.primitives[0].blink_to ==
+               (NabtsColour{6, 6, 6, false}));
+}
+
+// §6.2.8.1: the C1 form names no entry — "the blink-to color is nominal black
+// in color modes 0 and 1 or the background color in color mode 2".
+TEST(NaplpsInterpreter, C1BlinkStartBlinksToBlackOutsideColourModeTwo) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .escape({code(4, 14)})  // BLINK START
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  ASSERT_TRUE(snapshot.primitives[0].blinking);
+  EXPECT_EQ(snapshot.primitives[0].blink_to_map_address, -1)
+      << "the C1 form names no map entry, so nothing should resolve one";
+  EXPECT_EQ(snapshot.primitives[0].blink_to, kNabtsNominalBlack);
+}
+
+// §5.3.2.7.3: "An ON or OFF interval of 0 is taken to mean termination of any
+// active blink process on the blink-from/blink-to color pair." Both intervals
+// count — reading only the ON interval leaves a terminated process running.
+TEST(NaplpsInterpreter, AZeroBlinkIntervalTerminatesTheProcess) {
+  for (const auto& intervals :
+       std::vector<std::pair<uint8_t, uint8_t>>{{0, 6}, {4, 0}}) {
+    Record record;
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+        .byte(numeric(0b000000))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+        .byte(numeric(0b001100))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+        .byte(numeric(0b011000))
+        .byte(numeric(intervals.first))
+        .byte(numeric(intervals.second))
+        .byte(numeric(0))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+        .byte(coord1(0b001, 0b001));
+
+    const NabtsPageSnapshot snapshot = run(record);
+    ASSERT_EQ(snapshot.primitives.size(), 1u);
+    EXPECT_FALSE(snapshot.primitives[0].blinking)
+        << "ON=" << static_cast<int>(intervals.first)
+        << " OFF=" << static_cast<int>(intervals.second);
+  }
+}
+
+// §6.2.8.2: BLINK STOP "turns off any currently active blink processes
+// utilizing the drawing color as the blink-from color" — the drawing colour's
+// alone, so a process on another entry survives it.
+TEST(NaplpsInterpreter, BlinkStopEndsOnlyTheDrawingColoursProcess) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .escape({code(4, 14)})  // BLINK START on entry 3
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b011100))
+      .escape({code(4, 14)})  // BLINK START on entry 7
+      .pdi()
+      .escape({code(5, 14)})  // BLINK STOP, drawing colour still entry 7
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_FALSE(snapshot.primitives[0].blinking) << "entry 7 was stopped";
+  EXPECT_TRUE(snapshot.primitives[1].blinking) << "entry 3 was never stopped";
+}
+
+// §5.3.2.7.5: operands beyond one complete process repeat the command "with the
+// address of the blink-from color being automatically incremented (as in
+// 5.3.2.5.1) ... The drawing color is not affected by this incrementing."
+// §5.3.2.5.1's increment turns the most significant zero into a one, so from
+// entry 0 the next blink-from is entry 8.
+TEST(NaplpsInterpreter, BlinkRepeatsOntoTheIncrementedBlinkFromAddress) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b000000))  // mode 1 at entry 0
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      // First process: blink-to 6, ON 4, OFF 6, delay 0.
+      .byte(numeric(0b011000))
+      .byte(numeric(4))
+      .byte(numeric(6))
+      .byte(numeric(0))
+      // Second, implicitly on the incremented blink-from address.
+      .byte(numeric(0b011000))
+      .byte(numeric(4))
+      .byte(numeric(6))
+      .byte(numeric(0))
+      // Drawn in entry 8, which only the repeat can have started.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b100000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_TRUE(snapshot.primitives[0].blinking);
 }
 
 }  // namespace

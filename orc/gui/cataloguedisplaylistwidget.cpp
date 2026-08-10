@@ -445,12 +445,14 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
 
   const QColor background =
       op.has_background ? to_qcolor(op.background) : QColor(0, 0, 0);
-  // The blank phase of a blink process draws the operation in its background
-  // colour, or in black where it has none. Substituting the drawing colour
-  // rather than dropping the operation is what keeps a blinking character's
-  // field, and anything drawn under it, on screen through the blank phase.
+  // The other phase of a blink process draws the operation in its blink-to
+  // colour, which the service names and which is not always a ground colour —
+  // a figure alternating with a second colour twinkles rather than flashes.
+  // Substituting the drawing colour rather than dropping the operation is what
+  // makes that possible, and what keeps a blinking character's field, and
+  // anything drawn under it, on screen through the phase.
   const bool blank = op.blinking && !lit;
-  const QColor colour = blank ? background : to_qcolor(op.colour);
+  const QColor colour = blank ? to_qcolor(op.blink_to) : to_qcolor(op.colour);
 
   // The pen is what gives a line its width. Both dimensions map to one pen, so
   // the larger governs — a pen has no orientation.
