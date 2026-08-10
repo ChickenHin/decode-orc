@@ -103,6 +103,35 @@ QString ThemeManager::colorSchemeToString(Qt::ColorScheme scheme) {
   }
 }
 
+bool ThemeManager::styleNeedsPaletteFallback(const QString& styleName,
+                                             bool isDark,
+                                             Qt::ColorScheme osScheme) {
+  const QString normalized = styleName.trimmed().toLower();
+
+  // Windows 10 (and any Windows build of Qt without the Windows 11 style) uses
+  // the UxTheme-backed "windowsvista" style. Win32 common controls have no dark
+  // rendering there, so buttons, combo boxes and line edits always come out
+  // light no matter what the application palette says.
+  if (normalized == QLatin1String("windowsvista")) {
+    return isDark;
+  }
+
+  // The Windows 11 style does paint dark chrome, but only for the colour scheme
+  // Qt reports for the desktop; it cannot be pointed at the opposite scheme. A
+  // user override that disagrees with the OS therefore needs the fallback.
+  if (normalized == QLatin1String("windows11")) {
+    return isDark != (osScheme == Qt::ColorScheme::Dark);
+  }
+
+  // Every other style either follows the palette (Fusion and the Linux desktop
+  // styles) or manages both schemes itself (macOS).
+  return false;
+}
+
+QString ThemeManager::paletteFallbackStyleName() {
+  return QStringLiteral("Fusion");
+}
+
 bool ThemeManager::isPaletteDark(const QPalette& palette) {
   const QColor windowColor = palette.color(QPalette::Window);
   const QColor textColor = palette.color(QPalette::WindowText);

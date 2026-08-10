@@ -220,5 +220,91 @@ TEST(NabtsCaptionPublication, NeitherIsPublishedWithoutACaptionService) {
   EXPECT_EQ(caption_track(catalogue), nullptr);
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+// More chains in the catalogue browser (§5.2.7.6)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+NabtsCataloguedRecord chain_member(uint64_t address,
+                                   const std::string& address_text,
+                                   uint8_t version, uint32_t position) {
+  NabtsCataloguedRecord record;
+  record.channel = 0x000;
+  record.address = address;
+  record.address_text = address_text;
+  record.channel_text = "000/" + address_text;
+  record.record_type = 0;  // §5.2.2.2 cyclic presentation
+  record.version = version;
+  record.chain_base_address = 0x4400;
+  record.chain_position = position;
+  record.times_seen = 1;
+  record.times_intact = 1;
+  return record;
+}
+
+// A chain of More Records is one page to a reader, so it is listed once with
+// its members as sub-pages — the same shape the teletext catalogue gives a
+// multi-page set.
+TEST(NabtsCatalogueView, GroupsAMoreChainAsOnePageWithSubPages) {
+  NabtsAnalysisDataset dataset;
+  auto base = chain_member(0x4400, "044", 2, 0);
+  base.more = true;
+  dataset.records = {base, chain_member(0x4401, "000004401", 1, 1)};
+
+  const CatalogueDataset catalogue = build_nabts_catalogue(dataset);
+  EXPECT_EQ(catalogue.schema.variant_noun, "Sub-page");
+  ASSERT_EQ(catalogue.items.size(), 3u) << "one page row and two sub-pages";
+
+  const auto& parent = catalogue.items[0];
+  EXPECT_TRUE(parent.parent_id.empty());
+  EXPECT_EQ(parent.find_key, "000/044");
+  EXPECT_EQ(parent.values[0], "000/044");
+  EXPECT_EQ(parent.values[2], "2") << "the page's Seen sums its members";
+  // The list itself says the page holds more than one screen: the members are
+  // reached through the stepper, not listed as rows.
+  ASSERT_EQ(parent.badges.size(), 1u);
+  EXPECT_EQ(parent.badges[0], "2 sub-pages");
+
+  const auto& first = catalogue.items[1];
+  EXPECT_EQ(first.parent_id, parent.id);
+  EXPECT_EQ(first.variant_label, "00 v2");
+  const auto& second = catalogue.items[2];
+  EXPECT_EQ(second.parent_id, parent.id);
+  EXPECT_EQ(second.variant_label, "01 v1");
+}
+
+// An explicitly linked chain need not run in address order (§5.2.8.4 names
+// any successor), and the stepper walks positions — so the sub-pages are
+// emitted by chain position, not by address.
+TEST(NabtsCatalogueView, SubPagesAreOrderedByChainPositionNotAddress) {
+  NabtsAnalysisDataset dataset;
+  // Catalogue order is ascending by address: the continuation at 030 comes
+  // before the base at 099.
+  auto continuation = chain_member(0x03000, "030", 0, 1);
+  continuation.chain_base_address = 0x09900;
+  auto base = chain_member(0x09900, "099", 0, 0);
+  base.chain_base_address = 0x09900;
+  dataset.records = {continuation, base};
+
+  const CatalogueDataset catalogue = build_nabts_catalogue(dataset);
+  ASSERT_EQ(catalogue.items.size(), 3u);
+  EXPECT_EQ(catalogue.items[1].variant_label, "00 v0")
+      << "the base steps first however its address sorts";
+  EXPECT_EQ(catalogue.items[2].variant_label, "01 v0");
+}
+
+// A record outside any chain keeps its flat row; nothing gains a stepper it
+// does not need.
+TEST(NabtsCatalogueView, AStandaloneRecordStaysAFlatItem) {
+  NabtsAnalysisDataset dataset;
+  auto lone = chain_member(0x4400, "044", 0, 0);
+  lone.chain_base_address = 0x4400;
+  dataset.records = {lone};
+
+  const CatalogueDataset catalogue = build_nabts_catalogue(dataset);
+  ASSERT_EQ(catalogue.items.size(), 1u);
+  EXPECT_TRUE(catalogue.items[0].parent_id.empty());
+  EXPECT_TRUE(catalogue.items[0].variant_label.empty());
+}
+
 }  // namespace
 }  // namespace orc

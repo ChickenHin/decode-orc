@@ -33,6 +33,12 @@ namespace {
 // one a typo can turn into thousands of threads.
 constexpr int32_t kMaxDecodeThreads = 256;
 
+// The second_character_set choice that leaves a page in one alphabet
+// throughout, so the ESC control character has nothing to switch to. Spelled
+// out rather than left as an empty string because it is a decision the reader
+// makes, not a field they failed to fill in.
+constexpr const char* kNoSecondCharacterSet = "None";
+
 // The widest window either service uses bounds the parameters, so a project
 // whose format is not yet known can still be configured.
 constexpr int32_t kFirstAllowedUiLine = 1;
@@ -212,6 +218,61 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
     desc.type = ParameterType::STRING;
     desc.constraints.allowed_strings = {"Automatic", "Threshold", "MLSE"};
     desc.constraints.default_value = std::string("Automatic");
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "character_set";
+    desc.display_name = "Character Set";
+    desc.description =
+        "Which alphabet the page codes are read in when the service does not "
+        "say. A service that says so is always believed: if it transmits a "
+        "packet X/28/0 or M/29/0 designating its character set, that is what "
+        "is used and this setting is ignored. Level 1 services — which is "
+        "most of what survives on tape — transmit neither, and the standard "
+        "leaves the choice to \"a local Code of Practice\": the region the "
+        "receiver was sold in. Nothing in the recording can settle it, so it "
+        "has to be set here. Latin covers western Europe and is what every "
+        "page was shown as before; pick a Cyrillic option for a Russian, "
+        "Bulgarian, Ukrainian or ex-Yugoslav service, which would otherwise "
+        "read as transliterated nonsense. The national option sub-set within "
+        "Latin still comes from each page's own header bits";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {to_string(TeletextG0Set::Latin),
+                                        to_string(TeletextG0Set::Cyrillic2),
+                                        to_string(TeletextG0Set::Cyrillic3),
+                                        to_string(TeletextG0Set::Cyrillic1)};
+    desc.constraints.default_value = to_string(TeletextG0Set::Latin);
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "second_character_set";
+    desc.display_name = "Second Character Set";
+    desc.description =
+        "The alphabet the ESC control character switches into, for services "
+        "that mix two on one page. A Russian or Ukrainian service writes "
+        "foreign names and titles in Latin letters in among the Cyrillic, and "
+        "marks each switch with a control code (ETSI EN 300 706 §12.2 Table 26 "
+        "code 1/B) that toggles the rest of the display row into the other "
+        "alphabet. As with the character set above, a service that designates "
+        "its own pair is always believed and this setting is ignored — "
+        "including when it says it uses only one, which switches the control "
+        "code off. None, the default, means the same: pages are read in one "
+        "alphabet throughout and the code does nothing, which is how every "
+        "page was read before. Set this only where a recording really does mix "
+        "alphabets, since a wrong pairing turns the switched runs into "
+        "nonsense "
+        "rather than leaving them alone";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {kNoSecondCharacterSet,
+                                        to_string(TeletextG0Set::Latin),
+                                        to_string(TeletextG0Set::Cyrillic2),
+                                        to_string(TeletextG0Set::Cyrillic3),
+                                        to_string(TeletextG0Set::Cyrillic1)};
+    desc.constraints.default_value = std::string(kNoSecondCharacterSet);
     descriptors.push_back(desc);
   }
 
@@ -461,6 +522,32 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
     options.detector = TeletextDetector::kMlse;
   } else {
     throw std::runtime_error("Unknown bit detector: " + detector);
+  }
+
+  const std::string character_set = get_string_or(
+      parameters, "character_set", to_string(TeletextG0Set::Latin));
+  if (const auto g0_set = teletext_g0_set_from_string(character_set)) {
+    options.character_set = *g0_set;
+  } else {
+    throw std::runtime_error("Unknown character set: " + character_set);
+  }
+
+  // The second set is optional in a way the first is not: a page always has one
+  // alphabet, and only some services have two.
+  const std::string second_character_set =
+      get_string_or(parameters, "second_character_set", kNoSecondCharacterSet);
+  if (second_character_set == kNoSecondCharacterSet) {
+    options.second_character_set.reset();
+  } else if (const auto second =
+                 teletext_g0_set_from_string(second_character_set)) {
+    // The national option sub-set of a second Latin set is designated with the
+    // set itself rather than by the page header (EN 300 706 §15.3), and there
+    // is no designation to read here — so it is English, which is what the
+    // sub-set of an unqualified "Latin" has always meant on this surface.
+    options.second_character_set = TeletextG0Designation{*second, 0};
+  } else {
+    throw std::runtime_error("Unknown second character set: " +
+                             second_character_set);
   }
 
   options.squash_repeated_rows =

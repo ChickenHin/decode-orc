@@ -277,5 +277,46 @@ TEST(NabtsPacket, Integrity_CoversTheReservedSuffixByteOfTheTwoByteForm) {
   }
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+// Detector confidence
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// The slicer measures confidence over the whole 33-byte packet; the data block
+// starts after the five prefix bytes, so the two are offset by that much.
+TEST(NabtsPacket, Confidence_IsTakenFromTheDataBlockBytes) {
+  const auto payload = parity_bytes({0x41, 0x42, 0x43});
+  const auto packet = make_packet(0x000, 0, /*synchronizing=*/false,
+                                  NabtsSuffixKind::kNone, payload);
+
+  orc::TeletextPacketConfidence confidence{};
+  confidence.fill(0.0F);
+  confidence[orc::kNabtsPrefixBytes + 0] = 1.0F;
+  confidence[orc::kNabtsPrefixBytes + 1] = 0.5F;
+  confidence[orc::kNabtsPrefixBytes + 2] = 0.0F;
+
+  const auto decoded =
+      orc::nabts_decode_packet(packet.data(), packet.size(), &confidence);
+  ASSERT_TRUE(decoded.valid);
+  EXPECT_EQ(decoded.confidence[0], 255);
+  EXPECT_EQ(decoded.confidence[1], 128);
+  EXPECT_EQ(decoded.confidence[2], 0);
+}
+
+// The threshold detector decides each bit on one sample and has no path metric
+// to compare, so it measures nothing. A detector that cannot say it is unsure
+// has not said so, and its bytes carry full confidence rather than none — which
+// is what stops a run without MLSE from weighing every byte at zero.
+TEST(NabtsPacket, Confidence_IsFullWhereNothingMeasuredIt) {
+  const auto payload = parity_bytes({0x41, 0x42, 0x43});
+  const auto packet = make_packet(0x000, 0, /*synchronizing=*/false,
+                                  NabtsSuffixKind::kNone, payload);
+
+  const auto decoded = orc::nabts_decode_packet(packet.data(), packet.size());
+  ASSERT_TRUE(decoded.valid);
+  for (size_t i = 0; i < decoded.data_length; ++i) {
+    EXPECT_EQ(decoded.confidence[i], 255) << "byte " << i;
+  }
+}
+
 }  // namespace
 }  // namespace orc_unit_test

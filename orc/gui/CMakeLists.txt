@@ -122,7 +122,9 @@ set(ORC_GUI_LIB_SOURCES
 
     # Generic catalogue browser: the viewer for any stage advertising
     # StageToolKind::CatalogueBrowser, plus the two payload renderers it
-    # switches between.
+    # switches between and the flash phase they share.
+    catalogue_flash_clock.cpp
+    catalogue_flash_clock.h
     cataloguecellgridwidget.cpp
     cataloguecellgridwidget.h
     cataloguedisplaylistwidget.cpp
@@ -422,6 +424,10 @@ if(WIN32)
         WIN32_EXECUTABLE TRUE
         OUTPUT_NAME "orc-gui"
     )
+
+    # Run with UTF-8 as the process code page so the UTF-8 std::string paths
+    # the GUI hands to the presenter layer survive the trip to the OS.
+    orc_apply_utf8_manifest(orc-gui)
 endif()
 
 # Install target

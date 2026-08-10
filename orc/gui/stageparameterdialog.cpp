@@ -323,19 +323,25 @@ void StageParameterDialog::build_ui(
 
                 for (const QString& e : extensions) {
                   QString trimmed = e.trimmed();
+                  if (trimmed.isEmpty()) continue;
                   if (!ext_patterns.isEmpty()) {
                     ext_patterns += " ";
                     ext_names += "/";
                   }
                   ext_patterns += "*" + trimmed;
-                  ext_names += trimmed.toUpper();
+                  // The name drops the leading dot of every extension, not
+                  // just the first: a hint listing several would otherwise
+                  // read "VBI/.FLAC/.U16".
+                  QString name = trimmed;
+                  if (name.startsWith('.')) name.remove(0, 1);
+                  ext_names += name.toUpper();
                 }
 
-                filter = ext_names.mid(1) + " Files (" + ext_patterns +
-                         ");;All Files (*)";
-                dialog_title =
-                    is_output ? "Select Output " + ext_names.mid(1) + " File"
-                              : "Select " + ext_names.mid(1) + " File";
+                filter =
+                    ext_names + " Files (" + ext_patterns + ");;All Files (*)";
+                dialog_title = is_output
+                                   ? "Select Output " + ext_names + " File"
+                                   : "Select " + ext_names + " File";
               }
 
               QString file;

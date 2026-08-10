@@ -39,6 +39,14 @@ std::vector<CatalogueColour> level1_palette() {
 constexpr int kCellAspectWidth = 12;
 constexpr int kCellAspectHeight = 20;
 
+// How far below the page's best-attested row a row's copy count must fall
+// before it is called unconfirmed (see where it is applied). Eight leaves ample
+// room for the unevenness of a real capture — a row lost to dropouts more often
+// than its neighbours still keeps a good fraction of their copies — while the
+// rows that do not belong to the page at all sit one to three copies against
+// hundreds.
+constexpr int kUnconfirmedCopyRatio = 8;
+
 // True when a 7-bit code selects a G1 block-mosaic character.
 //
 // With |blast_through|, codes 4/0-5/F remain alphanumeric capitals even in
@@ -195,6 +203,14 @@ std::string run_headline(const TeletextRecoverySummary& summary) {
   if (summary.pages_truncated) {
     parts.push_back("page list truncated at the catalogue limit");
   }
+  // Last, because it is a statement about the run rather than a count from it —
+  // and the one thing a reader cannot check by looking at the page (see
+  // TeletextRecoverySummary::character_set).
+  parts.push_back(
+      "read as " + to_string(summary.character_set) +
+      (summary.second_character_set.has_value()
+           ? ", switching to " + to_string(summary.second_character_set->g0_set)
+           : std::string()));
   std::string text = parts.front();
   for (size_t i = 1; i < parts.size(); ++i) {
     text += "; " + parts[i];
@@ -256,10 +272,12 @@ CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
         out.mosaic_separated = cell.separated_mosaic;
         out.character = U' ';
       } else {
-        // The page's own G0 set: the national option sub-set its header
-        // selected, not a fixed English one (§15.2, §15.6.2).
-        out.character = orc::teletext_latin_g0_to_unicode(
-            cell.character, snapshot.national_option_subset);
+        // The cell's own G0 set: the alphabet the service designated and the
+        // national option sub-set its header selected, not a fixed English one
+        // (§15.2, §15.6.2) — and where the page has a second set, whichever of
+        // the two the row's ESC codes left in force at this column (§15.3).
+        out.character = orc::teletext_g0_to_unicode(
+            cell.character, cell.g0_set, cell.national_option_subset);
       }
     }
   }
@@ -269,16 +287,26 @@ CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
   // rests on one copy and the label would be noise. Where other rows *have*
   // been corrected by a repeat, a row that stands alone is the one the reader
   // should distrust.
+  //
+  // "Stands alone" is a share of the page's own evidence, not a fixed count. A
+  // page cycles as a whole, so its rows are transmitted alike and their copy
+  // counts land within a factor of two or so of each other; a row an order of
+  // magnitude below the best-attested one was not transmitted with the page at
+  // all. Testing only for a single copy missed exactly the case the reader most
+  // needs marked — a row carried onto this page by a burst can arrive two or
+  // three times over a long recording while the page's real rows have hundreds,
+  // and at three copies it was drawn as ordinary content.
   const int most_copies =
       *std::max_element(snapshot.row_copies.begin(), snapshot.row_copies.end());
 
   grid.row_status.resize(static_cast<size_t>(grid.rows));
   for (int row = 0; row < grid.rows; ++row) {
+    const int copies = snapshot.row_copies[static_cast<size_t>(row)];
     auto& status = grid.row_status[static_cast<size_t>(row)];
     status.received = snapshot.row_received[static_cast<size_t>(row)];
-    status.unconfirmed = row > 0 && !grid.at(row, 0).double_height_lower &&
-                         most_copies > 1 &&
-                         snapshot.row_copies[static_cast<size_t>(row)] == 1;
+    status.unconfirmed =
+        row > 0 && !grid.at(row, 0).double_height_lower && most_copies > 1 &&
+        (copies == 1 || copies * kUnconfirmedCopyRatio <= most_copies);
   }
   return grid;
 }

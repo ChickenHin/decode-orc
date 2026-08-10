@@ -83,6 +83,7 @@ constexpr uint8_t kMosaicColourBase = 0x10;  // 1/0-1/7 (1/0 no Level 1 action)
 constexpr uint8_t kConceal = 0x18;           // 1/8
 constexpr uint8_t kContiguousMosaic = 0x19;  // 1/9
 constexpr uint8_t kSeparatedMosaic = 0x1A;   // 1/A
+constexpr uint8_t kEscape = 0x1B;            // 1/B ESC (or Switch)
 constexpr uint8_t kBlackBackground = 0x1C;   // 1/C
 constexpr uint8_t kNewBackground = 0x1D;     // 1/D
 constexpr uint8_t kHoldMosaics = 0x1E;       // 1/E
@@ -140,6 +141,224 @@ constexpr std::array<std::array<char32_t, 13>, 7> kNationalOptionSubsets = {{
      U'š'},
 }};
 
+// The three Cyrillic G0 primary sets, ETSI EN 300 706 §15.6.4 to §15.6.6
+// Tables 38, 39 and 40, as the 96 code points of positions 2/0 to 7/F in
+// ascending code order.
+//
+// Unlike the Latin set these reserve no positions for national option
+// sub-sets: each is a complete alphabet in its own right, chosen by the
+// character set *designation* rather than by the header's C12-C14 bits (§15.2
+// Table 32, designation 0100). Every one of them therefore has to be written
+// out in full — the letters are not an ASCII-compatible permutation of
+// anything, and only positions 2/0-2/5, 2/7-2/9, 2/B-3/F agree with Latin.
+//
+// Common to all three (each table's NOTE 1 to NOTE 3):
+//   - 2/0 is SPACE;
+//   - 2/A is the asterisk, replaced by '@' only when the set is reached
+//     through a packet X/26 column address triplet, which a Level 1 page has
+//     no way to send;
+//   - 7/F is a filled rectangle, as it is in the Latin set.
+
+// Table 38 — Option 1, Serbian/Croatian. The Macedonian Ѓ/Ќ at 5/7 and 5/1
+// come with it. The block at 7/F takes the position lowercase џ would have
+// held, so this set has Џ and no џ; that is the table as printed, not an
+// omission here.
+constexpr std::array<char32_t, 96> kCyrillic1G0 = {
+    /* 2/0 */ U' ', U'!', U'"', U'#', U'$', U'%', U'&', U'\'',
+    /* 2/8 */ U'(', U')', U'*', U'+', U',', U'-', U'.', U'/',
+    /* 3/0 */ U'0', U'1', U'2', U'3', U'4', U'5', U'6', U'7',
+    /* 3/8 */ U'8', U'9', U':', U';', U'<', U'=', U'>', U'?',
+    /* 4/0 */ U'Ч', U'А', U'Б', U'Ц', U'Д', U'Е', U'Ф', U'Г',
+    /* 4/8 */ U'Х', U'И', U'Ј', U'К', U'Л', U'М', U'Н', U'О',
+    /* 5/0 */ U'П', U'Ќ', U'Р', U'С', U'Т', U'У', U'В', U'Ѓ',
+    /* 5/8 */ U'Љ', U'Њ', U'З', U'Ћ', U'Ж', U'Ђ', U'Ш', U'Џ',
+    /* 6/0 */ U'ч', U'а', U'б', U'ц', U'д', U'е', U'ф', U'г',
+    /* 6/8 */ U'х', U'и', U'ј', U'к', U'л', U'м', U'н', U'о',
+    /* 7/0 */ U'п', U'ќ', U'р', U'с', U'т', U'у', U'в', U'ѓ',
+    /* 7/8 */ U'љ', U'њ', U'з', U'ћ', U'ж', U'ђ', U'ш', U'■',
+};
+
+// Table 39 — Option 2, Russian/Bulgarian. The alphabet is laid out as KOI-7
+// lays it out, except that Ъ and Ы are the other way round (5/9 and 5/F) and
+// the block at 7/F displaces lowercase ы to 2/6, where the Latin set has '&'.
+constexpr std::array<char32_t, 96> kCyrillic2G0 = {
+    /* 2/0 */ U' ', U'!', U'"', U'#', U'$', U'%', U'ы', U'\'',
+    /* 2/8 */ U'(', U')', U'*', U'+', U',', U'-', U'.', U'/',
+    /* 3/0 */ U'0', U'1', U'2', U'3', U'4', U'5', U'6', U'7',
+    /* 3/8 */ U'8', U'9', U':', U';', U'<', U'=', U'>', U'?',
+    /* 4/0 */ U'Ю', U'А', U'Б', U'Ц', U'Д', U'Е', U'Ф', U'Г',
+    /* 4/8 */ U'Х', U'И', U'Й', U'К', U'Л', U'М', U'Н', U'О',
+    /* 5/0 */ U'П', U'Я', U'Р', U'С', U'Т', U'У', U'Ж', U'В',
+    /* 5/8 */ U'Ь', U'Ъ', U'З', U'Ш', U'Э', U'Щ', U'Ч', U'Ы',
+    /* 6/0 */ U'ю', U'а', U'б', U'ц', U'д', U'е', U'ф', U'г',
+    /* 6/8 */ U'х', U'и', U'й', U'к', U'л', U'м', U'н', U'о',
+    /* 7/0 */ U'п', U'я', U'р', U'с', U'т', U'у', U'ж', U'в',
+    /* 7/8 */ U'ь', U'ъ', U'з', U'ш', U'э', U'щ', U'ч', U'■',
+};
+
+// Table 40 — Option 3, Ukrainian. Option 2's layout with the letters Ukrainian
+// does not use replaced by the ones it does: І at 5/9 for Ъ, Є at 5/C for Э,
+// Ї at 5/F for Ы, and ї at 2/6 for ы.
+constexpr std::array<char32_t, 96> kCyrillic3G0 = {
+    /* 2/0 */ U' ', U'!', U'"', U'#', U'$', U'%', U'ї', U'\'',
+    /* 2/8 */ U'(', U')', U'*', U'+', U',', U'-', U'.', U'/',
+    /* 3/0 */ U'0', U'1', U'2', U'3', U'4', U'5', U'6', U'7',
+    /* 3/8 */ U'8', U'9', U':', U';', U'<', U'=', U'>', U'?',
+    /* 4/0 */ U'Ю', U'А', U'Б', U'Ц', U'Д', U'Е', U'Ф', U'Г',
+    /* 4/8 */ U'Х', U'И', U'Й', U'К', U'Л', U'М', U'Н', U'О',
+    /* 5/0 */ U'П', U'Я', U'Р', U'С', U'Т', U'У', U'Ж', U'В',
+    /* 5/8 */ U'Ь', U'І', U'З', U'Ш', U'Є', U'Щ', U'Ч', U'Ї',
+    /* 6/0 */ U'ю', U'а', U'б', U'ц', U'д', U'е', U'ф', U'г',
+    /* 6/8 */ U'х', U'и', U'й', U'к', U'л', U'м', U'н', U'о',
+    /* 7/0 */ U'п', U'я', U'р', U'с', U'т', U'у', U'ж', U'в',
+    /* 7/8 */ U'ь', U'і', U'з', U'ш', U'є', U'щ', U'ч', U'■',
+};
+
+// Lowest G0 code the tables above start at: everything below 2/0 is a spacing
+// attribute rather than a character (§15.5).
+constexpr uint8_t kFirstG0Code = 0x20;
+
+const std::array<char32_t, 96>* cyrillic_table(TeletextG0Set g0_set) {
+  switch (g0_set) {
+    case TeletextG0Set::Cyrillic1:
+      return &kCyrillic1G0;
+    case TeletextG0Set::Cyrillic2:
+      return &kCyrillic2G0;
+    case TeletextG0Set::Cyrillic3:
+      return &kCyrillic3G0;
+    case TeletextG0Set::Latin:
+      break;
+  }
+  return nullptr;
+}
+
+// The G0 set names the parameter surface and the project file use. They name
+// the languages rather than the standard's option numbers, because "Cyrillic
+// option 2" tells a user nothing about whether it is the one their recording
+// needs.
+struct G0SetName {
+  TeletextG0Set set;
+  const char* name;
+};
+
+constexpr std::array<G0SetName, 4> kG0SetNames = {{
+    {TeletextG0Set::Latin, "Latin"},
+    {TeletextG0Set::Cyrillic1, "Cyrillic (Serbian/Croatian)"},
+    {TeletextG0Set::Cyrillic2, "Cyrillic (Russian/Bulgarian)"},
+    {TeletextG0Set::Cyrillic3, "Cyrillic (Ukrainian)"},
+}};
+
+// ETSI EN 300 706 §15.2 Table 32: the G0 set a *Default G0 and G2 Character
+// Set Designation and National Option Selection* value selects. |designation|
+// is triplet 1 bits 14-11 and |national_option| bits 10-8.
+//
+// Only the Cyrillic rows are distinguished. Every other designation carries a
+// Latin G0 set — including the four Latin rows of designation 0100 itself —
+// and the national option sub-set of a Latin page keeps coming from the
+// header's C12-C14 bits, as it does at Level 1 (§15.2). The Latin sub-sets
+// that only some designations reach (Polish, Turkish, Estonian,
+// Lettish/Lithuanian, Romanian) are not modelled; such a page displays in the
+// designation-0000 sub-set its header bits name, which is what it did before.
+TeletextG0Set g0_set_for_designation(int designation, int national_option) {
+  if (designation == 0b0100) {
+    switch (national_option) {
+      case 0b000:
+        return TeletextG0Set::Cyrillic1;
+      case 0b100:
+        return TeletextG0Set::Cyrillic2;
+      case 0b101:
+        return TeletextG0Set::Cyrillic3;
+      default:
+        break;
+    }
+  }
+  return TeletextG0Set::Latin;
+}
+
+// ETSI EN 300 706 §15.3 Table 33: the G0 set and national option sub-set a
+// *Second G0 Set Designation and National Option Selection* value selects.
+// std::nullopt is the 1111111 the table gives as "no second G0 set required",
+// which §15.3 says a decoder may read as disabling the ESC function for the
+// page or magazine — and which is exactly what a service transmitting one
+// alphabet sends, so honouring it costs nothing and stops a configured second
+// set from being applied where the service has said there is none.
+//
+// Table 33 differs from Table 32 only in Latin rows this decoder does not
+// distinguish anyway (Estonian, Lettish/Lithuanian, Rumanian and the like):
+// the three Cyrillic rows sit at designation 0100 with national option bits
+// 000, 100 and 101 in both, so g0_set_for_designation() reads either table.
+std::optional<TeletextG0Designation> second_g0_for_designation(int value) {
+  constexpr int kNoSecondG0Set = 0b1111111;
+  if (value == kNoSecondG0Set) {
+    return std::nullopt;
+  }
+  const int designation = (value >> 3) & 0xF;
+  const int national_option = value & 0x7;
+  return TeletextG0Designation{
+      g0_set_for_designation(designation, national_option), national_option};
+}
+
+// Designation codes and packet numbers of the packets that can carry a
+// character set designation (§9.1 Table 1, §9.4.2, §9.5).
+constexpr int kPacketX28 = 28;
+constexpr int kPacketM29 = 29;
+constexpr int kDesignationCodeZero = 0;
+// X/28/4 and M/29/4 code the same character set fields at the same bit
+// positions as the /0 packets (§9.4.2.2: "The same coding also applies to
+// packets X/28/4 except that they redefine CLUTs 0 and 1 instead of CLUTs 2
+// and 3"), and the same clause gives the /0 packet precedence over the /4 one
+// for everything but the colour map.
+constexpr int kDesignationCodeFour = 4;
+
+// X/28/0 carries Format 1 — the format Table 4 codes, and the only one with a
+// character set designation in it — when triplet 1's Page Function bits say
+// the page is a basic Level 1 teletext page (§9.4.2.1 Table 3, code 0000).
+constexpr int kPageFunctionBasicLevel1 = 0;
+
+// The last displayable row, X/24 — the FLOF label row of §9.6.1, which sits at
+// the boundary between the display rows and the non-display packets X/25 to
+// X/31 and so collects their mis-corrections (see accept_last_display_row()).
+constexpr int kLastDisplayRow = TeletextPageSnapshot::kRows - 1;
+
+// Whether a Hamming 8/4 byte arrived as a codeword rather than being corrected
+// into one. §8.2 gives the code minimum distance 4: one error is corrected and
+// two are detected, so a byte that needed correction is one channel error away
+// from having been mis-corrected into a neighbouring codeword instead.
+bool hamming84_uncorrected(uint8_t byte, int decoded) {
+  return teletext_hamming84_encode(static_cast<uint8_t>(decoded)) == byte;
+}
+
+// Whether a packet addressed to the last display row may be believed.
+//
+// Row 24 is the one display address a corrected MRAG must not be trusted for.
+// Its neighbours X/25 to X/31 are non-display packets that carry no odd parity
+// and are transmitted continuously, and the MRAG is Hamming 8/4 — distance 4,
+// so a two-bit burst is not detected but silently resolved to the neighbouring
+// codeword. Row 24 is where those land.
+//
+// What makes it show is that almost no page uses row 24. A service transmits
+// FLOF labels on a handful of pages and leaves the row empty on the rest
+// (the reference SECAM capture: 7 pages of 89). Rows 1-23 are re-sent with
+// every cycle of the page and the squasher votes an intruder down among five
+// hundred copies; row 24 has nothing to vote with, so the single packet that
+// arrives is the row, and the slicer's parity repair hands it over with no
+// damage to report.
+//
+// The measurement that sets the rule, over that capture's 228 839 packets:
+// rows X/1-23 arrive with both MRAG bytes uncorrected 78.4% of the time, and
+// X/24 on the pages that really carry FLOF labels 82.8% — but X/24 on every
+// other page only 29.8%. Genuine traffic sits at the baseline; the deficit is
+// packets that could only ever reach row 24 by being corrected into it.
+// Requiring both bytes as transmitted costs about one row 24 in six on the
+// pages that have one — a row re-sent tens of times, so nothing is lost — and
+// removes about seven in ten of the intruders.
+bool accept_last_display_row(
+    const std::array<uint8_t, kTeletextPacketBytes>& packet, int mrag_low,
+    int mrag_high) {
+  return hamming84_uncorrected(packet[0], mrag_low) &&
+         hamming84_uncorrected(packet[1], mrag_high);
+}
+
 }  // namespace
 
 bool teletext_odd_parity_valid(uint8_t byte) {
@@ -165,13 +384,40 @@ uint8_t teletext_odd_parity_encode(uint8_t value) {
   return byte;
 }
 
-char32_t teletext_latin_g0_to_unicode(uint8_t code,
-                                      int national_option_subset) {
+std::string to_string(TeletextG0Set g0_set) {
+  for (const G0SetName& entry : kG0SetNames) {
+    if (entry.set == g0_set) {
+      return entry.name;
+    }
+  }
+  return kG0SetNames.front().name;
+}
+
+std::optional<TeletextG0Set> teletext_g0_set_from_string(
+    std::string_view name) {
+  for (const G0SetName& entry : kG0SetNames) {
+    if (name == entry.name) {
+      return entry.set;
+    }
+  }
+  return std::nullopt;
+}
+
+char32_t teletext_g0_to_unicode(uint8_t code, TeletextG0Set g0_set,
+                                int national_option_subset) {
   const uint8_t c = static_cast<uint8_t>(code & 0x7F);
   // Codes 0/0-1/F are spacing attributes, not characters (§15.5).
-  if (c < 0x20) {
+  if (c < kFirstG0Code) {
     return U' ';
   }
+
+  // A Cyrillic set defines all 96 of its positions, so it is a lookup and the
+  // national option sub-set has no part in it.
+  if (const std::array<char32_t, 96>* table = cyrillic_table(g0_set);
+      table != nullptr) {
+    return (*table)[static_cast<size_t>(c - kFirstG0Code)];
+  }
+
   // §15.6.1 Table 35 NOTE 4: 7/F is a rectangle filling the character area.
   if (c == 0x7F) {
     return U'■';
@@ -191,10 +437,10 @@ char32_t teletext_latin_g0_to_unicode(uint8_t code,
   return static_cast<char32_t>(c);
 }
 
-std::string teletext_latin_g0_to_utf8(uint8_t code,
-                                      int national_option_subset) {
+std::string teletext_g0_to_utf8(uint8_t code, TeletextG0Set g0_set,
+                                int national_option_subset) {
   const char32_t cp =
-      teletext_latin_g0_to_unicode(code, national_option_subset);
+      teletext_g0_to_unicode(code, g0_set, national_option_subset);
   std::string out;
   // Table 36 reaches U+2016 at most, so two continuation bytes suffice; the
   // three-byte branch is written out anyway rather than assuming that.
@@ -325,12 +571,133 @@ void TeletextPageDecoder::process_packet(
   } else if (packet_number >= 1 &&
              packet_number < TeletextPageSnapshot::kRows) {
     // X/1 to X/24: directly displayable rows (EN 300 706 §9.3.2). X/25
-    // (key-word search labels) and X/26-X/31 (enhancement / non-display
-    // packets, §9.4-§9.8) are outside the Level 1 grid and are ignored.
+    // (key-word search labels) and X/26, X/27 and X/30-X/31 (enhancement,
+    // editorial linking and independent data, §9.4-§9.8) are outside the
+    // Level 1 grid and are ignored.
+    if (packet_number == kLastDisplayRow &&
+        !accept_last_display_row(packet, mrag_low, mrag_high)) {
+      return;
+    }
     handle_display_packet(magazine, packet_number, packet, field_index,
                           source == kAutoSource ? next_source_++ : source,
                           confidence);
+  } else if (packet_number == kPacketX28 || packet_number == kPacketM29) {
+    // Not display data, but the one thing outside the Level 1 grid that
+    // changes how the grid is read: which G0 sets its codes are in, and so
+    // whether ESC has anything to toggle to (§15.2, §15.3).
+    const int designation_code = teletext_hamming84_decode(packet[2]);
+    if (designation_code == kDesignationCodeZero ||
+        designation_code == kDesignationCodeFour) {
+      handle_character_set_designation(
+          magazine, packet, packet_number == kPacketM29,
+          designation_code == kDesignationCodeZero);
+    }
   }
+}
+
+void TeletextPageDecoder::handle_character_set_designation(
+    int transmission_magazine,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet, bool magazine_wide,
+    bool designation_zero) {
+  // The caller has already read the designation code out of byte 6 of the
+  // packet — index 2 here, the MRAG being bytes 4 and 5 — and established that
+  // it is 0 or 4, the two Table 4 codes. X/28/1 to X/28/3 and M/29/1 to
+  // M/29/3 code other things at other positions and never reach here.
+
+  // Before believing anything the packet says, require the whole of it to be
+  // what it claims: §9.4.1 codes all 39 bytes after the designation code as
+  // thirteen Hamming 24/18 triplets, so on a genuine packet every one of them
+  // decodes and on a damaged one the drop costs nothing — it is re-sent with
+  // every cycle of the page.
+  //
+  // This is not pedantry but the noise gate. On a tape recovery the MRAG's
+  // Hamming 8/4 mis-corrects bursts into valid addresses, and a long capture
+  // yields hundreds of garbage packets numbered 28 or 29 (the reference SECAM
+  // capture: 246 over 80 677 frames). A random triplet passes 24/18 about 39%
+  // of the time, so gating on triplet 1 alone let roughly one in forty of
+  // those through — and one fake M/29/0 re-designates a whole magazine for
+  // the rest of the recording, which on the reference capture silently undid
+  // the configured Cyrillic set. All thirteen triplets at once is a pass rate
+  // of about 5 in a million, and none of the observed fakes decodes more than
+  // seven.
+  for (size_t byte = 3; byte + 2 < kTeletextPacketBytes; byte += 3) {
+    if (teletext_hamming2418_decode(packet[byte], packet[byte + 1],
+                                    packet[byte + 2]) < 0) {
+      return;
+    }
+  }
+
+  // Triplet 1 is bytes 7 to 9 (indices 3 to 5), Hamming 24/18. An
+  // uncorrectable triplet is dropped: a mis-read designation would change the
+  // alphabet of every page in the magazine, and the packet is re-sent with the
+  // page.
+  const int32_t triplet =
+      teletext_hamming2418_decode(packet[3], packet[4], packet[5]);
+  if (triplet < 0) {
+    return;
+  }
+
+  // An X/28 packet is Format 1 — the format that carries a designation — only
+  // when its Page Function says a basic Level 1 page (§9.4.2.1 Table 3). An
+  // M/29 carries no page function at all (§9.1 Table 1: "the same functions
+  // apart from page function and coding"), so its triplet 1 bits 1-7 are not
+  // read.
+  if (!magazine_wide && (triplet & 0xF) != kPageFunctionBasicLevel1) {
+    return;
+  }
+
+  // Triplet 2 is bytes 10 to 12 (indices 6 to 8); the second G0 set straddles
+  // the two triplets, so it is needed here as well. Its own decode was already
+  // proved by the all-thirteen-triplets gate above.
+  const int32_t triplet2 =
+      teletext_hamming2418_decode(packet[6], packet[7], packet[8]);
+  if (triplet2 < 0) {
+    return;
+  }
+
+  // Triplet 1 bits 8-14: the 7-bit Table 32 value, four designation bits
+  // (14-11) over three national option bits (10-8).
+  const int value = (triplet >> 7) & 0x7F;
+  const TeletextG0Set g0_set =
+      g0_set_for_designation((value >> 3) & 0xF, value & 0x7);
+
+  // Triplet 1 bits 15-18 and triplet 2 bits 1-3: the 7-bit Table 33 value.
+  // Table 33 prints its columns with triplet 2's three bits above triplet 1's
+  // four, most significant first within each, so the value assembles as the
+  // table reads.
+  const int second_value =
+      ((static_cast<int>(triplet2) & 0x7) << 4) | ((triplet >> 14) & 0xF);
+  const std::optional<TeletextG0Designation> second_g0_set =
+      second_g0_for_designation(second_value);
+
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  if (magazine_wide) {
+    // M/29 sets the magazine's defaults. They do not reach back into a page
+    // already open: that page's rows were addressed under the sets it was
+    // opened with, and §15.2 gives the page's own X/28 the higher priority
+    // anyway.
+    //
+    // M/29/0 over M/29/4 (§9.4.2.2), so an M/29/4 arriving after an M/29/0 is
+    // read for the colour map this decoder does not model and for nothing else.
+    if (state.magazine_g0_received && state.magazine_g0_from_designation_zero &&
+        !designation_zero) {
+      return;
+    }
+    state.magazine_g0_set = g0_set;
+    state.magazine_second_g0_set = second_g0_set;
+    state.magazine_g0_received = true;
+    state.magazine_g0_from_designation_zero = designation_zero;
+    return;
+  }
+  // X/28 belongs to the page it was transmitted with, so it applies to the open
+  // page immediately — it may well arrive after some of the page's rows, and
+  // the page is only rendered when it terminates. X/28/0 over X/28/4 as above.
+  if (state.g0_set_from_designation_zero && !designation_zero) {
+    return;
+  }
+  state.g0_set = g0_set;
+  state.second_g0_set = second_g0_set;
+  state.g0_set_from_designation_zero = designation_zero;
 }
 
 int TeletextPageDecoder::erase_epoch(const PageIdentity& identity) const {
@@ -465,6 +832,25 @@ void TeletextPageDecoder::handle_header_packet(
   state.national_option_subset = (((c11_c14 >> 1) & 0x1) << 2) |  // C12
                                  (((c11_c14 >> 2) & 0x1) << 1) |  // C13
                                  ((c11_c14 >> 3) & 0x1);          // C14
+
+  // The G0 sets the page opens in: the magazine's designations if an M/29 has
+  // established them, otherwise the local Code of Practice (§15.2, §15.3). A
+  // packet X/28 for this page overrides them if one arrives before the page is
+  // rendered — but only for this page, which is why they are taken afresh here
+  // rather than left at whatever the previous page settled on, and why the
+  // X/28/0-over-X/28/4 precedence resets with them. A rolling header re-sent
+  // mid-page is the exception: it is the same transmission, so an X/28 already
+  // received for it must survive.
+  if (!same_page_continues) {
+    state.g0_set = state.magazine_g0_set.value_or(default_g0_set_);
+    // An M/29 that said the magazine has no second set is an answer, not an
+    // absence: only a magazine no M/29 has spoken for falls back to the
+    // configured default.
+    state.second_g0_set = state.magazine_g0_received
+                              ? state.magazine_second_g0_set
+                              : default_second_g0_set_;
+    state.g0_set_from_designation_zero = false;
+  }
   // The header that *opened* this transmission stamps it, so a rolling header
   // re-sent while the rows are still going out does not make the same
   // appearance of the page look like a series of new ones.
@@ -702,6 +1088,8 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   snapshot.inhibit_display = state.inhibit_display;
   snapshot.magazine_serial = state.magazine_serial;
   snapshot.national_option_subset = state.national_option_subset;
+  snapshot.g0_set = state.g0_set;
+  snapshot.second_g0_set = state.second_g0_set;
   snapshot.header_field_index = state.header_field_index;
   snapshot.last_field_index = state.last_field_index;
   snapshot.columns = columns_;
@@ -782,7 +1170,11 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
 
     // Start-of-row default conditions (EN 300 706 §12.2 Table 26): white
     // alphanumeric foreground, black background, steady, unboxed, normal
-    // size, contiguous mosaics, hold off.
+    // size, contiguous mosaics, hold off, and — code 1/B — the page's default
+    // G0 set rather than whatever the previous row's last ESC left selected.
+    // That last one is what keeps a lost ESC from spilling past its own row.
+    bool second_set_active = false;
+    bool g0_set_uncertain = false;
     TeletextColour foreground = TeletextColour::White;
     TeletextColour background = TeletextColour::Black;
     bool mosaic = false;
@@ -794,6 +1186,23 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     bool double_height = false;
     uint8_t held_character = 0x20;
     bool held_separated = false;
+
+    // Stamp a cell with the G0 set its code is to be read in: the page's
+    // default, or its second set where an ESC on this row has toggled into it
+    // (§12.2 Table 26 code 1/B, §15.3). Doing it per cell is what lets one row
+    // hold two alphabets and still convert to glyphs without any consumer
+    // knowing that ESC exists.
+    const auto stamp_g0_set = [&](TeletextPageCell& cell) {
+      if (second_set_active && snapshot.second_g0_set.has_value()) {
+        cell.g0_set = snapshot.second_g0_set->g0_set;
+        cell.national_option_subset =
+            snapshot.second_g0_set->national_option_subset;
+      } else {
+        cell.g0_set = snapshot.g0_set;
+        cell.national_option_subset = snapshot.national_option_subset;
+      }
+      cell.g0_set_uncertain = g0_set_uncertain;
+    };
 
     for (int column = 0; column < columns_; ++column) {
       const uint8_t code =
@@ -855,6 +1264,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
         cell.boxed = boxed;
         cell.double_height = double_height;
         cell.parity_error = false;
+        stamp_g0_set(cell);
 
         // "Set-After" actions.
         if (code >= kAlphaColourBase + 1 && code <= kAlphaColourBase + 7) {
@@ -891,8 +1301,17 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
           }
         } else if (code == kReleaseMosaics) {
           hold = false;
+        } else if (code == kEscape) {
+          // 1/B ESC (or Switch): toggle between the page's first and second G0
+          // sets for the rest of the row. Inert on a page that has only one —
+          // the §15.3 default, and what every page did before two sets could be
+          // designated — so the code stays a blank spacing attribute there
+          // rather than silently re-alphabeting the row.
+          if (snapshot.second_g0_set.has_value()) {
+            second_set_active = !second_set_active;
+          }
         }
-        // 0/E double width, 0/F double size, 1/B ESC: no Level 1 response.
+        // 0/E double width and 0/F double size: no Level 1 response.
       } else {
         // Displayable character (or a parity-damaged byte rendered as a
         // flagged SPACE).
@@ -910,12 +1329,24 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
         cell.conceal = conceal;
         cell.boxed = boxed;
         cell.double_height = double_height;
+        stamp_g0_set(cell);
         if (cell.mosaic) {
           // §12.2 1/E: the held mosaic is the most recent G1 mosaic
           // character with bit 6 set on this row.
           held_character = code;
           held_separated = separated;
         }
+      }
+
+      // A byte lost to parity damage could have been the ESC that toggles the
+      // rest of the row into the other alphabet, and there is no way to tell.
+      // Every cell after it is therefore in one of two sets rather than
+      // definitely the one stamped above — but only where the page has a second
+      // set at all, since with one set there is nothing an unseen ESC could
+      // have changed. Set after the cell is stamped because ESC is "Set-After":
+      // a lost one would have acted from the *next* cell, not this one.
+      if (parity_error && snapshot.second_g0_set.has_value()) {
+        g0_set_uncertain = true;
       }
     }
   }
@@ -946,6 +1377,12 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
       TeletextPageCell lower;
       lower.background = origin_cells[static_cast<size_t>(column)].background;
       lower.double_height_lower = true;
+      // The cell shows no character, but it still belongs to a page with an
+      // alphabet: leaving the struct default here would put a stray Latin cell
+      // in a Cyrillic page for anything that reads the field without checking
+      // double_height_lower first.
+      lower.g0_set = snapshot.g0_set;
+      lower.national_option_subset = snapshot.national_option_subset;
       lower_cells[static_cast<size_t>(column)] = lower;
     }
   }
@@ -1012,16 +1449,18 @@ std::string TeletextPageDecoder::extract_subtitle_text(
     bool last_was_space = true;  // collapses runs and trims the left edge
     for (int column = 0; column < snapshot.columns; ++column) {
       const TeletextPageCell& cell = cells[static_cast<size_t>(column)];
-      // Displayable cells go out as UTF-8 through the page's own G0 set, so
+      // Displayable cells go out as UTF-8 through the cell's own G0 set, so
       // the text reads as the page does: a UK service's 2/3 is "£", not the
-      // "#" the transmitted code would be in ASCII (§15.6.2 Table 36).
+      // "#" the transmitted code would be in ASCII (§15.6.2 Table 36), and a
+      // Latin word an ESC switched into on a Cyrillic page stays Latin
+      // (§15.3).
       std::string glyph;
       if (!cell.mosaic && !cell.held_mosaic && !cell.conceal &&
           !cell.double_height_lower && !cell.parity_error &&
           (!boxed_only || cell.boxed) && cell.character > 0x20 &&
           cell.character < 0x7F) {
-        glyph = teletext_latin_g0_to_utf8(cell.character,
-                                          snapshot.national_option_subset);
+        glyph = teletext_g0_to_utf8(cell.character, cell.g0_set,
+                                    cell.national_option_subset);
       }
       if (glyph.empty()) {
         if (!last_was_space) {

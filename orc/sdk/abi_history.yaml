@@ -276,3 +276,23 @@ history:
       the same breath. Layout- and source-breaking for anything that included
       that header for the removed types, which nothing outside this repository
       could have done.
+  - abi: 14
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+    notes: >-
+      ABI-neutral while abi 13 was current: the `CatalogueCell::flash` and
+      `CatalogueDrawOp::blinking` doc comments were rewritten when the catalogue
+      views learned to animate the two attributes instead of drawing them
+      static. Comments only; the layout change is the `blink_to` member below.
+    summary: >-
+      `CatalogueDrawOp` gains a `blink_to` colour. A blink process is defined by
+      ANSI X3.110 §5.3.2.7.2 over a colour map *entry*, alternating it with a
+      blink-to entry the service names (§5.3.2.7.3) — so a blinking figure need
+      not appear and disappear, it can twinkle between two colours, and a
+      renderer given only `blinking` cannot tell which was meant. The member is
+      inserted beside `blinking` rather than appended, so the struct's layout
+      moves; it is meaningful only where `blinking` is set and defaults to black,
+      which is the ground the C1 BLINK START of §6.2.8.1 blinks to in colour
+      modes 0 and 1.

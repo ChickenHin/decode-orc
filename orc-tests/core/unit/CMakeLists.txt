@@ -206,6 +206,7 @@ orc_add_core_unit_tests(
         stages/teletext_sink/teletext_frame_slicer_test.cpp
         stages/teletext_sink/teletext_scan_state_test.cpp
         stages/teletext_sink/teletext_page_catalogue_test.cpp
+        stages/teletext_sink/teletext_catalogue_view_test.cpp
         stages/teletext_sink/teletext_squash_stats_test.cpp
 )
 

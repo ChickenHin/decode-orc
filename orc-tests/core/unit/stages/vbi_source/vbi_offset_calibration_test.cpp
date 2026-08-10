@@ -466,6 +466,65 @@ TEST(VBIOffsetCalibration, RefusesToCalibrateATimeBaseCorrectedSource) {
   EXPECT_NE(error.find("exactly zero"), std::string::npos) << error;
 }
 
+// The other half of that rule. Such a source still has an unknown — when the
+// broadcaster transmitted, which the service table only tabulates for the
+// captures it was measured on — and that one is measured from the same survey,
+// read as an anchor rather than as an offset.
+TEST(VBIOffsetCalibration, MeasuresTheServiceAnchorOfATimeBaseCorrectedSource) {
+  VBISourceFormat format = bt8x8_pal_format();
+  format.family = VBISourceFamily::kTBCDerived;
+  format.capture_offset_is_auto = false;
+  format.capture_offset_samples = 0.0;
+
+  // A transmission that put its run-in 12 samples earlier than the table says.
+  // Displacing the run-in produces the same bytes whichever way they are read;
+  // what differs is the reading, and a record of this family starts at 0H, so
+  // the displacement is the broadcaster's rather than the hardware's.
+  constexpr double kShift = 12.0;
+  const VBITeletextService service = wst_service();
+  const double truth_anchor =
+      service.cri_start_samples(format.sample_rate_hz, kShift);
+
+  FakeByteSource source(make_synthetic_capture(format, service, 4, kShift));
+  VBILineReader reader(format, source);
+
+  VBICalibrationConfig config;
+  config.sample_frames = 4;
+
+  VBIOffsetCalibration calibration;
+  std::string error;
+  ASSERT_TRUE(
+      measure_vbi_service_anchor(reader, service, config, calibration, error))
+      << error;
+  ASSERT_TRUE(calibration.converged) << calibration.summary;
+
+  // The record starts at 0H, so where the run-in sits in the record is when it
+  // was transmitted, with no further correction.
+  EXPECT_NEAR(calibration.anchor_position_samples, truth_anchor, 0.2);
+
+  const double measured_ns =
+      vbi_measured_anchor_ns(calibration, format.sample_rate_hz);
+  EXPECT_NEAR(measured_ns, truth_anchor / format.sample_rate_hz * 1e9, 1.0);
+  EXPECT_LT(measured_ns, service.t_offset_ns);
+}
+
+// A card capture's fitted offset has already put its run-in on the tabulated
+// anchor, so there is no second quantity there to measure: asking for one would
+// be fitting the same unknown twice.
+TEST(VBIOffsetCalibration, RefusesToMeasureTheAnchorOfACardCapture) {
+  const VBISourceFormat format = bt8x8_pal_format();
+
+  FakeByteSource source(
+      std::vector<uint8_t>(static_cast<size_t>(format.bytes_per_frame()), 0u));
+  VBILineReader reader(format, source);
+
+  VBIOffsetCalibration calibration;
+  std::string error;
+  EXPECT_FALSE(measure_vbi_service_anchor(
+      reader, wst_service(), VBICalibrationConfig{}, calibration, error));
+  EXPECT_NE(error.find("time-base corrected"), std::string::npos) << error;
+}
+
 TEST(VBIOffsetCalibration, ReportsACaptureWithNoWholeFramesAsAnError) {
   const VBISourceFormat format = bt8x8_pal_format();
 

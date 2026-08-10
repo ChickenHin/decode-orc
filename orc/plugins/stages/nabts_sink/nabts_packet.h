@@ -137,6 +137,18 @@ struct NabtsPacket {
   /// |data_length| entries are meaningful.
   std::array<uint8_t, kNabtsMaxDataBlockBytes> data{};
 
+  /// How sure the detector was of each data-block byte, 0 (the detector could
+  /// as well have decided otherwise) to 255 (as clear-cut as an undamaged
+  /// signal makes it) — TeletextLineResult::byte_confidence quantised.
+  ///
+  /// A byte apiece rather than the float the slicer measures: what this feeds
+  /// is a weighting in a vote, not an arithmetic, and 256 levels are far more
+  /// than that needs. The threshold detector decides each bit on one sample and
+  /// has no path metric to compare, so it cannot express doubt at all; its
+  /// bytes are recorded at full confidence, which is the same reading the row
+  /// squasher gives an unmeasured copy.
+  std::array<uint8_t, kNabtsMaxDataBlockBytes> confidence{};
+
   /// Whether this packet contributes bytes to its group's data.
   bool carries_data() const { return valid && data_length > 0; }
 };
@@ -147,6 +159,11 @@ struct NabtsPacket {
  * @param packet Packet bytes in transmission coding, prefix first
  * @param length Bytes available; anything short of kNabtsPacketBytes yields an
  *               invalid packet rather than a partial read
+ *
+ * @param confidence Per-byte detector confidence for the same 33 bytes, or null
+ *                   where none was measured — which is read as full confidence,
+ *                   since a detector that cannot express doubt has not
+ * expressed any (see NabtsPacket::confidence)
  *
  * Hamming-decodes the prefix, derives the data-block extent from PS, and runs
  * the suffix check over the block. Never throws and never reads past |length|.
@@ -160,7 +177,9 @@ struct NabtsPacket {
  * ask for — bounded to one bit, and only when the longitudinal check has
  * already failed, so a clean packet of any group type is never touched.
  */
-NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length);
+NabtsPacket nabts_decode_packet(
+    const uint8_t* packet, size_t length,
+    const TeletextPacketConfidence* confidence = nullptr);
 
 }  // namespace orc
 

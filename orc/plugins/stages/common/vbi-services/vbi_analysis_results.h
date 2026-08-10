@@ -21,6 +21,7 @@
 // types cost while they sat in <orc/stage/analysis_sink_results.h>.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -136,6 +137,23 @@ struct TeletextRecoverySummary {
   /// True when the sub-page cap was reached and the least recently seen ones
   /// were dropped, so the catalogue is not the whole set the range carried.
   bool pages_truncated = false;
+
+  /// G0 character set the pages were read in — the alphabet, not the data.
+  ///
+  /// Reported because it is the one thing about a rendered page that cannot be
+  /// checked by looking at it: a Cyrillic service read as Latin produces
+  /// pronounceable nonsense rather than anything obviously wrong, and half the
+  /// Cyrillic capitals are drawn identically to their Latin counterparts, so
+  /// even a correctly read page can look untouched. Saying which set was used
+  /// turns "is this right?" into something the reader can answer.
+  TeletextG0Set character_set = TeletextG0Set::Latin;
+
+  /// The second G0 set the ESC control character switched into, where the run
+  /// had one (ETSI EN 300 706 §15.3). Reported for the same reason as the set
+  /// above and rather more urgently: a page holding two alphabets looks like a
+  /// page holding one that has gone wrong in places, so a reader who is not
+  /// told the run was reading two has no way to arrive at that reading.
+  std::optional<TeletextG0Designation> second_character_set;
 };
 
 /// Everything the teletext sink caches from one trigger run.
@@ -206,6 +224,9 @@ struct NabtsCataloguedRecord {
   bool alarm = false;
   bool update = false;
   bool support_record = false;
+  /// §5.2.7.9: the Data Channel's Support Record must be executed before this
+  /// record is — it defines macros, DRCS or colour maps this record invokes.
+  bool support_needed = false;
   bool index = false;
   bool more = false;
 
@@ -221,16 +242,40 @@ struct NabtsCataloguedRecord {
   /// Copies that arrived whole and undamaged, of @ref times_seen.
   uint64_t times_intact = 0;
 
+  /// §5.2.8.4: a header extension field naming this record's More Record
+  /// explicitly, which §7.3.4 has the receiver consult before the More Flag.
+  /// The address is in long form, same data channel. False when the record
+  /// carried no such extension.
+  bool has_more_address = false;
+  uint64_t more_address = 0;
+
+  /// The base of the More chain this record belongs to — the chain each
+  /// member names its successor of, by an explicit More address (§5.2.8.4) or
+  /// by the More Flag's algorithmic long-address-plus-one (§5.2.7.6, the last
+  /// two digits counted in decimal per §7.3.4). Equal to @ref address for a
+  /// record that starts a chain or stands alone. A continuation is rendered
+  /// over the accumulated display of the chain members before it, so its
+  /// @ref page is the screen a viewer stepping through the page would see.
+  uint64_t chain_base_address = 0;
+  /// Steps from the chain base: 0 for the base itself or a standalone record.
+  uint32_t chain_position = 0;
+
   /// Records in the linked series (§5.2.6); 1 for an unlinked record.
   uint32_t records_in_message = 0;
   /// The best copy has every link of its series and every packet of every
   /// group. A false here is why a presentation record may render short.
   bool complete = false;
 
-  /// Best copy of the record data (§5.3): NAPLPS presentation code for record
-  /// types 0, 1 and 3, application data for type 2. "Best" is the first
-  /// complete and undamaged copy seen, or the longest copy if none was.
+  /// Record data (§5.3): NAPLPS presentation code for record types 0, 1 and 3,
+  /// application data for type 2. Where an undamaged copy arrived it is that
+  /// copy; where none ever did, it is a vote across the damaged copies (see
+  /// @ref copies_voted).
   std::vector<uint8_t> data;
+
+  /// Damaged copies combined into @ref data, or zero when it is a single copy
+  /// that arrived undamaged. A vote of one is the copy itself, so one here
+  /// means the record was only ever seen damaged and only once.
+  uint32_t copies_voted = 0;
 
   /// Function descriptors, for an application record. Empty otherwise.
   std::vector<NabtsRecordFunction> functions;

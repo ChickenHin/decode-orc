@@ -127,40 +127,61 @@ The file-path parameters offered match the project's source type: a composite pr
 | **Stage id** | `vbi_source` |
 | **Stage name** | VBI Capture Source |
 | **Connections** | No inputs → 1 output |
-| **Purpose** | Ingest raw VBI teletext captures by synthesising the CVBS frames their lines were cut out of |
+| **Purpose** | Ingest raw VBI teletext captures by laying their lines onto CVBS frames at the timing point and amplitude the standard puts them at |
 
 **Use this stage when:**
 
-* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) or another raw teletext capture in the same family
+* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL or a SECAM source, a cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc`
 
 **What it does**
 
-A raw VBI capture holds nothing but the vertical-blanking line records: no sync, no burst, no picture, and no timing reference of any kind. This stage reads those records and manufactures the complete PAL CVBS frames around them — line sync with shaped edges, the porches, the vertical interval's equalising and broad pulses with the correct half-line pattern per field, and (by default) a coherent colour burst following the PAL four-frame progression. The result is an ordinary CVBS_U10_4FSC representation, so the existing teletext decoders see exactly what they see from a native decode.
+A raw VBI capture holds nothing but the vertical-blanking line records: no sync, no burst, no picture, and no timing reference of any kind. This stage reads those records and places them on otherwise blank CVBS frames at the data service's own time from 0H. The result is an ordinary CVBS_U10_4FSC representation, so the existing teletext decoders see exactly what they see from a native decode. Nothing else about the raster is manufactured: no stage that reads this output looks for sync, a vertical interval or a burst, so synthesising them would cost far more than placing the data does and be spent entirely on samples nobody reads.
 
-Frames are synthesised lazily, one at a time, as they are asked for: the full-frame expansion of a raw capture is 21.6× its size, so a four-hour bt8x8 capture would be 522 GB if it were materialised.
+Frames are built lazily, one at a time, as they are asked for: the full-frame expansion of a raw capture is 21.6× its size, so a four-hour bt8x8 capture would be 522 GB if it were materialised.
 
 Records are level-mapped from the card's relative levels into the CVBS amplitude domain (logic 0 from the quiet region ahead of the clock run-in, logic 1 from the larger of the run-in peaks and the framing code's leading ones), resampled onto the 4×fsc lattice with a band-limited filter, and placed at the data service's nominal time from 0H. The mapping is linear and nothing else is done to the samples — a deconvolving slicer downstream recovers data by matching the blurred waveform it is given.
 
-Because no capture format records the time from 0H to sample 0 of a record, and the bt8x8 family's documented figure is unreliable, the stage measures it: records sampled from across the whole capture are correlated against a generated clock-run-in and framing-code template and the median becomes a single global offset. A fit that fails its health checks stops the run rather than decoding hours of material at a wrong offset.
+Because no capture format records the time from 0H to sample 0 of a record, and the card families' documented figures are unreliable, the stage measures it: records sampled from across the whole capture are correlated against a generated clock-run-in and framing-code template and the median becomes a single global offset. A fit that fails its health checks stops the run rather than decoding hours of material at a wrong offset.
+
+A capture cropped from a decoded `.tbc` needs the opposite: its records start at 0H exactly, so its offset is known and never fitted, but the time at which the *broadcaster* transmitted the run-in is not — and the tabulated 525-line figures were measured on particular captures that others disagree with by up to a microsecond. The same survey is therefore run and read as the service anchor instead, so the written region is cut from where the run-in actually is rather than where the table predicts. Without it, a transmission a microsecond early has the head of every run-in replaced by blanking. Here a failed fit is not fatal — it leaves the tabulated figure standing, which is what earlier versions always used — and the log says which was used.
 
 The last four bytes of every bt8x8 frame are the driver's frame sequence number. Comparing it at the two ends of the capture says how many frames were dropped across the whole of it without reading the capture through, which is what the `drops` policy acts on.
 
-**Currently implemented:** the `bt8x8-pal` preset (625-line, 8×fsc, 8-bit, World System Teletext), raw or FLAC-wrapped. The remaining formats in the design's table (`bt8x8-ntsc`, `cx88-pal`, `saa7131-pal`, `tbc-pal`, `tbc-vbi-pal`, `tbc-vbi-ntsc`) and the NABTS data service are refused at configuration with a clear error rather than producing plausible but wrong output.
+**The capture formats**
+
+Everything about a capture — its geometry, its sampling rate, the data service it carries, where 0H is, what its logic levels mean, which field it starts on — is a property of the format rather than something you could be expected to know, so it all follows from the format you pick. Only the formats belonging to the project's television system are offered.
+
+| Format | Projects | What it is |
+|--------|----------|------------|
+| `bt8x8 card dump, 8-bit (WST)` | PAL | A 625-line capture-card dump: 2048 samples per record of which 2044 are real, unsigned 8-bit, at 8×fsc (35 468 950 Hz); 16 records per field carrying field lines 7–22, the whole of the WST line list |
+| `bt8x8 card dump, 8-bit (WST, SECAM source)` | PAL | The same container, byte for byte, from a SECAM source — see below |
+| `cx23885 card dump, 8-bit (WST)` and `(NABTS)` | NTSC | A 525-line capture-card dump from a Hauppauge HVR-1250 or sibling: 1440 samples per record with no padding, unsigned 8-bit, at 27 MHz; 12 records per field carrying field lines 10–21, the whole of the 525-line teletext list — see below |
+| `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21 |
+
+There is deliberately no "custom" entry. Every fact behind these formats had to be measured off real captures — none of it is recoverable from the file, and guessing at it produces output that looks right and is not.
+
+**cx23885 card dumps**
+
+The other card container, and nothing like the bt8x8 one. Its figures are the Linux `cx23885` driver's own: 27 MHz, 1440 samples per record, 12 records from field line 10. 1440 samples at 27 MHz is exactly the ITU-R BT.601 digital active line written at twice the 13,5 MHz rate, so what the card hands over is the active line and nothing else — no sync, no burst, no padding, and therefore nowhere for a frame counter to live. A cx23885 dump cannot report dropped frames.
+
+Where the window sits relative to 0H is neither in the file nor usefully in the driver, whose reported offset is a stub zero, so the configured figure is the window SMPTE 125M says the timing generator produces (122 samples at 13,5 MHz after 0H, 244 here) and the real value is measured from the clock run-in as on any card capture. A US network carried its magazine on two or three of the twelve lines, so this entry expects the run-in on a tenth of the sampled records rather than the quarter the PAL entries ask for; every other health check is the bt8x8 one expressed at this card's sampling rate.
+
+Choose the service — WST or NABTS — to match the broadcast. Getting it wrong on a card capture fails the calibration outright and stops the run with a diagnostic, because the offset is fitted against the service's own run-in template; that is intended, and makes the wrong choice loud rather than silent.
+
+**SECAM sources**
+
+Pick the SECAM entry when the capture came from a SECAM broadcast or tape. The container is identical — the driver's SECAM television norm shares the PAL one's sampling clock, its `vbipack` and its `vbistart` — and post-decode SECAM is a 625-line signal carrying the same World System Teletext, which is why it is placed on PAL frames.
+
+What differs is how much of the line list can carry teletext. A SECAM transmission with vertical colour identification puts the identification signal (the "green bottles") on field lines 8–15 and 321–328, so half the records of every stored field are spoken for before any teletext is inserted, and broadcasters using those idents typically left the remainder to test signals and a very few teletext lines. The SECAM entry therefore expects the clock run-in on far fewer of the sampled records before it trusts the calibration; every other health check is the same. Using the PAL entry on such a capture gets a perfectly good fit rejected on the line count alone.
 
 **Parameters**
 
 * `input_path` (file path) — Path to the raw capture. FLAC-wrapped captures are unwrapped transparently; the wrapper's declared sample rate is a placeholder and is never used for timing.
-* `format` (string) — Container preset: `bt8x8-pal` (default) or `custom`.
-* `teletext_system` (string) — `WST` (default) or `NABTS`. Only WST can currently be placed; the configured system is carried on the stage's output for downstream decoders.
-* `synthesise_burst` (bool) — Write a coherent colour burst on every line. Default on.
-* `capture_offset_mode` / `capture_offset_samples` — `auto` (default) fits the offset from the captured clock run-in; `manual` applies the configured figure unchanged.
-* `levels` (string) — `per-line` (default), `rolling`, or `fixed`; `fixed_logic0` / `fixed_logic1` supply the levels for `fixed`.
-* `first_field` (uint) — Television field the first stored field of each frame carries, 1 (default) or 2.
-* `drops` (string) — `preserve` (default) emits only the frames present; `pad` synthesises blank frames so output frame *n* stays aligned with source frame *n*.
-* `container_*` — Sample rate, record stride, valid samples, sample format, records per field, first/last data record, frame trailer bytes, and television system. Shown and used only when `format` is `custom`.
+* `format` (string) — Which of the capture formats above the file is.
+* `drops` (string) — `preserve` (default) emits only the frames present; `pad` synthesises blank frames so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter cannot report drops at all.
 
 **Notes**
 
-* Nothing is written to disk by this stage. To export the synthesised frames, connect a CVBS Sink.
-* The output declares `STANDARD_TBC_LOCKED` only when a coherent burst was synthesised **and** the frame timeline survived; a run with the burst off, or one whose counter gaps were not padded, reports `STANDARD_TBC_UNLOCKED`. This is a consequence of the run, never a setting.
+* Nothing is written to disk by this stage. To export the frames as a `.composite` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
+* A capture that ends short of a whole frame — on an odd field, as the `.tbc` crops usually do, or part-way through a line record, as a card dump stopped at the keyboard does — is loaded normally. The trailing bytes cannot make a frame, so they are not emitted, and the log says what was dropped. Only a file too short to hold a single whole frame is refused.
 * Which frame lines carry data follows from the television and teletext systems (WST occupies broadcast frame lines 7–22 and 320–335) and from which stored records the container declares as data records; it is not configured directly. A capture holding more data records than the standard defines is reported as an error rather than truncated.

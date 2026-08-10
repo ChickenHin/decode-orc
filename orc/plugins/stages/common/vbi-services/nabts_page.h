@@ -200,12 +200,34 @@ struct NabtsPrimitive {
 
   NabtsColourMode colour_mode = NabtsColourMode::kDirect;
   /// Drawing colour, resolved through the colour map where the mode says to.
+  /// In modes 1 and 2 the resolution is against the map as it stood at the
+  /// *end* of the record: X3.110 §5.3.2.5 makes a map write retroactive — "A
+  /// change in the color map will immediately be reflected in the color of all
+  /// pixels whose associated color map address points to the color map entry
+  /// that has been changed" — so the final map is the one that was on screen.
   NabtsColour colour;
-  /// Background colour; meaningful only in colour mode 2.
+  /// Background colour; meaningful only in colour mode 2. Resolved like
+  /// |colour|.
   NabtsColour background;
-  /// X3.110 §6.2.8.1: this primitive is part of a blink process, alternating
-  /// between |colour| and nominal black (or the background in colour mode 2).
+  /// Colour map address |colour| was resolved from, or -1 where the colour was
+  /// specified directly (mode 0). Carried so a consumer can tell a mapped
+  /// colour from a direct one; the resolution itself has already been done.
+  int16_t colour_map_address = -1;
+  /// Colour map address |background| was resolved from, or -1 outside mode 2.
+  int16_t background_map_address = -1;
+  /// X3.110 §5.3.2.7.2: this primitive's colour map entry carries a blink
+  /// process, so it alternates between |colour| and |blink_to|.
   bool blinking = false;
+  /// The blink-to colour, meaningful only where |blinking|. §5.3.2.7.3 lets the
+  /// BLINK command name any map entry, so this is not always a ground colour;
+  /// the C1 BLINK START of §6.2.8.1 fixes it at nominal black in colour modes 0
+  /// and 1 and at the background in mode 2.
+  NabtsColour blink_to;
+  /// Colour map address |blink_to| was resolved from, or -1 where the process
+  /// names no entry (the C1 form outside colour mode 2). Resolved against the
+  /// final map like |colour_map_address|, since a blink-to entry can be
+  /// rewritten after the process starts.
+  int16_t blink_to_map_address = -1;
 
   /// kIncrementalPoints only: the colour specifications of §5.3.3.6.3, in
   /// raster order within the active field. Values in colour mode 0 and colour

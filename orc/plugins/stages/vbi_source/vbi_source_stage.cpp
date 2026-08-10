@@ -192,7 +192,7 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
     VBISourceFormat format;
     VBILevelMapperConfig levels;
     VBIFrameSequenceConfig sequence;
-    double capture_offset_samples = 0.0;
+    VBIResolvedTiming timing;
     std::string input_path;
   };
 
@@ -298,9 +298,8 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
   bool initialise(std::string& error_message) {
     reader_ = std::make_unique<VBILineReader>(setup_.format, *byte_source_);
 
-    if (!make_vbi_frame_builder(setup_.format, setup_.levels,
-                                setup_.capture_offset_samples, builder_,
-                                error_message)) {
+    if (!make_vbi_frame_builder(setup_.format, setup_.levels, setup_.timing,
+                                builder_, error_message)) {
       return false;
     }
 
@@ -518,6 +517,81 @@ double calibrate_capture_offset(const VBILineReader& reader,
   return calibration.capture_offset_samples;
 }
 
+// Measure where a time-base corrected capture's run-in actually is, and return
+// the service anchor that describes it.  Returns the tabulated anchor unchanged
+// when the run-in cannot be found well enough to trust.
+//
+// Unlike a card capture's offset, a failed fit here is not fatal.  The two
+// failures are not comparable: a wrong global offset mis-places every line of
+// the capture, where a missing anchor measurement only leaves the tabulated
+// figure in place — which is what the stage used for these sources before it
+// measured anything, and is right for the captures the figure was taken from.
+// Refusing the file would turn an improvement into a regression.
+double measure_service_anchor_ns(const VBILineReader& reader,
+                                 const VBITeletextService& service,
+                                 const std::string& input_path,
+                                 ObservationContext& observation_context) {
+  VBICalibrationConfig calibration_config;
+  calibration_config.sample_frames = kCalibrationSampleFrames;
+
+  VBIOffsetCalibration calibration;
+  std::string error;
+  if (!measure_vbi_service_anchor(reader, service, calibration_config,
+                                  calibration, error)) {
+    ORC_LOG_WARN(
+        "{}: the clock run-in of '{}' could not be looked for ({}); the "
+        "service's tabulated anchor of {:.0f} ns is used as transmitted.",
+        kStageName, input_path, error, service.t_offset_ns);
+    return service.t_offset_ns;
+  }
+
+  if (!calibration.converged) {
+    ORC_LOG_WARN(
+        "{}: the clock run-in of '{}' was not found well enough to measure "
+        "where the transmission put it: {} {} The service's tabulated anchor "
+        "of {:.0f} ns is used instead, which is right for a transmission that "
+        "matches it and clips the head of the data line for one that does not.",
+        kStageName, input_path, join_messages(calibration.diagnostics),
+        calibration.summary, service.t_offset_ns);
+    return service.t_offset_ns;
+  }
+
+  const double measured_ns =
+      vbi_measured_anchor_ns(calibration, reader.format().sample_rate_hz);
+
+  observation_context.set(FieldID(0), kObservationNamespace, "calibration",
+                          calibration.summary);
+  observation_context.set(FieldID(0), kObservationNamespace, "service_anchor",
+                          measured_ns);
+  observation_context.set(FieldID(0), kObservationNamespace,
+                          "capture_offset_spread", calibration.spread_samples);
+  observation_context.set(FieldID(0), kObservationNamespace,
+                          "capture_offset_acceptance",
+                          calibration.acceptance_fraction);
+
+  ORC_LOG_INFO(
+      "{}: capture offset held at 0.00 samples, which is what a time-base "
+      "corrected record starts at. Run-in measured at {:.0f} ns from 0H "
+      "against the service's tabulated {:.0f} ns, a difference of {:.2f} "
+      "samples; the data window follows the measurement. Spread {:.2f} "
+      "samples ({}), locked on {} of {} records ({:.1f}%).",
+      kStageName, measured_ns, service.t_offset_ns,
+      (measured_ns - service.t_offset_ns) * 1e-9 *
+          reader.format().sample_rate_hz,
+      calibration.spread_samples,
+      calibration.spread_class == VBIOffsetSpreadClass::kTight
+          ? "time-base corrected"
+          : "mild jitter",
+      calibration.records_accepted, calibration.records_examined,
+      calibration.acceptance_fraction * 100.0);
+
+  for (const std::string& warning : calibration.warnings) {
+    ORC_LOG_WARN("{}: {}", kStageName, warning);
+  }
+
+  return measured_ns;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -635,27 +709,52 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
                         "configured container.");
   }
 
-  // A capture that ends on an odd field has passed validation, because such a
-  // file is perfectly ordinary; what is not ordinary is silently dropping a
-  // field, so it is said in as many words.
+  // A capture that ends short of a whole frame has passed validation, because
+  // such a file is perfectly ordinary; what is not ordinary is silently
+  // dropping data, so it is said in as many words — and what was dropped is
+  // worth telling apart, an odd field being how a capture ordinarily ends and
+  // a ragged tail meaning the writer stopped part-way through a record.
   if (reader.has_partial_trailing_frame()) {
-    ORC_LOG_INFO(
-        "{}: '{}' ends on an odd field. The trailing field is one short of a "
-        "frame and is not emitted; {} whole frames were found.",
-        kStageName, configuration.input_path, *stored_frames);
+    const uint64_t trailing = reader.trailing_bytes().value_or(0);
+    if (trailing == format.bytes_per_field()) {
+      ORC_LOG_INFO(
+          "{}: '{}' ends on an odd field. The trailing field is one short of a "
+          "frame and is not emitted; {} whole frames were found.",
+          kStageName, configuration.input_path, *stored_frames);
+    } else {
+      ORC_LOG_INFO(
+          "{}: '{}' ends part-way through a frame, {} bytes past the last "
+          "whole one, so the capture was cut short of a record boundary. Those "
+          "bytes are not emitted; {} whole frames were found. If the capture "
+          "was not interrupted, check the format: a wrong container geometry "
+          "leaves a ragged tail too.",
+          kStageName, configuration.input_path, trailing, *stored_frames);
+    }
   }
 
-  // --- Capture offset ---
-  double capture_offset_samples = format.capture_offset_samples;
+  // --- Capture offset, or the service anchor in its place ---
+  //
+  // The two families have one unknown each and they are different unknowns.  A
+  // card capture does not know when its window opened, so the offset is fitted
+  // and the service's tabulated anchor is taken as given.  A TBC-derived
+  // capture knows exactly when its window opened — at 0H — but not when the
+  // broadcaster transmitted, so the offset is taken as given and the anchor is
+  // measured.  Fitting both would be fitting one unknown twice.
+  VBIResolvedTiming timing;
+  timing.capture_offset_samples = format.capture_offset_samples;
   if (format.capture_offset_is_auto) {
-    capture_offset_samples = calibrate_capture_offset(
+    timing.capture_offset_samples = calibrate_capture_offset(
+        reader, service, configuration.input_path, observation_context);
+  } else if (format.family == VBISourceFamily::kTBCDerived) {
+    timing.service_anchor_ns = measure_service_anchor_ns(
         reader, service, configuration.input_path, observation_context);
   } else {
     ORC_LOG_INFO(
         "{}: capture offset held at the configured {:.2f} samples; no "
         "calibration was run",
-        kStageName, capture_offset_samples);
+        kStageName, timing.capture_offset_samples);
   }
+  const double capture_offset_samples = timing.capture_offset_samples;
 
   // The fitted figure replaces the descriptor's starting hint from here on, so
   // that everything derived from the record's own geometry — in particular the
@@ -673,7 +772,7 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   VBIFrameRepresentation::Setup setup;
   setup.format = format;
   setup.sequence.drops = parse_drop_policy(configuration.drops);
-  setup.capture_offset_samples = capture_offset_samples;
+  setup.timing = timing;
   setup.input_path = configuration.input_path;
 
   if (format.family == VBISourceFamily::kTBCDerived) {
@@ -699,6 +798,14 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
       {"capture_offset_samples", std::to_string(capture_offset_samples)},
       {kParamDrops, configuration.drops},
   };
+
+  // Recorded only when it was measured, so that its presence says the anchor
+  // came from the capture and its absence says the service table's figure was
+  // used as transmitted.
+  if (timing.service_anchor_ns.has_value()) {
+    provenance.parameters["service_anchor_ns"] =
+        std::to_string(*timing.service_anchor_ns);
+  }
 
   auto representation = VBIFrameRepresentation::create(
       std::move(byte_source), std::move(setup),
@@ -750,11 +857,21 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
     pd.description =
         "Path to the raw VBI capture. FLAC-wrapped captures (.vbi.flac) are "
         "unwrapped transparently; the wrapper's declared sample rate is "
-        "ignored.";
+        "ignored. Nothing about a capture is read from its name or its "
+        "extension — the container is entirely the Capture Format you pick — "
+        "so a capture whose extension is not one of the usual ones can still "
+        "be selected through the dialog's All Files filter.";
     pd.type = ParameterType::FILE_PATH;
     pd.constraints.required = false;
     pd.constraints.default_value = std::string("");
-    pd.file_extension_hint = ".flac";
+
+    // The extensions these captures actually arrive under. .vbi is a card
+    // dump, .flac the same thing losslessly wrapped, .u8 and .u16 the raw
+    // word-size spellings a decoder's VBI-only export uses, and .tbc the crop
+    // taken off a decoded capture.  It is only a filter on the browse dialog:
+    // the stage reads the container the format says it is, whatever the file
+    // is called, and the dialog keeps an All Files entry for anything else.
+    pd.file_extension_hint = ".vbi|.flac|.u8|.u16|.tbc";
     descriptors.push_back(pd);
   }
 
@@ -775,6 +892,25 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
         "estimated per line because they move with its gain control. The last "
         "four bytes of each frame are the driver's frame counter, which is "
         "what makes dropped frames detectable."
+        "\n\n"
+        "bt8x8 card dump, 8-bit (WST, SECAM source): the same container, byte "
+        "for byte, from a SECAM source. Pick it when the capture came from a "
+        "SECAM broadcast or tape: the vertical colour identification signal "
+        "occupies field lines 8-15, leaving only a few of the sixteen records "
+        "free for teletext, so the run-in is expected on far fewer of them "
+        "than a PAL capture and the PAL entry rejects the capture on that "
+        "count alone."
+        "\n\n"
+        "cx23885 card dump, 8-bit (WST) / (NABTS): a 525-line capture-card "
+        "dump from a Hauppauge HVR-1250 or one of its siblings. 1440 samples "
+        "per record with no padding, unsigned 8-bit, at 27 MHz; 12 records per "
+        "field carrying field lines 10-21, which is the whole 525-line "
+        "teletext list. The window the card hands over is the digital active "
+        "line, so it holds no sync and no burst, and there is no frame counter "
+        "and so no way to see a dropped frame. The time from 0H is measured "
+        "from the clock run-in when the capture is opened and the logic levels "
+        "are estimated per line, as on any card capture. Pick the variant "
+        "matching the service the broadcast carried."
         "\n\n"
         ".tbc VBI crop, 16-bit (WST) / (NABTS): the first 16 line records of "
         "each field of a decoded 525-line luma .tbc. 910 samples per record "

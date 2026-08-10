@@ -73,6 +73,10 @@ if(NOT EZPWD_INCLUDE_DIR)
     endif()
 endif()
 
+# UTF-8 application manifest for the Windows executables (orc_apply_utf8_manifest);
+# no-op elsewhere.
+include(cmake/WindowsUtf8Manifest.cmake)
+
 # clang-format check (optional; skipped silently when clang-format is absent)
 include(cmake/ClangFormat.cmake)
 

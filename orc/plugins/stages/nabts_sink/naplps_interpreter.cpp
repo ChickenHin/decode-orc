@@ -53,10 +53,50 @@ NaplpsInterpreter::NaplpsInterpreter() = default;
 // The main loop
 // ---------------------------------------------------------------------------
 
-NabtsPageSnapshot NaplpsInterpreter::run(const std::vector<uint8_t>& record) {
-  snapshot_ = NabtsPageSnapshot{};
+void NaplpsInterpreter::reset_decoder() {
+  // CEA-516 §8.5: "A general reset is equivalent to a NSR, followed by a RESET
+  // command with two operands consisting of all 1s" — so everything, storage
+  // included, goes back to Table II-3's defaults.
   state_.reset_all();
   env_.reset();
+}
+
+void NaplpsInterpreter::apply_caption_state() {
+  // CEA-516 §5.2.7.3: the caption process "first executes a Non-Selective
+  // Reset (NSR)" — which leaves macros, DRCS, masks and map alone — and then
+  // establishes the stated state.
+  apply_nsr_reset();
+  state_.cursor = NabtsPoint{0.0, 0.0};
+  state_.drawing_point = NabtsPoint{0.0, 0.0};
+  // "color map entry 0/16 (0000) set to transparent, ... 1/16 (0001) set to
+  // black, ... 7/16 (0111) set to white".
+  NabtsColour transparent;
+  transparent.transparent = true;
+  state_.colour.write_map_entry(0, transparent);
+  state_.colour.write_map_entry(1, kNabtsNominalBlack);
+  state_.colour.write_map_entry(7, kNabtsNominalWhite);
+  // "color mode set to 2, drawing color set to entry 7/16 (0111) (white),
+  // background color set to entry 1/16 (0001) (black)".
+  state_.colour.select_mapped_background_mode(7, 1);
+}
+
+NabtsPageSnapshot NaplpsInterpreter::run(const std::vector<uint8_t>& record,
+                                         bool keep_display) {
+  // Only the per-record transients start fresh. The presentation state — the
+  // attributes, macros, DRCS, texture masks and colour map — carries over from
+  // whatever ran before, because that is what a receiver does: CEA-516
+  // §8.7.2.3.1's per-page NSR is recommended precisely because nothing resets
+  // between records by itself.
+  //
+  // A continuation additionally starts from the display the previous record
+  // left: a More Record repaints only what changes, and running it over a
+  // blank canvas leaves holes where the page's standing artwork should be.
+  std::vector<NabtsPrimitive> carried;
+  if (keep_display) {
+    carried = std::move(snapshot_.primitives);
+  }
+  snapshot_ = NabtsPageSnapshot{};
+  snapshot_.primitives = std::move(carried);
   frames_.clear();
   collecting_ = Collecting::kNothing;
   definition_body_.clear();
@@ -64,6 +104,9 @@ NabtsPageSnapshot NaplpsInterpreter::run(const std::vector<uint8_t>& record) {
   mask_target_ = nullptr;
   have_last_drcs_code_ = false;
   have_last_graphic_ = false;
+  defining_frame_index_ = 0;
+  definition_had_code_ = false;
+  wrap_suppress_ = WrapSuppress::kNone;
 
   record_.clear();
   record_.reserve(record.size());
@@ -75,12 +118,42 @@ NabtsPageSnapshot NaplpsInterpreter::run(const std::vector<uint8_t>& record) {
   while (!frames_.empty()) {
     if (!step()) {
       frames_.pop_back();
+      // A definition opened inside a macro expansion keeps collecting from the
+      // frame below once the expansion runs out.
+      if (!frames_.empty() && defining_frame_index_ >= frames_.size()) {
+        defining_frame_index_ = frames_.size() - 1;
+      }
     }
   }
 
   // A definition left open by a truncated record is closed rather than dropped:
   // the bytes that did arrive defined something.
   end_definition();
+
+  // §5.3.2.5: a colour map write is retroactive — "A change in the color map
+  // will immediately be reflected in the color of all pixels whose associated
+  // color map address points to the color map entry that has been changed". A
+  // real display stores addresses per pixel and resolves them through the map
+  // at display time, so what is on screen at the end is everything resolved
+  // through the *final* map. The display list stores each mapped primitive's
+  // address and resolves it here.
+  const NabtsColour* final_map = state_.colour.map();
+  for (NabtsPrimitive& primitive : snapshot_.primitives) {
+    if (primitive.colour_map_address >= 0) {
+      primitive.colour =
+          final_map[primitive.colour_map_address % kNabtsColourMapEntries];
+    }
+    if (primitive.background_map_address >= 0) {
+      primitive.background =
+          final_map[primitive.background_map_address % kNabtsColourMapEntries];
+    }
+    // A blink-to entry can be rewritten after the process starts, and the
+    // process reads the map rather than a copy of the colour it held.
+    if (primitive.blink_to_map_address >= 0) {
+      primitive.blink_to =
+          final_map[primitive.blink_to_map_address % kNabtsColourMapEntries];
+    }
+  }
 
   snapshot_.diagnostics.bytes_read = record_.size();
   snapshot_.diagnostics.storage_used = state_.storage_used();
@@ -99,32 +172,73 @@ bool NaplpsInterpreter::step() {
   }
   const uint8_t byte = frame.bytes[frame.position++];
 
-  // A macro or DRCS definition stores its bytes rather than executing them
-  // (§6.2.2.1), so the only thing that matters while collecting is whether this
-  // byte ends the definition. DEFP MACRO is the exception: §6.2.2.2 has it
+  // Only the frame the definition was opened in is scanned for terminators and
+  // stored from. Bytes from deeper frames are a macro expanding inside the
+  // definition, and §6.2.2.1 stores "that reference only, not the expansion".
+  const bool from_defining_frame = frames_.size() - 1 == defining_frame_index_;
+
+  // A macro definition stores its bytes rather than executing them (§6.2.2.1),
+  // so the only thing that matters while collecting is whether this byte ends
+  // the definition. DEFP MACRO is the exception: §6.2.2.2 has it
   // "simultaneously executed and stored".
   if (collecting_ == Collecting::kMacro ||
       collecting_ == Collecting::kMacroExecuting) {
+    if (from_defining_frame) {
+      if (byte == kNaplpsEsc) {
+        const Frame& current = frames_.back();
+        const NaplpsEscape escape =
+            naplps_parse_escape(current.bytes + current.position,
+                                current.length - current.position);
+        if (escape.kind == NaplpsEscapeKind::kControl &&
+            naplps_terminates_definition(escape.c1)) {
+          // §6.2.2.1: "Neither the terminating control character nor its
+          // preceding ESC character in a 7-bit environment is stored as part
+          // of the macro."
+          frames_.back().position += escape.length - 1;
+          end_definition();
+          execute_c1(escape.c1);
+          return true;
+        }
+      }
+      if (collecting_ == Collecting::kMacro) {
+        definition_body_.push_back(byte);
+        return true;
+      }
+      // DEFP MACRO: execute the byte, then store it together with whatever
+      // lookahead its execution consumed from this frame — escape sequences,
+      // PDI operands, cursor addresses. Storing the lead byte alone left the
+      // body a different program from the one that just ran.
+      const size_t start = frame.position - 1;
+      execute_byte(byte);
+      const Frame& defining = frames_[defining_frame_index_];
+      definition_body_.insert(definition_body_.end(), defining.bytes + start,
+                              defining.bytes + defining.position);
+      return true;
+    }
+    // A macro expanding inside a DEFP MACRO body: executed, not stored.
+    execute_byte(byte);
+    return true;
+  }
+
+  // §6.2.3: a DRCS definition terminated "with no intervening presentation
+  // layer code" frees the character, so note whether this byte is code within
+  // the definition or the sequence that terminates it. The transparent
+  // controls have "no effect on the presentation layer" (§6.1.4-6.1.6.1) and
+  // count for nothing either way.
+  if ((collecting_ == Collecting::kDrcs ||
+       collecting_ == Collecting::kTextureMask) &&
+      from_defining_frame && !naplps_is_transparent_control(byte)) {
+    bool terminator = false;
     if (byte == kNaplpsEsc) {
       const Frame& current = frames_.back();
       const NaplpsEscape escape = naplps_parse_escape(
           current.bytes + current.position, current.length - current.position);
-      if (escape.kind == NaplpsEscapeKind::kControl &&
-          naplps_terminates_definition(escape.c1)) {
-        // §6.2.2.1: "Neither the terminating control character nor its
-        // preceding ESC character in a 7-bit environment is stored as part of
-        // the macro."
-        frames_.back().position += escape.length - 1;
-        end_definition();
-        execute_c1(escape.c1);
-        return true;
-      }
+      terminator = escape.kind == NaplpsEscapeKind::kControl &&
+                   naplps_terminates_definition(escape.c1);
     }
-    definition_body_.push_back(byte);
-    if (collecting_ == Collecting::kMacroExecuting) {
-      execute_byte(byte);
+    if (!terminator) {
+      definition_had_code_ = true;
     }
-    return true;
   }
 
   execute_byte(byte);
@@ -177,20 +291,43 @@ void NaplpsInterpreter::execute_c0(uint8_t byte) {
       move_cursor_by(CursorMove::kForward);
       return;
     case kNaplpsApd:
+      // §5.3.2.3.6: the explicit APR APD (or APD APR) after an automatic one
+      // is a null operation — the wrap already did its work.
+      if (wrap_suppress_ == WrapSuppress::kArmed) {
+        wrap_suppress_ = WrapSuppress::kSawApd;
+        return;
+      }
+      if (wrap_suppress_ == WrapSuppress::kSawApr) {
+        wrap_suppress_ = WrapSuppress::kNone;
+        return;
+      }
       move_cursor_by(CursorMove::kDown);
       return;
     case kNaplpsApu:
       move_cursor_by(CursorMove::kUp);
       return;
     case kNaplpsApr:
+      if (wrap_suppress_ == WrapSuppress::kArmed) {
+        wrap_suppress_ = WrapSuppress::kSawApr;
+        return;
+      }
+      if (wrap_suppress_ == WrapSuppress::kSawApd) {
+        wrap_suppress_ = WrapSuppress::kNone;
+        return;
+      }
       // §6.1.2.7: to the first character position along the character path.
       move_cursor(NabtsPoint{state_.field_origin.x, state_.cursor.y});
       return;
     case kNaplpsCs:
-      // §6.1.2.6: clears the display area and homes the cursor. A display list
-      // has no canvas to clear, so what is recorded is that everything before
-      // this was wiped — the primitives are dropped.
-      snapshot_.primitives.clear();
+      // §6.1.2.6: clears the display area and homes the cursor. "In color
+      // modes 0 and 1, it clears the display area to nominal black. In color
+      // mode 2, it clears the display area to the background color."
+      if (state_.colour.mode() == NabtsColourMode::kMappedWithBackground) {
+        clear_display(state_.colour.background_colour(),
+                      static_cast<int>(state_.colour.map_background_address()));
+      } else {
+        clear_display(kNabtsNominalBlack, -1);
+      }
       move_cursor(state_.home_position());
       return;
     case kNaplpsAph:
@@ -198,14 +335,7 @@ void NaplpsInterpreter::execute_c0(uint8_t byte) {
       return;
 
     case kNaplpsNsr: {
-      // §6.1.6.5: a non-selective reset of everything but the colour map and
-      // the programmable masks.
-      env_.reset();
-      state_.domain.reset();
-      state_.text.reset();
-      state_.texture.reset();
-      state_.colour.select_direct_mode();
-      state_.blinking = false;
+      apply_nsr_reset();
 
       // §6.1.6.5(6): NSR "can be used as an alternative means to position the
       // cursor". If the two bytes that follow are both from columns 4 to 7 they
@@ -335,6 +465,57 @@ void NaplpsInterpreter::execute_escape() {
   }
 }
 
+void NaplpsInterpreter::apply_nsr_reset() {
+  // §6.1.6.5, items (1) to (5). What is *not* here is the point: the colour
+  // map ("The color map is not changed"), the programmable masks ("The
+  // programmable masks are not cleared"), macros and DRCS — only the selective
+  // RESET of §5.3.2.9 clears those, which is what lets a Support Record's
+  // definitions survive the NSR every page is recommended to open with
+  // (CEA-516 §8.7.2.3.1). Blink processes are likewise not in the list, so
+  // they are left running.
+  env_.reset();
+  state_.domain.reset();
+  // (3) covers "the text parameters (from the TEXT opcode, from the C1 set
+  // and the active field)" — §5.3.2.9.3's wording, which includes the active
+  // field itself.
+  state_.text.reset();
+  state_.field_origin = NabtsPoint{0.0, 0.0};
+  state_.field_size = NabtsSize{1.0, 1.0};
+  state_.texture.reset();
+  // (5): "The color mode is set to color mode 0 and the drawing color is set
+  // to nominal white."
+  state_.colour.reset_drawing_to_white();
+}
+
+void NaplpsInterpreter::clear_display(const NabtsColour& colour,
+                                      int map_address) {
+  snapshot_.primitives.clear();
+
+  // Nominal black with no map address behind it is what a renderer shows for
+  // an empty display list anyway.
+  const bool black = colour.red == 0 && colour.green == 0 && colour.blue == 0 &&
+                     !colour.transparent;
+  if (black && map_address < 0) {
+    return;
+  }
+
+  // The clear is recorded as a full-display-area filled rectangle, drawn
+  // plainly whatever texture attributes happen to be in force — a clear is a
+  // flood, not a patterned fill.
+  NabtsPrimitive primitive;
+  primitive.kind = NabtsPrimitiveKind::kRectangle;
+  primitive.filled = true;
+  primitive.origin = NabtsPoint{0.0, 0.0};
+  primitive.size = NabtsSize{1.0, kNabtsDisplayAreaHeight};
+  primitive.points.push_back(NabtsPoint{0.0, 0.0});
+  primitive.points.push_back(NabtsPoint{1.0, kNabtsDisplayAreaHeight});
+  primitive.colour_mode = state_.colour.mode();
+  primitive.colour = colour;
+  primitive.colour_map_address =
+      map_address < 0 ? int16_t{-1} : static_cast<int16_t>(map_address);
+  snapshot_.primitives.push_back(std::move(primitive));
+}
+
 void NaplpsInterpreter::execute_c1(NaplpsC1 control) {
   switch (control) {
     // §6.2.2, §6.2.3, §6.2.4: the definition openers. Each takes the code of
@@ -344,12 +525,26 @@ void NaplpsInterpreter::execute_c1(NaplpsC1 control) {
     case NaplpsC1::kDeftMacro:
     case NaplpsC1::kDefDrcs:
     case NaplpsC1::kDefTexture: {
+      const Collecting terminated = collecting_;
       end_definition();
-      Frame& frame = frames_.back();
 
       // §6.2.3's one exception: a DEF DRCS that terminated a previous DEF DRCS
-      // is not followed by a code, and defines the next character of the G-set
-      // in circular sequence. It is handled in begin_definition().
+      // is *not* followed by a code — "the next character of the DRCS G-set
+      // (ie, in the circular sequence 2/0, 2/1, ... 7/15, 2/0 ...) is defined
+      // by the presentation layer code immediately following this new DEF DRCS
+      // command. (This is the only time DEF DRCS is not followed by the DRCS
+      // character to be defined.)" Consuming a code byte here would both
+      // define the wrong character and eat the first byte of its definition.
+      if (control == NaplpsC1::kDefDrcs && terminated == Collecting::kDrcs &&
+          have_last_drcs_code_) {
+        const uint8_t next = last_drcs_code_ >= kNaplpsLastCode
+                                 ? kNaplpsFirstCode
+                                 : static_cast<uint8_t>(last_drcs_code_ + 1);
+        begin_definition(Collecting::kDrcs, next);
+        return;
+      }
+
+      Frame& frame = frames_.back();
       uint8_t code = 0;
       if (frame.position < frame.length) {
         code = frame.bytes[frame.position];
@@ -462,12 +657,24 @@ void NaplpsInterpreter::execute_c1(NaplpsC1 control) {
       state_.text.character_field = NaplpsTextState::double_size_field();
       return;
 
-    // §6.2.8.1-2.
+    // §6.2.8.1: "creates a blink process in which: the blink-from color is the
+    // drawing color; the blink-to color is nominal black in color modes 0 and 1
+    // or the background color in color mode 2; the on and off intervals are
+    // implementation-dependent; and the phase delay is 0."
     case NaplpsC1::kBlinkStart:
-      state_.blinking = true;
+      if (state_.colour.mode() == NabtsColourMode::kMappedWithBackground) {
+        // The background has a map address of its own, so the process follows
+        // a later write to it the way the drawing colour does.
+        state_.start_blinking(state_.colour.map_background_address());
+      } else {
+        state_.start_blinking_to_colour(kNabtsNominalBlack);
+      }
       return;
+    // §6.2.8.2: "turns off any currently active blink processes utilizing the
+    // drawing color as the blink-from color" — the drawing colour's, not every
+    // process running.
     case NaplpsC1::kBlinkStop:
-      state_.blinking = false;
+      state_.stop_blinking();
       return;
 
     // §6.2.7.11-16.
@@ -740,13 +947,19 @@ void NaplpsInterpreter::pdi_reset(NaplpsOperandReader& reader) {
   }
 
   // Byte 1, b6 b5 b4: Table 15's screen and border clear. Only the display-area
-  // cases mean anything to a display list, and what they mean is that
-  // everything drawn so far was wiped.
+  // cases mean anything to a display list; the border has nowhere to appear.
+  // Actions 1 and 7 clear the display to nominal black, 2, 5 and 6 to the
+  // current drawing colour — recorded so a page that opens on a coloured
+  // ground shows it.
   const int screen_action = (bit(byte1, 6) ? 4 : 0) | (bit(byte1, 5) ? 2 : 0) |
                             (bit(byte1, 4) ? 1 : 0);
-  if (screen_action == 1 || screen_action == 2 || screen_action == 5 ||
-      screen_action == 6 || screen_action == 7) {
-    snapshot_.primitives.clear();
+  if (screen_action == 1 || screen_action == 7) {
+    clear_display(kNabtsNominalBlack, -1);
+  } else if (screen_action == 2 || screen_action == 5 || screen_action == 6) {
+    const int address = state_.colour.mode() == NabtsColourMode::kDirect
+                            ? -1
+                            : static_cast<int>(state_.colour.drawing_address());
+    clear_display(state_.colour.drawing_colour(), address);
   }
 
   // Byte 2.
@@ -758,7 +971,9 @@ void NaplpsInterpreter::pdi_reset(NaplpsOperandReader& reader) {
     move_cursor(state_.home_position());
   }
   if (bit(byte2, 2)) {
-    state_.blinking = false;
+    // §5.3.2.9.3: "all blink processes are terminated" — every one, not just
+    // the drawing colour's.
+    state_.blink_from.fill(NaplpsState::BlinkProcess{});
   }
   // b3 protects unprotected fields, which Table D1 item 12(1) makes a no-op for
   // the teletext service.
@@ -860,21 +1075,34 @@ void NaplpsInterpreter::pdi_set_colour(NaplpsOperandReader& reader,
   }
 
   // Each colour word sets a colour; §5.3.2.5.1 has additional data repeat the
-  // opcode with the map address incremented first. The first word is whatever
-  // bytes are there — a short operand is legal and zero-fills — so only the
-  // repeats need a whole word behind them.
+  // opcode "with the map address incremented prior to the execution of the new
+  // opcode", which is how a service loads a whole palette in one command. "This
+  // incrementing does not affect the color map address associated with the
+  // drawing color", so the walk is held locally rather than in the state, and
+  // "subsequent operand data are ignored when the physical limit (all ones) of
+  // the implemented color map is reached".
+  (void)operand_bytes;
   bool first = true;
-  while (first ? !reader.empty() : reader.remaining() >= operand_bytes) {
+  uint32_t repeat_address = 0;
+  while (!reader.empty()) {
     const NabtsColour colour = reader.read_colour();
-    if (!first && state_.colour.mode() != NabtsColourMode::kDirect) {
-      // The repeat writes the next entry, not the same one again. Modelled by
-      // selecting the incremented address before the write; §5.3.2.5.1 is
-      // explicit that "This incrementing does not affect the color map address
-      // associated with the drawing color", so it is put back afterwards.
+    if (first) {
+      state_.colour.set_colour(colour);
+      repeat_address = state_.colour.drawing_address();
+      first = false;
+      continue;
+    }
+    if (state_.colour.mode() == NabtsColourMode::kDirect) {
+      // In mode 0 a repeat is simply SET COLOR again: the last word is the
+      // drawing colour, each finding or claiming its map entry as §5.3.2.5.1
+      // has it.
+      state_.colour.set_colour(colour);
+      continue;
+    }
+    if (!NaplpsColourState::increment_map_address(repeat_address)) {
       break;
     }
-    state_.colour.set_colour(colour);
-    first = false;
+    state_.colour.write_map_entry(repeat_address, colour);
   }
 }
 
@@ -906,25 +1134,45 @@ void NaplpsInterpreter::pdi_blink(NaplpsOperandReader& reader,
   // processes utilizing the current drawing color as the blink-from color will
   // be terminated."
   if (reader.empty()) {
-    state_.blinking = false;
+    state_.stop_blinking();
     return;
   }
-  (void)operand_bytes;
-  // §5.3.2.7.3: a blink-to map address, then ON, OFF and start-delay intervals
-  // in tenths of a second. A display list carries no time, so the intervals are
-  // read past and what is recorded is that a blink process is running — which
-  // is what a still rendering of the page can show.
-  (void)reader.read_single_value();
-  const uint8_t on_interval = reader.empty() ? 0 : reader.read_fixed_byte();
-  if (!reader.empty()) {
-    (void)reader.read_fixed_byte();  // OFF
+
+  // §5.3.2.7.2: the blink-from colour is the one in use for drawing, and the
+  // process runs on that colour map entry. §5.3.2.7.5 then allows the command
+  // to be implicitly repeated for as long as operands keep arriving, "with the
+  // address of the blink-from color being automatically incremented (as in
+  // 5.3.2.5.1) ... The drawing color is not affected by this incrementing."
+  uint32_t blink_from = state_.colour.drawing_address();
+  while (true) {
+    // §5.3.2.7.3: a blink-to map address, then ON, OFF and start-delay
+    // intervals in tenths of a second. A display list carries no time, so the
+    // intervals decide only whether a process runs at all; the blink-to address
+    // is kept, because it is what the entry alternates to.
+    const uint32_t to_address = NaplpsColourState::address_from_operand(
+        reader.read_single_value(), operand_bytes);
+    const uint8_t on_interval = reader.empty() ? 0 : reader.read_fixed_byte();
+    const uint8_t off_interval = reader.empty() ? 0 : reader.read_fixed_byte();
+    if (!reader.empty()) {
+      (void)reader.read_fixed_byte();  // start delay
+    }
+    // "An ON or OFF interval of 0 is taken to mean termination of any active
+    // blink process on the blink-from/blink-to color pair."
+    NaplpsState::BlinkProcess& process =
+        state_.blink_from[blink_from % kNabtsColourMapEntries];
+    if (on_interval != 0 && off_interval != 0) {
+      process.active = true;
+      process.to_address =
+          static_cast<int16_t>(to_address % kNabtsColourMapEntries);
+    } else {
+      process = NaplpsState::BlinkProcess{};
+    }
+
+    if (reader.empty() ||
+        !NaplpsColourState::increment_map_address(blink_from)) {
+      return;
+    }
   }
-  if (!reader.empty()) {
-    (void)reader.read_fixed_byte();  // start delay
-  }
-  // "An ON or OFF interval of 0 is taken to mean termination of any active
-  // blink process on the blink-from/blink-to color pair."
-  state_.blinking = on_interval != 0;
 }
 
 void NaplpsInterpreter::pdi_wait(NaplpsOperandReader& reader) {
@@ -1286,7 +1534,29 @@ NabtsPrimitive NaplpsInterpreter::make_primitive(
   primitive.colour_mode = state_.colour.mode();
   primitive.colour = state_.colour.drawing_colour();
   primitive.background = state_.colour.background_colour();
-  primitive.blinking = state_.blinking;
+  // In the mapped modes the pixel a receiver stores is the address, not the
+  // value — the address is kept so run() can resolve it through the map as it
+  // finally stood (§5.3.2.5's retroactivity).
+  if (state_.colour.mode() != NabtsColourMode::kDirect) {
+    primitive.colour_map_address =
+        static_cast<int16_t>(state_.colour.drawing_address());
+  }
+  if (state_.colour.mode() == NabtsColourMode::kMappedWithBackground) {
+    primitive.background_map_address =
+        static_cast<int16_t>(state_.colour.map_background_address());
+  }
+  // A blink process belongs to the colour map entry, so what decides this is
+  // the colour the primitive is being drawn in — not whether a BLINK command
+  // has been seen at some point earlier in the record.
+  const NaplpsState::BlinkProcess& blink = state_.blink_process();
+  primitive.blinking = blink.active;
+  if (blink.active) {
+    primitive.blink_to_map_address = blink.to_address;
+    primitive.blink_to =
+        blink.to_address >= 0
+            ? state_.colour.map()[blink.to_address % kNabtsColourMapEntries]
+            : blink.to_colour;
+  }
   return primitive;
 }
 
@@ -1308,10 +1578,17 @@ void NaplpsInterpreter::move_drawing_point(const NabtsPoint& point) {
   // the cursor with it.
   if (state_.text.move_attribute == 0 || state_.text.move_attribute == 2) {
     state_.cursor = point;
+    // The character field origin moved, so §5.3.2.3.6's suppression window
+    // closes.
+    wrap_suppress_ = WrapSuppress::kNone;
   }
 }
 
 void NaplpsInterpreter::move_cursor(const NabtsPoint& point) {
+  // §5.3.2.3.6: any movement of the character field origin ends the window in
+  // which an explicit APR APD would be suppressed. The automatic wrap itself
+  // also passes through here; move_cursor_by() re-arms after it.
+  wrap_suppress_ = WrapSuppress::kNone;
   state_.cursor = resolve(point);
   // Move together (0) or cursor leads (1).
   if (state_.text.move_attribute == 0 || state_.text.move_attribute == 1) {
@@ -1398,16 +1675,31 @@ void NaplpsInterpreter::move_cursor_by(CursorMove move) {
   // next row. Only the forward move wraps here — §6.1.2.1 gives APB the mirror
   // of it, and §6.1.2.3 makes APD's own overflow a scroll-mode question that
   // Table D1 leaves out of the teletext model.
+  //
+  // The comparison needs a tolerance: a field ending exactly at the edge must
+  // not wrap, and a character width like the default 1/40 is not an exact
+  // binary fraction, so a line of them lands within an ulp or two of the edge
+  // rather than on it. Without the slack a full line wraps one character
+  // early.
+  constexpr double kFieldEdgeTolerance = 1e-9;
   const double field_right =
       state_.field_origin.x + std::fabs(state_.field_size.dx);
-  if (move == CursorMove::kForward &&
-      state_.text.path == NabtsCharPath::kRight &&
-      next.x + std::fabs(state_.text.character_field.dx) > field_right) {
+  const bool wrapped = move == CursorMove::kForward &&
+                       state_.text.path == NabtsCharPath::kRight &&
+                       next.x + std::fabs(state_.text.character_field.dx) >
+                           field_right + kFieldEdgeTolerance;
+  if (wrapped) {
     next.x = state_.field_origin.x;
     next.y -= row_distance;
   }
 
   move_cursor(next);
+  if (wrapped) {
+    // §5.3.2.3.6: the explicit APR APD that a service sends after writing a
+    // line flush to its field must now execute as a null operation. Armed
+    // after move_cursor(), which clears it.
+    wrap_suppress_ = WrapSuppress::kArmed;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1420,6 +1712,8 @@ void NaplpsInterpreter::begin_definition(Collecting what, uint8_t code) {
   definition_code_ = code;
   drcs_target_ = nullptr;
   mask_target_ = nullptr;
+  defining_frame_index_ = frames_.empty() ? 0 : frames_.size() - 1;
+  definition_had_code_ = false;
 
   if (what == Collecting::kDrcs) {
     uint16_t width = 0;
@@ -1427,10 +1721,14 @@ void NaplpsInterpreter::begin_definition(Collecting what, uint8_t code) {
     state_.drcs_buffer_size(width, height);
     drcs_target_ = state_.begin_drcs(code, width, height);
     if (drcs_target_ == nullptr) {
+      // Over the storage budget. The definition is still collected — its
+      // drawing redirected into nothing — because falling back to normal
+      // execution would paint the character's defining code onto the display,
+      // which no receiver refusing the download would show.
       ++snapshot_.diagnostics.storage_refusals;
-      collecting_ = Collecting::kNothing;
-      return;
     }
+    // The circular sequence of §6.2.3 continues from here even when the
+    // character itself was refused.
     last_drcs_code_ = code;
     have_last_drcs_code_ = true;
     return;
@@ -1466,6 +1764,13 @@ void NaplpsInterpreter::end_definition() {
       }
       break;
     case Collecting::kDrcs:
+      // §6.2.3: "If a DRCS definition is immediately terminated with no
+      // intervening presentation layer code, the buffer space allocated to
+      // that character is freed."
+      if (!definition_had_code_ && drcs_target_ != nullptr) {
+        state_.free_drcs(definition_code_);
+      }
+      [[fallthrough]];
     case Collecting::kTextureMask:
       // §6.2.3: "After the downloading sequence has been terminated, the
       // receiving device reverts to the normal procedure of mapping the unit
@@ -1578,6 +1883,14 @@ void NaplpsInterpreter::draw_into_definition(const NabtsPrimitive& primitive) {
 }
 
 void NaplpsInterpreter::invoke_macro(uint8_t code) {
+  // §6.2.2.2: "A macro is considered to be undefined during definition until
+  // the definition is terminated. Therefore, if a DEFP MACRO command contains
+  // a reference to itself, or if it references another macro which references
+  // the one being defined, the reference to the macro being defined is
+  // executed as a null operation."
+  if (collecting_ == Collecting::kMacroExecuting && code == definition_code_) {
+    return;
+  }
   const NaplpsMacro* entry = state_.macro(code);
   if (entry == nullptr || !entry->defined) {
     ++snapshot_.diagnostics.unresolved_macros;

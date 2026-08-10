@@ -13,8 +13,11 @@
 #include <QCheckBox>
 #include <QImage>
 #include <QLineEdit>
+#include <QRect>
 #include <QTableWidget>
+#include <QToolButton>
 
+#include "catalogue_flash_clock.h"
 #include "cataloguecellgridwidget.h"
 #include "cataloguedialog.h"
 #include "cataloguedisplaylistwidget.h"
@@ -185,12 +188,32 @@ int gridScale(const orc::CatalogueCellGrid& grid) {
   return scale;
 }
 
-QImage renderGrid(const orc::CatalogueCellGrid& grid) {
+QImage renderGrid(const orc::CatalogueCellGrid& grid, bool flash_lit = true) {
   CatalogueCellGridWidget widget;
   widget.setGrid(grid);
+  // The phase is set rather than waited for: a wall-clock cycle would make
+  // this test slow and flaky, and the widget paints whichever phase it holds.
+  widget.setFlashLit(flash_lit);
   const int scale = gridScale(grid);
   return renderWidget(widget, grid.columns * grid.cell_aspect_width * scale,
                       grid.rows * grid.cell_aspect_height * scale);
+}
+
+/// Whether anything at all was drawn inside the character rectangle at
+/// (row, column), against the black screen the grid sits on.
+bool cellHasInk(const QImage& image, const orc::CatalogueCellGrid& grid,
+                int row, int column) {
+  const int scale = gridScale(grid);
+  const int cell_w = grid.cell_aspect_width * scale;
+  const int cell_h = grid.cell_aspect_height * scale;
+  for (int y = row * cell_h; y < (row + 1) * cell_h; ++y) {
+    for (int x = column * cell_w; x < (column + 1) * cell_w; ++x) {
+      if (image.pixelColor(x, y) != QColor(Qt::black)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /// Colour at the centre of the character rectangle at (row, column).
@@ -412,6 +435,63 @@ TEST(CatalogueDialogTest, SingleVariantSaysSoAndDisablesTheControls) {
 
   EXPECT_EQ(dialog.variantCount(), 1);
   EXPECT_EQ(dialog.variantText(), "No sub-pages");
+
+  dialog.close();
+}
+
+namespace {
+
+// The shape the NABTS sink produces: a chain page whose members are variants,
+// listed alongside a record that carries its own payload and has none.
+orc::CatalogueDataset makeMixedVariantCatalogue() {
+  orc::CatalogueDataset data = makeVariantCatalogue(2);
+
+  orc::CatalogueItem standalone;
+  standalone.id = "000/1A4 v0";
+  standalone.find_key = standalone.id;
+  standalone.values = {standalone.id};
+  data.items.push_back(std::move(standalone));
+
+  orc::CataloguePayload payload;
+  payload.kind = orc::CataloguePayload::Kind::kCellGrid;
+  payload.grid = makeGrid("1A4");
+  payload.headline = "Record 000/1A4 seen 3 times";
+  data.payloads.push_back(std::move(payload));
+  return data;
+}
+
+}  // namespace
+
+// An item with nothing to step to keeps the stepper standing and disabled,
+// rather than removing it from the row: a control that came and went as the
+// reader moved down the list would read as an interface glitch.
+TEST(CatalogueDialogTest, ItemWithoutVariantsKeepsTheStepperInPlace) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makeMixedVariantCatalogue());
+
+  dialog.selectItem(0);
+  EXPECT_EQ(dialog.variantText(), "Sub-page 1 of 2 (0001)");
+
+  dialog.selectItem(1);
+  EXPECT_EQ(dialog.variantCount(), 0);
+  EXPECT_EQ(dialog.variantIndex(), 0);
+  EXPECT_EQ(dialog.variantText(), "No sub-pages");
+  EXPECT_EQ(dialog.headlineText(), "Record 000/1A4 seen 3 times");
+
+  const auto* previous =
+      dialog.findChild<QToolButton*>("cataloguePrevVariantButton");
+  const auto* next =
+      dialog.findChild<QToolButton*>("catalogueNextVariantButton");
+  ASSERT_NE(previous, nullptr);
+  ASSERT_NE(next, nullptr);
+  EXPECT_FALSE(previous->isEnabled());
+  EXPECT_FALSE(next->isEnabled());
+
+  // Stepping a stepper with nowhere to go leaves the display where it was.
+  dialog.showNextVariant();
+  EXPECT_EQ(dialog.headlineText(), "Record 000/1A4 seen 3 times");
 
   dialog.close();
 }
@@ -670,6 +750,74 @@ TEST(CatalogueDisplayListWidgetTest, WalksEveryOperation) {
   EXPECT_EQ(widget.opsPainted(), 3);
 }
 
+// X3.110 §5.3.3.5.1: "For filled polygons, the area enclosed by the outline
+// (including the region of the outline traced by the logical pel) is filled",
+// and §5.3.2.4.3 makes that region what the pel sweeps along the outline.
+//
+// The regression this pins: a service draws a letterform as a path that
+// encloses almost nothing and lets the pel give it its weight — the NCAA
+// roundel of the reference ExtraVision recording draws every letter that way.
+// Filling the enclosed area alone left the letters as disconnected slivers.
+// The path here is the degenerate case in miniature: out and back along the
+// same line, enclosing no area at all, so anything drawn is the pel's doing.
+TEST(CatalogueDisplayListWidgetTest, AFilledFigureIncludesItsPelTracedOutline) {
+  ensureApplication();
+
+  const auto strokeOnlyPolygon = [](double pel) {
+    orc::CatalogueDisplayList list;
+    list.aspect_height = 1.0;
+    orc::CatalogueDrawOp op;
+    op.kind = orc::CatalogueDrawKind::kPolygon;
+    op.filled = true;
+    op.colour = orc::CatalogueColour{255, 255, 255};
+    op.pen_size = orc::CatalogueSize{pel, pel};
+    // Down the middle and back: zero enclosed area.
+    op.points = {orc::CataloguePoint{0.5, 0.2}, orc::CataloguePoint{0.5, 0.8},
+                 orc::CataloguePoint{0.5, 0.2}};
+    list.ops.push_back(op);
+    return list;
+  };
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(strokeOnlyPolygon(0.05));
+  const QImage traced = renderWidget(widget, 200, 200);
+  EXPECT_GT(traced.pixelColor(100, 100).red(), 0)
+      << "the pel traced no outline, so the figure drew nothing at all";
+
+  // A dimensionless pel (§5.3.2.2.6's default) traces nothing, so the same
+  // path draws nothing — the stroke is the pel's, not a minimum line width's.
+  CatalogueDisplayListWidget dimensionless;
+  dimensionless.setDisplayList(strokeOnlyPolygon(0.0));
+  const QImage untraced = renderWidget(dimensionless, 200, 200);
+  EXPECT_EQ(untraced.pixelColor(100, 100).red(), 0);
+}
+
+// The traced outline is part of the filled area, so it takes the fill's
+// colour — not the black a highlight would put there (§5.3.2.4.3 makes the
+// black outline the highlight attribute's doing, and it is off by default).
+TEST(CatalogueDisplayListWidgetTest, ThePelTracedOutlineTakesTheFillColour) {
+  ensureApplication();
+  CatalogueDisplayListWidget widget;
+
+  orc::CatalogueDisplayList list;
+  list.aspect_height = 1.0;
+  orc::CatalogueDrawOp op;
+  op.kind = orc::CatalogueDrawKind::kRectangle;
+  op.filled = true;
+  op.origin = orc::CataloguePoint{0.3, 0.3};
+  op.size = orc::CatalogueSize{0.4, 0.4};
+  op.colour = orc::CatalogueColour{0, 255, 0};
+  op.pen_size = orc::CatalogueSize{0.06, 0.06};
+  list.ops.push_back(op);
+  widget.setDisplayList(list);
+
+  const QImage image = renderWidget(widget, 200, 200);
+  // On the rectangle's own edge, which is the middle of the traced band.
+  const QColor edge = image.pixelColor(60, 100);
+  EXPECT_GT(edge.green(), 0);
+  EXPECT_EQ(edge.red(), 0);
+}
+
 // The drawable area follows the payload's own aspect, not the widget's.
 TEST(CatalogueDisplayListWidgetTest, DrawableAreaFollowsThePayloadAspect) {
   ensureApplication();
@@ -747,6 +895,417 @@ TEST(CatalogueCellGridWidgetTest, RowGapsAreBandedWhenPacketsWereLost) {
                    grid.rows * grid.cell_aspect_height * scale);
   EXPECT_EQ(cellCentre(unmarked, grid, /*row=*/1, /*column=*/0),
             QColor(Qt::black));
+}
+
+// --- Flashing and blinking ------------------------------------------------
+
+// ETSI EN 300 706 §12.2 code 0/8 alternates the foreground pixels of the
+// characters that follow it between the foreground and background colours;
+// everything not flagged carries on being drawn.
+TEST(CatalogueCellGridWidgetTest, FlashBlanksOnlyTheFlaggedCharacters) {
+  ensureApplication();
+
+  orc::CatalogueCellGrid grid = makeGrid("AB", /*rows=*/2, /*columns=*/2);
+  grid.cells[0].flash = true;
+
+  const QImage lit = renderGrid(grid);
+  EXPECT_TRUE(cellHasInk(lit, grid, /*row=*/0, /*column=*/0));
+  EXPECT_TRUE(cellHasInk(lit, grid, /*row=*/0, /*column=*/1));
+
+  const QImage blank = renderGrid(grid, /*flash_lit=*/false);
+  EXPECT_FALSE(cellHasInk(blank, grid, /*row=*/0, /*column=*/0))
+      << "a flashing character was still drawn in the blank phase";
+  EXPECT_TRUE(cellHasInk(blank, grid, /*row=*/0, /*column=*/1))
+      << "a steady character was blanked along with its flashing neighbour";
+}
+
+// Only the foreground alternates: the cell keeps its background through the
+// blank phase, so a flashing character on a coloured strip does not punch a
+// hole in the strip.
+TEST(CatalogueCellGridWidgetTest, FlashLeavesTheCellBackgroundAlone) {
+  ensureApplication();
+
+  orc::CatalogueCellGrid grid = makeGrid("A", /*rows=*/1, /*columns=*/1);
+  grid.palette = {orc::CatalogueColour{0, 0, 0},
+                  orc::CatalogueColour{255, 255, 255},
+                  orc::CatalogueColour{255, 0, 0}};
+  grid.cells[0].flash = true;
+  grid.cells[0].background = 2;
+
+  const QImage blank = renderGrid(grid, /*flash_lit=*/false);
+  EXPECT_EQ(cellCentre(blank, grid, /*row=*/0, /*column=*/0),
+            QColor(255, 0, 0));
+}
+
+// The clock is only worth running for a page something on which actually
+// changes between the phases.
+TEST(CatalogueCellGridWidgetTest, OnlyDrawnCharactersCountAsFlashing) {
+  ensureApplication();
+  CatalogueCellGridWidget widget;
+
+  orc::CatalogueCellGrid grid = makeGrid("A", /*rows=*/1, /*columns=*/2);
+  widget.setGrid(grid);
+  EXPECT_FALSE(widget.hasFlashingCells());
+
+  // The attribute is set-after and runs to the end of the row, so it lands on
+  // the trailing SPACEs too — and a SPACE draws nothing in either phase.
+  grid.cells[1].flash = true;
+  widget.setGrid(grid);
+  EXPECT_FALSE(widget.hasFlashingCells());
+
+  grid.cells[0].flash = true;
+  widget.setGrid(grid);
+  EXPECT_TRUE(widget.hasFlashingCells());
+
+  // A concealed cell displays as SPACE until revealed, and there is no reveal
+  // control here.
+  grid.cells[0].concealed = true;
+  widget.setGrid(grid);
+  EXPECT_FALSE(widget.hasFlashingCells());
+}
+
+// A catalogue browser left open must not tick forever: the clock is held only
+// while a visible view has something to animate.
+TEST(CatalogueCellGridWidgetTest, TheClockRunsOnlyForAVisibleFlashingPage) {
+  ensureApplication();
+
+  CatalogueFlashClock clock;
+  CatalogueCellGridWidget widget;
+  widget.setFlashClock(&clock);
+
+  orc::CatalogueCellGrid grid = makeGrid("A", /*rows=*/1, /*columns=*/1);
+  grid.cells[0].flash = true;
+  widget.setGrid(grid);
+  EXPECT_FALSE(clock.running()) << "a hidden view has no reader to flash for";
+
+  widget.show();
+  QApplication::processEvents();
+  EXPECT_TRUE(clock.running());
+  EXPECT_EQ(clock.subscribers(), 1);
+
+  widget.setAnimationsEnabled(false);
+  EXPECT_FALSE(clock.running());
+  EXPECT_TRUE(widget.flashLit())
+      << "a page held still should show its flashing text, not hide it";
+
+  widget.setAnimationsEnabled(true);
+  EXPECT_TRUE(clock.running());
+
+  widget.hide();
+  QApplication::processEvents();
+  EXPECT_FALSE(clock.running());
+
+  // A page with nothing flashing on it does not start the clock either.
+  widget.show();
+  QApplication::processEvents();
+  widget.setGrid(makeGrid("A", /*rows=*/1, /*columns=*/1));
+  EXPECT_FALSE(clock.running());
+}
+
+TEST(CatalogueFlashClockTest, RunsWhileAnyViewIsSubscribed) {
+  ensureApplication();
+
+  CatalogueFlashClock clock;
+  EXPECT_FALSE(clock.running());
+  EXPECT_TRUE(clock.lit());
+
+  clock.acquire();
+  clock.acquire();
+  EXPECT_EQ(clock.subscribers(), 2);
+  EXPECT_TRUE(clock.running());
+
+  clock.release();
+  EXPECT_TRUE(clock.running()) << "a view is still animating";
+  clock.release();
+  EXPECT_FALSE(clock.running());
+  EXPECT_TRUE(clock.lit()) << "the still form of a flash is the lit one";
+
+  // An unbalanced release must not underflow the count and leave the clock
+  // unable to start again.
+  clock.release();
+  EXPECT_EQ(clock.subscribers(), 0);
+  clock.acquire();
+  EXPECT_TRUE(clock.running());
+}
+
+namespace {
+
+/// A display list holding one filled square in |colour|, blinking to
+/// |blink_to| when |blinking|.
+orc::CatalogueDisplayList makeBlinkingSquare(
+    const orc::CatalogueColour& colour, const orc::CatalogueColour& blink_to,
+    bool blinking = true) {
+  orc::CatalogueDisplayList list;
+  list.aspect_height = 1.0;
+  orc::CatalogueDrawOp op;
+  op.kind = orc::CatalogueDrawKind::kRectangle;
+  op.origin = orc::CataloguePoint{0.1, 0.1};
+  op.size = orc::CatalogueSize{0.5, 0.5};
+  op.filled = true;
+  op.colour = colour;
+  op.blinking = blinking;
+  op.blink_to = blink_to;
+  list.ops.push_back(op);
+  return list;
+}
+
+/// Colour of a pixel well inside that square.
+QColor squareCentre(const QImage& image) {
+  return image.pixelColor(image.width() / 3, image.height() / 2);
+}
+
+}  // namespace
+
+// The NAPLPS blink process alternates a colour map entry with the blink-to
+// entry the service named, so the other phase is a second colour rather than
+// the figure going away.
+TEST(CatalogueDisplayListWidgetTest, BlinkingOpsTakeTheirBlinkToColour) {
+  ensureApplication();
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(makeBlinkingSquare(orc::CatalogueColour{0, 140, 220},
+                                           orc::CatalogueColour{255, 210, 0}));
+  EXPECT_TRUE(widget.hasBlinkingOps());
+
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(0, 140, 220));
+  widget.setFlashLit(false);
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(255, 210, 0))
+      << "the other phase blanked the figure instead of recolouring it";
+}
+
+// Where the service means the figure to disappear it says so by blinking to
+// the ground colour, which is what the C1 BLINK START of X3.110 §6.2.8.1 does
+// and what the default black stands for.
+TEST(CatalogueDisplayListWidgetTest, BlinkingToBlackStillClearsTheFigure) {
+  ensureApplication();
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(makeBlinkingSquare(orc::CatalogueColour{255, 255, 255},
+                                           orc::CatalogueColour{0, 0, 0}));
+
+  const auto lit_pixels = [](const QImage& image) {
+    int count = 0;
+    for (int y = 0; y < image.height(); ++y) {
+      for (int x = 0; x < image.width(); ++x) {
+        if (image.pixelColor(x, y) != QColor(Qt::black)) {
+          ++count;
+        }
+      }
+    }
+    return count;
+  };
+
+  EXPECT_GT(lit_pixels(renderWidget(widget, 256, 256)), 0);
+  widget.setFlashLit(false);
+  EXPECT_EQ(lit_pixels(renderWidget(widget, 256, 256)), 0);
+}
+
+// A non-blinking operation is untouched by the phase, whatever blink_to holds.
+TEST(CatalogueDisplayListWidgetTest, ASteadyOpIgnoresTheBlinkPhase) {
+  ensureApplication();
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(makeBlinkingSquare(orc::CatalogueColour{0, 140, 220},
+                                           orc::CatalogueColour{255, 210, 0},
+                                           /*blinking=*/false));
+  EXPECT_FALSE(widget.hasBlinkingOps());
+
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(0, 140, 220));
+  widget.setFlashLit(false);
+  EXPECT_EQ(squareCentre(renderWidget(widget, 256, 256)), QColor(0, 140, 220));
+}
+
+// The switch belongs to the payload views, so it is offered where one of them
+// is on display and nowhere else.
+TEST(CatalogueDialogTest, AnimationSwitchIsOfferedForDrawnPayloadsOnly) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makePagedCatalogue(1));
+
+  auto* check = dialog.findChild<QCheckBox*>("catalogueAnimationsCheck");
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  EXPECT_TRUE(check->isChecked()) << "a page is transmitted animated";
+
+  auto* grid = dialog.findChild<CatalogueCellGridWidget*>("catalogueCellGrid");
+  auto* display =
+      dialog.findChild<CatalogueDisplayListWidget*>("catalogueDisplayList");
+  ASSERT_NE(grid, nullptr);
+  ASSERT_NE(display, nullptr);
+
+  // One switch covers both payload views, so a reader is not asked twice.
+  check->setChecked(false);
+  EXPECT_FALSE(grid->animationsEnabled());
+  EXPECT_FALSE(display->animationsEnabled());
+  check->setChecked(true);
+  EXPECT_TRUE(grid->animationsEnabled());
+  EXPECT_TRUE(display->animationsEnabled());
+
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);  // a display list
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  dialog.selectItem(1);  // a text listing, which cannot animate
+  EXPECT_FALSE(check->isVisibleTo(&dialog));
+
+  dialog.close();
+}
+
+// --- Saving the display as an image ---------------------------------------
+
+namespace {
+
+/// Whether anything was drawn inside |area| of |image|, against the black the
+/// display sits on
+bool hasInk(const QImage& image, const QRect& area) {
+  for (int y = area.top(); y <= area.bottom(); ++y) {
+    for (int x = area.left(); x <= area.right(); ++x) {
+      if (image.pixelColor(x, y) != QColor(Qt::black)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+// A saved page is whole multiples of the character rectangle at the grid's own
+// aspect: a fractional scale would put a cell boundary inside a pixel, and a
+// size off the aspect would letterbox the page inside its own image.
+TEST(CatalogueCellGridWidgetTest, SavedImageIsWholeCharacterRectangles) {
+  ensureApplication();
+  const orc::CatalogueCellGrid grid = makeGrid("100");
+
+  CatalogueCellGridWidget widget;
+  widget.setGrid(grid);
+
+  // 8 x 4 cells of 12 x 20, scaled by 8 — the smallest whole scale that puts
+  // the page past the 720-pixel minimum width.
+  const QSize size = widget.pageImageSize();
+  EXPECT_EQ(size, QSize(768, 640));
+
+  const QImage image = widget.renderPageImage(size);
+  ASSERT_FALSE(image.isNull());
+  EXPECT_EQ(image.size(), size);
+
+  // The text of the payload is on the top row and nowhere else, which is only
+  // true if the page filled the image rather than being centred inside it.
+  const int cell_w = size.width() / grid.columns;
+  const int cell_h = size.height() / grid.rows;
+  EXPECT_TRUE(hasInk(image, QRect(0, 0, cell_w, cell_h)));
+  EXPECT_FALSE(hasInk(image, QRect(0, cell_h, size.width(), cell_h)));
+}
+
+// The blank phase of a flash is a moment of the transmission, not the page: a
+// still caught in it would be missing the text the service chose to flash.
+TEST(CatalogueCellGridWidgetTest, SavedImageHoldsTheLitPhase) {
+  ensureApplication();
+  orc::CatalogueCellGrid grid = makeGrid("A", 2, 2);
+  grid.cells[0].flash = true;
+
+  CatalogueCellGridWidget widget;
+  widget.setGrid(grid);
+  widget.setFlashLit(false);
+  ASSERT_TRUE(widget.hasFlashingCells());
+
+  const QImage image = widget.renderPageImage(widget.pageImageSize());
+  ASSERT_FALSE(image.isNull());
+  const int cell_w = image.width() / grid.columns;
+  const int cell_h = image.height() / grid.rows;
+  EXPECT_TRUE(hasInk(image, QRect(0, 0, cell_w, cell_h)))
+      << "the flashed character is part of the page";
+}
+
+TEST(CatalogueDisplayListWidgetTest, SavedImageFollowsThePayloadAspect) {
+  ensureApplication();
+  orc::CatalogueDisplayList list;
+  list.aspect_height = 0.78125;
+  orc::CatalogueDrawOp op;
+  op.kind = orc::CatalogueDrawKind::kRectangle;
+  op.origin = orc::CataloguePoint{0.0, 0.0};
+  op.size = orc::CatalogueSize{1.0, 0.78125};
+  op.filled = true;
+  op.colour = orc::CatalogueColour{255, 255, 255};
+  list.ops.push_back(op);
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(list);
+
+  const QSize size = widget.pageImageSize();
+  EXPECT_EQ(size.width(), 720);
+  EXPECT_NEAR(static_cast<double>(size.height()) / size.width(), 0.78125, 0.01);
+
+  // The drawable area is the whole image at that aspect, so an operation
+  // covering unit space covers every corner of it.
+  const QImage image = widget.renderPageImage(size);
+  ASSERT_FALSE(image.isNull());
+  EXPECT_EQ(image.pixelColor(1, 1), QColor(Qt::white));
+  EXPECT_EQ(image.pixelColor(size.width() - 2, size.height() - 2),
+            QColor(Qt::white));
+}
+
+// Only a drawn payload can be saved; a listing or a table is text on screen and
+// there is nothing to render.
+TEST(CatalogueDialogTest, SaveIsOfferedForDrawnPayloadsOnly) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makePagedCatalogue(1));
+
+  auto* button = dialog.findChild<QToolButton*>("catalogueSavePageButton");
+  ASSERT_NE(button, nullptr);
+  EXPECT_TRUE(button->isVisibleTo(&dialog));
+  EXPECT_TRUE(dialog.canSavePage());
+
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);  // a display list
+  EXPECT_TRUE(button->isVisibleTo(&dialog));
+  EXPECT_TRUE(dialog.canSavePage());
+
+  dialog.selectItem(1);  // a text listing
+  EXPECT_FALSE(button->isVisibleTo(&dialog));
+  EXPECT_FALSE(dialog.canSavePage());
+  EXPECT_TRUE(dialog.renderedPageImage().isNull());
+
+  dialog.selectItem(2);  // a table
+  EXPECT_FALSE(button->isVisibleTo(&dialog));
+  EXPECT_FALSE(dialog.canSavePage());
+
+  dialog.close();
+}
+
+TEST(CatalogueDialogTest, SavedImageIsThePayloadOnDisplay) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(2));
+  dialog.selectItem(1);
+
+  const QImage grid_image = dialog.renderedPageImage();
+  ASSERT_FALSE(grid_image.isNull());
+  EXPECT_EQ(grid_image.size(), QSize(768, 640));
+
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);
+  const QImage list_image = dialog.renderedPageImage();
+  ASSERT_FALSE(list_image.isNull());
+  EXPECT_EQ(list_image.width(), 720);
+}
+
+// The suggested name says which display it is, in the service's own terms, with
+// the punctuation a file name cannot carry turned into separators.
+TEST(CatalogueDialogTest, SuggestedFileNameNamesTheDisplay) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(3));
+
+  dialog.selectItem(1);
+  EXPECT_EQ(dialog.suggestedPageFileName(), "Page-101-0000.png");
+
+  // "000/1A4 v0" would otherwise be read as a directory to save into.
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);
+  EXPECT_EQ(dialog.suggestedPageFileName(), "Record-000-1A4-v0.png");
 }
 
 }  // namespace gui_unit_test

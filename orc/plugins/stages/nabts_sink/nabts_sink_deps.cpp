@@ -556,8 +556,14 @@ NabtsSinkResult NabtsSinkDeps::analyse(
               // is deliberately not fed: it stands for a line that carried
               // nothing, and offering it as a packet would break the continuity
               // chain rather than record a gap in it.
-              groups.add_packet(nabts_decode_packet(line->sliced.bytes.data(),
-                                                    kNabtsPacketBytes));
+              // The detector's own reading of each byte goes with it, to weight
+              // this copy's say where the record catalogue combines repeated
+              // copies. The threshold detector measures none, and says so.
+              groups.add_packet(nabts_decode_packet(
+                  line->sliced.bytes.data(), kNabtsPacketBytes,
+                  line->sliced.has_byte_confidence
+                      ? &line->sliced.byte_confidence
+                      : nullptr));
             } else if (options.keep_empty_packets) {
               ++result.packets_written;
               emit(kEmptyPacket.data(), kNabtsPacketBytes);

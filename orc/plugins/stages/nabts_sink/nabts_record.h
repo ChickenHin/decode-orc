@@ -213,6 +213,13 @@ struct NabtsRecord {
   NabtsRecordHeader header;
   /// Record data (§5.3): the group's data past the header.
   std::vector<uint8_t> data;
+  /// One entry per byte of @ref data: whether that byte arrived, or stands in
+  /// for one a lost packet carried. Empty when none was lost (see
+  /// NabtsDataGroup::present).
+  std::vector<uint8_t> present;
+  /// One entry per byte of @ref data: detector confidence, 0-255 (see
+  /// NabtsDataGroup::confidence). Empty when nothing measured it.
+  std::vector<uint8_t> confidence;
   /// Whether the group this came from arrived whole and undamaged.
   bool intact = true;
 };
@@ -236,6 +243,15 @@ struct NabtsMessage {
 
   /// Record data of the series, concatenated in link order.
   std::vector<uint8_t> data;
+  /// One entry per byte of @ref data: whether that byte arrived, or stands in
+  /// for one a lost packet carried (see NabtsDataGroup::present). This is what
+  /// lets a damaged copy vote in the record catalogue over the bytes it did
+  /// receive without its holes displacing everything after them.
+  std::vector<uint8_t> present;
+  /// One entry per byte of @ref data: detector confidence, 0-255, which weights
+  /// this copy's say in that vote (see NabtsDataGroup::confidence). Empty when
+  /// nothing measured it, which is read as full confidence throughout.
+  std::vector<uint8_t> confidence;
 
   /// Records that contributed.
   uint32_t records = 0;
@@ -245,6 +261,13 @@ struct NabtsMessage {
   bool complete = false;
   /// Every contributing group arrived whole and undamaged.
   bool intact = true;
+  /// No link of the series is missing, so @ref data starts where the record
+  /// starts and every byte of it is at the offset the record gave it. A missing
+  /// link takes a whole record out of the middle of the concatenation, and
+  /// unlike a lost packet its width is unknown, so there is no hole to hold
+  /// open and the copy cannot be compared with another position for position.
+  /// This is what admits a copy to the vote in the record catalogue.
+  bool aligned = true;
   /// The reserved purpose of this address, if it has one (§7.1.5).
   std::string reserved_purpose;
 
@@ -328,6 +351,11 @@ class NabtsRecordAssembler {
     /// Record data per link order, so out-of-order arrival still concatenates
     /// in order. An absent entry is a link not yet seen.
     std::map<uint8_t, std::vector<uint8_t>> parts;
+    /// Which bytes of each part arrived, keyed and concatenated alike, so the
+    /// two stay index for index (see NabtsMessage::present).
+    std::map<uint8_t, std::vector<uint8_t>> part_present;
+    /// Detector confidence per part, keyed and concatenated alike.
+    std::map<uint8_t, std::vector<uint8_t>> part_confidence;
     /// The last link's order, once a record with more_links = false has been
     /// seen; kNabtsMaxLinkOrder + 1 means not yet.
     uint16_t final_order = kNabtsMaxLinkOrder + 1;

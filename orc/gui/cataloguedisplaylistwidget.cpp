@@ -12,16 +12,20 @@
 #include <QBrush>
 #include <QFont>
 #include <QFontDatabase>
+#include <QHideEvent>
 #include <QImage>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
 #include <QPolygonF>
+#include <QShowEvent>
 #include <QString>
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
+
+#include "catalogue_flash_clock.h"
 
 namespace {
 
@@ -38,6 +42,12 @@ using orc::CataloguePoint;
 // is only a starting shape.
 constexpr int kNominalPixelsAcross = 256;
 constexpr int kNominalPixelsDown = 200;
+
+// How wide a saved drawable area is. A display list is resolution-independent —
+// its unit space carries no pixels of its own — so the width is a choice, and
+// this one puts the fine strokes a service draws letterforms with well clear of
+// a single pixel.
+constexpr int kSavedPixelsAcross = 720;
 
 // A line whose pen is zero is a dimensionless drawing point; it still has to be
 // visible, so it is drawn one device pixel wide.
@@ -266,16 +276,96 @@ CatalogueDisplayListWidget::CatalogueDisplayListWidget(QWidget* parent)
   setMinimumSize(sizeHint() / 2);
 }
 
+CatalogueDisplayListWidget::~CatalogueDisplayListWidget() {
+  if (flash_subscribed_ && !flash_clock_.isNull()) {
+    flash_clock_->release();
+  }
+}
+
 void CatalogueDisplayListWidget::setDisplayList(
     const orc::CatalogueDisplayList& list) {
   list_ = list;
+  has_blinking_ops_ =
+      std::any_of(list_->ops.begin(), list_->ops.end(),
+                  [](const CatalogueDrawOp& op) { return op.blinking; });
+  updateFlashSubscription();
   update();
 }
 
 void CatalogueDisplayListWidget::clearDisplayList() {
   list_.reset();
   ops_painted_ = 0;
+  has_blinking_ops_ = false;
+  updateFlashSubscription();
   update();
+}
+
+void CatalogueDisplayListWidget::setFlashClock(CatalogueFlashClock* clock) {
+  if (flash_clock_ == clock) {
+    return;
+  }
+  if (flash_subscribed_ && !flash_clock_.isNull()) {
+    flash_clock_->release();
+  }
+  flash_subscribed_ = false;
+  flash_clock_ = clock;
+  if (clock != nullptr) {
+    connect(clock, &CatalogueFlashClock::litChanged, this, [this](bool lit) {
+      // A view that has released the clock is not animating, whatever the
+      // clock goes on to do for the views that still are.
+      if (flash_subscribed_) {
+        setFlashLit(lit);
+      }
+    });
+  }
+  updateFlashSubscription();
+}
+
+void CatalogueDisplayListWidget::setAnimationsEnabled(bool enabled) {
+  if (animations_enabled_ == enabled) {
+    return;
+  }
+  animations_enabled_ = enabled;
+  updateFlashSubscription();
+}
+
+void CatalogueDisplayListWidget::setFlashLit(bool lit) {
+  if (flash_lit_ == lit) {
+    return;
+  }
+  flash_lit_ = lit;
+  // A display list places its operations anywhere in the drawable area and
+  // they overlap freely, so there is no dirty rectangle worth deriving: the
+  // area is repainted whole.
+  update();
+}
+
+void CatalogueDisplayListWidget::updateFlashSubscription() {
+  const bool wanted = animations_enabled_ && has_blinking_ops_ && isVisible() &&
+                      !flash_clock_.isNull();
+  if (wanted == flash_subscribed_) {
+    return;
+  }
+  flash_subscribed_ = wanted;
+  if (wanted) {
+    flash_clock_->acquire();
+    setFlashLit(flash_clock_->lit());
+    return;
+  }
+  if (!flash_clock_.isNull()) {
+    flash_clock_->release();
+  }
+  setFlashLit(true);
+}
+
+void CatalogueDisplayListWidget::showEvent(QShowEvent* event) {
+  QWidget::showEvent(event);
+  updateFlashSubscription();
+}
+
+void CatalogueDisplayListWidget::hideEvent(QHideEvent* event) {
+  QWidget::hideEvent(event);
+  updateFlashSubscription();
 }
 
 void CatalogueDisplayListWidget::setShowDataErrors(bool show) {
@@ -295,11 +385,12 @@ QSize CatalogueDisplayListWidget::sizeHint() const {
   return QSize(kNominalPixelsAcross, kNominalPixelsDown);
 }
 
-QRectF CatalogueDisplayListWidget::displayAreaRect() const {
+QRectF CatalogueDisplayListWidget::displayAreaRectIn(
+    const QSizeF& bounds) const {
   const double aspect_height =
       list_ && list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
-  const qreal available_w = static_cast<qreal>(width());
-  const qreal available_h = static_cast<qreal>(height());
+  const qreal available_w = bounds.width();
+  const qreal available_h = bounds.height();
   qreal draw_w = available_w;
   qreal draw_h = draw_w * aspect_height;
   if (draw_h > available_h) {
@@ -312,16 +403,44 @@ QRectF CatalogueDisplayListWidget::displayAreaRect() const {
 
 void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
   QPainter painter(this);
-  painter.fillRect(rect(), Qt::black);
+  paintContent(painter, QRectF(rect()), flash_lit_);
+}
+
+QSize CatalogueDisplayListWidget::pageImageSize() const {
+  if (!list_) {
+    return {};
+  }
+  const double aspect_height =
+      list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
+  return QSize(kSavedPixelsAcross,
+               std::max(1, static_cast<int>(std::lround(kSavedPixelsAcross *
+                                                        aspect_height))));
+}
+
+QImage CatalogueDisplayListWidget::renderPageImage(const QSize& size) const {
+  if (!list_ || size.isEmpty()) {
+    return {};
+  }
+  QImage image(size, QImage::Format_RGB32);
+  image.fill(Qt::black);
+  QPainter painter(&image);
+  paintContent(painter, QRectF(QPointF(0.0, 0.0), QSizeF(size)), /*lit=*/true);
+  return image;
+}
+
+void CatalogueDisplayListWidget::paintContent(QPainter& painter,
+                                              const QRectF& bounds,
+                                              bool lit) const {
+  painter.fillRect(bounds, Qt::black);
   ops_painted_ = 0;
 
   if (!list_) {
     painter.setPen(Qt::gray);
-    painter.drawText(rect(), Qt::AlignCenter, placeholder_);
+    painter.drawText(bounds, Qt::AlignCenter, placeholder_);
     return;
   }
 
-  const QRectF area = displayAreaRect();
+  const QRectF area = displayAreaRectIn(bounds.size());
   // The mapping is isotropic: the drawable area is |unit| pixels per unit of x,
   // and the same per unit of y, because its nominal pixels are square.
   const qreal unit = area.width();
@@ -333,7 +452,7 @@ void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
   painter.setClipRect(area);
 
   for (const auto& op : list_->ops) {
-    paintOp(painter, *list_, op, area, unit);
+    paintOp(painter, *list_, op, area, unit, lit);
     ++ops_painted_;
   }
   painter.restore();
@@ -351,16 +470,24 @@ void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
 void CatalogueDisplayListWidget::paintOp(QPainter& painter,
                                          const CatalogueDisplayList& list,
                                          const CatalogueDrawOp& op,
-                                         const QRectF& area, qreal unit) {
+                                         const QRectF& area, qreal unit,
+                                         bool lit) {
   // Unit space has y upwards from the bottom left; the widget's y runs down.
   const auto map = [&area, unit](const CataloguePoint& point) {
     return QPointF(area.left() + point.x * unit,
                    area.bottom() - point.y * unit);
   };
 
-  const QColor colour = to_qcolor(op.colour);
   const QColor background =
       op.has_background ? to_qcolor(op.background) : QColor(0, 0, 0);
+  // The other phase of a blink process draws the operation in its blink-to
+  // colour, which the service names and which is not always a ground colour —
+  // a figure alternating with a second colour twinkles rather than flashes.
+  // Substituting the drawing colour rather than dropping the operation is what
+  // makes that possible, and what keeps a blinking character's field, and
+  // anything drawn under it, on screen through the phase.
+  const bool blank = op.blinking && !lit;
+  const QColor colour = blank ? to_qcolor(op.blink_to) : to_qcolor(op.colour);
 
   // The pen is what gives a line its width. Both dimensions map to one pen, so
   // the larger governs — a pen has no orientation.
@@ -386,6 +513,39 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
     QPen outline(op.has_background ? background : QColor(0, 0, 0));
     outline.setWidthF(std::max(pen_width, kMinimumPenWidth));
     return outline;
+  };
+
+  /**
+   * The pen that traces a filled figure's own outline.
+   *
+   * X3.110 §5.3.3.3, §5.3.3.4.1, §5.3.3.5.1 and §5.3.3.6.5 all put "the region
+   * of the outline traced by the logical pel" *inside* the filled area, and
+   * §5.3.2.4.3 defines that region as what the pel sweeps along the outline. A
+   * filled figure is therefore its enclosed area plus a stroke of the pel, in
+   * the same colour and texture — not the enclosed area alone.
+   *
+   * That is not a refinement at the edges. A service draws a letterform or a
+   * thin mark as a path that encloses almost nothing and lets the pel give it
+   * its weight: the NCAA roundel of the reference ExtraVision recording draws
+   * each letter this way, and filling the enclosed area alone leaves a few
+   * disconnected slivers where the letter should be.
+   *
+   * A dimensionless pel (the default 0,0 of §5.3.2.2.6) traces nothing, so it
+   * gets no stroke — unlike an outlined figure, which needs a visible minimum
+   * because the stroke is all there is of it.
+   */
+  const qreal traced_width = std::max(pel_w, pel_h);
+  const auto fill_outline_pen = [&](const QBrush& brush) {
+    if (traced_width <= 0.0) {
+      return QPen(Qt::NoPen);
+    }
+    QPen traced(brush, traced_width);
+    // Solid whatever the line texture: this region is part of the fill, not a
+    // textured line.
+    traced.setStyle(Qt::SolidLine);
+    traced.setCapStyle(Qt::FlatCap);
+    traced.setJoinStyle(Qt::MiterJoin);
+    return traced;
   };
 
   switch (op.kind) {
@@ -429,15 +589,30 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
         path = QPainterPath(points[0]);
         path.lineTo(points[1]);
       }
-      if (op.filled) {
-        path.closeSubpath();
-        painter.setPen(op.outlined ? outline_pen() : QPen(Qt::NoPen));
-        painter.setBrush(texture_brush(op, list, colour));
-      } else {
+      if (!op.filled) {
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
+        painter.drawPath(path);
+        return;
       }
-      painter.drawPath(path);
+
+      // §5.3.3.3: "the area enclosed by the outline and the chord (including
+      // the region of the outline and the chord traced by the logical pel)".
+      QPainterPath closed = path;
+      closed.closeSubpath();
+      const QBrush brush = texture_brush(op, list, colour);
+      painter.setBrush(brush);
+      painter.setPen(fill_outline_pen(brush));
+      painter.drawPath(closed);
+
+      if (op.outlined) {
+        // §5.3.2.4.3's highlight, over the fill. §5.3.3.3 keeps the chord out
+        // of it — "the chord is not considered a part of the arc and, as such,
+        // is not highlighted" — so the open arc is stroked, not the closure.
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(outline_pen());
+        painter.drawPath(path);
+      }
       return;
     }
 
@@ -449,8 +624,9 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
                         origin.y() - op.size.dy * unit);
       const QRectF box = QRectF(origin, far).normalized();
       if (op.filled) {
-        painter.setPen(op.outlined ? outline_pen() : QPen(Qt::NoPen));
-        painter.setBrush(texture_brush(op, list, colour));
+        const QBrush brush = texture_brush(op, list, colour);
+        painter.setPen(op.outlined ? outline_pen() : fill_outline_pen(brush));
+        painter.setBrush(brush);
       } else {
         painter.setPen(pen);
         painter.setBrush(Qt::NoBrush);
@@ -465,8 +641,9 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       }
       const QPolygonF polygon(points);
       if (op.filled) {
-        painter.setPen(op.outlined ? outline_pen() : QPen(Qt::NoPen));
-        painter.setBrush(texture_brush(op, list, colour));
+        const QBrush brush = texture_brush(op, list, colour);
+        painter.setPen(op.outlined ? outline_pen() : fill_outline_pen(brush));
+        painter.setBrush(brush);
         painter.drawPolygon(polygon);
       } else {
         painter.setPen(pen);
@@ -495,7 +672,11 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
         const int row = i / columns;
         const QRectF pel(origin.x() + column * step_x, top + row * step_y,
                          step_x, step_y);
-        painter.fillRect(pel, to_qcolor(op.colour_run[static_cast<size_t>(i)]));
+        // A run carries its own colour per pel, so the blank phase of a blink
+        // has to be applied to each of them rather than to |colour|.
+        painter.fillRect(
+            pel,
+            blank ? colour : to_qcolor(op.colour_run[static_cast<size_t>(i)]));
       }
       return;
     }

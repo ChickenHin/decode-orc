@@ -293,22 +293,20 @@ VBIOffsetCalibration fit_vbi_capture_offset(
   return calibration;
 }
 
-bool calibrate_vbi_capture_offset(const VBILineReader& reader,
-                                  const VBITeletextService& service,
-                                  const VBICalibrationConfig& config,
-                                  VBIOffsetCalibration& out_calibration,
-                                  std::string& error_message) {
-  out_calibration = VBIOffsetCalibration();
+namespace {
 
+// The measurement both entry points below are built on: correlate the run-in
+// template against every data record of a sample of frames and fit the result.
+//
+// The survey is one procedure because the question it answers is one question —
+// where is the clock run-in? — and only what the answer is then used for
+// differs between the two families (design §5.3.3).
+bool survey_vbi_cri_positions(const VBILineReader& reader,
+                              const VBITeletextService& service,
+                              const VBICalibrationConfig& config,
+                              VBIOffsetCalibration& out_calibration,
+                              std::string& error_message) {
   const VBISourceFormat& format = reader.format();
-
-  if (format.family == VBISourceFamily::kTBCDerived) {
-    error_message =
-        "A time-base corrected source has sample 0 of every record at 0H by "
-        "construction, so its capture offset is exactly zero and must not be "
-        "calibrated (design §5.3.3).";
-    return false;
-  }
 
   VBICRITemplate cri_template;
   if (!make_vbi_cri_frc_template(service, format.sample_rate_hz,
@@ -371,6 +369,57 @@ bool calibrate_vbi_capture_offset(const VBILineReader& reader,
         "spread across it.");
   }
   return true;
+}
+
+}  // namespace
+
+bool calibrate_vbi_capture_offset(const VBILineReader& reader,
+                                  const VBITeletextService& service,
+                                  const VBICalibrationConfig& config,
+                                  VBIOffsetCalibration& out_calibration,
+                                  std::string& error_message) {
+  out_calibration = VBIOffsetCalibration();
+
+  if (reader.format().family == VBISourceFamily::kTBCDerived) {
+    error_message =
+        "A time-base corrected source has sample 0 of every record at 0H by "
+        "construction, so its capture offset is exactly zero and must not be "
+        "calibrated (design §5.3.3).";
+    return false;
+  }
+
+  return survey_vbi_cri_positions(reader, service, config, out_calibration,
+                                  error_message);
+}
+
+bool measure_vbi_service_anchor(const VBILineReader& reader,
+                                const VBITeletextService& service,
+                                const VBICalibrationConfig& config,
+                                VBIOffsetCalibration& out_calibration,
+                                std::string& error_message) {
+  out_calibration = VBIOffsetCalibration();
+
+  if (reader.format().family != VBISourceFamily::kTBCDerived) {
+    error_message =
+        "The service anchor is only measured on a time-base corrected source. "
+        "On a card capture the anchor is not separable from the capture "
+        "offset — the fitted offset already puts the run-in at the service's "
+        "nominal time — so measuring it would be fitting one unknown twice.";
+    return false;
+  }
+
+  return survey_vbi_cri_positions(reader, service, config, out_calibration,
+                                  error_message);
+}
+
+double vbi_measured_anchor_ns(const VBIOffsetCalibration& calibration,
+                              double sample_rate_hz) {
+  if (!(sample_rate_hz > 0.0)) {
+    return 0.0;
+  }
+  // Sample 0 of the record is 0H, so where the run-in sits within the record
+  // is, without any further correction, how long after 0H it was transmitted.
+  return calibration.anchor_position_samples / sample_rate_hz * 1e9;
 }
 
 }  // namespace orc

@@ -132,7 +132,9 @@ struct CatalogueCell {
   bool double_height = false;
   bool double_height_lower = false;
 
-  bool flash = false;      ///< Flashing (rendered static)
+  /// The cell's character alternates with being blanked. A host that animates
+  /// picks its own rate; a still one draws the lit phase.
+  bool flash = false;
   bool concealed = false;  ///< Rendered as SPACE until revealed
   /// Inside a boxed region. Only meaningful with
   /// CatalogueCellGrid::boxed_only.
@@ -278,9 +280,16 @@ struct CatalogueDrawOp {
   /// background" from "no background".
   CatalogueColour background;
   bool has_background = false;
-  /// Part of a blink process, alternating between @ref colour and black (or the
-  /// background where there is one). A still renderer draws the lit phase.
+  /// Part of a blink process, alternating between @ref colour and
+  /// @ref blink_to. A still renderer draws @ref colour, which is the operation
+  /// as the page describes it.
   bool blinking = false;
+  /// The colour the operation alternates to while @ref blinking. A service can
+  /// name any colour here, so a blink is not necessarily an appearance and
+  /// disappearance: a figure alternating with a second colour twinkles rather
+  /// than flashes. Where the service meant it to vanish this holds the ground
+  /// it vanishes into, which is why the default is black.
+  CatalogueColour blink_to;
 
   /// kColourRun only: one colour per pen position, in raster order within the
   /// field @ref size describes.

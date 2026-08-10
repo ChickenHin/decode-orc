@@ -152,6 +152,36 @@ bool calibrate_vbi_capture_offset(const VBILineReader& reader,
                                   VBIOffsetCalibration& out_calibration,
                                   std::string& error_message);
 
+// The same survey, read the other way round, for time-base corrected sources.
+//
+// Such a capture's offset is exactly zero and is never fitted — sample 0 of
+// every record is 0H by construction (design §5.3.3) — but that leaves the
+// other half of the timing unmeasured. The service's 0H-to-run-in anchor is a
+// property of the transmission, not of the file, and transmissions disagree
+// about it: the tabulated 525-line figures were measured on particular
+// captures, and a broadcaster that transmitted its run-in a microsecond
+// earlier puts it outside the window derived from them, clipping the head of
+// every data line the stage places.
+//
+// On a card capture there is nothing to separate here, because the fitted
+// capture offset already absorbs the disagreement and lands the run-in on the
+// nominal anchor. On a TBC-derived one it is the anchor that has to move.
+//
+// The returned calibration is the survey's: capture_offset_samples is not
+// meaningful for such a source and must not be applied. Read
+// anchor_position_samples, or vbi_measured_anchor_ns() below.
+bool measure_vbi_service_anchor(const VBILineReader& reader,
+                                const VBITeletextService& service,
+                                const VBICalibrationConfig& config,
+                                VBIOffsetCalibration& out_calibration,
+                                std::string& error_message);
+
+// The measured anchor as a service 0H offset in nanoseconds, ready to replace
+// VBITeletextService::t_offset_ns. Only meaningful for a TBC-derived source,
+// whose record sample 0 is 0H.
+double vbi_measured_anchor_ns(const VBIOffsetCalibration& calibration,
+                              double sample_rate_hz);
+
 }  // namespace orc
 
 #endif  // ORC_VBI_OFFSET_CALIBRATION_H

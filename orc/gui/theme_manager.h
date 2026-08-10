@@ -42,6 +42,20 @@ class ThemeManager {
   static QString modeToString(Mode mode);
   static QString colorSchemeToString(Qt::ColorScheme scheme);
 
+  // Reports whether a widget style named `styleName` has to be replaced by the
+  // palette-driven fallback style in order to render a dark (`isDark`) or light
+  // theme correctly, given that Qt reports `osScheme` for the desktop.
+  //
+  // Some native styles paint their controls from the OS theme instead of the
+  // application palette. Applying a palette they ignore leaves native light
+  // chrome with light palette text drawn on top, which is unreadable.
+  static bool styleNeedsPaletteFallback(const QString& styleName, bool isDark,
+                                        Qt::ColorScheme osScheme);
+
+  // Name of the fully palette-driven style used when the native style cannot
+  // render the requested theme.
+  static QString paletteFallbackStyleName();
+
  private:
   static bool isPaletteDark(const QPalette& palette);
 

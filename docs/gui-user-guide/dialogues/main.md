@@ -189,6 +189,8 @@ Chooses the user-interface theme, applied immediately:
 
 The choice overrides the `--theme` command-line option and is remembered between runs. The same modes can be cycled quickly from the theme button on the [toolbar](#toolbar).
 
+On Windows, controls are normally drawn by the operating system's own widget style. That style cannot draw dark controls on Windows 10, and on Windows 11 it can only draw the scheme the desktop itself is set to, so the application switches to Qt's Fusion style whenever the selected theme cannot be rendered natively. Buttons, drop-down lists and text fields then look slightly different from other Windows applications, but stay readable.
+
 ---
 
 ### Help Menu

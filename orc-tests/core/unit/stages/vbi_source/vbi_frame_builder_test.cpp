@@ -60,7 +60,7 @@ VBIFrameBuilder builder_for(const VBISourceFormat& format,
                             VBILevelMapperConfig levels = {}) {
   VBIFrameBuilder builder;
   std::string error;
-  EXPECT_TRUE(make_vbi_frame_builder(format, levels, kCaptureOffsetSamples,
+  EXPECT_TRUE(make_vbi_frame_builder(format, levels, {kCaptureOffsetSamples},
                                      builder, error))
       << error;
   return builder;
@@ -274,7 +274,7 @@ TEST(VBIFrameBuilder, AFieldRangeLongerThanTheStandardIsRejected) {
   VBIFrameBuilder builder;
   std::string error;
   EXPECT_FALSE(make_vbi_frame_builder(format, VBILevelMapperConfig{},
-                                      kCaptureOffsetSamples, builder, error));
+                                      {kCaptureOffsetSamples}, builder, error));
   EXPECT_FALSE(error.empty());
 }
 
@@ -338,7 +338,7 @@ TEST(VBIFrameBuilder, NTSCRecordsArePlacedOnTheStandardLines) {
   const VBISourceFormat format = tbc_vbi_ntsc_format();
   VBIFrameBuilder builder;
   std::string error;
-  ASSERT_TRUE(make_vbi_frame_builder(format, VBILevelMapperConfig{}, 0.0,
+  ASSERT_TRUE(make_vbi_frame_builder(format, VBILevelMapperConfig{}, {0.0},
                                      builder, error))
       << error;
 
@@ -391,7 +391,7 @@ TEST(VBIFrameBuilder, NTSCTBCLevelsAreMappedAbsolutelyWhateverThePolicy) {
   VBIFrameBuilder builder;
   VBILevelMapperConfig policy;
   policy.mode = VBILevelMode::kPerLine;
-  ASSERT_TRUE(make_vbi_frame_builder(format, policy, 0.0, builder, error))
+  ASSERT_TRUE(make_vbi_frame_builder(format, policy, {0.0}, builder, error))
       << error;
   ASSERT_TRUE(builder.build_frame(records, per_line, data_lines, error))
       << error;
@@ -400,7 +400,7 @@ TEST(VBIFrameBuilder, NTSCTBCLevelsAreMappedAbsolutelyWhateverThePolicy) {
   policy.mode = VBILevelMode::kFixed;
   policy.fixed_logic0 = 0.0;
   policy.fixed_logic1 = 65535.0;
-  ASSERT_TRUE(make_vbi_frame_builder(format, policy, 0.0, builder, error))
+  ASSERT_TRUE(make_vbi_frame_builder(format, policy, {0.0}, builder, error))
       << error;
   ASSERT_TRUE(builder.build_frame(records, fixed, data_lines, error)) << error;
 
@@ -428,8 +428,8 @@ TEST(VBIFrameBuilder, AnOffsetThatPlacesNothingIsRejected) {
 
   VBIFrameBuilder builder;
   std::string error;
-  EXPECT_FALSE(make_vbi_frame_builder(format, VBILevelMapperConfig{}, 100000.0,
-                                      builder, error));
+  EXPECT_FALSE(make_vbi_frame_builder(format, VBILevelMapperConfig{},
+                                      {100000.0}, builder, error));
   EXPECT_FALSE(error.empty());
 }
 

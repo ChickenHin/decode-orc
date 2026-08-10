@@ -408,10 +408,15 @@ void NabtsRecordAssembler::emit_unlinked(const NabtsRecord& record) {
   message.classification = record.header.classification;
   message.extensions = record.header.extensions;
   message.data = record.data;
+  message.present = record.present;
+  message.confidence = record.confidence;
   message.records = 1;
   message.links_expected = 1;
   message.complete = true;
   message.intact = record.intact;
+  // An unlinked record is the whole message, so it starts where the record
+  // starts and its holes are already held open at their true width.
+  message.aligned = true;
   finalise(message);
 
   ++stats_.messages_complete;
@@ -423,6 +428,11 @@ void NabtsRecordAssembler::emit_unlinked(const NabtsRecord& record) {
 void NabtsRecordAssembler::emit(OpenMessage& open, bool complete) {
   NabtsMessage& message = open.message;
   message.complete = complete;
+  // A series missing a link is missing that record's bytes from the middle of
+  // the concatenation below, which moves every later link earlier.
+  if (!complete) {
+    message.aligned = false;
+  }
   message.records = static_cast<uint32_t>(open.parts.size());
   message.links_expected = open.final_order <= kNabtsMaxLinkOrder
                                ? static_cast<uint32_t>(open.final_order) + 1
@@ -439,6 +449,18 @@ void NabtsRecordAssembler::emit(OpenMessage& open, bool complete) {
   for (const auto& part : open.parts) {
     message.data.insert(message.data.end(), part.second.begin(),
                         part.second.end());
+  }
+  message.present.clear();
+  message.present.reserve(total);
+  for (const auto& part : open.part_present) {
+    message.present.insert(message.present.end(), part.second.begin(),
+                           part.second.end());
+  }
+  message.confidence.clear();
+  message.confidence.reserve(total);
+  for (const auto& part : open.part_confidence) {
+    message.confidence.insert(message.confidence.end(), part.second.begin(),
+                              part.second.end());
   }
   finalise(message);
 
@@ -499,6 +521,8 @@ void NabtsRecordAssembler::add_linked(const NabtsRecord& record) {
     open.final_order = record.header.link_order;
   }
   open.parts[record.header.link_order] = record.data;
+  open.part_present[record.header.link_order] = record.present;
+  open.part_confidence[record.header.link_order] = record.confidence;
 
   // Complete when every link from 0 to the last has arrived. Counting rather
   // than checking each index is enough: parts is keyed on link order, so its
@@ -536,6 +560,21 @@ void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
     record.data.assign(
         group.data.begin() + static_cast<ptrdiff_t>(header.header_bytes),
         group.data.end());
+    // §3.2.4's holes are held open in the group, so the record's bytes are
+    // already at the offsets it gave them; which of them actually arrived comes
+    // across with them. An empty mask says the group lost nothing, and is left
+    // empty here rather than invented.
+    if (group.present.size() >= group.data.size()) {
+      record.present.assign(
+          group.present.begin() + static_cast<ptrdiff_t>(header.header_bytes),
+          group.present.begin() + static_cast<ptrdiff_t>(group.data.size()));
+    }
+    if (group.confidence.size() >= group.data.size()) {
+      record.confidence.assign(
+          group.confidence.begin() +
+              static_cast<ptrdiff_t>(header.header_bytes),
+          group.confidence.begin() + static_cast<ptrdiff_t>(group.data.size()));
+    }
   }
 
   ++stats_.records_seen;

@@ -15,6 +15,7 @@
 #include <QSettings>
 #include <QString>
 #include <QStyle>
+#include <QStyleFactory>
 #include <QStyleHints>
 #include <QWidget>
 
@@ -40,6 +41,20 @@ ThemeController::ThemeController(QApplication& app,
   mode_ = manager.mode();
 
   s_instance = this;
+
+  // Capture the platform's own style before the first theme is applied; it is
+  // the style to restore whenever the fallback is not needed. The name is only
+  // readable here: once an application stylesheet is installed, QApplication
+  // wraps the style in an unnamed QStyleSheetStyle.
+  if (const QStyle* style = app_.style()) {
+    native_style_name_ = style->name();
+  }
+  applied_style_name_ = native_style_name_;
+  if (native_style_name_.isEmpty()) {
+    ORC_LOG_WARN(
+        "Platform widget style is unnamed; the palette-driven style fallback "
+        "is unavailable");
+  }
 
   applyCurrentMode(QStringLiteral("startup"));
   updateSystemTracking();
@@ -92,6 +107,9 @@ void ThemeController::applyResolution(
     const ThemeManager::Resolution& resolution) {
   app_.setProperty("isDarkTheme", resolution.isDark);
   app_.setProperty("themeMode", ThemeManager::modeToString(resolution.mode));
+  // The style has to be settled first: QApplication::setStyle() resets the
+  // application palette to the new style's standard palette.
+  applyStyle(resolution.isDark);
   applyPalette(app_, resolution.isDark);
 
   const auto widgets = app_.allWidgets();
@@ -128,6 +146,47 @@ void ThemeController::updateSystemTracking() {
   ORC_LOG_DEBUG("Runtime OS theme tracking enabled (auto mode)");
 }
 
+QString ThemeController::styleNameForTheme(const QString& nativeStyleName,
+                                           bool isDark,
+                                           Qt::ColorScheme osScheme) {
+  if (ThemeManager::styleNeedsPaletteFallback(nativeStyleName, isDark,
+                                              osScheme)) {
+    return ThemeManager::paletteFallbackStyleName();
+  }
+  return nativeStyleName;
+}
+
+// Ensure the active widget style can actually render the requested theme.
+void ThemeController::applyStyle(bool isDark) {
+  if (native_style_name_.isEmpty()) {
+    return;
+  }
+
+  const Qt::ColorScheme osScheme = app_.styleHints()
+                                       ? app_.styleHints()->colorScheme()
+                                       : Qt::ColorScheme::Unknown;
+  const QString wanted =
+      styleNameForTheme(native_style_name_, isDark, osScheme);
+
+  if (wanted.compare(applied_style_name_, Qt::CaseInsensitive) == 0) {
+    return;
+  }
+
+  QStyle* style = QStyleFactory::create(wanted);
+  if (!style) {
+    ORC_LOG_WARN("Widget style '{}' is unavailable, keeping '{}'",
+                 wanted.toStdString(), applied_style_name_.toStdString());
+    return;
+  }
+
+  // QApplication takes ownership of the style and deletes the previous one.
+  app_.setStyle(style);
+  applied_style_name_ = wanted;
+  ORC_LOG_INFO("Widget style changed to '{}' for the {} theme (native '{}')",
+               wanted.toStdString(), isDark ? "dark" : "light",
+               native_style_name_.toStdString());
+}
+
 // Apply dark or light palette to the application.
 void ThemeController::applyPalette(QApplication& app, bool isDark) {
   if (isDark) {
@@ -138,7 +197,6 @@ void ThemeController::applyPalette(QApplication& app, bool isDark) {
     QColor darkGray(53, 53, 53);
     QColor darkerGray(42, 42, 42);
     QColor darkestGray(25, 25, 25);
-    QColor lightGray(200, 200, 200);
     QColor blue(42, 130, 218);
 
     darkPalette.setColor(QPalette::Window, darkGray);
@@ -155,7 +213,22 @@ void ThemeController::applyPalette(QApplication& app, bool isDark) {
     darkPalette.setColor(QPalette::Highlight, blue);
     darkPalette.setColor(QPalette::HighlightedText, Qt::black);
 
+    // Shading roles used for frames, bevels and separators. Roles left unset
+    // fall back to the platform's system palette, which on Windows is derived
+    // from GetSysColor() and stays light even when the desktop is in dark mode
+    // - so every role a palette-driven style may read has to be specified.
+    darkPalette.setColor(QPalette::Light, QColor(75, 75, 75));
+    darkPalette.setColor(QPalette::Midlight, QColor(64, 64, 64));
+    darkPalette.setColor(QPalette::Mid, darkerGray);
+    darkPalette.setColor(QPalette::Dark, QColor(35, 35, 35));
+    darkPalette.setColor(QPalette::Shadow, QColor(20, 20, 20));
+    darkPalette.setColor(QPalette::PlaceholderText, QColor(127, 127, 127));
+
     // Disabled colors
+    darkPalette.setColor(QPalette::Disabled, QPalette::Window, darkGray);
+    darkPalette.setColor(QPalette::Disabled, QPalette::Base, darkerGray);
+    darkPalette.setColor(QPalette::Disabled, QPalette::AlternateBase, darkGray);
+    darkPalette.setColor(QPalette::Disabled, QPalette::Button, darkGray);
     darkPalette.setColor(QPalette::Disabled, QPalette::WindowText,
                          QColor(127, 127, 127));
     darkPalette.setColor(QPalette::Disabled, QPalette::Text,
@@ -176,6 +249,10 @@ void ThemeController::applyPalette(QApplication& app, bool isDark) {
 
   const QString disabled_menu_text_color =
       isDark ? "rgb(127, 127, 127)" : "palette(mid)";
+  // palette(mid) is darker than the button face in the dark palette, which
+  // would make the button outline disappear; use a lighter grey instead.
+  const QString button_border_color =
+      isDark ? "rgb(90, 90, 90)" : "palette(mid)";
 
   app.setStyleSheet(
       QString("QMenuBar { background-color: palette(window); color: "
@@ -192,11 +269,11 @@ void ThemeController::applyPalette(QApplication& app, bool isDark) {
               "palette(window-text); }"
               "QMessageBox QLabel { color: palette(window-text); }"
               "QMessageBox QPushButton { background-color: palette(button); "
-              "color: palette(button-text); border: 1px solid palette(mid); "
+              "color: palette(button-text); border: 1px solid %2; "
               "padding: 4px 12px; border-radius: 3px; min-width: 60px; }"
               "QMessageBox QPushButton:hover { background-color: "
               "palette(highlight); color: palette(highlighted-text); }"
               "QMessageBox QPushButton:pressed { background-color: "
               "palette(dark); color: palette(button-text); }")
-          .arg(disabled_menu_text_color));
+          .arg(disabled_menu_text_color, button_border_color));
 }
