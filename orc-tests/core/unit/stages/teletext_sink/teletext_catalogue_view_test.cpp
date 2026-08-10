@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <map>
 #include <string>
 
 #include "vbi-services/teletext_page_decoder.h"
@@ -82,6 +83,72 @@ std::string drawn_row(const CatalogueDataset& catalogue, int row,
     }
   }
   return text;
+}
+
+// A dataset holding one page whose rows rest on |copies| copies each, indexed
+// by row. Rows given a non-zero count are marked received.
+TeletextAnalysisDataset make_dataset_with_copies(
+    const std::map<int, int>& copies) {
+  TeletextPageSnapshot snapshot;
+  snapshot.magazine = 1;
+  snapshot.page_number = 0x64;
+  for (const auto& [row, count] : copies) {
+    snapshot.row_copies[static_cast<size_t>(row)] = count;
+    snapshot.row_received[static_cast<size_t>(row)] = count > 0;
+  }
+
+  TeletextCataloguedSubPage subpage;
+  subpage.page = snapshot;
+
+  TeletextCataloguedPage page;
+  page.magazine = snapshot.magazine;
+  page.page_number = snapshot.page_number;
+  page.times_seen = 1;
+  page.subpages.push_back(std::move(subpage));
+
+  TeletextAnalysisDataset dataset;
+  dataset.pages.push_back(std::move(page));
+  return dataset;
+}
+
+bool row_is_unconfirmed(const CatalogueDataset& catalogue, int row) {
+  for (const CataloguePayload& payload : catalogue.payloads) {
+    if (payload.kind == CataloguePayload::Kind::kCellGrid) {
+      EXPECT_LT(static_cast<size_t>(row), payload.grid.row_status.size());
+      return payload.grid.row_status[static_cast<size_t>(row)].unconfirmed;
+    }
+  }
+  ADD_FAILURE() << "no cell grid in the catalogue";
+  return false;
+}
+
+// A row carried onto this page by a burst can arrive two or three times over a
+// long recording while the page's own rows have hundreds. Marking only the rows
+// that rest on a single copy left exactly that row drawn as ordinary content,
+// which is what a reader has no other way to notice.
+TEST(TeletextCatalogueView, ARowFarBelowThePagesOwnEvidenceIsUnconfirmed) {
+  const CatalogueDataset catalogue = build_teletext_catalogue(
+      make_dataset_with_copies({{1, 500}, {2, 480}, {3, 500}, {24, 3}}));
+  EXPECT_FALSE(row_is_unconfirmed(catalogue, 1));
+  EXPECT_FALSE(row_is_unconfirmed(catalogue, 2));
+  EXPECT_TRUE(row_is_unconfirmed(catalogue, 24));
+}
+
+// The unevenness of a real recovery is not suspicion: a row the dropouts took
+// more often than its neighbours still belongs to the page.
+TEST(TeletextCatalogueView, ARowMerelyLessLuckyThanItsNeighboursIsNot) {
+  const CatalogueDataset catalogue = build_teletext_catalogue(
+      make_dataset_with_copies({{1, 500}, {2, 480}, {24, 120}}));
+  EXPECT_FALSE(row_is_unconfirmed(catalogue, 24));
+}
+
+// The label needs something to compare against: where every row rests on one
+// copy nothing distinguishes them, and marking the whole page says nothing.
+TEST(TeletextCatalogueView, APageSeenOnceHasNoUnconfirmedRows) {
+  const CatalogueDataset catalogue = build_teletext_catalogue(
+      make_dataset_with_copies({{1, 1}, {2, 1}, {24, 1}}));
+  EXPECT_FALSE(row_is_unconfirmed(catalogue, 1));
+  EXPECT_FALSE(row_is_unconfirmed(catalogue, 24));
 }
 
 // The reader is told which alphabet the pages were read in, because it is the

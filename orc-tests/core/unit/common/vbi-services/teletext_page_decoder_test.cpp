@@ -335,6 +335,52 @@ TEST_F(TeletextPageDecoderTest,
   EXPECT_EQ(row_text(snapshots_[0], 2), "STILL FIRST");
 }
 
+// Row 24 is the display address the non-display packets X/25 to X/31 are
+// mis-corrected into, and the row almost no page transmits — so nothing ever
+// out-votes the intruder and it reaches the screen looking like content. A
+// corrected MRAG is the one thing those packets have in common, so row 24 is
+// the row that will not take one.
+TEST_F(TeletextPageDecoderTest, LastDisplayRow_RejectsACorrectedAddress) {
+  auto row = make_row(1, 24, "MISCORRECTED");
+  row[1] ^= 0x10;  // single-bit error in the packet-number MRAG byte (§8.2)
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "REAL CONTENT"), 1);
+  decoder_.process_packet(row, 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_[0], 1), "REAL CONTENT");
+  EXPECT_EQ(row_text(snapshots_[0], 24), "");
+  EXPECT_FALSE(snapshots_[0].row_received[24]);
+}
+
+TEST_F(TeletextPageDecoderTest, LastDisplayRow_KeepsAnUncorrectedAddress) {
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 24, "FLOF LABELS"), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_[0], 24), "FLOF LABELS");
+  EXPECT_TRUE(snapshots_[0].row_received[24]);
+}
+
+// The rule is only for the last row: rows 1 to 23 are re-sent with every cycle
+// of the page, so a mis-correction among them is voted down by the copies that
+// follow, and refusing corrected addresses there would throw away a fifth of a
+// noisy recovery for nothing.
+TEST_F(TeletextPageDecoderTest, OrdinaryRows_StillTakeACorrectedAddress) {
+  auto row = make_row(1, 23, "CORRECTED");
+  row[1] ^= 0x10;
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(row, 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_[0], 23), "CORRECTED");
+}
+
 TEST_F(TeletextPageDecoderTest, ParityError_FlagsCellWithoutCorruptingPage) {
   auto row = make_row(1, 1, "AXC");
   row[2 + 1] ^= 0x01;  // break odd parity on the 'X' (EN 300 706 §8.1)

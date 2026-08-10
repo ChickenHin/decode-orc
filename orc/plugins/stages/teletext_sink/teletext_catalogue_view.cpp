@@ -39,6 +39,14 @@ std::vector<CatalogueColour> level1_palette() {
 constexpr int kCellAspectWidth = 12;
 constexpr int kCellAspectHeight = 20;
 
+// How far below the page's best-attested row a row's copy count must fall
+// before it is called unconfirmed (see where it is applied). Eight leaves ample
+// room for the unevenness of a real capture — a row lost to dropouts more often
+// than its neighbours still keeps a good fraction of their copies — while the
+// rows that do not belong to the page at all sit one to three copies against
+// hundreds.
+constexpr int kUnconfirmedCopyRatio = 8;
+
 // True when a 7-bit code selects a G1 block-mosaic character.
 //
 // With |blast_through|, codes 4/0-5/F remain alphanumeric capitals even in
@@ -274,16 +282,26 @@ CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
   // rests on one copy and the label would be noise. Where other rows *have*
   // been corrected by a repeat, a row that stands alone is the one the reader
   // should distrust.
+  //
+  // "Stands alone" is a share of the page's own evidence, not a fixed count. A
+  // page cycles as a whole, so its rows are transmitted alike and their copy
+  // counts land within a factor of two or so of each other; a row an order of
+  // magnitude below the best-attested one was not transmitted with the page at
+  // all. Testing only for a single copy missed exactly the case the reader most
+  // needs marked — a row carried onto this page by a burst can arrive two or
+  // three times over a long recording while the page's real rows have hundreds,
+  // and at three copies it was drawn as ordinary content.
   const int most_copies =
       *std::max_element(snapshot.row_copies.begin(), snapshot.row_copies.end());
 
   grid.row_status.resize(static_cast<size_t>(grid.rows));
   for (int row = 0; row < grid.rows; ++row) {
+    const int copies = snapshot.row_copies[static_cast<size_t>(row)];
     auto& status = grid.row_status[static_cast<size_t>(row)];
     status.received = snapshot.row_received[static_cast<size_t>(row)];
-    status.unconfirmed = row > 0 && !grid.at(row, 0).double_height_lower &&
-                         most_copies > 1 &&
-                         snapshot.row_copies[static_cast<size_t>(row)] == 1;
+    status.unconfirmed =
+        row > 0 && !grid.at(row, 0).double_height_lower && most_copies > 1 &&
+        (copies == 1 || copies * kUnconfirmedCopyRatio <= most_copies);
   }
   return grid;
 }

@@ -285,6 +285,50 @@ constexpr int kDesignationCodeZero = 0;
 // the page is a basic Level 1 teletext page (§9.4.2.1 Table 3, code 0000).
 constexpr int kPageFunctionBasicLevel1 = 0;
 
+// The last displayable row, X/24 — the FLOF label row of §9.6.1, which sits at
+// the boundary between the display rows and the non-display packets X/25 to
+// X/31 and so collects their mis-corrections (see accept_last_display_row()).
+constexpr int kLastDisplayRow = TeletextPageSnapshot::kRows - 1;
+
+// Whether a Hamming 8/4 byte arrived as a codeword rather than being corrected
+// into one. §8.2 gives the code minimum distance 4: one error is corrected and
+// two are detected, so a byte that needed correction is one channel error away
+// from having been mis-corrected into a neighbouring codeword instead.
+bool hamming84_uncorrected(uint8_t byte, int decoded) {
+  return teletext_hamming84_encode(static_cast<uint8_t>(decoded)) == byte;
+}
+
+// Whether a packet addressed to the last display row may be believed.
+//
+// Row 24 is the one display address a corrected MRAG must not be trusted for.
+// Its neighbours X/25 to X/31 are non-display packets that carry no odd parity
+// and are transmitted continuously, and the MRAG is Hamming 8/4 — distance 4,
+// so a two-bit burst is not detected but silently resolved to the neighbouring
+// codeword. Row 24 is where those land.
+//
+// What makes it show is that almost no page uses row 24. A service transmits
+// FLOF labels on a handful of pages and leaves the row empty on the rest
+// (the reference SECAM capture: 7 pages of 89). Rows 1-23 are re-sent with
+// every cycle of the page and the squasher votes an intruder down among five
+// hundred copies; row 24 has nothing to vote with, so the single packet that
+// arrives is the row, and the slicer's parity repair hands it over with no
+// damage to report.
+//
+// The measurement that sets the rule, over that capture's 228 839 packets:
+// rows X/1-23 arrive with both MRAG bytes uncorrected 78.4% of the time, and
+// X/24 on the pages that really carry FLOF labels 82.8% — but X/24 on every
+// other page only 29.8%. Genuine traffic sits at the baseline; the deficit is
+// packets that could only ever reach row 24 by being corrected into it.
+// Requiring both bytes as transmitted costs about one row 24 in six on the
+// pages that have one — a row re-sent tens of times, so nothing is lost — and
+// removes about seven in ten of the intruders.
+bool accept_last_display_row(
+    const std::array<uint8_t, kTeletextPacketBytes>& packet, int mrag_low,
+    int mrag_high) {
+  return hamming84_uncorrected(packet[0], mrag_low) &&
+         hamming84_uncorrected(packet[1], mrag_high);
+}
+
 }  // namespace
 
 bool teletext_odd_parity_valid(uint8_t byte) {
@@ -500,6 +544,10 @@ void TeletextPageDecoder::process_packet(
     // (key-word search labels) and X/26, X/27 and X/30-X/31 (enhancement,
     // editorial linking and independent data, §9.4-§9.8) are outside the
     // Level 1 grid and are ignored.
+    if (packet_number == kLastDisplayRow &&
+        !accept_last_display_row(packet, mrag_low, mrag_high)) {
+      return;
+    }
     handle_display_packet(magazine, packet_number, packet, field_index,
                           source == kAutoSource ? next_source_++ : source,
                           confidence);
