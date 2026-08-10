@@ -336,6 +336,30 @@ TEST(VBISourceStageParameters, TheSurfaceIsThreeParameters) {
   EXPECT_EQ(names, (std::vector<std::string>{"input_path", "format", "drops"}));
 }
 
+// The browse dialog filters on this hint, and these captures arrive under
+// several extensions: a card dump is .vbi raw or .flac wrapped, a decoder's
+// VBI-only export is named for its word size, and a crop keeps .tbc. Offering
+// only one of them hides the rest behind the All Files entry.
+TEST(VBISourceStageParameters, TheCapturePathHintCoversEveryContainerInUse) {
+  VBISourceStage stage;
+  const auto descriptors = stage.get_parameter_descriptors();
+
+  const auto path = std::find_if(descriptors.begin(), descriptors.end(),
+                                 [](const ParameterDescriptor& descriptor) {
+                                   return descriptor.name == "input_path";
+                                 });
+  ASSERT_NE(path, descriptors.end());
+
+  for (const char* extension : {".vbi", ".flac", ".u8", ".u16", ".tbc"}) {
+    EXPECT_NE(path->file_extension_hint.find(extension), std::string::npos)
+        << extension << " missing from '" << path->file_extension_hint << "'";
+  }
+
+  // Nothing about a capture is read from its name, so the hint must stay a
+  // dialog filter and never become a requirement.
+  EXPECT_FALSE(path->constraints.required);
+}
+
 TEST(VBISourceStageParameters, RejectsAnUnknownParameter) {
   VBISourceStage stage;
   EXPECT_FALSE(stage.set_parameters({{"nonsense", std::string("value")}}));
@@ -764,15 +788,30 @@ TEST(VBISourceStageSequence, PaddingKeepsTheOutputAlignedWithTheSource) {
 // Rejected configurations
 // ---------------------------------------------------------------------------
 
-TEST(VBISourceStageValidation, RefusesACaptureThatIsNotAWholeNumberOfFrames) {
+// A capture holding less than one whole frame has nothing to emit, so it is
+// refused; a remainder on top of at least one whole frame is not, because that
+// is only a capture that stopped where it stopped.
+TEST(VBISourceStageValidation, RefusesACaptureShorterThanOneWholeFrame) {
   const VBISourceFormat format = bt8x8_pal_format();
-  std::vector<uint8_t> capture = make_synthetic_capture(format, 2);
+  std::vector<uint8_t> capture = make_synthetic_capture(format, 1);
   capture.resize(capture.size() - 16u);
 
   VBISourceStage stage(std::make_shared<FakeDeps>(capture));
   ObservationContext observations;
   EXPECT_THROW(stage.execute({}, default_parameters(), observations),
                UserDataError);
+}
+
+TEST(VBISourceStageValidation, LoadsACaptureWithARaggedTrailingFrame) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  std::vector<uint8_t> capture = make_synthetic_capture(format, 2);
+  capture.resize(capture.size() - 16u);
+
+  VBISourceStage stage(std::make_shared<FakeDeps>(capture));
+  const auto representation =
+      representation_of(run_stage(stage, default_parameters()));
+  ASSERT_NE(representation, nullptr);
+  EXPECT_EQ(representation->frame_count(), 1u);
 }
 
 TEST(VBISourceStageValidation, RefusesACaptureItCannotOpen) {
@@ -813,8 +852,14 @@ VBISourceFormat tbc_vbi_ntsc_format() {
 // A capture in the shape of the circulating NTSC VBI-only crops: 16-bit
 // little-endian words in the decoder's amplitude domain, sixteen whole .tbc
 // lines per field, records starting at 0H so the offset is zero.
-std::vector<uint8_t> make_synthetic_ntsc_capture(const VBISourceFormat& format,
-                                                 uint64_t frame_count) {
+// anchor_shift_samples moves the run-in away from the service table's nominal
+// time, which is what a real transmission does: the tabulated 525-line figures
+// were measured on particular captures and broadcasters disagree with them by
+// up to a microsecond.  A crop of such a transmission is the case the stage has
+// to measure rather than assume.
+std::vector<uint8_t> make_synthetic_ntsc_capture(
+    const VBISourceFormat& format, uint64_t frame_count,
+    double anchor_shift_samples = 0.0) {
   VBITeletextService service;
   std::string error;
   EXPECT_TRUE(vbi_teletext_service(VBITVSystem::kNTSC, VBITeletextSystem::kWST,
@@ -823,7 +868,9 @@ std::vector<uint8_t> make_synthetic_ntsc_capture(const VBISourceFormat& format,
 
   std::vector<uint8_t> bytes(
       static_cast<size_t>(format.bytes_per_frame() * frame_count), 0);
-  const double position = service.cri_start_samples(format.sample_rate_hz, 0.0);
+  const double position =
+      service.cri_start_samples(format.sample_rate_hz, 0.0) +
+      anchor_shift_samples;
 
   for (uint64_t frame = 0; frame < frame_count; ++frame) {
     for (uint32_t field = 0; field < 2u; ++field) {
@@ -994,6 +1041,86 @@ TEST(VBISourceStageNTSC, ACaptureEndingOnAnOddFieldLoadsAndDropsThatField) {
   std::vector<uint8_t> capture = make_synthetic_ntsc_capture(format, 3);
   capture.resize(capture.size() -
                  static_cast<size_t>(format.bytes_per_field()));
+
+  auto deps = std::make_shared<FakeDeps>(capture);
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+  EXPECT_EQ(representation->frame_count(), 2u);
+}
+
+// A crop of a transmission that put its run-in earlier than the service table
+// says must have the data window moved to follow it. The window is cut one bit
+// period ahead of the anchor, so a transmission four bits early loses the head
+// of every run-in it places if the tabulated figure is used as transmitted —
+// which is the whole of what the measurement prevents.
+TEST(VBISourceStageNTSC, TheDataWindowFollowsTheTransmissionsOwnRunIn) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+
+  // Stored frame line 14 is broadcast field line 15, a data line of field 1.
+  constexpr size_t kDataLine = 14;
+
+  // Where the written region of that line begins and ends. Outside it the line
+  // is exactly blanking; inside it every sample sits at logic 0 or above, so
+  // the first and last samples that differ from blanking are the region.
+  auto written_region = [&](double shift) {
+    auto deps = std::make_shared<FakeDeps>(
+        make_synthetic_ntsc_capture(format, 3, shift));
+    deps->declared_bits = 16u;
+    VBISourceStage stage(deps);
+    const auto representation =
+        representation_of(run_stage(stage, ntsc_parameters()));
+    EXPECT_NE(representation, nullptr);
+
+    const std::vector<int16_t> frame = representation->get_frame_copy(1);
+    const size_t begin_of_line = kDataLine * kNtscSamplesPerLine;
+    size_t first = kNtscSamplesPerLine;
+    size_t last = 0;
+    for (size_t sample = 0; sample < kNtscSamplesPerLine; ++sample) {
+      if (frame[begin_of_line + sample] == kNtscBlanking) continue;
+      first = std::min(first, sample);
+      last = std::max(last, sample);
+    }
+    return std::pair<size_t, size_t>{first, last};
+  };
+
+  const auto nominal = written_region(0.0);
+  ASSERT_LT(nominal.first, nominal.second);
+
+  // A transmission eleven samples — some four bits — ahead of the table, which
+  // is what the reference NABTS crop measures against its own service entry.
+  constexpr double kShiftSamples = -11.0;
+  const auto early = written_region(kShiftSamples);
+
+  // The whole region moves with the run-in rather than the run-in moving out
+  // of a fixed region.
+  EXPECT_NEAR(
+      static_cast<double>(early.first) - static_cast<double>(nominal.first),
+      kShiftSamples, 1.5);
+  EXPECT_NEAR(
+      static_cast<double>(early.second) - static_cast<double>(nominal.second),
+      kShiftSamples, 1.5);
+
+  // And it keeps its width: nothing is clipped off either end.
+  EXPECT_NEAR(static_cast<double>(early.second - early.first),
+              static_cast<double>(nominal.second - nominal.first), 2.0);
+}
+
+// A capture cut part-way through a record is just as ordinary — it is how a
+// card dump stopped at the keyboard ends — and is loaded the same way, with
+// the ragged tail dropped rather than the file refused.
+TEST(VBISourceStageNTSC, ACaptureCutMidRecordLoadsAndDropsTheRaggedTail) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  std::vector<uint8_t> capture = make_synthetic_ntsc_capture(format, 3);
+
+  // One whole field, one whole record and 17 bytes past the second frame:
+  // a remainder that is none of the container's own quantities.
+  capture.resize(capture.size() -
+                 static_cast<size_t>(format.bytes_per_frame()) +
+                 static_cast<size_t>(format.bytes_per_field()) +
+                 static_cast<size_t>(format.bytes_per_record()) + 17u);
 
   auto deps = std::make_shared<FakeDeps>(capture);
   deps->declared_bits = 16u;

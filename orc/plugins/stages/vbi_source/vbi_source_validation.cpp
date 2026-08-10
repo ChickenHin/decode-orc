@@ -183,22 +183,28 @@ std::vector<std::string> validate_vbi_source_config(
   }
 
   // ------------------------------------------------------------------
-  // Stream length.  The capture must factorise into whole fields; a
-  // remainder means the format is wrong or the file has trailing garbage
-  // (design §8).
+  // Stream length.  The capture has to hold one whole frame; what follows the
+  // last whole frame does not have to be anything in particular.
   //
-  // Fields rather than frames, because a capture stops when it stops: the
-  // circulating VBI-only .tbc crops end on an odd field about as often as not,
-  // and there is nothing wrong with such a file.  The trailing field is one
-  // short of a frame, so it is not emitted — which the stage reports rather
-  // than hides.  Half a field is a different matter and stays an error: no
-  // container produces one, so it means the geometry is wrong.
+  // A capture stops when it stops, and nothing that writes one of these files
+  // rounds it off first.  The circulating VBI-only .tbc crops end on an odd
+  // field about as often as not, and a card dump ends wherever the writer was
+  // when it was killed — part-way through a record as readily as on a record
+  // boundary.  Neither file is misconfigured, so neither is refused: the
+  // trailing bytes are short of a frame, so they are not emitted, and the
+  // stage says what it dropped rather than passing over it in silence.
+  //
+  // This does mean a remainder no longer witnesses a wrong geometry.  It never
+  // witnessed one reliably — a wrong container leaves an arbitrary remainder
+  // and a truncated capture leaves an arbitrary remainder, and the check could
+  // not tell them apart — and the fit that follows is what actually catches it:
+  // a wrong stride, rate or system scatters the clock run-in far beyond the
+  // spread and drift limits and stops the run with a diagnostic naming the
+  // cause.
   // ------------------------------------------------------------------
   const uint64_t frame_bytes = format.bytes_per_frame();
-  const uint64_t field_bytes = format.bytes_per_field();
   if (decoded_stream_bytes.has_value() && frame_bytes > 0) {
     const uint64_t stream_bytes = *decoded_stream_bytes;
-    const uint64_t remainder = stream_bytes % frame_bytes;
     if (stream_bytes == 0) {
       errors.push_back("The capture is empty (0 bytes after decoding).");
     } else if (stream_bytes < frame_bytes) {
@@ -207,16 +213,6 @@ std::vector<std::string> validate_vbi_source_config(
           " bytes, which is less than the configured frame size of " +
           std::to_string(frame_bytes) +
           " bytes, so it does not hold one complete frame.");
-    } else if (remainder != 0 && remainder != field_bytes) {
-      errors.push_back(
-          "The capture is " + std::to_string(stream_bytes) +
-          " bytes, which is not an exact multiple of the configured frame "
-          "size of " +
-          std::to_string(frame_bytes) + " bytes (" +
-          std::to_string(stream_bytes / frame_bytes) + " whole frames plus " +
-          std::to_string(remainder) +
-          " bytes, which is not a whole field either). The container format is "
-          "wrong, or the file has trailing data.");
     }
   }
 

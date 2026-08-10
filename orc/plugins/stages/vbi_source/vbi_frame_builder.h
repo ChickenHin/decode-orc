@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -97,17 +98,36 @@ class VBIFrameBuilder {
 // placement of its records on that lattice, the resampler that lands them
 // there, and the frame line each record belongs to.
 //
-// capture_offset_samples is passed explicitly rather than read from the format
-// so that a calibrated offset overrides the descriptor's starting hint without
-// the descriptor having to be rewritten (design §5.3.4).
+// The two timing figures settled when a capture is opened.
 //
+// They are passed explicitly rather than read from the format and the service
+// table so that what was measured overrides what was tabulated, without either
+// of those having to be rewritten (design §5.3.4).  Which of the two is
+// measured depends on the source family, and it is never both: a capture has
+// one unknown here, and fitting two would be fitting it twice.
+struct VBIResolvedTiming {
+  // Time from 0H to sample 0 of every record, in source samples.  Fitted from
+  // the run-in for a card capture, whose hardware does not say; exactly zero
+  // for a TBC-derived one, whose records start at 0H by construction.
+  double capture_offset_samples = 0.0;
+
+  // The service's 0H-to-run-in anchor in nanoseconds, when it was measured
+  // from the capture rather than taken from the service table.  Empty leaves
+  // the tabulated figure standing.
+  //
+  // Only a TBC-derived capture ever sets it.  A card capture's fitted offset
+  // has already put its run-in at the tabulated anchor, so there is nothing
+  // left for a measurement here to say.
+  std::optional<double> service_anchor_ns;
+};
+
 // Returns false with an error message for any part the stage does not yet
 // support, and for a configuration that maps two records of a frame onto the
 // same frame line — which is a wrong field range rather than something to
 // resolve silently.
 bool make_vbi_frame_builder(const VBISourceFormat& format,
                             const VBILevelMapperConfig& level_config,
-                            double capture_offset_samples,
+                            const VBIResolvedTiming& timing,
                             VBIFrameBuilder& out_builder,
                             std::string& error_message);
 

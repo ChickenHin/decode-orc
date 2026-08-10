@@ -309,6 +309,7 @@ TEST(VBILineReader, FrameCountIsWholeFramesOnly) {
   ASSERT_TRUE(reader.frame_count().has_value());
   EXPECT_EQ(*reader.frame_count(), 5u);
   EXPECT_FALSE(reader.has_partial_trailing_frame());
+  EXPECT_EQ(reader.trailing_bytes().value_or(1u), 0u);
   EXPECT_EQ(reader.bytes_per_frame(), 65536u);
 }
 
@@ -322,6 +323,27 @@ TEST(VBILineReader, PartialTrailingFrameIsReported) {
   ASSERT_TRUE(reader.frame_count().has_value());
   EXPECT_EQ(*reader.frame_count(), 2u);
   EXPECT_TRUE(reader.has_partial_trailing_frame());
+
+  // How much was left over is what tells an ordinary odd-field ending apart
+  // from a capture cut mid-record, so the reader reports the count and not
+  // just the fact.
+  ASSERT_TRUE(reader.trailing_bytes().has_value());
+  EXPECT_EQ(*reader.trailing_bytes(), format.bytes_per_frame() - 100u);
+}
+
+// A capture that ends exactly on a field boundary is the ordinary case, and
+// the reported remainder is what lets the stage say so in those words.
+TEST(VBILineReader, TrailingWholeFieldIsReportedAsAFieldsWorthOfBytes) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  std::vector<uint8_t> bytes = make_capture(format, 3);
+  bytes.resize(bytes.size() - static_cast<size_t>(format.bytes_per_field()));
+  FakeByteSource source(std::move(bytes));
+  VBILineReader reader(format, source);
+
+  EXPECT_EQ(*reader.frame_count(), 2u);
+  EXPECT_TRUE(reader.has_partial_trailing_frame());
+  ASSERT_TRUE(reader.trailing_bytes().has_value());
+  EXPECT_EQ(*reader.trailing_bytes(), format.bytes_per_field());
 }
 
 // A short final frame is an error, never a silent truncation: records must

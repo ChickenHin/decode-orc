@@ -57,20 +57,24 @@ TEST(VBISourceValidation, ReferenceCaptureConfigurationIsAccepted) {
   EXPECT_TRUE(errors.empty()) << joined(errors);
 }
 
-TEST(VBISourceValidation, StreamLengthMustFactoriseIntoWholeFrames) {
+// A capture stops when it stops, and nothing that writes one of these files
+// rounds it off first. Whatever follows the last whole frame is short of a
+// frame and is simply not emitted, so no trailing remainder is refused.
+TEST(VBISourceValidation, AnyTrailingRemainderIsAccepted) {
   const VBISourceFormat format = bt8x8_pal_format();
+  const uint64_t frame_bytes = format.bytes_per_frame();
 
-  const std::vector<std::string> errors =
-      validate_vbi_source_config(format, 65536ull * 10 + 7);
-
-  EXPECT_TRUE(mentions(errors, "not an exact multiple")) << joined(errors);
-  EXPECT_TRUE(mentions(errors, "65536")) << joined(errors);
-  EXPECT_TRUE(mentions(errors, "7 bytes")) << joined(errors);
+  for (const uint64_t remainder :
+       {uint64_t{0}, uint64_t{7}, format.bytes_per_field(),
+        format.bytes_per_record(), frame_bytes - 1}) {
+    const std::vector<std::string> errors =
+        validate_vbi_source_config(format, frame_bytes * 10 + remainder);
+    EXPECT_TRUE(errors.empty()) << remainder << ": " << joined(errors);
+  }
 }
 
-// A capture stops when it stops, and the circulating VBI-only .tbc crops end
-// on an odd field about as often as not.  Such a file is not misconfigured:
-// the trailing field is one short of a frame and is simply not emitted.
+// The circulating VBI-only .tbc crops end on an odd field about as often as
+// not, which is the ordinary case the tolerance was first written for.
 TEST(VBISourceValidation, ATrailingWholeFieldIsAccepted) {
   VBISourceFormat format;
   std::string error;
@@ -87,23 +91,25 @@ TEST(VBISourceValidation, ATrailingWholeFieldIsAccepted) {
   EXPECT_TRUE(errors.empty()) << joined(errors);
 }
 
-// Half a field is a different matter: no container produces one, so it means
-// the geometry is wrong.
-TEST(VBISourceValidation, ATrailingPartialFieldIsRejected) {
+// A card dump killed at the keyboard stops part-way through a record, which is
+// no more a misconfiguration than stopping on a field boundary is. What a
+// remainder can no longer do is witness a wrong geometry — the run-in fit is
+// what catches that, and it does so naming the cause.
+TEST(VBISourceValidation, ACaptureCutMidRecordIsAccepted) {
   VBISourceFormat format;
   std::string error;
-  ASSERT_TRUE(
-      expand_vbi_source_preset(".tbc VBI crop, 16-bit (WST)", format, error))
+  ASSERT_TRUE(expand_vbi_source_preset("cx23885 card dump, 8-bit (NABTS)",
+                                       format, error))
       << error;
 
-  const uint64_t frame_bytes = format.bytes_per_frame();
-  const uint64_t field_bytes = format.bytes_per_field();
-
+  // The reference capture: 18 093 whole frames and 34 048 bytes that are
+  // neither a whole field nor a whole record.
   const std::vector<std::string> errors =
-      validate_vbi_source_config(format, frame_bytes * 100 + field_bytes / 2);
+      validate_vbi_source_config(format, 625328128ull);
 
-  EXPECT_TRUE(mentions(errors, "not an exact multiple")) << joined(errors);
-  EXPECT_TRUE(mentions(errors, "not a whole field either")) << joined(errors);
+  EXPECT_TRUE(errors.empty()) << joined(errors);
+  EXPECT_EQ(625328128ull / format.bytes_per_frame(), 18093ull);
+  EXPECT_EQ(625328128ull % format.bytes_per_frame(), 34048ull);
 }
 
 // A stream too short to hold a frame at all says so, rather than reporting a

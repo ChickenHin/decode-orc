@@ -77,10 +77,20 @@ class VBILineReader {
   // report its size without decoding everything.
   std::optional<uint64_t> frame_count() const;
 
-  // True when the stream ends part-way through a frame.  This is always a
-  // configuration error rather than something to truncate silently; it is
-  // reported as such by validate_vbi_source_config().
+  // True when the stream ends part-way through a frame.  Not an error: a
+  // capture stops when it stops.  The trailing bytes are short of a frame and
+  // so are never emitted, which the stage reports rather than hiding.
   bool has_partial_trailing_frame() const;
+
+  // Bytes following the last whole frame, or nullopt when the transport cannot
+  // report its size without decoding everything.  Zero when the capture
+  // factorises exactly.
+  //
+  // What they are is worth telling apart. A whole field is the ordinary way a
+  // capture ends; anything else means the writer stopped part-way through a
+  // record, which is ordinary for a card dump killed at the keyboard and is
+  // also what a wrong container geometry would leave behind.
+  std::optional<uint64_t> trailing_bytes() const;
 
   // Read every data-service record of one stored frame.  Returns false with
   // an error message on a short read (a truncated final frame) or a sample

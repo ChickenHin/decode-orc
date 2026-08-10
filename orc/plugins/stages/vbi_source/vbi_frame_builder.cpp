@@ -109,10 +109,12 @@ bool VBIFrameBuilder::build_frame(const std::vector<VBILineRecord>& records,
 
 bool make_vbi_frame_builder(const VBISourceFormat& format,
                             const VBILevelMapperConfig& level_config,
-                            double capture_offset_samples,
+                            const VBIResolvedTiming& timing,
                             VBIFrameBuilder& out_builder,
                             std::string& error_message) {
   out_builder = VBIFrameBuilder();
+
+  const double capture_offset_samples = timing.capture_offset_samples;
 
   VBIOutputFrame output_frame;
   if (!make_vbi_output_frame(format.tv_system, format.tt_system, output_frame,
@@ -124,6 +126,14 @@ bool make_vbi_frame_builder(const VBISourceFormat& format,
   if (!vbi_teletext_service(format.tv_system, format.tt_system, service,
                             error_message)) {
     return false;
+  }
+
+  // A measured anchor replaces the tabulated one for everything downstream:
+  // the data window is cut from it, and so are the windows the level mapper
+  // reads its logic levels from.  Both have to follow the run-in to where it
+  // actually is, or the window is cut around the wrong part of the line.
+  if (timing.service_anchor_ns.has_value()) {
+    service.t_offset_ns = *timing.service_anchor_ns;
   }
 
   VBITeletextLineMap line_map;

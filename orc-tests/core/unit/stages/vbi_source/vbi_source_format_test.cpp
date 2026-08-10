@@ -213,11 +213,13 @@ TEST(VBISourceFormat, UnknownPresetIsRejectedAndListsTheKnownNames) {
 TEST(VBISourceFormat, PresetNamesAreTheWholeChoiceAndAllExpand) {
   const std::vector<std::string> names = vbi_source_preset_names();
 
-  EXPECT_EQ(names, (std::vector<std::string>{
-                       "bt8x8 card dump, 8-bit (WST)",
-                       "bt8x8 card dump, 8-bit (WST, SECAM source)",
-                       ".tbc VBI crop, 16-bit (WST)",
-                       ".tbc VBI crop, 16-bit (NABTS)"}));
+  EXPECT_EQ(
+      names,
+      (std::vector<std::string>{
+          "bt8x8 card dump, 8-bit (WST)",
+          "bt8x8 card dump, 8-bit (WST, SECAM source)",
+          "cx23885 card dump, 8-bit (WST)", "cx23885 card dump, 8-bit (NABTS)",
+          ".tbc VBI crop, 16-bit (WST)", ".tbc VBI crop, 16-bit (NABTS)"}));
 
   for (const std::string& name : names) {
     VBISourceFormat format;
@@ -244,16 +246,163 @@ TEST(VBISourceFormat, PresetNamesAreFilteredByTelevisionSystem) {
       vbi_source_preset_names(VBITVSystem::kNTSC);
 
   // A PAL project is offered the one card container in its two source
-  // flavours; an NTSC project is offered the choice between the two services
-  // its captures might carry.
+  // flavours; an NTSC project is offered its two containers, each in the two
+  // services its captures might carry.
   EXPECT_EQ(pal, (std::vector<std::string>{
                      "bt8x8 card dump, 8-bit (WST)",
                      "bt8x8 card dump, 8-bit (WST, SECAM source)"}));
-  EXPECT_EQ(ntsc, (std::vector<std::string>{".tbc VBI crop, 16-bit (WST)",
+  EXPECT_EQ(ntsc, (std::vector<std::string>{"cx23885 card dump, 8-bit (WST)",
+                                            "cx23885 card dump, 8-bit (NABTS)",
+                                            ".tbc VBI crop, 16-bit (WST)",
                                             ".tbc VBI crop, 16-bit (NABTS)"}));
 
   // Between them the two lists are the whole table: no preset is unreachable.
   EXPECT_EQ(pal.size() + ntsc.size(), vbi_source_preset_names().size());
+}
+
+// The cx23885 container is the Linux driver's cx23885_vbi_fmt(), field for
+// field: 27 MHz, VBI_LINE_LENGTH samples with no padding, and
+// VBI_NTSC_LINE_COUNT records from V4L2_VBI_ITU_525_F1_START + 9. Getting any
+// of these wrong is a silently wrong decode rather than a refusal.
+TEST(VBISourceFormat, Cx23885NTSCPresetExpandsToTheDriverContainer) {
+  VBISourceFormat format;
+  std::string error;
+
+  ASSERT_TRUE(expand_vbi_source_preset("cx23885 card dump, 8-bit (NABTS)",
+                                       format, error))
+      << error;
+  EXPECT_TRUE(error.empty());
+
+  EXPECT_DOUBLE_EQ(format.sample_rate_hz, 27000000.0);
+  EXPECT_EQ(format.line_length, 1440u);
+  EXPECT_EQ(format.sample_format, VBISampleFormat::kU8);
+  EXPECT_EQ(format.field_lines, 12u);
+
+  // The window is the digital active line, so every stored sample is real:
+  // no padding, and therefore nowhere for a frame counter to live.
+  EXPECT_EQ(format.valid_samples, format.line_length);
+  EXPECT_EQ(format.record_padding_bytes(), 0u);
+  EXPECT_EQ(format.frame_trailer_bytes, 0u);
+  EXPECT_FALSE(format.frame_trailer_is_counter);
+
+  // Twelve records from field line 10 is the whole 525-line teletext list, so
+  // unlike the .tbc crop there are no records to skip at either end.
+  EXPECT_EQ(format.field_range.start, 0u);
+  EXPECT_EQ(format.field_range.end, 11u);
+  EXPECT_EQ(format.field_range.count(),
+            standard_teletext_lines_per_field(VBITVSystem::kNTSC,
+                                              VBITeletextSystem::kNABTS));
+
+  // start[0] is the field 1 line list and the driver stores it first.
+  EXPECT_EQ(format.first_field, 1u);
+
+  EXPECT_EQ(format.tv_system, VBITVSystem::kNTSC);
+  EXPECT_EQ(format.tt_system, VBITeletextSystem::kNABTS);
+  EXPECT_EQ(format.family, VBISourceFamily::kCardCapture);
+}
+
+// 1440 samples of one byte, twelve records to a field, two fields to a frame.
+TEST(VBISourceFormat, Cx23885NTSCFrameGeometryDerivesTheCaptureByteCounts) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(expand_vbi_source_preset("cx23885 card dump, 8-bit (NABTS)",
+                                       format, error))
+      << error;
+
+  EXPECT_EQ(format.bytes_per_sample(), 1u);
+  EXPECT_EQ(format.bytes_per_record(), 1440u);
+  EXPECT_EQ(format.bytes_per_field(), 17280u);
+  EXPECT_EQ(format.bytes_per_frame(), 34560u);
+}
+
+// The two services share the container completely — the card knows nothing
+// about what the lines carry — so the entries may differ in the service and in
+// nothing else.
+TEST(VBISourceFormat, Cx23885NTSCServiceVariantsShareOneContainer) {
+  VBISourceFormat wst;
+  VBISourceFormat nabts;
+  std::string error;
+
+  ASSERT_TRUE(
+      expand_vbi_source_preset("cx23885 card dump, 8-bit (WST)", wst, error))
+      << error;
+  ASSERT_TRUE(expand_vbi_source_preset("cx23885 card dump, 8-bit (NABTS)",
+                                       nabts, error))
+      << error;
+
+  EXPECT_DOUBLE_EQ(nabts.sample_rate_hz, wst.sample_rate_hz);
+  EXPECT_EQ(nabts.line_length, wst.line_length);
+  EXPECT_EQ(nabts.valid_samples, wst.valid_samples);
+  EXPECT_EQ(nabts.sample_format, wst.sample_format);
+  EXPECT_EQ(nabts.field_lines, wst.field_lines);
+  EXPECT_EQ(nabts.field_range.start, wst.field_range.start);
+  EXPECT_EQ(nabts.field_range.end, wst.field_range.end);
+  EXPECT_EQ(nabts.first_field, wst.first_field);
+  EXPECT_DOUBLE_EQ(nabts.capture_offset_samples, wst.capture_offset_samples);
+  EXPECT_EQ(nabts.capture_offset_is_auto, wst.capture_offset_is_auto);
+  EXPECT_EQ(nabts.family, wst.family);
+
+  EXPECT_EQ(wst.tt_system, VBITeletextSystem::kWST);
+  EXPECT_EQ(nabts.tt_system, VBITeletextSystem::kNABTS);
+}
+
+// The driver reports f->fmt.vbi.offset = 0 without measuring anything, so the
+// configured figure is the window SMPTE 125M says the card's timing generator
+// produces — 122 samples at 13,5 MHz, which is 244 at 27 MHz — and it is a
+// starting point for calibration rather than a value to be used as configured.
+TEST(VBISourceFormat, Cx23885NTSCPresetCalibratesItsCaptureOffset) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(expand_vbi_source_preset("cx23885 card dump, 8-bit (NABTS)",
+                                       format, error))
+      << error;
+
+  EXPECT_TRUE(format.capture_offset_is_auto);
+  EXPECT_DOUBLE_EQ(format.capture_offset_samples, 244.0);
+
+  // The reference capture puts sample 0 at 9,31 us against the standard's
+  // 9,04, and the service anchor is a further 22 samples out at this rate, so
+  // the search has to reach a good deal further than the figure itself
+  // suggests.
+  EXPECT_GE(format.calibration.search_tolerance_samples, 30.0);
+}
+
+// A US network carried its magazine on two or three of the twelve lines, so the
+// share of records that lock is a fraction of what a 625-line capture shows.
+// Only that one threshold is relaxed: the spread and drift checks, which are
+// what actually catch a wrong container, keep the bt8x8 preset's tolerance
+// expressed at this preset's sampling rate.
+TEST(VBISourceFormat, Cx23885NTSCPresetExpectsFewLinesToCarryTeletext) {
+  VBISourceFormat cx;
+  VBISourceFormat bt;
+  std::string error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("cx23885 card dump, 8-bit (NABTS)", cx, error))
+      << error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", bt, error))
+      << error;
+
+  EXPECT_GT(cx.calibration.minimum_acceptance_fraction, 0.0);
+  EXPECT_LT(cx.calibration.minimum_acceptance_fraction,
+            bt.calibration.minimum_acceptance_fraction);
+
+  // Both captures of the reference broadcast carry the service on two records
+  // of the twelve, so the bar has to sit below that and not far below it.
+  EXPECT_LT(cx.calibration.minimum_acceptance_fraction, 2.0 / 12.0);
+  EXPECT_GT(cx.calibration.minimum_acceptance_fraction, 1.0 / 12.0);
+
+  // 8 samples at the bt8x8's 35,47 MHz is 226 ns; the same tolerance in time
+  // is what this preset allows at 27 MHz, rather than the same count.
+  const double bt_spread_ns =
+      bt.calibration.maximum_spread_samples / bt.sample_rate_hz * 1e9;
+  const double cx_spread_ns =
+      cx.calibration.maximum_spread_samples / cx.sample_rate_hz * 1e9;
+  EXPECT_NEAR(cx_spread_ns, bt_spread_ns, 10.0);
+  EXPECT_DOUBLE_EQ(cx.calibration.maximum_drift_samples,
+                   cx.calibration.maximum_spread_samples);
+  EXPECT_DOUBLE_EQ(cx.calibration.acceptance_correlation,
+                   bt.calibration.acceptance_correlation);
 }
 
 // The circulating NTSC VBI-only crops: sixteen whole 4 x fsc .tbc lines per

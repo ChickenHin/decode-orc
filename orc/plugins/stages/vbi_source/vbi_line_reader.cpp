@@ -97,16 +97,21 @@ std::optional<uint64_t> VBILineReader::frame_count() const {
 }
 
 bool VBILineReader::has_partial_trailing_frame() const {
+  const std::optional<uint64_t> trailing = trailing_bytes();
+  return trailing.has_value() && *trailing != 0;
+}
+
+std::optional<uint64_t> VBILineReader::trailing_bytes() const {
   const uint64_t frame_bytes = format_.bytes_per_frame();
   if (frame_bytes == 0) {
-    return false;
+    return std::nullopt;
   }
 
   const std::optional<uint64_t> stream_bytes = byte_source_->size_bytes();
   if (!stream_bytes.has_value()) {
-    return false;
+    return std::nullopt;
   }
-  return (*stream_bytes % frame_bytes) != 0;
+  return *stream_bytes % frame_bytes;
 }
 
 bool VBILineReader::read_frame_counter(uint64_t frame_index,
