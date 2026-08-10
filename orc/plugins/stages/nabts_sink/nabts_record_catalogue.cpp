@@ -12,6 +12,9 @@
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
+#include <array>
+
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 
@@ -34,10 +37,131 @@ std::string arguments_text(const std::vector<uint8_t>& arguments) {
   return out;
 }
 
+/// §7.2.2's descriptors as the catalogue reports them.
+std::vector<NabtsRecordFunction> render_functions(
+    const std::vector<NabtsFunctionDescriptor>& functions) {
+  std::vector<NabtsRecordFunction> out;
+  out.reserve(functions.size());
+  for (const NabtsFunctionDescriptor& function : functions) {
+    NabtsRecordFunction rendered;
+    rendered.code = function.code_text();
+    rendered.control = function.is_control();
+    rendered.arguments = arguments_text(function.arguments);
+    out.push_back(std::move(rendered));
+  }
+  return out;
+}
+
+/// The length most copies agree on; the longest of them where none has more
+/// support than another, since a copy is far likelier to have been cut short
+/// than to have grown.
+std::size_t voted_length(const std::vector<NabtsRecordCopy>& copies) {
+  std::size_t best = 0;
+  std::size_t best_support = 0;
+  for (const auto& candidate : copies) {
+    std::size_t support = 0;
+    for (const auto& other : copies) {
+      support += (other.data.size() == candidate.data.size()) ? 1 : 0;
+    }
+    if (support > best_support ||
+        (support == best_support && candidate.data.size() > best)) {
+      best = candidate.data.size();
+      best_support = support;
+    }
+  }
+  return best;
+}
+
 }  // namespace
 
-NabtsRecordCatalogue::NabtsRecordCatalogue(std::size_t max_records)
-    : max_records_(std::max<std::size_t>(1, max_records)) {}
+std::vector<uint8_t> nabts_vote_record_data(
+    const std::vector<NabtsRecordCopy>& copies) {
+  if (copies.empty()) {
+    return {};
+  }
+  if (copies.size() == 1) {
+    return copies.front().data;  // A vote of one is the copy itself.
+  }
+
+  const std::size_t length = voted_length(copies);
+  std::vector<uint8_t> out(length, 0);
+
+  // One pass over the copies per position, tallying per byte value. The
+  // accumulators are epoch-marked by position so none of them has to be cleared
+  // between positions.
+  std::array<uint64_t, 256> weight_of{};
+  std::array<std::size_t, 256> newest_of{};
+  std::array<std::size_t, 256> seen_at{};  // epoch: position + 1, 0 = never
+  std::array<uint8_t, 256> distinct{};
+
+  for (std::size_t position = 0; position < length; ++position) {
+    const std::size_t epoch = position + 1;
+    std::size_t distinct_count = 0;
+    for (std::size_t copy = 0; copy < copies.size(); ++copy) {
+      const NabtsRecordCopy& candidate = copies[copy];
+      if (position >= candidate.data.size()) {
+        continue;  // a copy cut short votes only over the bytes it has
+      }
+      if (position < candidate.present.size() &&
+          candidate.present[position] == 0) {
+        // A byte a lost packet carried. The hole is held open so the bytes
+        // after it keep their offsets, but there is nothing here to vote with.
+        continue;
+      }
+      const uint8_t value = candidate.data[position];
+      if (seen_at[value] != epoch) {
+        seen_at[value] = epoch;
+        weight_of[value] = 0;
+        newest_of[value] = 0;
+        distinct[distinct_count++] = value;
+      }
+      // What the detector made of this byte, or full weight where nothing
+      // measured it — see NabtsRecordCopy::confidence. One is the floor, so a
+      // byte the detector could not decide at all still counts for more than a
+      // copy that has no byte here at all.
+      const uint64_t weight =
+          position < candidate.confidence.size()
+              ? std::max<uint64_t>(1, candidate.confidence[position])
+              : 255;
+      weight_of[value] += weight;
+      newest_of[value] = copy;  // copies are held oldest first
+    }
+
+    bool best_clean = false;
+    // NUL stands where no copy had this byte at all. X3.110 §6.1.4 makes it a
+    // transparent control with no presentation effect, so a hole costs the
+    // drawing nothing beyond the bytes that were actually lost — which is the
+    // point of holding it open rather than letting the record close up over it.
+    uint8_t best = 0;
+    uint64_t best_weight = 0;
+    std::size_t best_newest = 0;
+    for (std::size_t k = 0; k < distinct_count; ++k) {
+      const uint8_t value = distinct[k];
+      const bool clean = teletext_odd_parity_valid(value);
+      if (k > 0) {
+        if (best_clean && !clean) {
+          continue;  // a byte known corrupt never beats a parity-clean one
+        }
+        if (clean == best_clean && !(weight_of[value] > best_weight ||
+                                     (weight_of[value] == best_weight &&
+                                      newest_of[value] > best_newest))) {
+          continue;
+        }
+      }
+      best = value;
+      best_clean = clean;
+      best_weight = weight_of[value];
+      best_newest = newest_of[value];
+    }
+    out[position] = best;
+  }
+  return out;
+}
+
+NabtsRecordCatalogue::NabtsRecordCatalogue(std::size_t max_records,
+                                           std::size_t max_copies)
+    : max_records_(std::max<std::size_t>(1, max_records)),
+      max_copies_(std::max<std::size_t>(1, max_copies)) {}
 
 bool NabtsRecordCatalogue::copy_is_better(const Entry& entry,
                                           const NabtsMessage& message) {
@@ -67,27 +191,34 @@ void NabtsRecordCatalogue::take_copy(Entry& entry,
   record.complete = message.complete;
   record.data = message.data;
 
-  record.functions.clear();
-  record.functions.reserve(message.functions.size());
-  for (const NabtsFunctionDescriptor& function : message.functions) {
-    NabtsRecordFunction out;
-    out.code = function.code_text();
-    out.control = function.is_control();
-    out.arguments = arguments_text(function.arguments);
-    record.functions.push_back(std::move(out));
-  }
-
-  // §6.1: a presentation record's data is NAPLPS, so this is where it becomes
-  // something a viewer can draw. An application record's data is function
-  // descriptors (§7.2.2), already rendered above, and running it as
-  // presentation code would draw nonsense.
-  if (nabts_type_is_presentation(message.type)) {
-    record.page = interpreter_.run(message.data);
-  } else {
-    record.page = NabtsPageSnapshot{};
-  }
-
+  record.functions = render_functions(message.functions);
   entry.kept_copy_intact = message.complete && message.intact;
+}
+
+void NabtsRecordCatalogue::add_copy(Entry& entry,
+                                    const NabtsMessage& message) const {
+  if (message.complete && message.intact) {
+    // The record has arrived whole, so there is nothing left for a vote to
+    // improve on and the copies held for one can go.
+    entry.copies.clear();
+    entry.copies.shrink_to_fit();
+    return;
+  }
+  if (entry.kept_copy_intact) {
+    return;  // an undamaged copy arrived earlier and is what will be shown
+  }
+  if (!message.aligned) {
+    // Bytes that have moved cannot be compared position for position with the
+    // rest, and voting them in would corrupt every position after the hole.
+    return;
+  }
+  if (entry.copies.size() >= max_copies_) {
+    // Oldest out, so the copies held stay the most recent — which is what the
+    // vote falls back to when a position has nothing to choose between.
+    entry.copies.erase(entry.copies.begin());
+  }
+  entry.copies.push_back(
+      NabtsRecordCopy{message.data, message.present, message.confidence});
 }
 
 void NabtsRecordCatalogue::merge(const NabtsMessage& message,
@@ -113,6 +244,7 @@ void NabtsRecordCatalogue::merge(const NabtsMessage& message,
   }
 
   Entry& entry = it->second;
+  add_copy(entry, message);
   entry.record.last_seen_frame = frame_id;
   ++entry.record.times_seen;
   if (message.complete && message.intact) {
@@ -144,6 +276,30 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
   // the order a reader would list a service in.
   for (const auto& entry : records_) {
     out.push_back(entry.second.record);
+    NabtsCataloguedRecord& record = out.back();
+
+    // Copies are held only where no undamaged one ever arrived, so this is the
+    // recording that never gave up a clean copy of the record: combine what did
+    // arrive rather than show whichever copy happened to be longest.
+    if (!entry.second.copies.empty()) {
+      record.data = nabts_vote_record_data(entry.second.copies);
+      record.copies_voted = static_cast<uint32_t>(entry.second.copies.size());
+      if (record.record_type == kNabtsRecordTypeApplication) {
+        // The descriptors were rendered from one copy; the vote may have
+        // recovered bytes that copy had wrong (§7.2.2).
+        record.functions =
+            render_functions(nabts_decode_application_record(record.data));
+      }
+    }
+
+    // §6.1: a presentation record's data is NAPLPS, so this is where it becomes
+    // something a viewer can draw — once per record, on whatever the vote
+    // settled on. An application record's data is function descriptors
+    // (§7.2.2), rendered above, and running it as presentation code would draw
+    // nonsense.
+    if (nabts_type_is_presentation(record.record_type)) {
+      record.page = interpreter_.run(record.data);
+    }
   }
   return out;
 }

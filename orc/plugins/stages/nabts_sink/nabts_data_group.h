@@ -100,6 +100,27 @@ struct NabtsDataGroup {
   /// is exactly one teletext record (§5.1).
   std::vector<uint8_t> data;
 
+  /// One entry per byte of @ref data: non-zero where that byte arrived, zero
+  /// where it stands in for one a lost packet carried. Empty when the group
+  /// lost nothing, which saves carrying a mask that is all ones.
+  ///
+  /// §3.2.4's continuity index says how many packets never arrived, so a hole
+  /// can be held open at the width the lost blocks would have filled instead of
+  /// letting the bytes after it close up. That keeps every later byte at the
+  /// offset the record gave it, which is what lets two copies of one record be
+  /// compared position for position however much each of them lost. The width
+  /// is an estimate — the lost packets' own suffix codes went with them, so the
+  /// group's nominal block length stands in — and where the continuity index
+  /// disagrees with the block count the header declared it is not trusted at
+  /// all, and the rest of the group is marked absent rather than misplaced.
+  std::vector<uint8_t> present;
+
+  /// One entry per byte of @ref data: how sure the detector was of it, on the
+  /// 0-255 scale of NabtsPacket::confidence. Zero where the byte never arrived.
+  /// Empty when nothing measured any of them, which is read as full confidence
+  /// throughout.
+  std::vector<uint8_t> confidence;
+
   /// Packets that contributed, including the synchronizing packet.
   uint32_t packets = 0;
   /// Data blocks whose suffix check the product code had to repair.
@@ -193,6 +214,18 @@ class NabtsGroupAssembler {
     /// eight header bytes included, so an offset into this is an offset into
     /// the group as §4.2.6 counts it.
     std::vector<uint8_t> stream;
+    /// Parallel to @ref stream: whether each byte arrived or stands in for one
+    /// a lost packet carried (see NabtsDataGroup::present).
+    std::vector<uint8_t> present;
+    /// Parallel to @ref stream: detector confidence per byte, zero in a hole.
+    std::vector<uint8_t> confidence;
+    /// Data-block bytes the synchronizing packet carried, which is the width a
+    /// lost block is assumed to have had. §4.2 has a group's packets share a
+    /// suffix code in practice, and a lost packet's own is lost with it.
+    size_t nominal_block_bytes = 0;
+    /// False once the continuity index has said something the group header
+    /// contradicts, after which no byte of this group can be placed.
+    bool placeable = true;
     /// Blocks after the synchronizing packet's own.
     uint16_t further_blocks_seen = 0;
     /// Where the last data block with any bytes in it started, and how long it
@@ -220,6 +253,10 @@ class NabtsGroupAssembler {
 
   /// Append |packet|'s data block, maintaining the final-non-zero bookkeeping.
   static void append_block(OpenGroup& group, const NabtsPacket& packet);
+
+  /// Hold open a hole |blocks| blocks wide where packets never arrived, so the
+  /// bytes after it keep their offsets.
+  static void append_hole(OpenGroup& group, uint32_t blocks);
 
   GroupCallback callback_;
   // Ordered rather than hashed: the map is tiny and bounded, and iterating it

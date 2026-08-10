@@ -237,10 +237,16 @@ struct NabtsCataloguedRecord {
   /// group. A false here is why a presentation record may render short.
   bool complete = false;
 
-  /// Best copy of the record data (§5.3): NAPLPS presentation code for record
-  /// types 0, 1 and 3, application data for type 2. "Best" is the first
-  /// complete and undamaged copy seen, or the longest copy if none was.
+  /// Record data (§5.3): NAPLPS presentation code for record types 0, 1 and 3,
+  /// application data for type 2. Where an undamaged copy arrived it is that
+  /// copy; where none ever did, it is a vote across the damaged copies (see
+  /// @ref copies_voted).
   std::vector<uint8_t> data;
+
+  /// Damaged copies combined into @ref data, or zero when it is a single copy
+  /// that arrived undamaged. A vote of one is the copy itself, so one here
+  /// means the record was only ever seen damaged and only once.
+  uint32_t copies_voted = 0;
 
   /// Function descriptors, for an application record. Empty otherwise.
   std::vector<NabtsRecordFunction> functions;

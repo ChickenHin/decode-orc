@@ -9,6 +9,8 @@
 
 #include "nabts_packet.h"
 
+#include <cmath>
+
 #include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
@@ -108,9 +110,28 @@ NabtsBlockIntegrity check_and_repair(
   return NabtsBlockIntegrity::kCorrected;
 }
 
+/// One byte of TeletextLineResult::byte_confidence on the 0-255 scale
+/// NabtsPacket::confidence uses. A null measurement is full confidence: see
+/// NabtsPacket::confidence for why the threshold detector reads that way.
+uint8_t quantise_confidence(const TeletextPacketConfidence* confidence,
+                            size_t index) {
+  if (confidence == nullptr || index >= confidence->size()) {
+    return 255;
+  }
+  const float value = (*confidence)[index];
+  if (!(value > 0.0F)) {
+    return 0;  // also catches a NaN, which is not a measurement of anything
+  }
+  if (value >= 1.0F) {
+    return 255;
+  }
+  return static_cast<uint8_t>(std::lround(value * 255.0F));
+}
+
 }  // namespace
 
-NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length) {
+NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
+                                const TeletextPacketConfidence* confidence) {
   NabtsPacket out;
   if (packet == nullptr || length < kNabtsPacketBytes) {
     return out;
@@ -142,6 +163,7 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length) {
 
   for (size_t i = 0; i < out.data_length; ++i) {
     out.data[i] = packet[kNabtsPrefixBytes + i];
+    out.confidence[i] = quantise_confidence(confidence, kNabtsPrefixBytes + i);
   }
 
   // A bundle packet is all suffix (§3.4) and its protection method is reserved,

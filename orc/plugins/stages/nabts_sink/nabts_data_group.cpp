@@ -86,6 +86,28 @@ void NabtsGroupAssembler::append_block(OpenGroup& group,
   group.stream.insert(
       group.stream.end(), packet.data.begin(),
       packet.data.begin() + static_cast<ptrdiff_t>(packet.data_length));
+  // Bytes that arrived are present only while the group can still say where
+  // they belong; past a continuity index the header contradicts, nothing can.
+  group.present.insert(group.present.end(), packet.data_length,
+                       group.placeable ? 1 : 0);
+  group.confidence.insert(
+      group.confidence.end(), packet.confidence.begin(),
+      packet.confidence.begin() + static_cast<ptrdiff_t>(packet.data_length));
+}
+
+void NabtsGroupAssembler::append_hole(OpenGroup& group, uint32_t blocks) {
+  const size_t bytes = static_cast<size_t>(blocks) * group.nominal_block_bytes;
+  if (bytes == 0) {
+    return;
+  }
+  // Zero rather than anything meaningful. The mask keeps these out of the
+  // record catalogue's vote, and for anything that reads the bytes themselves
+  // NUL is X3.110 §6.1.4's transparent control — no presentation effect — so a
+  // hole in NAPLPS code costs the drawing nothing beyond what was actually
+  // lost.
+  group.stream.insert(group.stream.end(), bytes, 0);
+  group.present.insert(group.present.end(), bytes, 0);
+  group.confidence.insert(group.confidence.end(), bytes, 0);
 }
 
 void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
@@ -116,6 +138,14 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
     out.data.assign(
         group.stream.begin() + static_cast<ptrdiff_t>(kNabtsGroupHeaderBytes),
         group.stream.begin() + static_cast<ptrdiff_t>(useful_end));
+    // Trimmed identically, so an index into one is an index into the other.
+    out.present.assign(
+        group.present.begin() + static_cast<ptrdiff_t>(kNabtsGroupHeaderBytes),
+        group.present.begin() + static_cast<ptrdiff_t>(useful_end));
+    out.confidence.assign(
+        group.confidence.begin() +
+            static_cast<ptrdiff_t>(kNabtsGroupHeaderBytes),
+        group.confidence.begin() + static_cast<ptrdiff_t>(useful_end));
   }
 
   switch (outcome) {
@@ -173,6 +203,10 @@ void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
   group.stream.reserve(std::min(kNabtsMaxGroupBytes,
                                 static_cast<size_t>(header.further_blocks + 1) *
                                     kNabtsMaxDataBlockBytes));
+  // The width a lost block of this group is assumed to have had: §4.2 has a
+  // group's packets share a suffix code, and the synchronizing packet is the
+  // one whose code is certainly this group's.
+  group.nominal_block_bytes = packet.data_length;
   if (packet.integrity == NabtsBlockIntegrity::kCorrected) {
     ++group.blocks_corrected;
   } else if (packet.integrity == NabtsBlockIntegrity::kUncorrectable) {
@@ -211,8 +245,20 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
     // The lost packets carried blocks this group was promised, so they count
     // towards its size — otherwise a group missing packets would never reach
     // its block count and would only ever end superseded.
+    const uint32_t room = static_cast<uint32_t>(group.header.further_blocks) -
+                          group.further_blocks_seen;
     group.further_blocks_seen = static_cast<uint16_t>(std::min<uint32_t>(
         group.further_blocks_seen + gap, group.header.further_blocks));
+    // A gap wider than the group has blocks left is not a loss the header can
+    // account for: §3.2.4's index wraps at 16, so a damaged continuity nibble
+    // reads as a gap just as a real loss does, and only the header says which
+    // is possible. Where it says the gap cannot be real, nothing after it can
+    // be placed.
+    if (gap > room) {
+      group.placeable = false;
+    } else {
+      append_hole(group, gap);
+    }
   }
   group.last_continuity = packet.continuity;
   ++group.packets;

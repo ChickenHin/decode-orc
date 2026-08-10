@@ -104,7 +104,7 @@ Beyond the packet-level recovery profile, the report accounts for every layer ab
 ### export_records (boolean)
 Write each teletext record the recording carried as its own file beside the packet stream, named for the channel, record address and version that identify it — `mydata.t33.000-1A4-v2.rec`. Off by default; needs an output file to sit beside.
 
-The file holds the record's data exactly as transmitted, byte for byte: NAPLPS presentation code, or application data for a record of type 2. Byte parity is left in place, as it is in the packet stream. This is what to use to take a record to an external NAPLPS tool.
+The file holds the record's data as the record dialog reads it: NAPLPS presentation code, or application data for a record of type 2. Where an undamaged copy arrived that is that copy byte for byte; where none ever did, it is the combination of the damaged copies described below. Byte parity is left in place, as it is in the packet stream. This is what to use to take a record to an external NAPLPS tool.
 
 ### export_captions (boolean)
 Write the recording's captioning as a SubRip subtitle file beside the packet stream (`mydata.t33` gives `mydata.t33.srt`). Off by default; needs an output file to sit beside.
@@ -133,13 +133,39 @@ The SP recording browses as a working service. The EP recording catalogues 239 r
 
 So: **mean decision confidence in the report is the number to read first.** Around 0.5 and above, expect readable pages. Approaching 0.2, the recording is at the limit of what can be detected at all, and a better transfer — or a copy recorded at a longer-playing speed's expense — is the only thing that will help.
 
+Both figures above were measured before repeated copies of a record were combined. Combining them changes what a marginal tape yields, and changes what the report means. A later NBC EP transfer measuring 0.36 mean confidence — above the 0.22 of the table, below the 0.5 that reads cleanly — decoded end to end as:
+
+| channel 000, the NBC service | one copy kept | copies combined |
+|---|---|---|
+| record bytes failing odd parity | 2.53 % | **0.67 %** |
+| record length | short by a third | as the group header declares |
+| positions no copy ever received | — | 14.5 %, left as NUL |
+
+Two things are worth taking from that. Damage among the bytes that did arrive falls by about three quarters, because the copies disagree only where they were damaged. And the records come out at their true length: a copy that lost packets used to close up over the hole, which moved every byte after it and is what turned a page into overlaid nonsense. What replaces the shortfall is honest — positions nothing ever arrived for, left as a control with no presentation effect.
+
+What it does not do is invent data. A third of that recording's record positions were never received on any pass, and no vote recovers those. Nor does it move the bottom of the range: at 0.2 the bit decisions are the detector fitting noise, the copies disagree everywhere rather than in a few places, and there is nothing for a vote to find.
+
 ## Notes
 
 * NTSC and PAL-M sources are accepted. A 625-line source is reported as an error: CEA-516 §1.1.1 specifies NABTS on the 525-line NTSC signal, and no 625-line service exists to recover.
 * Empty VBI lines are cheap to probe under every detector: a line that never rises meaningfully above blanking is rejected before any detection runs.
 * Nothing is corrected in the packet stream. The prefix bytes are written as recovered and left to their own Hamming coding, and the data block to its own byte parity and longitudinal check byte.
-* Byte parity is **not** used to repair damaged bytes, as it is for World System Teletext. CEA-516 §3.3 gives the data block odd parity only when its data group is of type 0, and a single packet does not say which type its group is — so at the packet layer a byte that fails parity is not known to be damaged. Where a packet carries the longitudinal check byte of §3.4, that byte and the per-byte parity do form a product code, and a single-bit error in the block is located and corrected. Whether a service sends it is the service's choice: ExtraVision does and 768 blocks were mended on the reference capture, NBC does not and none were.
-* Only one copy of each record is kept — the intact copy if one ever arrives, otherwise the longest. A carousel transmits each record many times, and combining those copies the way the Teletext Sink combines repeated rows is not done here.
+* Byte parity is not used to repair damaged bytes **in the packet stream**, as it is for World System Teletext. CEA-516 §3.3 gives the data block odd parity only when its data group is of type 0, and a single packet does not say which type its group is — so at the packet layer a byte that fails parity is not known to be damaged. Where a packet carries the longitudinal check byte of §3.4, that byte and the per-byte parity do form a product code, and a single-bit error in the block is located and corrected. Whether a service sends it is the service's choice: ExtraVision does and 768 blocks were mended on the reference capture, NBC does not and none were.
+* By the time a record is assembled the group type **is** known — §4.3 makes a type-zero group the only one carrying a teletext record, and everything else has already been set aside — so at that layer every byte is known to be parity-coded and one that fails the check is known to be corrupt. That is what gates the vote described next.
+* Where no copy of a record ever arrives undamaged, the damaged copies are **combined** rather than one of them chosen. A carousel (§7.1.2) brings each record round for the length of the recording, and the copies differ only where they were damaged, so a vote across them recovers bytes that no single copy has right. The vote is per byte position: a parity-clean candidate beats a corrupt one however often the corrupt one arrived, and a position every copy damaged falls back to the best of a bad set. The record dialog says how many copies a record was combined from. The moment an undamaged copy arrives it is used as it stands and the copies held for the vote are dropped.
+* Among candidates of equal standing each copy is weighted by how sure the detector was of its byte, rather than counting one vote apiece, so a value read cleanly outweighs more copies of one the MLSE detector nearly decided the other way. The threshold detector decides each bit on one sample and has no path metric to compare, so it measures nothing and its bytes weigh full — a detector with no way of saying it is unsure has not said so. A tie goes to the most recent copy.
+
+  The weighting earns its keep where copies are few. With two copies disagreeing there is no majority to find at all, and the choice would otherwise fall to whichever arrived last; with eight or more the majority is usually decisive on its own. On the NBC EP transfer, which averages around eight copies per record, weighting changed no byte of the result — the parity gate and the count between them had already settled every position.
+* Only copies that line up position for position take part. A group that lost packets (§3.2.4) is missing bytes from its middle, so everything after the hole has moved earlier; such a copy is counted as an appearance but kept out of the vote, since voting it in would corrupt every position past the hole. The same goes for an incomplete linked series (§5.2.6), which is missing a whole record from the middle of its concatenation. A copy damaged only by bit errors still lines up and still votes.
+* Sixteen copies per record are retained for the vote — beyond a handful the result rarely changes — and it is the most recent sixteen that are kept.
+* Only the combined result is run through the NAPLPS interpreter, once per record rather than once per copy.
+* A position no copy ever received is left as NUL. X3.110 §6.1.4 makes that a transparent control with no presentation effect, so a hole costs the drawing nothing beyond the bytes that were actually lost — which is the point of holding the hole open rather than letting the record close up over it.
+
+## Choosing the line range
+
+`first_vbi_line` and `last_vbi_line` default to the whole of 10-21, which is where CEA-516 §1.2 permits NABTS. A recording rarely uses all of it, and the lines it does not use are not free: a line carrying another service, or nothing but noise, still produces the occasional 33 bytes whose Hamming 8/4 prefix decodes by chance, and those enter data group reassembly as packets of whatever channel they appeared to name. There they open groups that never complete and consume continuity indices that belonged to real ones.
+
+The report's per-line table is what to read. A line carrying a service shows a large, steady packet count; a line being fitted to noise shows a high burst count and a small packet count. Narrowing the range to the lines that carry the service is worth doing — on the NBC EP transfer above, going from 10-21 to 15-16 took group headers refused from 19691 to 1675, recovered seven more records, and took damage among received record bytes from 0.67 % to 0.57 %.
 * Header extension fields (§5.2.8) are decoded and reported but the link redefinitions of §5.2.8.4 are not acted on. The clause's data table is unusable as published — row 12 merges two meanings, and rows 6 and 9 label six- and nine-byte fields as a "Short Record Address" — and no capture available here exercises it.
 * Every run logs a recovery profile at debug level, as part of the report described under `write_report`. It covers how many candidate lines carried a data burst, how many packets came out of each detector, and which gate discarded the rest.
 

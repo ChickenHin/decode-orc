@@ -417,7 +417,13 @@ std::string record_condition(const NabtsCataloguedRecord& record,
     // tell that from a record the service meant to be short.
     parts.emplace_back("incomplete");
   } else if (record.times_intact == 0) {
-    parts.emplace_back("no undamaged copy");
+    // No copy of this record ever arrived clean, so what is shown was voted for
+    // rather than picked out — and how many copies voted is how much weight the
+    // reading carries.
+    parts.emplace_back(record.copies_voted > 1
+                           ? "no undamaged copy, combined from " +
+                                 plural(record.copies_voted, "copy", "copies")
+                           : std::string("no undamaged copy"));
   } else {
     parts.emplace_back("complete");
   }
