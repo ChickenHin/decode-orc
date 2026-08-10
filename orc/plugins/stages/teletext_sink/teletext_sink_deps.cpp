@@ -223,13 +223,20 @@ std::string TeletextSinkDeps::build_report(
       // is the transmitted bytes and carries no character set, and a reader
       // comparing pages against a photograph of the same service has no other
       // way to know what was assumed. Qualified because a service that
-      // designates its own set (a packet X/28/0 or M/29/0) overrides this.
-      "  Character set: {} (unless a page designates its own)\n"
+      // designates its own set (a packet X/28 or M/29) overrides this. The
+      // second set is named alongside it when there is one, because a reader
+      // seeing two alphabets on one page has the same question about the
+      // second as about the first.
+      "  Character set: {}{} (unless a page designates its own)\n"
       "  Packets:       {} written, {} fields carried data",
       result.output_path.empty() ? std::string("(none; pages browsed only)")
                                  : result.output_path,
       total_frames, options.first_field_line + 1, options.last_field_line + 1,
       detector_name(options.detector), to_string(options.character_set),
+      options.second_character_set.has_value()
+          ? fmt::format(", switching to {}",
+                        to_string(options.second_character_set->g0_set))
+          : std::string(),
       result.packets_written, result.fields_with_data);
   if (options.keep_empty_packets) {
     report += " (empty candidate lines padded)";
@@ -472,6 +479,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // squash pass exists to attribute rows to pages, which the character set has
   // no part in.
   output_decoder.set_default_g0_set(options.character_set);
+  output_decoder.set_default_second_g0_set(options.second_character_set);
   if (squash) {
     output_decoder.set_row_squasher(&squasher);
   }
@@ -522,6 +530,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
     // The alphabet the pages above were read in, carried to the viewer so the
     // reader is told rather than left to judge it from the glyphs.
     partial.dataset.summary.character_set = options.character_set;
+    partial.dataset.summary.second_character_set = options.second_character_set;
     partial.dataset.summary.packets_recovered = partial.packets_written;
     partial.dataset.summary.fields_with_data = partial.fields_with_data;
     partial.dataset.summary.packets_corrected = partial.packets_corrected;

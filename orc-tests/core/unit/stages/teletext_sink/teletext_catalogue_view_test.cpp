@@ -35,6 +35,11 @@ TeletextAnalysisDataset make_dataset(const std::string& codes,
   snapshot.row_received[1] = true;
   for (size_t column = 0; column < codes.size(); ++column) {
     snapshot.cells[1][column].character = static_cast<uint8_t>(codes[column]);
+    // The decoder stamps every cell with the set its code is to be read in, so
+    // that a row switched between two alphabets by an ESC still converts (see
+    // TeletextPageCell::g0_set). A hand-built snapshot has to do the same.
+    snapshot.cells[1][column].g0_set = g0_set;
+    snapshot.cells[1][column].national_option_subset = national_option_subset;
   }
 
   TeletextCataloguedSubPage subpage;
@@ -169,6 +174,28 @@ TEST(TeletextCatalogueView, TheSummarySaysWhichCharacterSetWasUsed) {
   const CatalogueDataset latin = build_teletext_catalogue(dataset);
   EXPECT_NE(latin.summary.headline.find("read as Latin"), std::string::npos)
       << latin.summary.headline;
+  // With one alphabet the headline says nothing about a second, so a page that
+  // holds one set is not described as if it might hold two.
+  EXPECT_EQ(latin.summary.headline.find("switching to"), std::string::npos)
+      << latin.summary.headline;
+}
+
+// A page holding two alphabets looks like a page holding one that has gone
+// wrong in places, so the pairing has to be stated for that reading to be
+// available to a reader at all.
+TEST(TeletextCatalogueView, TheSummaryNamesTheSecondCharacterSetToo) {
+  TeletextAnalysisDataset dataset = make_dataset("A", TeletextG0Set::Cyrillic2);
+  dataset.summary.frames_analysed = 10;
+  dataset.summary.packets_recovered = 20;
+  dataset.summary.character_set = TeletextG0Set::Cyrillic2;
+  dataset.summary.second_character_set =
+      TeletextG0Designation{TeletextG0Set::Latin, 0};
+
+  const CatalogueDataset catalogue = build_teletext_catalogue(dataset);
+  EXPECT_NE(catalogue.summary.headline.find(
+                "read as Cyrillic (Russian/Bulgarian), switching to Latin"),
+            std::string::npos)
+      << catalogue.summary.headline;
 }
 
 TEST(TeletextCatalogueView, DrawsThePageInItsOwnG0Set) {

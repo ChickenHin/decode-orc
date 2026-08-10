@@ -1726,13 +1726,23 @@ TEST_F(TeletextPageDecoderTest, DefaultPacketLengthKeepsTheFortyColumnPage) {
 
 namespace {
 
-// Build an X/28 or M/29 packet carrying a designation code and one triplet.
-// ETSI EN 300 706 §9.4.1 figure 11: byte 6 (index 2) is the Hamming 8/4
-// designation code and the 39 bytes after it are thirteen Hamming 24/18
-// triplets. Triplets past the first are left as the all-zero data pattern,
+// ETSI EN 300 706 §15.3 Table 33: the Second G0 Set Designation value a
+// service with only one alphabet transmits, which the table gives as "no second
+// G0 set required". It is the helpers' default below so that a test saying
+// nothing about a second set gets a packet that says there is none.
+constexpr int kNoSecondG0Set = 0b1111111;
+
+// Build an X/28 or M/29 packet carrying a designation code and its first two
+// triplets. ETSI EN 300 706 §9.4.1 figure 11: byte 6 (index 2) is the Hamming
+// 8/4 designation code and the 39 bytes after it are thirteen Hamming 24/18
+// triplets. Triplets past the second are left as the all-zero data pattern,
 // which is what a service with nothing to say in them transmits.
+//
+// |triplet2| defaults to the three bits that complete kNoSecondG0Set, the
+// second G0 set straddling the two triplets (§15.3 Table 33).
 std::array<uint8_t, kTeletextPacketBytes> make_enhancement_packet(
-    int magazine, int packet_number, int designation_code, uint32_t triplet1) {
+    int magazine, int packet_number, int designation_code, uint32_t triplet1,
+    uint32_t triplet2 = (kNoSecondG0Set >> 4) & 0x7) {
   std::array<uint8_t, kTeletextPacketBytes> packet{};
   const auto mrag = make_mrag(magazine, packet_number);
   packet[0] = mrag[0];
@@ -1744,8 +1754,12 @@ std::array<uint8_t, kTeletextPacketBytes> make_enhancement_packet(
   packet[3] = triplet_bytes[0];
   packet[4] = triplet_bytes[1];
   packet[5] = triplet_bytes[2];
+  orc::teletext_hamming2418_encode(triplet2, triplet_bytes);
+  packet[6] = triplet_bytes[0];
+  packet[7] = triplet_bytes[1];
+  packet[8] = triplet_bytes[2];
   orc::teletext_hamming2418_encode(0, triplet_bytes);
-  for (size_t byte = 6; byte + 2 < kTeletextPacketBytes; byte += 3) {
+  for (size_t byte = 9; byte + 2 < kTeletextPacketBytes; byte += 3) {
     packet[byte] = triplet_bytes[0];
     packet[byte + 1] = triplet_bytes[1];
     packet[byte + 2] = triplet_bytes[2];
@@ -1753,21 +1767,39 @@ std::array<uint8_t, kTeletextPacketBytes> make_enhancement_packet(
   return packet;
 }
 
-// Triplet 1 of an X/28/0 Format 1 or M/29/0 for a basic Level 1 page
-// (§9.4.2.2 Table 4): page function 0000 and page coding 000 in bits 1-7, the
-// seven Table 32 designation and national option bits in 8-14.
-uint32_t character_set_triplet(int designation, int national_option) {
+// Triplet 1 of an X/28/0 Format 1, X/28/4, M/29/0 or M/29/4 for a basic Level 1
+// page (§9.4.2.2 Table 4): page function 0000 and page coding 000 in bits 1-7,
+// the seven Table 32 designation and national option bits in 8-14, and the low
+// four of the seven Table 33 second-set bits in 15-18.
+uint32_t character_set_triplet(int designation, int national_option,
+                               int second_value = kNoSecondG0Set) {
   const uint32_t value = (static_cast<uint32_t>(designation & 0xF) << 3) |
                          static_cast<uint32_t>(national_option & 0x7);
-  return value << 7;
+  return (value << 7) | ((static_cast<uint32_t>(second_value) & 0xF) << 14);
+}
+
+// Triplet 2 of the same packet: the high three of the Table 33 second-set bits
+// in its bits 1-3, everything above them (side panels, colour map) left zero.
+uint32_t second_set_triplet(int second_value) {
+  return (static_cast<uint32_t>(second_value) >> 4) & 0x7;
 }
 
 // Table 32 designation 0100 with national option 100: Cyrillic G0 Option 2.
 constexpr int kCyrillicDesignation = 0b0100;
 constexpr int kRussianBulgarianOption = 0b100;
 
+// The same value read through Table 33, which codes its Cyrillic rows
+// identically — and Table 33's plain Latin/English row, the natural second set
+// of a Cyrillic service.
+constexpr int kSecondSetCyrillic2 =
+    (kCyrillicDesignation << 3) | kRussianBulgarianOption;
+constexpr int kSecondSetLatin = 0b0000000;
+
 // A row of the Russian broadcast the Cyrillic tables were read against.
 const char* const kRussianRow = "Wtornik";
+
+// The ESC (or Switch) spacing attribute, §12.2 Table 26 code 1/B.
+constexpr char kEsc = '\x1B';
 
 }  // namespace
 
@@ -1909,10 +1941,11 @@ TEST_F(TeletextPageDecoderTest, DesignationsThatSayNothingUsefulAreIgnored) {
       character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption);
   decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
 
-  // X/28/4, whose triplet 1 codes something else entirely.
+  // X/28/1, one of the designation codes that carries no character set at all
+  // (§9.4.2: only 0 and 4 are coded by Table 4).
   decoder_.process_packet(make_header(1, 0x00, 0), 0);
   decoder_.process_packet(
-      make_enhancement_packet(1, 28, 4, character_set_triplet(0, 0)), 1);
+      make_enhancement_packet(1, 28, 1, character_set_triplet(0, 0)), 1);
   decoder_.process_packet(make_time_filling_header(1), 2);
 
   // X/28/0 Format 1 for a page that is not a basic Level 1 page: page function
@@ -1978,6 +2011,433 @@ TEST_F(TeletextPageDecoderTest, SubtitleTextIsReadInThePagesOwnSet) {
 
   ASSERT_FALSE(decoder_.subtitle_cues().empty());
   EXPECT_EQ(decoder_.subtitle_cues().front().text, "Вторник");
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// ESC (Switch) and the second G0 set — EN 300 706 §12.2 Table 26 code 1/B,
+// §15.3 Table 33.
+////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace {
+
+// The G0 sets the cells of one rendered row resolved to, as UTF-8 through each
+// cell's own set — which is the whole point of stamping them per cell.
+std::string row_glyphs(const TeletextPageSnapshot& snapshot, int row) {
+  std::string text;
+  for (int column = 0; column < snapshot.columns; ++column) {
+    const auto& cell =
+        snapshot.cells[static_cast<size_t>(row)][static_cast<size_t>(column)];
+    text += orc::teletext_g0_to_utf8(cell.character, cell.g0_set,
+                                     cell.national_option_subset);
+  }
+  while (!text.empty() && text.back() == ' ') {
+    text.pop_back();
+  }
+  return text;
+}
+
+}  // namespace
+
+TEST_F(TeletextPageDecoderTest, EscapeIsInertWithoutASecondSet) {
+  // What every page did before a second set could be designated, and what a
+  // one-alphabet page must go on doing: 1/B is a blank spacing attribute and
+  // the codes around it are all read in the one set.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, std::string("W") + kEsc + "tornik"),
+                          1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_FALSE(page.second_g0_set.has_value());
+  // The attribute cell renders as SPACE; everything else stays Cyrillic.
+  EXPECT_EQ(row_glyphs(page, 1), "В торник");
+}
+
+TEST_F(TeletextPageDecoderTest, EscapeSwitchesToTheConfiguredSecondSet) {
+  // The local Code of Practice of §15.3 for a Level 1 service: no packet X/28
+  // or M/29 anywhere in the stream, so the pairing can only come from the
+  // setting — and with it, the Latin run between the two ESCs stays Latin.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(
+      make_row(1, 1, std::string("W") + kEsc + "BBC" + kEsc + "tornik"), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  ASSERT_TRUE(page.second_g0_set.has_value());
+  EXPECT_EQ(page.second_g0_set->g0_set, TeletextG0Set::Latin);
+  // 'W' is Cyrillic В, "BBC" is Latin because the first ESC switched into the
+  // second set, and "tornik" is Cyrillic again because the second switched
+  // back. Read in one set throughout it would have been "ВББЦторник".
+  EXPECT_EQ(row_glyphs(page, 1), "В BBC торник");
+}
+
+TEST_F(TeletextPageDecoderTest, EscapeIsSetAfterAndTheCellItselfIsSpace) {
+  // §12.2 Table 26 lists 1/B as "Set-After": the switch applies from the cell
+  // after it, and the attribute cell displays as SPACE.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, std::string("W") + kEsc + "W"), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& cells = snapshots_.front().cells[1];
+  EXPECT_EQ(cells[0].g0_set, TeletextG0Set::Cyrillic2);
+  EXPECT_EQ(cells[1].character, 0x20);
+  EXPECT_EQ(cells[1].g0_set, TeletextG0Set::Cyrillic2);
+  EXPECT_EQ(cells[2].g0_set, TeletextG0Set::Latin);
+}
+
+TEST_F(TeletextPageDecoderTest, TheDefaultSetIsReselectedAtEveryRowStart) {
+  // §12.2 Table 26 code 1/B: "The default at the start of each row is the
+  // default G0 set." This is what confines the damage of a lost ESC to the row
+  // it was lost in, so it is worth a test of its own: row 1 ends inside the
+  // second set and row 2 must still start in the first.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, std::string(1, kEsc) + "BBC"), 1);
+  decoder_.process_packet(make_row(1, 2, "W"), 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(row_glyphs(page, 1), " BBC");
+  EXPECT_EQ(row_glyphs(page, 2), "В");
+}
+
+TEST_F(TeletextPageDecoderTest, ADamagedEscapeDoesNotSwitchButIsAdmitted) {
+  // A byte that fails odd parity is never read as an attribute (§8.1), so
+  // damage cannot silently re-alphabet a row. What it can do is hide an ESC
+  // that was really sent, and the cells after it say so rather than claiming a
+  // set that cannot be verified.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  auto row = make_row(1, 1, std::string("W") + kEsc + "BBC");
+  row[3] ^= 0x80;  // break the ESC byte's parity, as a dropout would
+  decoder_.process_packet(row, 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& cells = snapshots_.front().cells[1];
+  EXPECT_TRUE(cells[1].parity_error);
+  // No switch happened, so the run after it is read in the first set — but
+  // every cell from the damage on is marked as being in one of the two.
+  EXPECT_EQ(cells[2].g0_set, TeletextG0Set::Cyrillic2);
+  EXPECT_FALSE(cells[0].g0_set_uncertain);
+  EXPECT_FALSE(cells[1].g0_set_uncertain);
+  EXPECT_TRUE(cells[2].g0_set_uncertain);
+  EXPECT_TRUE(cells[39].g0_set_uncertain);
+  // Nothing is uncertain on the row that follows: the set is re-selected there.
+  EXPECT_FALSE(snapshots_.front().cells[2][0].g0_set_uncertain);
+}
+
+TEST_F(TeletextPageDecoderTest, DamageIsNotUncertaintyWithoutASecondSet) {
+  // With one alphabet there is no unseen ESC that could have changed anything,
+  // so ordinary parity damage must not be dressed up as an alphabet doubt.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  auto row = make_row(1, 1, "WWWW");
+  row[3] ^= 0x80;
+  decoder_.process_packet(row, 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& cells = snapshots_.front().cells[1];
+  EXPECT_TRUE(cells[1].parity_error);
+  EXPECT_FALSE(cells[2].g0_set_uncertain);
+}
+
+TEST_F(TeletextPageDecoderTest, AnX28DesignatesTheSecondSetToo) {
+  // §15.3: triplet 1 bits 15-18 over triplet 2 bits 1-3 select a Table 33
+  // entry. A service that designates the pair is believed over the setting for
+  // both halves of it.
+  decoder_.set_default_g0_set(TeletextG0Set::Latin);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Cyrillic3, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 0,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption,
+                                kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      1);
+  decoder_.process_packet(
+      make_row(1, 1, std::string("W") + kEsc + "BBC" + kEsc + "tornik"), 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(page.g0_set, TeletextG0Set::Cyrillic2);
+  ASSERT_TRUE(page.second_g0_set.has_value());
+  EXPECT_EQ(page.second_g0_set->g0_set, TeletextG0Set::Latin);
+  EXPECT_EQ(row_glyphs(page, 1), "В BBC торник");
+}
+
+TEST_F(TeletextPageDecoderTest, ANoSecondSetDesignationDisablesEscape) {
+  // §15.3 reserves 1111111 for "no second G0 set required" and says a decoder
+  // may read it as disabling ESC. A service saying so must beat the setting:
+  // it knows what it transmits and the setting is a guess about material that
+  // says nothing.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 0,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption)),
+      1);
+  decoder_.process_packet(make_row(1, 1, std::string("W") + kEsc + "BBC"), 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(page.g0_set, TeletextG0Set::Cyrillic2);
+  EXPECT_FALSE(page.second_g0_set.has_value());
+  EXPECT_EQ(row_glyphs(page, 1), "В ББЦ");
+}
+
+TEST_F(TeletextPageDecoderTest, AnM29DesignatesTheSecondSetForItsMagazine) {
+  // The magazine-wide half of §15.3, including the case that catches a decoder
+  // out: an M/29 saying the magazine has no second set is an answer, and must
+  // silence ESC rather than falling through to the configured pairing.
+  decoder_.set_default_g0_set(TeletextG0Set::Latin);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 29, 0,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption,
+                                kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      0);
+  // Magazine 2 says it needs only one set, so the configured pairing must not
+  // reach its pages either.
+  decoder_.process_packet(
+      make_enhancement_packet(
+          2, 29, 0,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption)),
+      1);
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 2);
+  decoder_.process_packet(make_row(1, 1, std::string("W") + kEsc + "BBC"), 3);
+  decoder_.process_packet(make_header(2, 0x00, 0), 4);
+  decoder_.process_packet(make_row(2, 1, std::string("W") + kEsc + "BBC"), 5);
+  decoder_.process_packet(make_time_filling_header(1), 6);
+  decoder_.process_packet(make_time_filling_header(2), 7);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  ASSERT_TRUE(snapshots_[0].second_g0_set.has_value());
+  EXPECT_EQ(row_glyphs(snapshots_[0], 1), "В BBC");
+  EXPECT_FALSE(snapshots_[1].second_g0_set.has_value());
+  EXPECT_EQ(row_glyphs(snapshots_[1], 1), "В ББЦ");
+}
+
+TEST_F(TeletextPageDecoderTest, AnX284DesignatesTheSetsAndX280BeatsIt) {
+  // §9.4.2.2: X/28/4 is coded by the same Table 4 as X/28/0 Format 1 — so it
+  // carries the same designations — and "packet 28/0 takes precedence over
+  // 28/4 for all but the colour map entry coding", in whichever order the two
+  // arrive.
+  decoder_.set_default_g0_set(TeletextG0Set::Latin);
+
+  // X/28/4 alone: it designates the page.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 4,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption,
+                                kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  // X/28/0 after an X/28/4: the /0 wins.
+  decoder_.process_packet(make_header(1, 0x01, 0), 3);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 4,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption,
+                                kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      4);
+  decoder_.process_packet(
+      make_enhancement_packet(1, 28, 0, character_set_triplet(0b0000, 0b000)),
+      5);
+  decoder_.process_packet(make_time_filling_header(1), 6);
+
+  // X/28/4 after an X/28/0: the /0 still wins, so the /4 changes nothing.
+  decoder_.process_packet(make_header(1, 0x02, 0), 7);
+  decoder_.process_packet(
+      make_enhancement_packet(1, 28, 0, character_set_triplet(0b0000, 0b000)),
+      8);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 4,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption,
+                                kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      9);
+  decoder_.process_packet(make_time_filling_header(1), 10);
+  decoder_.finalize(20);
+
+  ASSERT_EQ(snapshots_.size(), 3u);
+  EXPECT_EQ(snapshots_[0].g0_set, TeletextG0Set::Cyrillic2);
+  EXPECT_TRUE(snapshots_[0].second_g0_set.has_value());
+  EXPECT_EQ(snapshots_[1].g0_set, TeletextG0Set::Latin);
+  EXPECT_FALSE(snapshots_[1].second_g0_set.has_value());
+  EXPECT_EQ(snapshots_[2].g0_set, TeletextG0Set::Latin);
+  EXPECT_FALSE(snapshots_[2].second_g0_set.has_value());
+}
+
+TEST_F(TeletextPageDecoderTest, TheSecondSetDoesNotLeakToTheNextPage) {
+  // As for the first set: an X/28 belongs to its page, and the page after it
+  // falls back to the magazine's answer or to the setting — including the
+  // X/28/0-over-X/28/4 precedence, which must not lock the next page out of
+  // reading its own X/28/4.
+  decoder_.set_default_g0_set(TeletextG0Set::Latin);
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(
+      make_enhancement_packet(1, 28, 0, character_set_triplet(0b0000, 0b000)),
+      1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  decoder_.process_packet(make_header(1, 0x01, 0), 3);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 4,
+          character_set_triplet(kCyrillicDesignation, kRussianBulgarianOption,
+                                kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      4);
+  decoder_.process_packet(make_time_filling_header(1), 5);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_FALSE(snapshots_[0].second_g0_set.has_value());
+  EXPECT_EQ(snapshots_[1].g0_set, TeletextG0Set::Cyrillic2);
+  ASSERT_TRUE(snapshots_[1].second_g0_set.has_value());
+  EXPECT_EQ(snapshots_[1].second_g0_set->g0_set, TeletextG0Set::Latin);
+}
+
+TEST_F(TeletextPageDecoderTest, ASecondLatinSetKeepsItsOwnNationalOption) {
+  // §15.3: "The national option sub-set selected by the C12, C13 and C14 bits
+  // is not relevant to the secondary set." The page header here says French,
+  // and the second set's own designation says English — so 2/3 is `é` in the
+  // first set and `£` in the second, on the same row.
+  HeaderFlags flags;
+  flags.national_option_subset = 4;  // Table 32: French
+
+  decoder_.process_packet(make_header(1, 0x00, 0, flags), 0);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 0, character_set_triplet(0b0000, 0b100, kSecondSetLatin),
+          second_set_triplet(kSecondSetLatin)),
+      1);
+  decoder_.process_packet(make_row(1, 1, std::string("#") + kEsc + "#"), 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  ASSERT_TRUE(page.second_g0_set.has_value());
+  EXPECT_EQ(page.second_g0_set->national_option_subset, 0);
+  EXPECT_EQ(row_glyphs(page, 1), "é £");
+}
+
+TEST_F(TeletextPageDecoderTest, SubtitleTextFollowsTheRowsEscapeSwitches) {
+  // The cue text is where a wrong alphabet is least visible: a Latin name
+  // switched into mid-row must not come out transliterated into Cyrillic.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+  ASSERT_TRUE(decoder_.set_subtitle_page("888"));
+
+  HeaderFlags flags;
+  flags.subtitle = true;
+  decoder_.process_packet(make_header(8, 0x88, 0, flags), 0);
+  decoder_.process_packet(
+      make_row(8, 20, boxed(std::string("W") + kEsc + "BBC")), 1);
+  decoder_.process_packet(make_time_filling_header(8), 2);
+  decoder_.finalize(50);
+
+  ASSERT_FALSE(decoder_.subtitle_cues().empty());
+  EXPECT_EQ(decoder_.subtitle_cues().front().text, "В BBC");
+}
+
+TEST_F(TeletextPageDecoderTest, TheConfiguredPairSurvivesAPageWithNoPackets) {
+  // The whole point of the setting: a Level 1 service transmits neither X/28
+  // nor M/29, so every page it carries must open with the configured pair
+  // rather than only the first.
+  decoder_.set_default_g0_set(TeletextG0Set::Cyrillic2);
+  decoder_.set_default_second_g0_set(
+      orc::TeletextG0Designation{TeletextG0Set::Latin, 0});
+
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, std::string(1, kEsc) + "BBC"), 1);
+  decoder_.process_packet(make_header(1, 0x01, 0), 2);
+  decoder_.process_packet(make_row(1, 1, std::string(1, kEsc) + "BBC"), 3);
+  decoder_.process_packet(make_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_EQ(row_glyphs(snapshots_[0], 1), " BBC");
+  EXPECT_EQ(row_glyphs(snapshots_[1], 1), " BBC");
+}
+
+TEST_F(TeletextPageDecoderTest, ACyrillicSecondSetReadsTable33AsTable32Does) {
+  // Table 33 codes its Cyrillic rows at the same designation and national
+  // option bits as Table 32, so a service can name a Cyrillic set as the
+  // *second* one — a Latin service quoting Russian, the mirror of the usual
+  // case. Worth its own test because the two tables are separate documents and
+  // one shared lookup reads both.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(
+      make_enhancement_packet(
+          1, 28, 0, character_set_triplet(0b0000, 0b000, kSecondSetCyrillic2),
+          second_set_triplet(kSecondSetCyrillic2)),
+      1);
+  decoder_.process_packet(make_row(1, 1, std::string("W") + kEsc + "Wtornik"),
+                          2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(page.g0_set, TeletextG0Set::Latin);
+  ASSERT_TRUE(page.second_g0_set.has_value());
+  EXPECT_EQ(page.second_g0_set->g0_set, TeletextG0Set::Cyrillic2);
+  EXPECT_EQ(row_glyphs(page, 1), "W Вторник");
 }
 
 }  // namespace orc_unit_test

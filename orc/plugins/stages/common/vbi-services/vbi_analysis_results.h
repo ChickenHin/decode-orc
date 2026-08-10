@@ -21,6 +21,7 @@
 // types cost while they sat in <orc/stage/analysis_sink_results.h>.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -146,6 +147,13 @@ struct TeletextRecoverySummary {
   /// even a correctly read page can look untouched. Saying which set was used
   /// turns "is this right?" into something the reader can answer.
   TeletextG0Set character_set = TeletextG0Set::Latin;
+
+  /// The second G0 set the ESC control character switched into, where the run
+  /// had one (ETSI EN 300 706 §15.3). Reported for the same reason as the set
+  /// above and rather more urgently: a page holding two alphabets looks like a
+  /// page holding one that has gone wrong in places, so a reader who is not
+  /// told the run was reading two has no way to arrive at that reading.
+  std::optional<TeletextG0Designation> second_character_set;
 };
 
 /// Everything the teletext sink caches from one trigger run.

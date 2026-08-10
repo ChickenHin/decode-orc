@@ -632,10 +632,61 @@ TEST_F(TeletextSinkDeps,
   // And it reads as Cyrillic, which is the only thing a user can see.
   std::string text;
   for (int column = 0; column < 7; ++column) {
-    text += orc::teletext_g0_to_utf8(page.cells[1][column].character,
-                                     page.g0_set, page.national_option_subset);
+    text += orc::teletext_g0_to_utf8(
+        page.cells[1][column].character, page.cells[1][column].g0_set,
+        page.cells[1][column].national_option_subset);
   }
   EXPECT_EQ(text, "Вторник");
+}
+
+// The same chain for the second set, which has one extra link in it: the pass
+// has to hand the pairing to the decoder as well as the alphabet, and a row's
+// ESC codes only do anything once it has.
+TEST_F(TeletextSinkDeps,
+       Analyse_CataloguedPagesFollowTheConfiguredSecondCharacterSet) {
+  const auto params = make_pal_params();
+  const auto header = make_header_packet(0x00, /*subtitle=*/false,
+                                         /*erase=*/false);
+  // ESC (§12.2 Table 26 code 1/B) switches "BBC" into the second set and the
+  // second switches back, so the row mixes both alphabets.
+  const auto row =
+      make_row_packet(1, std::string("W\x1B") + "BBC\x1B" + "tornik");
+
+  put_line(0, flat_line(params, 0, 7),
+           orc::tests::synthesize_teletext_line(header));
+  put_line(0, flat_line(params, 1, 7),
+           orc::tests::synthesize_teletext_line(row));
+
+  serve_lines(params);
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+
+  auto deps = make_deps();
+  auto options = single_line_options(7);
+  options.output_path.clear();
+  options.character_set = orc::TeletextG0Set::Cyrillic2;
+  options.second_character_set =
+      orc::TeletextG0Designation{orc::TeletextG0Set::Latin, 0};
+
+  const auto result = deps.analyse(&mockRepresentation_, options);
+
+  ASSERT_TRUE(result.success) << result.message;
+  ASSERT_EQ(result.dataset.pages.size(), 1u);
+  ASSERT_EQ(result.dataset.pages[0].subpages.size(), 1u);
+  const orc::TeletextPageSnapshot& page =
+      result.dataset.pages[0].subpages[0].page;
+  ASSERT_TRUE(page.second_g0_set.has_value());
+
+  std::string text;
+  for (int column = 0; column < 12; ++column) {
+    text += orc::teletext_g0_to_utf8(
+        page.cells[1][column].character, page.cells[1][column].g0_set,
+        page.cells[1][column].national_option_subset);
+  }
+  // Read in one set throughout this would have been "В ББЦ торник".
+  EXPECT_EQ(text, "В BBC торник");
+  EXPECT_NE(result.report.find("switching to Latin"), std::string::npos)
+      << result.report;
 }
 
 // The cues are named after the packet stream and written beside it, so a

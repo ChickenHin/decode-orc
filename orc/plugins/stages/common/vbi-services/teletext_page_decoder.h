@@ -94,6 +94,22 @@ enum class TeletextG0Set : uint8_t {
   Cyrillic3 = 3,
 };
 
+// A designated G0 set together with the national option sub-set the
+// designation itself names for it.
+//
+// The two travel together because ETSI EN 300 706 §15.2 Table 32 and §15.3
+// Table 33 are single 7-bit values selecting both at once. It matters for the
+// *second* G0 set in particular: §15.3 says in as many words that "the national
+// option sub-set selected by the C12, C13 and C14 bits is not relevant to the
+// secondary set", so a second Latin set carries its own sub-set and cannot
+// borrow the page header's.
+struct TeletextG0Designation {
+  TeletextG0Set g0_set = TeletextG0Set::Latin;
+  // A TeletextNationalOption; only consulted when |g0_set| is Latin, the
+  // Cyrillic sets reserving no positions for a sub-set.
+  int national_option_subset = 0;
+};
+
 // Human-readable name of a G0 set, as the parameter surface spells it.
 std::string to_string(TeletextG0Set g0_set);
 
@@ -164,6 +180,28 @@ struct TeletextPageCell {
   // The transmitted byte failed odd parity (EN 300 706 §8.1); |character| is
   // replaced with SPACE and the cell flagged so renderers can mark it.
   bool parity_error = false;
+
+  // G0 set |character| is to be read in, and the national option sub-set that
+  // goes with it. Resolved per cell rather than per page because the ESC
+  // spacing attribute (§12.2 Table 26 code 1/B) toggles the row between the
+  // page's default G0 set and its second one, so a single row can hold two
+  // alphabets — the very thing two-alphabet services use it for. A consumer
+  // converting a cell to a glyph reads these and needs to know nothing about
+  // ESC; on a page with no second set designated they are the page's own
+  // g0_set and national_option_subset throughout.
+  TeletextG0Set g0_set = TeletextG0Set::Latin;
+  int national_option_subset = 0;
+
+  // A byte earlier in this row failed odd parity while a second G0 set was in
+  // force for the page, so |g0_set| above may be the wrong one of the two: a
+  // damaged byte cannot be told from the ESC it might have been, and one lost
+  // ESC inverts every cell after it to the end of the row.
+  //
+  // Cells are only ever marked from the damage onwards, and never at all on a
+  // page with no second set — where ESC does nothing and there is nothing to
+  // get wrong. §12.2 Table 26 re-selects the default set at the start of every
+  // row, which is what stops this reaching past the row it began in.
+  bool g0_set_uncertain = false;
 };
 
 // A completed Level 1 page: the 25-row grid (row 0 is the header row) plus
@@ -226,7 +264,22 @@ struct TeletextPageSnapshot {
   // (EN 300 706 §15.2). The Cyrillic sets reserve no national option
   // positions, so |national_option_subset| above is only consulted when this
   // is Latin.
+  //
+  // This is the set every row *starts* in (§12.2 Table 26 code 1/B). Where the
+  // page also has a second set, the cells say which of the two each of them is
+  // actually in; see TeletextPageCell::g0_set.
   TeletextG0Set g0_set = TeletextG0Set::Latin;
+
+  // The page's second G0 set, if it has one: what a packet X/28/0 Format 1 or
+  // X/28/4 designated for this page, failing that what an M/29/0 or M/29/4
+  // designated for its magazine, failing all four the decoder's configured
+  // default (EN 300 706 §15.3, set_default_second_g0_set()).
+  //
+  // Unset means the ESC spacing attribute does nothing on this page — either
+  // because no second set was designated, or because the designation was the
+  // 1111111 that §15.3 defines as "no second G0 set required" and says a
+  // decoder may read as disabling ESC. Every cell is then in |g0_set| above.
+  std::optional<TeletextG0Designation> second_g0_set;
 
   // Field indices (as passed to process_packet()) of the header packet that
   // *opened* this transmission and of the last packet that contributed to
@@ -333,6 +386,14 @@ struct TeletextSubtitleCue {
  * arrival displays the text, a header for the page with C4 (erase) set or C6
  * clear removes it.
  *
+ * Where the service designates a *second* G0 set (§15.3, packets X/28/0
+ * Format 1, X/28/4, M/29/0 and M/29/4) — or one is configured for a Level 1
+ * service that designates none — the ESC spacing attribute of §12.2 Table 26
+ * code 1/B toggles each display row between the two sets, which is how a
+ * two-alphabet service mixes Latin words into Cyrillic text. Every rendered
+ * cell carries the set it resolved to, so the toggling is invisible downstream;
+ * on a page with no second set ESC does nothing, as it did before.
+ *
  * Error handling degrades gracefully: packets whose MRAG is uncorrectable
  * are dropped, headers whose page number is uncorrectable are dropped,
  * uncorrectable control nibbles fall back to zero, and display bytes failing
@@ -377,6 +438,31 @@ class TeletextPageDecoder {
    */
   void set_default_g0_set(TeletextG0Set g0_set) { default_g0_set_ = g0_set; }
   TeletextG0Set default_g0_set() const { return default_g0_set_; }
+
+  /**
+   * @brief Set the second G0 set to toggle to when the service designates none
+   *
+   * The counterpart of set_default_g0_set() for the *second* G0 set of ETSI
+   * EN 300 706 §15.3 — the one the ESC spacing attribute (§12.2 Table 26 code
+   * 1/B) toggles a display row into and back out of, so that a service can mix
+   * two alphabets on one page. §15.3 says the pair is "implied by a local Code
+   * of Practice" on a transmission that sends no packet X/28 or M/29, which is
+   * every Level 1 service, so it is a decoder setting for the same reason the
+   * default set is.
+   *
+   * std::nullopt — the default — means the page has no second set and ESC is
+   * ignored, which is what this decoder did before ESC was honoured at all. A
+   * designation the service transmits always wins, including the 1111111 that
+   * §15.3 defines as "no second G0 set required".
+   *
+   * Takes effect on pages opened from here on.
+   */
+  void set_default_second_g0_set(std::optional<TeletextG0Designation> second) {
+    default_second_g0_set_ = second;
+  }
+  const std::optional<TeletextG0Designation>& default_second_g0_set() const {
+    return default_second_g0_set_;
+  }
 
   // Enable subtitle cue emission for one page ("888"-style string, see
   // parse_page_number()). Returns false and leaves the filter unset when the
@@ -508,10 +594,25 @@ class TeletextPageDecoder {
     // was opened, replaced by this page's own X/28/0 designation if one
     // arrives while it is open.
     TeletextG0Set g0_set = TeletextG0Set::Latin;
+    // Second G0 set of the open page, resolved the same way (see
+    // TeletextPageSnapshot::second_g0_set). Unset means ESC is inert on it.
+    std::optional<TeletextG0Designation> second_g0_set;
+    // Whether the two above came from a designation-0 packet (X/28/0), which
+    // §9.4.2.2 gives precedence over the designation-4 packet (X/28/4) that
+    // codes the same fields — so a later X/28/4 must not overwrite them.
+    bool g0_set_from_designation_zero = false;
     // What an M/29/0 designated for the whole magazine, unset until one
     // arrives — at which point it supersedes the decoder's configured default
     // for every page of the magazine opened afterwards (§15.2).
     std::optional<TeletextG0Set> magazine_g0_set;
+    // The magazine-wide second set, and whether an M/29 has been seen at all.
+    // Two fields rather than a nested optional: "no M/29 yet, use the
+    // configured default" and "an M/29 said this magazine has no second set"
+    // are different answers and only the second one silences ESC.
+    bool magazine_g0_received = false;
+    std::optional<TeletextG0Designation> magazine_second_g0_set;
+    // M/29/0 over M/29/4, as X/28/0 over X/28/4 above.
+    bool magazine_g0_from_designation_zero = false;
     int64_t header_field_index = 0;
     int64_t last_field_index = 0;
     std::array<RowData, TeletextPageSnapshot::kRows> rows{};
@@ -534,14 +635,15 @@ class TeletextPageDecoder {
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
       int64_t field_index, int64_t source,
       const TeletextPacketConfidence* confidence);
-  // X/28/0 Format 1 (page-specific) and M/29/0 (magazine-wide) character set
-  // designation, ETSI EN 300 706 §9.4.2.2 Table 4 and §15.2 Table 32.
-  // |magazine_wide| distinguishes the two; everything else about reading the
-  // designation out of the packet is identical.
+  // X/28 (page-specific) and M/29 (magazine-wide) character set designation,
+  // ETSI EN 300 706 §9.4.2.2 Table 4, §15.2 Table 32 and §15.3 Table 33.
+  // |magazine_wide| distinguishes the two and |designation_zero| the /0 packet
+  // from the /4 one; everything else about reading the designations out of the
+  // packet is identical, Table 4 coding both.
   void handle_character_set_designation(
       int transmission_magazine,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
-      bool magazine_wide);
+      bool magazine_wide, bool designation_zero);
 
   // A sub-page's identity without the erase epoch, which is what the epoch
   // counter below is keyed on: {displayed magazine, page number, sub-code}.
@@ -592,8 +694,10 @@ class TeletextPageDecoder {
 
   std::array<MagazineState, 8> magazines_{};
 
-  // The local Code of Practice; see set_default_g0_set().
+  // The local Code of Practice; see set_default_g0_set() and
+  // set_default_second_g0_set().
   TeletextG0Set default_g0_set_ = TeletextG0Set::Latin;
+  std::optional<TeletextG0Designation> default_second_g0_set_;
 
   // How many C4 (erase page) headers each sub-page has been given, which is
   // the erase_epoch of its TeletextPageKey. Kept per sub-page rather than per
