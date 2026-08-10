@@ -122,7 +122,9 @@ set(ORC_GUI_LIB_SOURCES
 
     # Generic catalogue browser: the viewer for any stage advertising
     # StageToolKind::CatalogueBrowser, plus the two payload renderers it
-    # switches between.
+    # switches between and the flash phase they share.
+    catalogue_flash_clock.cpp
+    catalogue_flash_clock.h
     cataloguecellgridwidget.cpp
     cataloguecellgridwidget.h
     cataloguedisplaylistwidget.cpp

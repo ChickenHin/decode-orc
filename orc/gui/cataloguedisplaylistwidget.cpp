@@ -12,16 +12,20 @@
 #include <QBrush>
 #include <QFont>
 #include <QFontDatabase>
+#include <QHideEvent>
 #include <QImage>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
 #include <QPolygonF>
+#include <QShowEvent>
 #include <QString>
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
+
+#include "catalogue_flash_clock.h"
 
 namespace {
 
@@ -266,16 +270,96 @@ CatalogueDisplayListWidget::CatalogueDisplayListWidget(QWidget* parent)
   setMinimumSize(sizeHint() / 2);
 }
 
+CatalogueDisplayListWidget::~CatalogueDisplayListWidget() {
+  if (flash_subscribed_ && !flash_clock_.isNull()) {
+    flash_clock_->release();
+  }
+}
+
 void CatalogueDisplayListWidget::setDisplayList(
     const orc::CatalogueDisplayList& list) {
   list_ = list;
+  has_blinking_ops_ =
+      std::any_of(list_->ops.begin(), list_->ops.end(),
+                  [](const CatalogueDrawOp& op) { return op.blinking; });
+  updateFlashSubscription();
   update();
 }
 
 void CatalogueDisplayListWidget::clearDisplayList() {
   list_.reset();
   ops_painted_ = 0;
+  has_blinking_ops_ = false;
+  updateFlashSubscription();
   update();
+}
+
+void CatalogueDisplayListWidget::setFlashClock(CatalogueFlashClock* clock) {
+  if (flash_clock_ == clock) {
+    return;
+  }
+  if (flash_subscribed_ && !flash_clock_.isNull()) {
+    flash_clock_->release();
+  }
+  flash_subscribed_ = false;
+  flash_clock_ = clock;
+  if (clock != nullptr) {
+    connect(clock, &CatalogueFlashClock::litChanged, this, [this](bool lit) {
+      // A view that has released the clock is not animating, whatever the
+      // clock goes on to do for the views that still are.
+      if (flash_subscribed_) {
+        setFlashLit(lit);
+      }
+    });
+  }
+  updateFlashSubscription();
+}
+
+void CatalogueDisplayListWidget::setAnimationsEnabled(bool enabled) {
+  if (animations_enabled_ == enabled) {
+    return;
+  }
+  animations_enabled_ = enabled;
+  updateFlashSubscription();
+}
+
+void CatalogueDisplayListWidget::setFlashLit(bool lit) {
+  if (flash_lit_ == lit) {
+    return;
+  }
+  flash_lit_ = lit;
+  // A display list places its operations anywhere in the drawable area and
+  // they overlap freely, so there is no dirty rectangle worth deriving: the
+  // area is repainted whole.
+  update();
+}
+
+void CatalogueDisplayListWidget::updateFlashSubscription() {
+  const bool wanted = animations_enabled_ && has_blinking_ops_ && isVisible() &&
+                      !flash_clock_.isNull();
+  if (wanted == flash_subscribed_) {
+    return;
+  }
+  flash_subscribed_ = wanted;
+  if (wanted) {
+    flash_clock_->acquire();
+    setFlashLit(flash_clock_->lit());
+    return;
+  }
+  if (!flash_clock_.isNull()) {
+    flash_clock_->release();
+  }
+  setFlashLit(true);
+}
+
+void CatalogueDisplayListWidget::showEvent(QShowEvent* event) {
+  QWidget::showEvent(event);
+  updateFlashSubscription();
+}
+
+void CatalogueDisplayListWidget::hideEvent(QHideEvent* event) {
+  QWidget::hideEvent(event);
+  updateFlashSubscription();
 }
 
 void CatalogueDisplayListWidget::setShowDataErrors(bool show) {
@@ -333,7 +417,7 @@ void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
   painter.setClipRect(area);
 
   for (const auto& op : list_->ops) {
-    paintOp(painter, *list_, op, area, unit);
+    paintOp(painter, *list_, op, area, unit, flash_lit_);
     ++ops_painted_;
   }
   painter.restore();
@@ -351,16 +435,22 @@ void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
 void CatalogueDisplayListWidget::paintOp(QPainter& painter,
                                          const CatalogueDisplayList& list,
                                          const CatalogueDrawOp& op,
-                                         const QRectF& area, qreal unit) {
+                                         const QRectF& area, qreal unit,
+                                         bool lit) {
   // Unit space has y upwards from the bottom left; the widget's y runs down.
   const auto map = [&area, unit](const CataloguePoint& point) {
     return QPointF(area.left() + point.x * unit,
                    area.bottom() - point.y * unit);
   };
 
-  const QColor colour = to_qcolor(op.colour);
   const QColor background =
       op.has_background ? to_qcolor(op.background) : QColor(0, 0, 0);
+  // The blank phase of a blink process draws the operation in its background
+  // colour, or in black where it has none. Substituting the drawing colour
+  // rather than dropping the operation is what keeps a blinking character's
+  // field, and anything drawn under it, on screen through the blank phase.
+  const bool blank = op.blinking && !lit;
+  const QColor colour = blank ? background : to_qcolor(op.colour);
 
   // The pen is what gives a line its width. Both dimensions map to one pen, so
   // the larger governs — a pen has no orientation.
@@ -545,7 +635,11 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
         const int row = i / columns;
         const QRectF pel(origin.x() + column * step_x, top + row * step_y,
                          step_x, step_y);
-        painter.fillRect(pel, to_qcolor(op.colour_run[static_cast<size_t>(i)]));
+        // A run carries its own colour per pel, so the blank phase of a blink
+        // has to be applied to each of them rather than to |colour|.
+        painter.fillRect(
+            pel,
+            blank ? colour : to_qcolor(op.colour_run[static_cast<size_t>(i)]));
       }
       return;
     }

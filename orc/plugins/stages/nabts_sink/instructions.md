@@ -54,6 +54,8 @@ Selecting a record shows what it carries:
 * A **presentation record** is drawn as its NAPLPS display list, beside the plain text of the page. Pages are drawn in a unit square whose lower 0.78125 is the display area every receiver is guaranteed to show (ANSI X3.110 Table D1); **Show display area** outlines it, which is how to tell a record drawn deliberately into one corner from one that was mis-scaled. The text pane is there because an index page is mostly words and picking them off a rasterised page is tedious — it is the same characters the drawing used, in reading order.
 * An **application record** is shown as its function descriptors, each with its code in the code-table notation §7.2.2 uses and its arguments.
 
+**Enable animations** runs the blink processes the record set up (ANSI X3.110 §6.2.8.1-2), alternating each blinking figure between its own colour and its background — or black where the colour mode gives it none — on the same 0.75 Hz cycle the teletext viewer flashes at. Clear the box to hold the record still for reading or capture.
+
 **Caption track** switches the right-hand pane to the recording's captioning: the records the service marked with the caption flag of §5.2.7.3, in transmission order, each cue running until the next replaces it. §7.3.10 carries captioning as a run of records that each replace the last, so the cues — not the individual records — are what the service actually says. The control is only enabled on a recording that carried captioning, and the line above the list says which records those were.
 
 ## Parameters

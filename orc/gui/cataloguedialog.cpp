@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <limits>
 
+#include "catalogue_flash_clock.h"
 #include "cataloguecellgridwidget.h"
 #include "cataloguedisplaylistwidget.h"
 
@@ -105,6 +106,20 @@ void CatalogueDialog::setupUI() {
   top_row->addWidget(notice_label_);
   top_row->addStretch();
 
+  // Flashing text and blinking figures are part of the page, but a page being
+  // read or captured is better still, so the reader chooses. Shown only where
+  // the payload on display is one that can animate.
+  animations_check_ = new QCheckBox(tr("Enable animations"), this);
+  animations_check_->setObjectName("catalogueAnimationsCheck");
+  animations_check_->setChecked(true);
+  animations_check_->setVisible(false);
+  animations_check_->setToolTip(
+      tr("Flash characters and blinking figures as the service transmitted "
+         "them. Clear this to hold the payload still."));
+  connect(animations_check_, &QCheckBox::toggled, this,
+          &CatalogueDialog::onAnimationsToggled);
+  top_row->addWidget(animations_check_);
+
   highlight_check_ = new QCheckBox(this);
   highlight_check_->setObjectName("catalogueHighlightCheck");
   highlight_check_->setVisible(false);
@@ -153,8 +168,11 @@ void CatalogueDialog::setupUI() {
   empty_label_->setWordWrap(true);
   payload_stack_->insertWidget(kPageNothing, empty_label_);
 
+  flash_clock_ = new CatalogueFlashClock(this);
+
   grid_widget_ = new CatalogueCellGridWidget(this);
   grid_widget_->setObjectName("catalogueCellGrid");
+  grid_widget_->setFlashClock(flash_clock_);
   payload_stack_->insertWidget(kPageCellGrid, grid_widget_);
 
   // A display list is often read as much as looked at, so a text form sits
@@ -165,6 +183,7 @@ void CatalogueDialog::setupUI() {
   auto* display_splitter = new QSplitter(Qt::Horizontal, display_page_);
   display_widget_ = new CatalogueDisplayListWidget(display_splitter);
   display_widget_->setObjectName("catalogueDisplayList");
+  display_widget_->setFlashClock(flash_clock_);
   display_splitter->addWidget(display_widget_);
   companion_pane_ = new QPlainTextEdit(display_splitter);
   companion_pane_->setObjectName("catalogueCompanionPane");
@@ -508,6 +527,7 @@ void CatalogueDialog::renderPayload() {
     table_pane_->clearContents();
     table_pane_->setRowCount(0);
     condition_label_->setVisible(false);
+    animations_check_->setVisible(false);
     payload_stack_->setCurrentIndex(kPageNothing);
     if (!has_data_) {
       headline_label_->setText(tr("No data"));
@@ -531,16 +551,24 @@ void CatalogueDialog::renderPayload() {
   condition_label_->setText(condition);
   condition_label_->setVisible(!condition.isEmpty());
 
+  // Only the two drawn payloads can animate; a listing or a table has nothing
+  // for the switch to act on.
+  animations_check_->setVisible(
+      payload.kind == orc::CataloguePayload::Kind::kCellGrid ||
+      payload.kind == orc::CataloguePayload::Kind::kDisplayList);
+
   switch (payload.kind) {
     case orc::CataloguePayload::Kind::kCellGrid:
       grid_widget_->setGrid(payload.grid);
       grid_widget_->setShowDataErrors(highlight_check_->isChecked());
+      grid_widget_->setAnimationsEnabled(animations_check_->isChecked());
       payload_stack_->setCurrentIndex(kPageCellGrid);
       return;
 
     case orc::CataloguePayload::Kind::kDisplayList: {
       display_widget_->setDisplayList(payload.display_list);
       display_widget_->setShowDataErrors(highlight_check_->isChecked());
+      display_widget_->setAnimationsEnabled(animations_check_->isChecked());
       const QString companion = to_qstring(payload.companion_text);
       companion_pane_->setPlainText(companion);
       companion_pane_->setVisible(!companion.isEmpty());
@@ -688,6 +716,11 @@ void CatalogueDialog::onItemSelected() {
 void CatalogueDialog::onHighlightToggled(bool checked) {
   grid_widget_->setShowDataErrors(checked);
   display_widget_->setShowDataErrors(checked);
+}
+
+void CatalogueDialog::onAnimationsToggled(bool checked) {
+  grid_widget_->setAnimationsEnabled(checked);
+  display_widget_->setAnimationsEnabled(checked);
 }
 
 // ---------------------------------------------------------------------------

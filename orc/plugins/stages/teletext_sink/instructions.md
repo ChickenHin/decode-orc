@@ -46,6 +46,8 @@ A page number is not always one page. A service can transmit a sequence of **sub
 
 Which pages are sequences is otherwise invisible in the list, so the page's row says so in its tooltip.
 
+**Enable animations** flashes the characters the service marked to flash. ETSI EN 300 706 §12.2 gives code 0/8 the job of alternating the foreground pixels of the characters that follow it between the foreground and background colours, cancelled by Steady (0/9) or by the start of the next row; the rate is the receiver's own, and this is the 0.75 Hz cycle a World System Teletext receiver used — three quarters of it showing the character and the last quarter blank. Only the characters alternate: their background stays put, and a concealed character stays concealed. Clear the box to hold the page still, which is what reading a flashing headline, or capturing the display, wants.
+
 ## Parameters
 
 ### output_path (file path)

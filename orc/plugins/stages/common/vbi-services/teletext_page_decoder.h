@@ -174,7 +174,9 @@ struct TeletextPageCell {
   // Lower cell of a double-height pair: no foreground data, background
   // copied from the origin row (§12.2 0/D).
   bool double_height_lower = false;
-  bool flash = false;    // §12.2 0/8 (static or ignored by renderers)
+  // §12.2 0/8: foreground pixels alternate with the background colour, at a
+  // rate the renderer chooses.
+  bool flash = false;
   bool conceal = false;  // §12.2 1/8: display as SPACE until revealed
   bool boxed = false;    // inside a Start Box/End Box region (§12.2 0/A-0/B)
   // The transmitted byte failed odd parity (EN 300 706 §8.1); |character| is

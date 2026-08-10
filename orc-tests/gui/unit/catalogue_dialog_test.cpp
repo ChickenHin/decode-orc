@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QTableWidget>
 
+#include "catalogue_flash_clock.h"
 #include "cataloguecellgridwidget.h"
 #include "cataloguedialog.h"
 #include "cataloguedisplaylistwidget.h"
@@ -185,12 +186,32 @@ int gridScale(const orc::CatalogueCellGrid& grid) {
   return scale;
 }
 
-QImage renderGrid(const orc::CatalogueCellGrid& grid) {
+QImage renderGrid(const orc::CatalogueCellGrid& grid, bool flash_lit = true) {
   CatalogueCellGridWidget widget;
   widget.setGrid(grid);
+  // The phase is set rather than waited for: a wall-clock cycle would make
+  // this test slow and flaky, and the widget paints whichever phase it holds.
+  widget.setFlashLit(flash_lit);
   const int scale = gridScale(grid);
   return renderWidget(widget, grid.columns * grid.cell_aspect_width * scale,
                       grid.rows * grid.cell_aspect_height * scale);
+}
+
+/// Whether anything at all was drawn inside the character rectangle at
+/// (row, column), against the black screen the grid sits on.
+bool cellHasInk(const QImage& image, const orc::CatalogueCellGrid& grid,
+                int row, int column) {
+  const int scale = gridScale(grid);
+  const int cell_w = grid.cell_aspect_width * scale;
+  const int cell_h = grid.cell_aspect_height * scale;
+  for (int y = row * cell_h; y < (row + 1) * cell_h; ++y) {
+    for (int x = column * cell_w; x < (column + 1) * cell_w; ++x) {
+      if (image.pixelColor(x, y) != QColor(Qt::black)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /// Colour at the centre of the character rectangle at (row, column).
@@ -815,6 +836,210 @@ TEST(CatalogueCellGridWidgetTest, RowGapsAreBandedWhenPacketsWereLost) {
                    grid.rows * grid.cell_aspect_height * scale);
   EXPECT_EQ(cellCentre(unmarked, grid, /*row=*/1, /*column=*/0),
             QColor(Qt::black));
+}
+
+// --- Flashing and blinking ------------------------------------------------
+
+// ETSI EN 300 706 §12.2 code 0/8 alternates the foreground pixels of the
+// characters that follow it between the foreground and background colours;
+// everything not flagged carries on being drawn.
+TEST(CatalogueCellGridWidgetTest, FlashBlanksOnlyTheFlaggedCharacters) {
+  ensureApplication();
+
+  orc::CatalogueCellGrid grid = makeGrid("AB", /*rows=*/2, /*columns=*/2);
+  grid.cells[0].flash = true;
+
+  const QImage lit = renderGrid(grid);
+  EXPECT_TRUE(cellHasInk(lit, grid, /*row=*/0, /*column=*/0));
+  EXPECT_TRUE(cellHasInk(lit, grid, /*row=*/0, /*column=*/1));
+
+  const QImage blank = renderGrid(grid, /*flash_lit=*/false);
+  EXPECT_FALSE(cellHasInk(blank, grid, /*row=*/0, /*column=*/0))
+      << "a flashing character was still drawn in the blank phase";
+  EXPECT_TRUE(cellHasInk(blank, grid, /*row=*/0, /*column=*/1))
+      << "a steady character was blanked along with its flashing neighbour";
+}
+
+// Only the foreground alternates: the cell keeps its background through the
+// blank phase, so a flashing character on a coloured strip does not punch a
+// hole in the strip.
+TEST(CatalogueCellGridWidgetTest, FlashLeavesTheCellBackgroundAlone) {
+  ensureApplication();
+
+  orc::CatalogueCellGrid grid = makeGrid("A", /*rows=*/1, /*columns=*/1);
+  grid.palette = {orc::CatalogueColour{0, 0, 0},
+                  orc::CatalogueColour{255, 255, 255},
+                  orc::CatalogueColour{255, 0, 0}};
+  grid.cells[0].flash = true;
+  grid.cells[0].background = 2;
+
+  const QImage blank = renderGrid(grid, /*flash_lit=*/false);
+  EXPECT_EQ(cellCentre(blank, grid, /*row=*/0, /*column=*/0),
+            QColor(255, 0, 0));
+}
+
+// The clock is only worth running for a page something on which actually
+// changes between the phases.
+TEST(CatalogueCellGridWidgetTest, OnlyDrawnCharactersCountAsFlashing) {
+  ensureApplication();
+  CatalogueCellGridWidget widget;
+
+  orc::CatalogueCellGrid grid = makeGrid("A", /*rows=*/1, /*columns=*/2);
+  widget.setGrid(grid);
+  EXPECT_FALSE(widget.hasFlashingCells());
+
+  // The attribute is set-after and runs to the end of the row, so it lands on
+  // the trailing SPACEs too — and a SPACE draws nothing in either phase.
+  grid.cells[1].flash = true;
+  widget.setGrid(grid);
+  EXPECT_FALSE(widget.hasFlashingCells());
+
+  grid.cells[0].flash = true;
+  widget.setGrid(grid);
+  EXPECT_TRUE(widget.hasFlashingCells());
+
+  // A concealed cell displays as SPACE until revealed, and there is no reveal
+  // control here.
+  grid.cells[0].concealed = true;
+  widget.setGrid(grid);
+  EXPECT_FALSE(widget.hasFlashingCells());
+}
+
+// A catalogue browser left open must not tick forever: the clock is held only
+// while a visible view has something to animate.
+TEST(CatalogueCellGridWidgetTest, TheClockRunsOnlyForAVisibleFlashingPage) {
+  ensureApplication();
+
+  CatalogueFlashClock clock;
+  CatalogueCellGridWidget widget;
+  widget.setFlashClock(&clock);
+
+  orc::CatalogueCellGrid grid = makeGrid("A", /*rows=*/1, /*columns=*/1);
+  grid.cells[0].flash = true;
+  widget.setGrid(grid);
+  EXPECT_FALSE(clock.running()) << "a hidden view has no reader to flash for";
+
+  widget.show();
+  QApplication::processEvents();
+  EXPECT_TRUE(clock.running());
+  EXPECT_EQ(clock.subscribers(), 1);
+
+  widget.setAnimationsEnabled(false);
+  EXPECT_FALSE(clock.running());
+  EXPECT_TRUE(widget.flashLit())
+      << "a page held still should show its flashing text, not hide it";
+
+  widget.setAnimationsEnabled(true);
+  EXPECT_TRUE(clock.running());
+
+  widget.hide();
+  QApplication::processEvents();
+  EXPECT_FALSE(clock.running());
+
+  // A page with nothing flashing on it does not start the clock either.
+  widget.show();
+  QApplication::processEvents();
+  widget.setGrid(makeGrid("A", /*rows=*/1, /*columns=*/1));
+  EXPECT_FALSE(clock.running());
+}
+
+TEST(CatalogueFlashClockTest, RunsWhileAnyViewIsSubscribed) {
+  ensureApplication();
+
+  CatalogueFlashClock clock;
+  EXPECT_FALSE(clock.running());
+  EXPECT_TRUE(clock.lit());
+
+  clock.acquire();
+  clock.acquire();
+  EXPECT_EQ(clock.subscribers(), 2);
+  EXPECT_TRUE(clock.running());
+
+  clock.release();
+  EXPECT_TRUE(clock.running()) << "a view is still animating";
+  clock.release();
+  EXPECT_FALSE(clock.running());
+  EXPECT_TRUE(clock.lit()) << "the still form of a flash is the lit one";
+
+  // An unbalanced release must not underflow the count and leave the clock
+  // unable to start again.
+  clock.release();
+  EXPECT_EQ(clock.subscribers(), 0);
+  clock.acquire();
+  EXPECT_TRUE(clock.running());
+}
+
+// The NAPLPS blink process is the same idea: the blank phase draws the
+// operation in its background colour rather than dropping it.
+TEST(CatalogueDisplayListWidgetTest, BlinkingOpsGoDarkInTheBlankPhase) {
+  ensureApplication();
+
+  orc::CatalogueDisplayList list;
+  list.aspect_height = 1.0;
+  orc::CatalogueDrawOp op;
+  op.kind = orc::CatalogueDrawKind::kRectangle;
+  op.origin = orc::CataloguePoint{0.1, 0.1};
+  op.size = orc::CatalogueSize{0.5, 0.5};
+  op.filled = true;
+  op.colour = orc::CatalogueColour{255, 255, 255};
+  op.blinking = true;
+  list.ops.push_back(op);
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(list);
+  EXPECT_TRUE(widget.hasBlinkingOps());
+
+  const auto lit_pixels = [](const QImage& image) {
+    int count = 0;
+    for (int y = 0; y < image.height(); ++y) {
+      for (int x = 0; x < image.width(); ++x) {
+        if (image.pixelColor(x, y) != QColor(Qt::black)) {
+          ++count;
+        }
+      }
+    }
+    return count;
+  };
+
+  EXPECT_GT(lit_pixels(renderWidget(widget, 256, 256)), 0);
+  widget.setFlashLit(false);
+  EXPECT_EQ(lit_pixels(renderWidget(widget, 256, 256)), 0);
+}
+
+// The switch belongs to the payload views, so it is offered where one of them
+// is on display and nowhere else.
+TEST(CatalogueDialogTest, AnimationSwitchIsOfferedForDrawnPayloadsOnly) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makePagedCatalogue(1));
+
+  auto* check = dialog.findChild<QCheckBox*>("catalogueAnimationsCheck");
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  EXPECT_TRUE(check->isChecked()) << "a page is transmitted animated";
+
+  auto* grid = dialog.findChild<CatalogueCellGridWidget*>("catalogueCellGrid");
+  auto* display =
+      dialog.findChild<CatalogueDisplayListWidget*>("catalogueDisplayList");
+  ASSERT_NE(grid, nullptr);
+  ASSERT_NE(display, nullptr);
+
+  // One switch covers both payload views, so a reader is not asked twice.
+  check->setChecked(false);
+  EXPECT_FALSE(grid->animationsEnabled());
+  EXPECT_FALSE(display->animationsEnabled());
+  check->setChecked(true);
+  EXPECT_TRUE(grid->animationsEnabled());
+  EXPECT_TRUE(display->animationsEnabled());
+
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);  // a display list
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  dialog.selectItem(1);  // a text listing, which cannot animate
+  EXPECT_FALSE(check->isVisibleTo(&dialog));
+
+  dialog.close();
 }
 
 }  // namespace gui_unit_test

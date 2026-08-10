@@ -132,7 +132,9 @@ struct CatalogueCell {
   bool double_height = false;
   bool double_height_lower = false;
 
-  bool flash = false;      ///< Flashing (rendered static)
+  /// The cell's character alternates with being blanked. A host that animates
+  /// picks its own rate; a still one draws the lit phase.
+  bool flash = false;
   bool concealed = false;  ///< Rendered as SPACE until revealed
   /// Inside a boxed region. Only meaningful with
   /// CatalogueCellGrid::boxed_only.
