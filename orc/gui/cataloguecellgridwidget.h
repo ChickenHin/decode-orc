@@ -12,8 +12,10 @@
 
 #include <orc/stage/tooling/catalogue_results.h>
 
+#include <QImage>
 #include <QPointer>
 #include <QRectF>
+#include <QSize>
 #include <QWidget>
 #include <optional>
 
@@ -95,6 +97,26 @@ class CatalogueCellGridWidget : public QWidget {
 
   QSize sizeHint() const override;
 
+  /**
+   * @brief The page alone as an image |size| pixels across and down
+   *
+   * The page is fitted to |size| at the character-rectangle aspect exactly as
+   * it is fitted to the widget, so a size of the page's own aspect — which is
+   * what pageImageSize() gives — leaves no border around it.
+   *
+   * Always the lit phase, whatever phase the view is holding: flashing text is
+   * on the page because the service put it there, and a still of the blank
+   * phase would drop it. The damage overlay follows the view's own setting,
+   * because a reader who turned it on is looking at the damage.
+   *
+   * Null when there is no grid to draw or |size| is empty.
+   */
+  QImage renderPageImage(const QSize& size) const;
+
+  /// The size renderPageImage() is worth being asked for: whole pixels per
+  /// character rectangle, at the page's own aspect. Null when there is no grid.
+  QSize pageImageSize() const;
+
  protected:
   void paintEvent(QPaintEvent* event) override;
   void showEvent(QShowEvent* event) override;
@@ -110,7 +132,15 @@ class CatalogueCellGridWidget : public QWidget {
     /// device pixel per cell and nothing can usefully be drawn
     bool valid = false;
   };
-  PageGeometry pageGeometry() const;
+  /// Where the page sits within a paint surface |bounds| pixels across and
+  /// down, whose origin is (0, 0) — the widget itself, or the image a save
+  /// renders into
+  PageGeometry pageGeometryIn(const QSizeF& bounds) const;
+  PageGeometry pageGeometry() const { return pageGeometryIn(QSizeF(size())); }
+
+  /// Draw the page into |bounds| of |painter|, in the given flash phase. What
+  /// both the widget's own paint and an exported image are.
+  void paintContent(QPainter& painter, const QRectF& bounds, bool lit) const;
 
   /// Hatch rows that carried no packet and outline damaged cells
   static void paintDataErrorOverlay(QPainter& painter,

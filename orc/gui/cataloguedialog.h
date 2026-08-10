@@ -14,6 +14,7 @@
 
 #include <QCheckBox>
 #include <QDialog>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
@@ -102,6 +103,18 @@ class CatalogueDialog : public QDialog {
   QString summaryText() const;
   QString noticeText() const;
 
+  /// Whether the payload on display is a drawn one, and so can be saved as an
+  /// image. A listing or a table is text and there is nothing to render.
+  bool canSavePage() const;
+
+  /// The image a save would write, at the payload's own size (test seam; null
+  /// when the payload on display is not a drawn one)
+  QImage renderedPageImage() const;
+
+  /// The file name the save dialogue opens on, derived from what is displayed —
+  /// "Page-100-0002.png" (test seam)
+  QString suggestedPageFileName() const;
+
   /// The payload on display (test seams; nullptr when none is)
   const orc::CatalogueCellGrid* currentGrid() const;
   const orc::CatalogueDisplayList* currentDisplayList() const;
@@ -115,6 +128,7 @@ class CatalogueDialog : public QDialog {
   void onItemSelected();
   void onHighlightToggled(bool checked);
   void onAnimationsToggled(bool checked);
+  void onSavePageClicked();
 
  private:
   /// Which pane the payload side is showing
@@ -166,6 +180,7 @@ class CatalogueDialog : public QDialog {
   QLineEdit* find_edit_ = nullptr;
   QCheckBox* highlight_check_ = nullptr;
   QCheckBox* animations_check_ = nullptr;
+  QToolButton* save_page_button_ = nullptr;
   QToolButton* prev_item_button_ = nullptr;
   QToolButton* next_item_button_ = nullptr;
   QWidget* item_nav_ = nullptr;

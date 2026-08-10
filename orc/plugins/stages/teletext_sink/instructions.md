@@ -48,6 +48,8 @@ Which pages are sequences is otherwise invisible in the list, so the page's row 
 
 **Enable animations** flashes the characters the service marked to flash. ETSI EN 300 706 §12.2 gives code 0/8 the job of alternating the foreground pixels of the characters that follow it between the foreground and background colours, cancelled by Steady (0/9) or by the start of the next row; the rate is the receiver's own, and this is the 0.75 Hz cycle a World System Teletext receiver used — three quarters of it showing the character and the last quarter blank. Only the characters alternate: their background stays put, and a concealed character stays concealed. Clear the box to hold the page still, which is what reading a flashing headline, or capturing the display, wants.
 
+**Save PNG…** writes the page on screen to an image file. The page is drawn on its own, at whole pixels per character rectangle and at the aspect of the character rectangle the service uses, so a 40 x 25 page comes out 960 x 1000 with no border around it and every column landing on a pixel boundary. Flashing characters are saved lit whatever phase the display happens to be in, because a still caught in the blank phase would be missing the very text the service chose to flash; **Show data errors** is honoured, so a page saved with the overlay on records what was lost as well as what arrived. The name offered is the page and its sub-code — `Page-100-0002.png`. The packet stream the stage writes is the data rather than the picture, so this is the only place the assembled page exists as one.
+
 ## Parameters
 
 ### output_path (file path)

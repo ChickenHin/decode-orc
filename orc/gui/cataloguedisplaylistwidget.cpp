@@ -43,6 +43,12 @@ using orc::CataloguePoint;
 constexpr int kNominalPixelsAcross = 256;
 constexpr int kNominalPixelsDown = 200;
 
+// How wide a saved drawable area is. A display list is resolution-independent —
+// its unit space carries no pixels of its own — so the width is a choice, and
+// this one puts the fine strokes a service draws letterforms with well clear of
+// a single pixel.
+constexpr int kSavedPixelsAcross = 720;
+
 // A line whose pen is zero is a dimensionless drawing point; it still has to be
 // visible, so it is drawn one device pixel wide.
 constexpr qreal kMinimumPenWidth = 1.0;
@@ -379,11 +385,12 @@ QSize CatalogueDisplayListWidget::sizeHint() const {
   return QSize(kNominalPixelsAcross, kNominalPixelsDown);
 }
 
-QRectF CatalogueDisplayListWidget::displayAreaRect() const {
+QRectF CatalogueDisplayListWidget::displayAreaRectIn(
+    const QSizeF& bounds) const {
   const double aspect_height =
       list_ && list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
-  const qreal available_w = static_cast<qreal>(width());
-  const qreal available_h = static_cast<qreal>(height());
+  const qreal available_w = bounds.width();
+  const qreal available_h = bounds.height();
   qreal draw_w = available_w;
   qreal draw_h = draw_w * aspect_height;
   if (draw_h > available_h) {
@@ -396,16 +403,44 @@ QRectF CatalogueDisplayListWidget::displayAreaRect() const {
 
 void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
   QPainter painter(this);
-  painter.fillRect(rect(), Qt::black);
+  paintContent(painter, QRectF(rect()), flash_lit_);
+}
+
+QSize CatalogueDisplayListWidget::pageImageSize() const {
+  if (!list_) {
+    return {};
+  }
+  const double aspect_height =
+      list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
+  return QSize(kSavedPixelsAcross,
+               std::max(1, static_cast<int>(std::lround(kSavedPixelsAcross *
+                                                        aspect_height))));
+}
+
+QImage CatalogueDisplayListWidget::renderPageImage(const QSize& size) const {
+  if (!list_ || size.isEmpty()) {
+    return {};
+  }
+  QImage image(size, QImage::Format_RGB32);
+  image.fill(Qt::black);
+  QPainter painter(&image);
+  paintContent(painter, QRectF(QPointF(0.0, 0.0), QSizeF(size)), /*lit=*/true);
+  return image;
+}
+
+void CatalogueDisplayListWidget::paintContent(QPainter& painter,
+                                              const QRectF& bounds,
+                                              bool lit) const {
+  painter.fillRect(bounds, Qt::black);
   ops_painted_ = 0;
 
   if (!list_) {
     painter.setPen(Qt::gray);
-    painter.drawText(rect(), Qt::AlignCenter, placeholder_);
+    painter.drawText(bounds, Qt::AlignCenter, placeholder_);
     return;
   }
 
-  const QRectF area = displayAreaRect();
+  const QRectF area = displayAreaRectIn(bounds.size());
   // The mapping is isotropic: the drawable area is |unit| pixels per unit of x,
   // and the same per unit of y, because its nominal pixels are square.
   const qreal unit = area.width();
@@ -417,7 +452,7 @@ void CatalogueDisplayListWidget::paintEvent(QPaintEvent* /*event*/) {
   painter.setClipRect(area);
 
   for (const auto& op : list_->ops) {
-    paintOp(painter, *list_, op, area, unit, flash_lit_);
+    paintOp(painter, *list_, op, area, unit, lit);
     ++ops_painted_;
   }
   painter.restore();

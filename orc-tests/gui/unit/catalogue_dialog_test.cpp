@@ -13,7 +13,9 @@
 #include <QCheckBox>
 #include <QImage>
 #include <QLineEdit>
+#include <QRect>
 #include <QTableWidget>
+#include <QToolButton>
 
 #include "catalogue_flash_clock.h"
 #include "cataloguecellgridwidget.h"
@@ -433,6 +435,63 @@ TEST(CatalogueDialogTest, SingleVariantSaysSoAndDisablesTheControls) {
 
   EXPECT_EQ(dialog.variantCount(), 1);
   EXPECT_EQ(dialog.variantText(), "No sub-pages");
+
+  dialog.close();
+}
+
+namespace {
+
+// The shape the NABTS sink produces: a chain page whose members are variants,
+// listed alongside a record that carries its own payload and has none.
+orc::CatalogueDataset makeMixedVariantCatalogue() {
+  orc::CatalogueDataset data = makeVariantCatalogue(2);
+
+  orc::CatalogueItem standalone;
+  standalone.id = "000/1A4 v0";
+  standalone.find_key = standalone.id;
+  standalone.values = {standalone.id};
+  data.items.push_back(std::move(standalone));
+
+  orc::CataloguePayload payload;
+  payload.kind = orc::CataloguePayload::Kind::kCellGrid;
+  payload.grid = makeGrid("1A4");
+  payload.headline = "Record 000/1A4 seen 3 times";
+  data.payloads.push_back(std::move(payload));
+  return data;
+}
+
+}  // namespace
+
+// An item with nothing to step to keeps the stepper standing and disabled,
+// rather than removing it from the row: a control that came and went as the
+// reader moved down the list would read as an interface glitch.
+TEST(CatalogueDialogTest, ItemWithoutVariantsKeepsTheStepperInPlace) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makeMixedVariantCatalogue());
+
+  dialog.selectItem(0);
+  EXPECT_EQ(dialog.variantText(), "Sub-page 1 of 2 (0001)");
+
+  dialog.selectItem(1);
+  EXPECT_EQ(dialog.variantCount(), 0);
+  EXPECT_EQ(dialog.variantIndex(), 0);
+  EXPECT_EQ(dialog.variantText(), "No sub-pages");
+  EXPECT_EQ(dialog.headlineText(), "Record 000/1A4 seen 3 times");
+
+  const auto* previous =
+      dialog.findChild<QToolButton*>("cataloguePrevVariantButton");
+  const auto* next =
+      dialog.findChild<QToolButton*>("catalogueNextVariantButton");
+  ASSERT_NE(previous, nullptr);
+  ASSERT_NE(next, nullptr);
+  EXPECT_FALSE(previous->isEnabled());
+  EXPECT_FALSE(next->isEnabled());
+
+  // Stepping a stepper with nowhere to go leaves the display where it was.
+  dialog.showNextVariant();
+  EXPECT_EQ(dialog.headlineText(), "Record 000/1A4 seen 3 times");
 
   dialog.close();
 }
@@ -1090,6 +1149,163 @@ TEST(CatalogueDialogTest, AnimationSwitchIsOfferedForDrawnPayloadsOnly) {
   EXPECT_FALSE(check->isVisibleTo(&dialog));
 
   dialog.close();
+}
+
+// --- Saving the display as an image ---------------------------------------
+
+namespace {
+
+/// Whether anything was drawn inside |area| of |image|, against the black the
+/// display sits on
+bool hasInk(const QImage& image, const QRect& area) {
+  for (int y = area.top(); y <= area.bottom(); ++y) {
+    for (int x = area.left(); x <= area.right(); ++x) {
+      if (image.pixelColor(x, y) != QColor(Qt::black)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+// A saved page is whole multiples of the character rectangle at the grid's own
+// aspect: a fractional scale would put a cell boundary inside a pixel, and a
+// size off the aspect would letterbox the page inside its own image.
+TEST(CatalogueCellGridWidgetTest, SavedImageIsWholeCharacterRectangles) {
+  ensureApplication();
+  const orc::CatalogueCellGrid grid = makeGrid("100");
+
+  CatalogueCellGridWidget widget;
+  widget.setGrid(grid);
+
+  // 8 x 4 cells of 12 x 20, scaled by 8 — the smallest whole scale that puts
+  // the page past the 720-pixel minimum width.
+  const QSize size = widget.pageImageSize();
+  EXPECT_EQ(size, QSize(768, 640));
+
+  const QImage image = widget.renderPageImage(size);
+  ASSERT_FALSE(image.isNull());
+  EXPECT_EQ(image.size(), size);
+
+  // The text of the payload is on the top row and nowhere else, which is only
+  // true if the page filled the image rather than being centred inside it.
+  const int cell_w = size.width() / grid.columns;
+  const int cell_h = size.height() / grid.rows;
+  EXPECT_TRUE(hasInk(image, QRect(0, 0, cell_w, cell_h)));
+  EXPECT_FALSE(hasInk(image, QRect(0, cell_h, size.width(), cell_h)));
+}
+
+// The blank phase of a flash is a moment of the transmission, not the page: a
+// still caught in it would be missing the text the service chose to flash.
+TEST(CatalogueCellGridWidgetTest, SavedImageHoldsTheLitPhase) {
+  ensureApplication();
+  orc::CatalogueCellGrid grid = makeGrid("A", 2, 2);
+  grid.cells[0].flash = true;
+
+  CatalogueCellGridWidget widget;
+  widget.setGrid(grid);
+  widget.setFlashLit(false);
+  ASSERT_TRUE(widget.hasFlashingCells());
+
+  const QImage image = widget.renderPageImage(widget.pageImageSize());
+  ASSERT_FALSE(image.isNull());
+  const int cell_w = image.width() / grid.columns;
+  const int cell_h = image.height() / grid.rows;
+  EXPECT_TRUE(hasInk(image, QRect(0, 0, cell_w, cell_h)))
+      << "the flashed character is part of the page";
+}
+
+TEST(CatalogueDisplayListWidgetTest, SavedImageFollowsThePayloadAspect) {
+  ensureApplication();
+  orc::CatalogueDisplayList list;
+  list.aspect_height = 0.78125;
+  orc::CatalogueDrawOp op;
+  op.kind = orc::CatalogueDrawKind::kRectangle;
+  op.origin = orc::CataloguePoint{0.0, 0.0};
+  op.size = orc::CatalogueSize{1.0, 0.78125};
+  op.filled = true;
+  op.colour = orc::CatalogueColour{255, 255, 255};
+  list.ops.push_back(op);
+
+  CatalogueDisplayListWidget widget;
+  widget.setDisplayList(list);
+
+  const QSize size = widget.pageImageSize();
+  EXPECT_EQ(size.width(), 720);
+  EXPECT_NEAR(static_cast<double>(size.height()) / size.width(), 0.78125, 0.01);
+
+  // The drawable area is the whole image at that aspect, so an operation
+  // covering unit space covers every corner of it.
+  const QImage image = widget.renderPageImage(size);
+  ASSERT_FALSE(image.isNull());
+  EXPECT_EQ(image.pixelColor(1, 1), QColor(Qt::white));
+  EXPECT_EQ(image.pixelColor(size.width() - 2, size.height() - 2),
+            QColor(Qt::white));
+}
+
+// Only a drawn payload can be saved; a listing or a table is text on screen and
+// there is nothing to render.
+TEST(CatalogueDialogTest, SaveIsOfferedForDrawnPayloadsOnly) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makePagedCatalogue(1));
+
+  auto* button = dialog.findChild<QToolButton*>("catalogueSavePageButton");
+  ASSERT_NE(button, nullptr);
+  EXPECT_TRUE(button->isVisibleTo(&dialog));
+  EXPECT_TRUE(dialog.canSavePage());
+
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);  // a display list
+  EXPECT_TRUE(button->isVisibleTo(&dialog));
+  EXPECT_TRUE(dialog.canSavePage());
+
+  dialog.selectItem(1);  // a text listing
+  EXPECT_FALSE(button->isVisibleTo(&dialog));
+  EXPECT_FALSE(dialog.canSavePage());
+  EXPECT_TRUE(dialog.renderedPageImage().isNull());
+
+  dialog.selectItem(2);  // a table
+  EXPECT_FALSE(button->isVisibleTo(&dialog));
+  EXPECT_FALSE(dialog.canSavePage());
+
+  dialog.close();
+}
+
+TEST(CatalogueDialogTest, SavedImageIsThePayloadOnDisplay) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(2));
+  dialog.selectItem(1);
+
+  const QImage grid_image = dialog.renderedPageImage();
+  ASSERT_FALSE(grid_image.isNull());
+  EXPECT_EQ(grid_image.size(), QSize(768, 640));
+
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);
+  const QImage list_image = dialog.renderedPageImage();
+  ASSERT_FALSE(list_image.isNull());
+  EXPECT_EQ(list_image.width(), 720);
+}
+
+// The suggested name says which display it is, in the service's own terms, with
+// the punctuation a file name cannot carry turned into separators.
+TEST(CatalogueDialogTest, SuggestedFileNameNamesTheDisplay) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(3));
+
+  dialog.selectItem(1);
+  EXPECT_EQ(dialog.suggestedPageFileName(), "Page-101-0000.png");
+
+  // "000/1A4 v0" would otherwise be read as a directory to save into.
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);
+  EXPECT_EQ(dialog.suggestedPageFileName(), "Record-000-1A4-v0.png");
 }
 
 }  // namespace gui_unit_test

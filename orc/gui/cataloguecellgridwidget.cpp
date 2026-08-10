@@ -26,6 +26,12 @@ namespace {
 constexpr int kHintColumns = 40;
 constexpr int kHintRows = 25;
 
+// The narrowest a saved page is worth being. A character rectangle is nominally
+// a dozen pixels across, which is legible on a receiver's line-doubled display
+// and not in a still that is looked at on its own, so the page is scaled up
+// until it is at least this wide.
+constexpr int kSavedPixelsAcross = 720;
+
 // The fixed-pitch font the cells are drawn in, with families named after the
 // platform's own so a glyph it lacks is still drawn by something.
 //
@@ -272,8 +278,8 @@ QSize CatalogueCellGridWidget::sizeHint() const {
   return QSize(kHintColumns * cell_w, kHintRows * cell_h);
 }
 
-CatalogueCellGridWidget::PageGeometry CatalogueCellGridWidget::pageGeometry()
-    const {
+CatalogueCellGridWidget::PageGeometry CatalogueCellGridWidget::pageGeometryIn(
+    const QSizeF& bounds) const {
   PageGeometry geometry;
   if (!grid_ || !grid_->valid()) {
     return geometry;
@@ -290,14 +296,14 @@ CatalogueCellGridWidget::PageGeometry CatalogueCellGridWidget::pageGeometry()
   // stretched grid would misshape every glyph and mosaic block.
   const qreal page_aspect = static_cast<qreal>(columns * aspect_w) /
                             static_cast<qreal>(rows * aspect_h);
-  qreal page_w = width();
+  qreal page_w = bounds.width();
   qreal page_h = page_w / page_aspect;
-  if (page_h > height()) {
-    page_h = height();
+  if (page_h > bounds.height()) {
+    page_h = bounds.height();
     page_w = page_h * page_aspect;
   }
-  geometry.page = QRectF((width() - page_w) / 2.0, (height() - page_h) / 2.0,
-                         page_w, page_h);
+  geometry.page = QRectF((bounds.width() - page_w) / 2.0,
+                         (bounds.height() - page_h) / 2.0, page_w, page_h);
   geometry.cell_w = geometry.page.width() / columns;
   geometry.cell_h = geometry.page.height() / rows;
   geometry.valid = geometry.cell_w >= 1.0 && geometry.cell_h >= 1.0;
@@ -306,15 +312,50 @@ CatalogueCellGridWidget::PageGeometry CatalogueCellGridWidget::pageGeometry()
 
 void CatalogueCellGridWidget::paintEvent(QPaintEvent* /*event*/) {
   QPainter painter(this);
-  painter.fillRect(rect(), Qt::black);
+  paintContent(painter, QRectF(rect()), flash_lit_);
+}
+
+QSize CatalogueCellGridWidget::pageImageSize() const {
+  if (!grid_ || !grid_->valid()) {
+    return {};
+  }
+  const int aspect_w = qMax(1, grid_->cell_aspect_width);
+  const int aspect_h = qMax(1, grid_->cell_aspect_height);
+  const int nominal_w = grid_->columns * aspect_w;
+  const int nominal_h = grid_->rows * aspect_h;
+  // Whole multiples of the character rectangle: at a fractional scale a cell
+  // boundary falls inside a pixel and the columns stop lining up.
+  int scale = 1;
+  while (nominal_w * scale < kSavedPixelsAcross) {
+    ++scale;
+  }
+  return QSize(nominal_w * scale, nominal_h * scale);
+}
+
+QImage CatalogueCellGridWidget::renderPageImage(const QSize& size) const {
+  if (!grid_ || !grid_->valid() || size.isEmpty()) {
+    return {};
+  }
+  QImage image(size, QImage::Format_RGB32);
+  image.fill(Qt::black);
+  QPainter painter(&image);
+  paintContent(painter, QRectF(QPointF(0.0, 0.0), QSizeF(size)),
+               /*lit=*/true);
+  return image;
+}
+
+void CatalogueCellGridWidget::paintContent(QPainter& painter,
+                                           const QRectF& bounds,
+                                           bool lit) const {
+  painter.fillRect(bounds, Qt::black);
 
   if (!grid_ || !grid_->valid()) {
     painter.setPen(Qt::gray);
-    painter.drawText(rect(), Qt::AlignCenter, placeholder_);
+    painter.drawText(bounds, Qt::AlignCenter, placeholder_);
     return;
   }
 
-  const PageGeometry geometry = pageGeometry();
+  const PageGeometry geometry = pageGeometryIn(bounds.size());
   if (!geometry.valid) {
     return;
   }
@@ -382,7 +423,7 @@ void CatalogueCellGridWidget::paintEvent(QPaintEvent* /*event*/) {
       // The blank phase of a flash leaves the background alone and draws no
       // foreground, which is what alternating the foreground pixels to the
       // background colour comes to.
-      if (cell.flash && !flash_lit_) {
+      if (cell.flash && !lit) {
         continue;
       }
 

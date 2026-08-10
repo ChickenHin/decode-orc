@@ -11,10 +11,15 @@
 
 #include <QAbstractItemView>
 #include <QBrush>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QMessageBox>
 #include <QPalette>
+#include <QSettings>
 #include <QSplitter>
 #include <QStringList>
 #include <QTableWidgetItem>
@@ -29,12 +34,35 @@
 
 namespace {
 
+/// Gap that separates one group of controls on a row from the next, wider than
+/// the layout's own spacing between neighbours within a group.
+constexpr int kControlGroupSpacing = 18;
+
 /// The find box matches on a trimmed, case-folded key, which is as much
 /// tolerance as a host can offer without knowing what the key means.
 QString normalise_key(const QString& text) { return text.trimmed().toUpper(); }
 
 QString to_qstring(const std::string& text) {
   return QString::fromStdString(text);
+}
+
+/// A catalogue key made safe to put in a file name. Services name their items
+/// with whatever punctuation the standard gave them — a NABTS record is
+/// "000/1A4 v0" — and a slash in a suggested name is a directory the save would
+/// land in rather than part of the name.
+QString to_file_name_part(const QString& text) {
+  QString out;
+  for (const QChar& character : text) {
+    if (character.isLetterOrNumber()) {
+      out += character;
+    } else if (!out.isEmpty() && !out.endsWith(QLatin1Char('-'))) {
+      out += QLatin1Char('-');
+    }
+  }
+  while (out.endsWith(QLatin1Char('-'))) {
+    out.chop(1);
+  }
+  return out;
 }
 
 }  // namespace
@@ -126,6 +154,24 @@ void CatalogueDialog::setupUI() {
   connect(highlight_check_, &QCheckBox::toggled, this,
           &CatalogueDialog::onHighlightToggled);
   top_row->addWidget(highlight_check_);
+
+  // A page worth finding is usually a page worth keeping, and the viewer is the
+  // only place the assembled display exists — the packet stream the sink writes
+  // is the data, not the picture. Last on the row and set apart from the
+  // switches before it: those change what is on screen, and this does
+  // something with it. Shown only where the payload on display is drawn.
+  top_row->addSpacing(kControlGroupSpacing);
+  save_page_button_ = new QToolButton(this);
+  save_page_button_->setObjectName("catalogueSavePageButton");
+  save_page_button_->setText(tr("Save PNG…"));
+  save_page_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  save_page_button_->setVisible(false);
+  save_page_button_->setToolTip(
+      tr("Save the display on screen as a PNG image, drawn at its own size "
+         "with flashing and blinking held lit."));
+  connect(save_page_button_, &QToolButton::clicked, this,
+          &CatalogueDialog::onSavePageClicked);
+  top_row->addWidget(save_page_button_);
   content_layout->addLayout(top_row);
 
   auto* body_row = new QHBoxLayout();
@@ -528,6 +574,7 @@ void CatalogueDialog::renderPayload() {
     table_pane_->setRowCount(0);
     condition_label_->setVisible(false);
     animations_check_->setVisible(false);
+    save_page_button_->setVisible(false);
     payload_stack_->setCurrentIndex(kPageNothing);
     if (!has_data_) {
       headline_label_->setText(tr("No data"));
@@ -551,11 +598,12 @@ void CatalogueDialog::renderPayload() {
   condition_label_->setText(condition);
   condition_label_->setVisible(!condition.isEmpty());
 
-  // Only the two drawn payloads can animate; a listing or a table has nothing
-  // for the switch to act on.
-  animations_check_->setVisible(
-      payload.kind == orc::CataloguePayload::Kind::kCellGrid ||
-      payload.kind == orc::CataloguePayload::Kind::kDisplayList);
+  // Only the two drawn payloads can animate, or be saved as an image; a listing
+  // or a table has nothing for either control to act on.
+  const bool drawn = payload.kind == orc::CataloguePayload::Kind::kCellGrid ||
+                     payload.kind == orc::CataloguePayload::Kind::kDisplayList;
+  animations_check_->setVisible(drawn);
+  save_page_button_->setVisible(drawn);
 
   switch (payload.kind) {
     case orc::CataloguePayload::Kind::kCellGrid:
@@ -638,7 +686,11 @@ void CatalogueDialog::refreshVariantControl() {
                            ? tr("Variant")
                            : to_qstring(data_.schema.variant_noun);
 
-  if (data_.schema.variant_noun.empty() || variants.empty()) {
+  // The stepper belongs to the service, not to the item on screen: a control
+  // that came and went as the reader moved down the list would read as an
+  // interface glitch. So it stands wherever the schema names a variant and
+  // there is an item to step, and says so when there is nothing to step to.
+  if (data_.schema.variant_noun.empty() || current_row_ < 0) {
     variant_index_ = 0;
     variant_bar_->setVisible(false);
     variant_label_->clear();
@@ -646,15 +698,16 @@ void CatalogueDialog::refreshVariantControl() {
   }
 
   const int count = static_cast<int>(variants.size());
-  variant_index_ = std::clamp(variant_index_, 0, count - 1);
-  const auto& variant =
-      data_.items[variants[static_cast<size_t>(variant_index_)]];
+  variant_index_ = count < 2 ? 0 : std::clamp(variant_index_, 0, count - 1);
 
-  if (count == 1) {
-    // Said rather than hidden, so "one of them" is distinguishable from a
+  if (count < 2) {
+    // Said rather than hidden, so "one of them" — or none at all, which is what
+    // an item that carries its own payload has — is distinguishable from a
     // control that has not been noticed.
     variant_label_->setText(tr("No %1s").arg(noun.toLower()));
   } else {
+    const auto& variant =
+        data_.items[variants[static_cast<size_t>(variant_index_)]];
     variant_label_->setText(tr("%1 %2 of %3 (%4)")
                                 .arg(noun)
                                 .arg(variant_index_ + 1)
@@ -721,6 +774,81 @@ void CatalogueDialog::onHighlightToggled(bool checked) {
 void CatalogueDialog::onAnimationsToggled(bool checked) {
   grid_widget_->setAnimationsEnabled(checked);
   display_widget_->setAnimationsEnabled(checked);
+}
+
+void CatalogueDialog::onSavePageClicked() {
+  const QImage image = renderedPageImage();
+  if (image.isNull()) {
+    return;
+  }
+
+  // The same remembered directory the rest of the application exports into, so
+  // a page saved here lands beside a preview frame saved from the main window.
+  QSettings settings("orc-project", "orc-gui");
+  QString directory =
+      settings.value("lastExportDirectory", QString()).toString();
+  if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
+    directory = QDir::homePath();
+  }
+
+  QString path = QFileDialog::getSaveFileName(
+      this, tr("Save Display as PNG"),
+      QDir(directory).filePath(suggestedPageFileName()),
+      tr("PNG Images (*.png);;All Files (*)"));
+  if (path.isEmpty()) {
+    return;  // cancelled
+  }
+  if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
+    path += QStringLiteral(".png");
+  }
+  settings.setValue("lastExportDirectory", QFileInfo(path).absolutePath());
+
+  if (!image.save(path, "PNG")) {
+    QMessageBox::critical(this, tr("Save Display as PNG"),
+                          tr("Could not write %1").arg(path));
+  }
+}
+
+bool CatalogueDialog::canSavePage() const {
+  const int page = payload_stack_->currentIndex();
+  return page == kPageCellGrid || page == kPageDisplayList;
+}
+
+QImage CatalogueDialog::renderedPageImage() const {
+  switch (payload_stack_->currentIndex()) {
+    case kPageCellGrid:
+      return grid_widget_->renderPageImage(grid_widget_->pageImageSize());
+    case kPageDisplayList:
+      return display_widget_->renderPageImage(display_widget_->pageImageSize());
+    default:
+      return {};
+  }
+}
+
+QString CatalogueDialog::suggestedPageFileName() const {
+  const size_t index = displayedIndex();
+  if (index == std::numeric_limits<size_t>::max()) {
+    return QStringLiteral("display.png");
+  }
+
+  // What the reader would call this display: the service's noun for an item,
+  // the key they would type to reach it, and which variant of it is on screen.
+  QStringList parts;
+  parts << to_file_name_part(data_.schema.item_noun.empty()
+                                 ? tr("Display")
+                                 : to_qstring(data_.schema.item_noun));
+
+  const orc::CatalogueItem& parent =
+      data_.items[top_level_[static_cast<size_t>(current_row_)]];
+  QString key = to_qstring(parent.find_key);
+  if (key.isEmpty() && !parent.values.empty()) {
+    key = to_qstring(parent.values.front());
+  }
+  parts << to_file_name_part(key);
+  parts << to_file_name_part(to_qstring(data_.items[index].variant_label));
+
+  parts.removeAll(QString());
+  return parts.join(QLatin1Char('-')) + QStringLiteral(".png");
 }
 
 // ---------------------------------------------------------------------------

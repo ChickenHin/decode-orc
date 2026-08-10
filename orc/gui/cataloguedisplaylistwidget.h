@@ -12,8 +12,10 @@
 
 #include <orc/stage/tooling/catalogue_results.h>
 
+#include <QImage>
 #include <QPointer>
 #include <QRectF>
+#include <QSize>
 #include <QWidget>
 #include <optional>
 
@@ -86,7 +88,27 @@ class CatalogueDisplayListWidget : public QWidget {
   QSize sizeHint() const override;
 
   /// The drawable area within the widget, in device pixels (test seam)
-  QRectF displayAreaRect() const;
+  QRectF displayAreaRect() const { return displayAreaRectIn(QSizeF(size())); }
+
+  /**
+   * @brief The drawable area alone as an image |size| pixels across and down
+   *
+   * The area is fitted to |size| at the list's own aspect exactly as it is
+   * fitted to the widget, so a size of that aspect — which is what
+   * pageImageSize() gives — leaves no border around it.
+   *
+   * Always the lit phase, whatever phase the view is holding: a blinking figure
+   * is on the page because the service put it there, and a still of the other
+   * phase would lose it. The drawable-area outline follows the view's own
+   * setting.
+   *
+   * Null when there is no list to draw or |size| is empty.
+   */
+  QImage renderPageImage(const QSize& size) const;
+
+  /// The size renderPageImage() is worth being asked for, at the list's own
+  /// aspect. Null when there is no list.
+  QSize pageImageSize() const;
 
  protected:
   void paintEvent(QPaintEvent* event) override;
@@ -97,6 +119,15 @@ class CatalogueDisplayListWidget : public QWidget {
   static void paintOp(QPainter& painter, const orc::CatalogueDisplayList& list,
                       const orc::CatalogueDrawOp& op, const QRectF& area,
                       qreal unit, bool lit);
+
+  /// The drawable area within a paint surface |bounds| pixels across and down,
+  /// whose origin is (0, 0) — the widget itself, or the image a save renders
+  /// into
+  QRectF displayAreaRectIn(const QSizeF& bounds) const;
+
+  /// Draw the list into |bounds| of |painter|, in the given blink phase. What
+  /// both the widget's own paint and an exported image are.
+  void paintContent(QPainter& painter, const QRectF& bounds, bool lit) const;
 
   /// Subscribe to the clock only while this view is visible and holds
   /// something that blinks; release it otherwise
