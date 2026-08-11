@@ -63,6 +63,18 @@ NaplpsRepairResult repair(const std::vector<uint8_t>& record) {
   return repairer.repair(record);
 }
 
+/// |record| repaired against evidence that doubts the byte at |offset| beyond
+/// anything its parity says — the detector, or the vote between copies, having
+/// been unsure of it.
+NaplpsRepairResult repair_doubting(const std::vector<uint8_t>& record,
+                                   size_t offset) {
+  std::vector<uint8_t> confidence(record.size(), 255);
+  confidence[offset] = 0;
+  NaplpsLintRepairer repairer;
+  return repairer.repair(record,
+                         NaplpsSuspectMap::from_record(record, {}, confidence));
+}
+
 /**
  * @brief |record| with one bit of the byte at |offset| flipped
  *
@@ -219,6 +231,156 @@ TEST(NaplpsLintRepair, RestoresAPdiOpcodeCorruptedIntoNumericData) {
   EXPECT_EQ(draw(result.data).size(), draw(record).size());
 }
 
+// The correction that empties a page is always available and always looks like
+// the best one there is. Clearing b7 of an operand moves it out of columns 4 to
+// 7 into a transparent control, which §5.3.1 lets stand inside the run without
+// ending it — so the byte leaves the operand sequence and every word after it
+// is read from different six-bit groups. Where the run was misaligned that
+// silences every fault in it at a stroke, and the geometry it draws afterwards
+// is not the geometry that arrived. The grammar cannot tell the difference, so
+// the part the byte plays is what rules the correction out.
+TEST(NaplpsLintRepair, DeclinesACorrectionThatWouldStopAByteDrawing) {
+  // Three words whose third byte, read as the first byte of a word, names a
+  // point outside the unit screen — so a run shifted by one byte faults twice
+  // over, and a run reading straight does not fault at all.
+  const std::vector<uint8_t> shifts_out_of_range = coordinate(0x044, 0x044);
+  std::vector<uint8_t> plain = {kSo, code(2, 8)};
+  const std::vector<uint8_t> first = coordinate(0x040, 0x050);
+  plain.insert(plain.end(), first.begin(), first.end());
+  // One byte more than the words account for, standing between them. Clearing
+  // its b7 leaves 0/2 (STX), which is transparent.
+  plain.push_back(numeric(0x02));
+  for (int word = 0; word < 3; ++word) {
+    plain.insert(plain.end(), shifts_out_of_range.begin(),
+                 shifts_out_of_range.end());
+  }
+  std::vector<uint8_t> record = with_parity(plain);
+  // The odd byte is the one the recovery doubts, its parity having gone stale.
+  const size_t odd_byte = 5;
+  record[odd_byte] = static_cast<uint8_t>(record[odd_byte] ^ 0x80);
+
+  const NaplpsRepairResult result = repair(record);
+
+  EXPECT_EQ(result.summary.bytes_repaired, 0u);
+  EXPECT_EQ(result.data, record);
+  // The faults it would have silenced are still reported, which is the point:
+  // a reader is told what arrived rather than shown a page invented to parse.
+  EXPECT_GT(result.summary.errors_after, 0u);
+}
+
+// Only a parity failure says a byte is *wrong*. A close vote between copies, or
+// a detector reporting low confidence, says how sure the recovery is — which is
+// a statement about the recovery, not about the byte. With a fifth of a record
+// held in doubt on a damaged recording, treating that as licence to rewrite is
+// a search wide enough to find something that parses better almost anywhere.
+TEST(NaplpsLintRepair, DeclinesAByteTheRecoveryOnlyFeltUnsureOf) {
+  // The very damage RestoresAnOperandByteKnockedOutOfItsColumn repairs — an
+  // operand out of columns 4 to 7 — but arriving with parity that matches it.
+  std::vector<uint8_t> plain = {kSo, code(2, 8)};
+  const std::vector<uint8_t> first = coordinate(0x040, 0x050);
+  const std::vector<uint8_t> second = coordinate(0x0C0, 0x0D0);
+  plain.insert(plain.end(), first.begin(), first.end());
+  plain.insert(plain.end(), second.begin(), second.end());
+  plain[3] = static_cast<uint8_t>(plain[3] & ~0x40);
+  const std::vector<uint8_t> record = with_parity(plain);
+
+  const NaplpsRepairResult result = repair_doubting(record, 3);
+
+  EXPECT_EQ(result.summary.suspect_bytes, 1u);
+  EXPECT_EQ(result.summary.bytes_offered, 0u);
+  EXPECT_EQ(result.summary.bytes_repaired, 0u);
+  EXPECT_EQ(result.data, record);
+}
+
+// §4.3.2's escape sequences say which G-set a slot designates and which slot is
+// in use, so every graphic byte after one is read through it. One bit off the
+// ESC abandons the sequence and its remaining bytes print as characters; one
+// bit off an intermediate moves the designation to another slot. Either parses,
+// and the grammar has no way of preferring the one that was sent.
+TEST(NaplpsLintRepair, LeavesTheBytesOfAnEscapeSequenceAlone) {
+  // ESC 4/4 is DEF TEXTURE (§6.2.4), ESC 4/5 the END that closes it.
+  const std::vector<uint8_t> record =
+      with_parity({kEsc, code(4, 4), code(4, 2), kEsc, code(4, 5)});
+
+  // The control byte of the sequence, hit.
+  const std::vector<uint8_t> control_hit = flip_bit(record, 1, 0x10);
+  const NaplpsRepairResult on_control = repair(control_hit);
+  ASSERT_GT(on_control.summary.bytes_offered, 0u);
+  EXPECT_EQ(on_control.summary.bytes_repaired, 0u);
+  EXPECT_EQ(on_control.data, control_hit);
+
+  // And the ESC itself, which no correction may put back either: a byte that
+  // would *become* one of these reaches just as far as one that is.
+  const std::vector<uint8_t> esc_hit = flip_bit(record, 0, 0x04);
+  const NaplpsRepairResult on_esc = repair(esc_hit);
+  ASSERT_GT(on_esc.summary.bytes_offered, 0u);
+  EXPECT_EQ(on_esc.summary.bytes_repaired, 0u);
+  EXPECT_EQ(on_esc.data, esc_hit);
+}
+
+// The last question, and the only one asked of the page rather than the
+// grammar. One flipped bit is one damaged instruction; a correction that leaves
+// most of the page gone or drawn in another colour has not corrected an
+// instruction, it has made the record say something else — and said it
+// grammatically, which is why nothing above this can catch it.
+TEST(NaplpsLintRepair, DeclinesACorrectionThatWouldRepaintThePage) {
+  // Eight coordinate words with one odd byte standing between them, so the run
+  // is misaligned and faults. Clearing that byte's b7 leaves 3/12 — SET COLOUR,
+  // whose operands have no word structure at all (§5.3.2.5) — which silences
+  // every fault in the tail and draws the rest of the page in whatever colour
+  // those bytes happen to name.
+  std::vector<uint8_t> plain = {kSo, code(2, 8)};
+  for (int word = 0; word < 4; ++word) {
+    const std::vector<uint8_t> point =
+        coordinate(static_cast<uint16_t>(0x040 + word * 0x10), 0x050);
+    plain.insert(plain.end(), point.begin(), point.end());
+  }
+  const size_t odd_byte = plain.size();
+  plain.push_back(numeric(0x3C));
+  for (int word = 0; word < 4; ++word) {
+    const std::vector<uint8_t> point =
+        coordinate(static_cast<uint16_t>(0x0C0 - word * 0x10), 0x0D0);
+    plain.insert(plain.end(), point.begin(), point.end());
+  }
+  std::vector<uint8_t> record = with_parity(plain);
+  // The odd byte is the one known to be wrong, its parity having gone stale.
+  record[odd_byte] = static_cast<uint8_t>(record[odd_byte] ^ 0x80);
+
+  const NaplpsRepairResult result = repair(record);
+
+  EXPECT_EQ(result.summary.bytes_repaired, 0u);
+  // Twice over, as it happens: the substitution is refused, and so is the cut
+  // the structural pass would otherwise make on the same misaligned run. Both
+  // would have redrawn the page rather than repaired the run.
+  EXPECT_GE(result.summary.changes_declined_by_reach, 1u);
+  EXPECT_EQ(result.summary.pdis_resynchronised, 0u);
+  EXPECT_EQ(result.data, record);
+}
+
+// What the pass did to the *page*, which is the account a reader can check
+// against what is in front of them. The fault counts say whether the record
+// parses better, and a record can parse very much better while drawing
+// something the sender never sent.
+TEST(NaplpsLintRepair, SaysWhetherThePageItselfCameOutDifferent) {
+  const std::vector<uint8_t> record = two_line_record();
+  std::vector<uint8_t> damaged = record;
+  damaged[3] = 0x00;  // a lost packet's filler inside the operands
+
+  const NaplpsRepairResult altered = repair(damaged);
+
+  EXPECT_GT(altered.summary.total_repairs(), 0u);
+  EXPECT_TRUE(altered.summary.drawing_changed);
+  EXPECT_GT(altered.summary.primitives_before, 0u);
+
+  // A record nothing was done to is not run at all, and says so with zeroes
+  // rather than claiming the page was checked.
+  const NaplpsRepairResult untouched = repair(record);
+
+  EXPECT_FALSE(untouched.summary.drawing_changed);
+  EXPECT_EQ(untouched.summary.primitives_before, 0u);
+  EXPECT_EQ(untouched.summary.primitives_after, 0u);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Task 2.2 — hole and truncation resynchronisation
 ////////////////////////////////////////////////////////////////////////////////
@@ -298,6 +460,34 @@ TEST(NaplpsLintRepair, LeavesARunWhoseGapFellOnAnOperandBoundary) {
   EXPECT_EQ(result.summary.pdis_resynchronised, 0u);
   // The surviving word still draws what it always described.
   ASSERT_EQ(draw(result.data).size(), 1u);
+}
+
+// A cut divides the run on the word and block sizes read from the opcode and
+// the DOMAIN format in force at it (§5.3.2.2). Where the evidence doubts the
+// opcode, what follows it may be no run at all — and a cut made on a structure
+// inferred from a doubtful byte would null bytes that were never its operands.
+TEST(NaplpsLintRepair, LeavesARunWhoseOpcodeTheEvidenceDoubts) {
+  // SET LINE ABS (2/10) takes two coordinate words per execution, so the run
+  // below is one execution with a hole in it — the case the test above has
+  // resynchronised. Its opcode is one whose damage the grammar cannot decide,
+  // so no substitution is made to it and the cut is all that is in question.
+  const std::vector<uint8_t> record = pdi_record(
+      {kSo, code(2, 10)}, {coordinate(0x040, 0x050), coordinate(0x0C0, 0x0D0)});
+  std::vector<uint8_t> damaged = record;
+  damaged[3] = 0x00;  // one byte of the first word lost with its packet
+
+  // Nothing is doubted but the opcode, the hole being evidence enough of
+  // itself. The run is left exactly as it arrived, hole and all.
+  const NaplpsRepairResult doubted = repair_doubting(damaged, 1);
+
+  EXPECT_EQ(doubted.summary.pdis_resynchronised, 0u);
+  EXPECT_EQ(doubted.data, damaged);
+
+  // The same record with the opcode arriving intact is cut, which is what
+  // makes the refusal above the opcode's doing rather than the hole's.
+  const NaplpsRepairResult trusted = repair(damaged);
+
+  EXPECT_EQ(trusted.summary.pdis_resynchronised, 1u);
 }
 
 // Where the bytes after the damage are not a whole number of executions there
@@ -623,14 +813,22 @@ TEST(NaplpsLintRepair, HandlesAnEmptyRecord) {
 // Beyond a certain amount of damage, byte-level repair is not the right tool
 // and the cost of trying is real. The cap is reported rather than hidden.
 TEST(NaplpsLintRepair, ReportsSuspectBytesItDidNotInspect) {
-  std::vector<uint8_t> damaged;
-  damaged.reserve(kNaplpsMaxInspectedSuspectBytes + 20);
-  damaged.push_back(teletext_odd_parity_encode(kSo));
-  // Zero fails odd parity, so every one of these is a byte in doubt.
-  damaged.resize(damaged.size() + kNaplpsMaxInspectedSuspectBytes + 20, 0x00);
+  const size_t offered = kNaplpsMaxInspectedSuspectBytes + 20;
+  std::vector<uint8_t> plain = {kSo, code(2, 8)};
+  for (size_t i = 0; i < offered; ++i) {
+    plain.push_back(numeric(static_cast<uint8_t>(i & 0x3F)));
+  }
+  std::vector<uint8_t> damaged = with_parity(plain);
+  // Every operand arrives with its parity bit hit, so every one is known to be
+  // wrong and every one is offered to the pass. The head is left intact.
+  for (size_t offset = 2; offset < damaged.size(); ++offset) {
+    damaged[offset] = static_cast<uint8_t>(damaged[offset] ^ 0x80);
+  }
 
   const NaplpsRepairResult result = repair(damaged);
-  EXPECT_EQ(result.summary.suspect_bytes, kNaplpsMaxInspectedSuspectBytes + 20);
+
+  EXPECT_EQ(result.summary.suspect_bytes, offered);
+  EXPECT_EQ(result.summary.bytes_offered, offered);
   EXPECT_EQ(result.summary.suspect_bytes_uninspected, 20u);
   EXPECT_EQ(result.data.size(), damaged.size());
 }

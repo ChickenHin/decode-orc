@@ -59,11 +59,13 @@ CatalogueViewToggle naplps_repair_toggle(bool active);
  * interpreting it (see naplps_lint_repair.h). Like @p mode it changes how the
  * records read rather than what was recovered: the record data the catalogue
  * carries is what arrived, and a run's exported packet stream and record files
- * are untouched either way.
+ * are untouched either way. Off by default, here and in the viewer, so that a
+ * caller who has not asked for a reading of the recording is given the
+ * recording.
  */
 CatalogueDataset build_nabts_catalogue(
     const NabtsAnalysisDataset& data,
-    NaplpsRenderMode mode = NaplpsRenderMode::kReference, bool repair = true);
+    NaplpsRenderMode mode = NaplpsRenderMode::kReference, bool repair = false);
 
 /**
  * @brief One NAPLPS record snapshot as a drawable display list

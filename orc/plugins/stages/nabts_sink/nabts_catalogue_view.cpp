@@ -416,6 +416,24 @@ std::vector<std::string> classification_flags(
   return flags;
 }
 
+/**
+ * @brief Whether the repair altered this record on the way to the screen
+ *
+ * The three counters between them cover everything the pass can do to a record
+ * (see naplps_lint_repair.h). All zero on a page presented as transmitted, so
+ * this is false throughout with the repair turned off — which is what a reader
+ * toggling it expects to see.
+ */
+bool repair_touched(const NabtsCataloguedRecord& record) {
+  if (!type_is_presentation(record.record_type)) {
+    return false;
+  }
+  const auto& diagnostics = record.page.diagnostics;
+  return diagnostics.repaired_bytes > 0 ||
+         diagnostics.resynchronised_pdis > 0 ||
+         diagnostics.dropped_coordinate_words > 0;
+}
+
 std::string record_condition(const NabtsCataloguedRecord& record,
                              bool presentation) {
   std::vector<std::string> parts;
@@ -479,6 +497,16 @@ std::string record_condition(const NabtsCataloguedRecord& record,
       parts.push_back(
           plural(diagnostics.undecided_suspect_bytes, "byte", "bytes") +
           " left in doubt");
+    }
+    // And the part of it a reader can actually check against what they are
+    // looking at. Bytes corrected says how much of the record was altered;
+    // this says whether the alteration reached the page, which is the thing
+    // in front of them.
+    if (diagnostics.repaired_bytes > 0 || diagnostics.resynchronised_pdis > 0 ||
+        diagnostics.dropped_coordinate_words > 0) {
+      parts.emplace_back(diagnostics.repair_changed_drawing
+                             ? "the page draws differently"
+                             : "the page draws as it arrived");
     }
   }
   return join(parts, ", ");
@@ -563,24 +591,33 @@ std::string lint_notice(const std::vector<NabtsCataloguedRecord>& records,
 
   uint64_t pages = 0;
   uint64_t changed = 0;
+  uint64_t redrawn = 0;
   for (const NabtsCataloguedRecord& record : records) {
     if (!type_is_presentation(record.record_type)) {
       continue;
     }
     ++pages;
     const auto& diagnostics = record.page.diagnostics;
-    changed += (diagnostics.repaired_bytes > 0 ||
-                diagnostics.resynchronised_pdis > 0 ||
-                diagnostics.dropped_coordinate_words > 0)
-                   ? 1
-                   : 0;
+    if (diagnostics.repaired_bytes > 0 || diagnostics.resynchronised_pdis > 0 ||
+        diagnostics.dropped_coordinate_words > 0) {
+      ++changed;
+      if (diagnostics.repair_changed_drawing) {
+        ++redrawn;
+      }
+    }
   }
 
   if (changed == 0) {
-    return "Syntax repair on: nothing needed correcting.";
+    return "Syntax repair on: no page needed altering.";
   }
+  // "Corrected" is a claim about the outcome that the counters cannot support:
+  // what is known is that the records were altered, and how many of the pages
+  // that changed. A reader deciding whether to trust what is in front of them
+  // is told both, and told the second in the same breath.
   return "Syntax repair on: " + std::to_string(changed) + " of " +
-         std::to_string(pages) + " pages corrected.";
+         std::to_string(pages) + " pages altered, " + std::to_string(redrawn) +
+         " of them now drawing differently. Altered pages are marked * in the "
+         "list.";
 }
 
 }  // namespace
@@ -806,12 +843,13 @@ CatalogueViewToggle naplps_repair_toggle(bool active) {
       kNabtsRepairToggleId, "Syntax repair",
       "NAPLPS is a language with a defined grammar (ANSI X3.110-1983), so a "
       "page recovered from a damaged recording can be checked against it and, "
-      "where the recording independently says a byte is wrong, corrected. Only "
-      "bytes the recovery already doubts are ever changed, and only where the "
-      "grammar leaves one answer; the rest are left exactly as they arrived. "
-      "Turn it off to read the page as transmitted. Either way this changes "
-      "only what is drawn here — the packet stream and record files a run "
-      "exports are always the recording's own bytes.",
+      "where a byte is known to be wrong, corrected. Only bytes that failed "
+      "their parity are ever changed, only where the grammar leaves one "
+      "answer, and only where the page still comes out as the page that was "
+      "there — a byte the recovery merely felt unsure of is reported and left "
+      "alone. Turn it off to read the page as transmitted. Either way this "
+      "changes only what is drawn here — the packet stream and record files a "
+      "run exports are always the recording's own bytes.",
       active};
 }
 
@@ -919,6 +957,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
       uint64_t first_frame = 0;
       uint64_t last_frame = 0;
       size_t members = 0;
+      bool repaired_member = false;
       uint8_t base_type = record.record_type;
       for (const auto& member : records) {
         if (member.channel != record.channel ||
@@ -931,6 +970,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
                           ? member.first_seen_frame
                           : std::min(first_frame, member.first_seen_frame);
         last_frame = std::max(last_frame, member.last_seen_frame);
+        repaired_member = repaired_member || repair_touched(member);
         ++members;
       }
       const std::string label =
@@ -950,6 +990,11 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
       // sub-page stepper rather than listed as rows, so without this nothing
       // says the page holds more than one screen.
       parent.badges.push_back(plural(members, "sub-page", "sub-pages"));
+      // A chain is presented as one page, so the mark belongs on it where any
+      // of the records it is built from was altered.
+      if (repaired_member) {
+        parent.badges.emplace_back("*");
+      }
       parent.tooltip =
           "This page is a chain of " + plural(members, "record", "records") +
           " linked as More Records (CEA-516 §5.2.7.6, §5.2.8.4). Each is "
@@ -979,7 +1024,23 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
         frame_range(record.first_seen_frame, record.last_seen_frame),
     };
 
+    // Marked in the list, so a reader stepping through pages can see which of
+    // them the grammar had a hand in without opening each one. What was done
+    // is on the condition line under the page; whether it reached the drawing
+    // is the part worth knowing, so the mark says which.
+    if (repair_touched(record)) {
+      item.badges.emplace_back("*");
+    }
+
     std::vector<std::string> tips;
+    if (repair_touched(record)) {
+      tips.push_back(record.page.diagnostics.repair_changed_drawing
+                         ? "* Syntax repair altered this record, and the page "
+                           "draws differently for it. Turn the repair off to "
+                           "see what arrived."
+                         : "* Syntax repair altered this record, though the "
+                           "page draws exactly as it arrived.");
+    }
     if (!record.reserved_purpose.empty()) {
       // §7.1.5 reserves a handful of channel/address pairings; a reader has no
       // way of knowing which without being told.

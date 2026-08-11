@@ -632,10 +632,21 @@ std::string NabtsLintTotals::summary() const {
       "  Repairs:       {} byte(s) corrected, {} run(s) resynchronised, {} "
       "coordinate word(s) dropped\n",
       bytes_repaired, pdis_resynchronised, coordinate_words_dropped);
+  // The line to read first. Everything above counts what happened to the
+  // records; this counts what happened to the pages, which is what a reader is
+  // actually looking at and the only measure that can say the pass did harm.
   out += fmt::format(
-      "  Left alone:    {} byte(s) in doubt, of which {} the grammar could not "
-      "decide\n",
-      suspect_bytes, bytes_ambiguous);
+      "  Pages:         {} record(s) altered, {} of them drawing differently\n",
+      records_altered, records_drawing_changed);
+  out += fmt::format(
+      "  Left alone:    {} byte(s) in doubt, {} of them known wrong, of which "
+      "{} the grammar could not decide",
+      suspect_bytes, bytes_offered, bytes_ambiguous);
+  if (changes_declined_by_reach > 0) {
+    out += fmt::format(", and {} change(s) refused for redrawing the page",
+                       changes_declined_by_reach);
+  }
+  out += "\n";
   return out;
 }
 
@@ -664,10 +675,19 @@ NabtsLintTotals nabts_lint_records(
     totals.errors_after += result.summary.errors_after;
     totals.warnings_after += result.summary.warnings_after;
     totals.suspect_bytes += result.summary.suspect_bytes;
+    totals.bytes_offered += result.summary.bytes_offered;
     totals.bytes_repaired += result.summary.bytes_repaired;
     totals.bytes_ambiguous += result.summary.bytes_ambiguous;
+    totals.changes_declined_by_reach +=
+        result.summary.changes_declined_by_reach;
     totals.pdis_resynchronised += result.summary.pdis_resynchronised;
     totals.coordinate_words_dropped += result.summary.coordinate_words_dropped;
+    if (result.summary.total_repairs() > 0) {
+      ++totals.records_altered;
+    }
+    if (result.summary.drawing_changed) {
+      ++totals.records_drawing_changed;
+    }
   };
 
   // Support Record first, per Data Channel, for the reason
@@ -721,11 +741,15 @@ void nabts_interpret_records(std::vector<NabtsCataloguedRecord>& records,
         ORC_LOG_DEBUG(
             "NAPLPS lint: {} — {} error(s)/{} warning(s) before, {}/{} after; "
             "{} byte(s) corrected, {} run(s) resynchronised, {} coordinate "
-            "word(s) dropped, {} of {} doubtful byte(s) undecidable",
+            "word(s) dropped, {} change(s) refused for redrawing the page; "
+            "{} of {} doubtful byte(s) known wrong; page {} ({} -> {} "
+            "drawing(s))",
             record.channel_text, did.errors_before, did.warnings_before,
             did.errors_after, did.warnings_after, did.bytes_repaired,
             did.pdis_resynchronised, did.coordinate_words_dropped,
-            did.bytes_ambiguous, did.suspect_bytes);
+            did.changes_declined_by_reach, did.bytes_offered, did.suspect_bytes,
+            did.drawing_changed ? "draws differently" : "unchanged",
+            did.primitives_before, did.primitives_after);
       }
     };
     for (std::size_t i = 0; i < records.size(); ++i) {

@@ -348,6 +348,14 @@ struct NabtsDecodeDiagnostics {
   /// were therefore left exactly as they arrived. The measure of how much of a
   /// page is still guesswork after repair.
   uint64_t undecided_suspect_bytes = 0;
+  /// Changes the grammar picked out but which would have redrawn more of the
+  /// page than one bit of damage can account for, and were refused for it.
+  uint64_t changes_declined_by_reach = 0;
+  /// Whether the repair changed what this page draws. The counters above say
+  /// how much of the *record* was altered, which is not the same question and
+  /// is not the one a reader is asking: a page can have eight bytes corrected
+  /// and look identical, or one corrected and be unrecognisable.
+  bool repair_changed_drawing = false;
 };
 
 /**

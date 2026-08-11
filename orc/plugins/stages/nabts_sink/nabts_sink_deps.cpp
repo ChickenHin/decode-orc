@@ -520,13 +520,17 @@ NabtsSinkResult NabtsSinkDeps::analyse(
       const NabtsLintTotals& lint = partial.lint_totals;
       ORC_LOG_INFO(
           "NabtsSinkDeps: NAPLPS lint over {} presentation record(s) — {} "
-          "faulted before repair, {} after; {} byte(s) corrected, {} run(s) "
-          "resynchronised, {} coordinate word(s) dropped, {} of {} doubtful "
-          "byte(s) the grammar could not decide",
+          "faulted before repair, {} after; {} record(s) altered and {} of "
+          "them "
+          "now drawing differently; {} byte(s) corrected, {} run(s) "
+          "resynchronised, {} coordinate word(s) dropped, {} change(s) refused "
+          "for redrawing the page; {} of {} doubtful byte(s) were known wrong, "
+          "{} of those the grammar could not decide",
           lint.records_linted, lint.records_faulted, lint.records_faulted_after,
+          lint.records_altered, lint.records_drawing_changed,
           lint.bytes_repaired, lint.pdis_resynchronised,
-          lint.coordinate_words_dropped, lint.bytes_ambiguous,
-          lint.suspect_bytes);
+          lint.coordinate_words_dropped, lint.changes_declined_by_reach,
+          lint.bytes_offered, lint.suspect_bytes, lint.bytes_ambiguous);
     }
 
     partial.report = build_report(options, partial, total_frames, stats,

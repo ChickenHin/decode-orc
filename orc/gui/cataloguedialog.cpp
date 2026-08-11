@@ -198,7 +198,9 @@ void CatalogueDialog::setupUI() {
   // want the transcript.
   show_text_check_ = new QCheckBox(tr("Show text"), this);
   show_text_check_->setObjectName("catalogueShowTextCheck");
-  show_text_check_->setChecked(true);
+  // Off to begin with: the drawing is what the window is for, and it gets the
+  // whole pane until a reader asks for the transcript beside it.
+  show_text_check_->setChecked(false);
   show_text_check_->setVisible(false);
   show_text_check_->setToolTip(
       tr("Show the text form of the payload beside the drawing. Clear this to "

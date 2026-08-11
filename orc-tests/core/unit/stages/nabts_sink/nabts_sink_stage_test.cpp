@@ -417,9 +417,11 @@ TEST_F(NabtsSinkStage, Catalogue_OffersSyntaxRepairToTheReader) {
   const auto& catalogue = stage_.catalogue();
   ASSERT_EQ(catalogue.schema.toggles.size(), 1u);
   EXPECT_EQ(catalogue.schema.toggles.front().id, orc::kNabtsRepairToggleId);
-  // On unless the reader says otherwise: repair only touches bytes the recovery
-  // already doubts, and reading the recording as transmitted is one click away.
-  EXPECT_TRUE(catalogue.schema.toggles.front().active);
+  // Off unless the reader asks: what the viewer shows to begin with is what
+  // the recording carried, and a reading of a damaged recording — however
+  // disciplined — is this program's argument about it rather than the thing
+  // itself.
+  EXPECT_FALSE(catalogue.schema.toggles.front().active);
 }
 
 // The toggle is part of what the cached catalogue was built under, so switching
