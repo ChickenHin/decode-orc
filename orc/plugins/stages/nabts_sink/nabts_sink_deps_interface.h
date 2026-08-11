@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <string>
 
+#include "nabts_record_catalogue.h"
 #include "vbi-services/teletext_slicer.h"
 #include "vbi-services/vbi_analysis_results.h"
 
@@ -60,6 +61,12 @@ struct NabtsSinkOptions {
   // what makes that true — so it is a claim on the machine rather than a
   // tuning knob.
   int32_t decode_threads{0};
+  // Let the NAPLPS grammar settle the byte positions the vote across a
+  // record's copies could not settle on the evidence (see nabts_vote_record).
+  // Unlike the viewer's syntax repair this is recovery rather than
+  // presentation: it changes the recovered record data, and so what the record
+  // files export and what every later reading of the record starts from.
+  bool grammar_assisted_vote{true};
   // Write the run's diagnostic report to <output_path>.txt as well as logging
   // it. The report is always built; this only decides whether it is kept
   // somewhere a reader can go back to.
@@ -103,6 +110,9 @@ struct NabtsSinkResult {
   // Every record the range carried, which the stage resolves into the
   // catalogue the host browses through ICatalogueResults.
   NabtsAnalysisDataset dataset;
+  // What lint-directed repair made of the presentation records, for the
+  // report. Aggregate only; the per-page detail rides on each page.
+  NabtsLintTotals lint_totals;
 };
 
 class INabtsSinkStageDeps {

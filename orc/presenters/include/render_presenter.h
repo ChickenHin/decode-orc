@@ -293,10 +293,21 @@ class RenderPresenter {
    * is handed over whole.
    *
    * @param node_id Node to get data from
+   * @param view_option One of orc::CatalogueSchema::view_options, or empty for
+   *        the view the stage's own settings give. Passed to the stage
+   *        verbatim; one it does not know means the same as empty
+   * @param active_toggles Ids of the orc::CatalogueSchema::toggles the reader
+   *        has on. Passed to the stage verbatim; one it offers and this does
+   *        not name is off. Absent is not the same as empty: an empty list is
+   *        a reader who has turned everything off, and std::nullopt is a
+   *        reader who has not been asked yet, which is answered with whatever
+   *        the stage has the toggles at by default
    * @return The catalogue, or std::nullopt if the node's stage does not expose
    *         orc::ICatalogueResults or has not been triggered
    */
-  std::optional<orc::CatalogueDataset> getCatalogueData(NodeID node_id);
+  std::optional<orc::CatalogueDataset> getCatalogueData(
+      NodeID node_id, const std::string& view_option = {},
+      const std::optional<std::vector<std::string>>& active_toggles = {});
 
   /**
    * @brief Request dropout analysis data from a sink node (deprecated - use

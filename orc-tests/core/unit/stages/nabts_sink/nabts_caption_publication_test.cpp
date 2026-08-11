@@ -43,7 +43,11 @@ NabtsCataloguedRecord caption_record(uint8_t version, uint64_t first,
   record.last_seen_frame = last;
   record.times_seen = 1;
   record.times_intact = 1;
-  record.data = {0x1B};
+  // The page is given here rather than run out of presentation code: these
+  // tests are about how a caption is published once it has been read, not about
+  // the interpreter. The record carries no data for the same reason — a record
+  // that had some would have its page derived from it at catalogue-build time
+  // (see nabts_interpret_records()), which would discard what is set up below.
   double x = 0.0;
   for (const char letter : text) {
     NabtsPrimitive primitive;

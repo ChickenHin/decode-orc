@@ -330,6 +330,24 @@ struct NabtsDecodeDiagnostics {
   uint64_t storage_refusals = 0;
   /// Bytes of the shared budget in use at the end of the record.
   uint64_t storage_used = 0;
+
+  // What a lint-directed repair pass did to the record before it was run, all
+  // zero for a page presented as transmitted. The interpreter never sets these
+  // — it is not told the record was repaired — so they are stamped on by
+  // whoever ran both (see naplps_stamp_repair_diagnostics).
+
+  /// Bytes the recovery doubted where the grammar picked out one correction.
+  uint64_t repaired_bytes = 0;
+  /// Operand runs cut back to a whole operand boundary because bytes had gone
+  /// missing from the middle of them.
+  uint64_t resynchronised_pdis = 0;
+  /// Coordinate words dropped for naming a point outside the unit screen with
+  /// a byte the recovery doubted.
+  uint64_t dropped_coordinate_words = 0;
+  /// Bytes the recovery doubted that the grammar could not decide, and which
+  /// were therefore left exactly as they arrived. The measure of how much of a
+  /// page is still guesswork after repair.
+  uint64_t undecided_suspect_bytes = 0;
 };
 
 /**

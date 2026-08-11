@@ -144,7 +144,9 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   getBurstLevelAnalysisData(orc::NodeID) override {
     return std::nullopt;
   }
-  std::optional<orc::CatalogueDataset> getCatalogueData(orc::NodeID) override {
+  std::optional<orc::CatalogueDataset> getCatalogueData(
+      orc::NodeID, const std::string&,
+      const std::optional<std::vector<std::string>>&) override {
     return std::nullopt;
   }
   LineSampleData getLineSamplesWithYC(orc::NodeID, orc::PreviewOutputType,

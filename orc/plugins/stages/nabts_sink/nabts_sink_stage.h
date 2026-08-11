@@ -20,6 +20,7 @@
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -35,6 +36,36 @@
 namespace orc {
 
 class IStageServices;
+
+/**
+ * @brief Whether a page is presented as recovered unless the reader says
+ *        otherwise
+ *
+ * On, because repair only ever touches bytes the recovery independently says
+ * are wrong, only ever where the grammar leaves one answer, and counts every
+ * intervention on the page it produced. Reading the recording as transmitted is
+ * then one click away, which is the right way round: the reader who wants to
+ * check a repair can, and the reader who does not is shown the better page.
+ */
+inline constexpr bool kDefaultRepair = true;
+
+/**
+ * @brief The receiver a page is drawn against until a reader picks another
+ *
+ * The 256 by 200 grid of X3.110 Table D1 item 10 is the resolution the
+ * standard's own service reference model requires, and so what a set-top
+ * decoder of the period put on screen; anything sharper is a later reading of
+ * the same page rather than the one its author was working to.
+ *
+ * There is no parameter behind this. Which receiver a page is drawn for changes
+ * nothing the recovery found — the records are read off the recording, and the
+ * receiver decides only how they are drawn afterwards — so it is a way of
+ * looking, offered on the viewer's own dropdown. Making it a parameter as well
+ * would mean paying a full re-run of the recovery pass, which is what editing
+ * any parameter costs, to change something that pass cannot see.
+ */
+inline constexpr NaplpsRenderMode kDefaultRenderMode =
+    NaplpsRenderMode::kReference;
 
 /**
  * @brief NABTS Sink Stage
@@ -121,12 +152,29 @@ class NabtsSinkStage : public DAGStage,
   // packet stream never needs it, so it is built on first ask and cached.
   // Called from the host's render worker, hence the lock.
   const CatalogueDataset& catalogue() const override {
-    std::lock_guard<std::mutex> lock(catalogue_mutex_);
-    if (!catalogue_) {
-      catalogue_ =
-          std::make_unique<CatalogueDataset>(build_nabts_catalogue(dataset_));
-    }
-    return *catalogue_;
+    return catalogue_for(std::string(), kDefaultRepair);
+  }
+
+  // The same records drawn for a receiver the reader picked in the viewer
+  // rather than the one the project's parameter names. Only the display lists
+  // differ, so this rebuilds the catalogue and nothing above it: the records
+  // themselves were recovered once and are not read again.
+  const CatalogueDataset& catalogue(
+      const std::string& view_option) const override {
+    return catalogue_for(view_option, kDefaultRepair);
+  }
+
+  // The same records read either as recovered or as transmitted, which the
+  // reader switches between while looking. Only the interpretation differs:
+  // the records themselves were recovered once and are not read again, and
+  // what a run exports is untouched by this.
+  const CatalogueDataset& catalogue(
+      const std::string& view_option,
+      const std::vector<std::string>& active_toggles) const override {
+    const bool repair =
+        std::find(active_toggles.begin(), active_toggles.end(),
+                  std::string(kNabtsRepairToggleId)) != active_toggles.end();
+    return catalogue_for(view_option, repair);
   }
 
   // IStagePreviewCapability
@@ -140,6 +188,26 @@ class NabtsSinkStage : public DAGStage,
   }
 
  private:
+  /// The catalogue as drawn for the receiver @p view_option names, or for the
+  /// reference receiver where it names none — which an empty string and an
+  /// unrecognised one both do. Built if what is held was built for another
+  /// receiver. One is held rather than one per receiver: the host copies what
+  /// it is given before it asks again, and a page of deposited pixels is a
+  /// large thing to keep four copies of for a reader looking at one.
+  const CatalogueDataset& catalogue_for(const std::string& view_option,
+                                        bool repair) const {
+    std::lock_guard<std::mutex> lock(catalogue_mutex_);
+    const NaplpsRenderMode mode =
+        naplps_render_mode_from_name(view_option, kDefaultRenderMode);
+    if (!catalogue_ || catalogue_mode_ != mode || catalogue_repair_ != repair) {
+      catalogue_ = std::make_unique<CatalogueDataset>(
+          build_nabts_catalogue(dataset_, mode, repair));
+      catalogue_mode_ = mode;
+      catalogue_repair_ = repair;
+    }
+    return *catalogue_;
+  }
+
   /// Drop the cached catalogue so the next reader rebuilds it from the dataset
   /// that has just replaced the one it was built from.
   void invalidate_catalogue() {
@@ -168,7 +236,13 @@ class NabtsSinkStage : public DAGStage,
   // Built from dataset_ on first catalogue() call; cleared with it.
   mutable std::mutex catalogue_mutex_;
   mutable std::unique_ptr<CatalogueDataset> catalogue_;
-
+  // The receiver catalogue_ was built for, which is the reference one unless a
+  // reader asked the viewer for another.
+  mutable NaplpsRenderMode catalogue_mode_{NaplpsRenderMode::kReference};
+  // Whether catalogue_ was built with the records repaired. Part of the cache
+  // key for the same reason the receiver is: both change the payloads and
+  // neither changes the records.
+  mutable bool catalogue_repair_{kDefaultRepair};
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_input_;
 };
 

@@ -335,10 +335,49 @@ struct CatalogueDrawOp {
 struct CatalogueDisplayList {
   std::vector<CatalogueDrawOp> ops;
 
-  /// Height of the drawable area as a fraction of its width, i.e. the aspect
-  /// the unit space is drawn at. Unit x runs 0 to 1 left to right and unit y
-  /// runs 0 to this value *upwards* from the bottom left.
+  /// Extent of unit y the list is drawn over, as a fraction of unit x. Unit x
+  /// runs 0 to 1 left to right and unit y runs 0 to this value *upwards* from
+  /// the bottom left.
   double aspect_height = 1.0;
+
+  /**
+   * Height of the drawable area as a fraction of its width, i.e. the shape the
+   * unit space above is drawn at. Zero means the nominal pixels are square, so
+   * the area takes the shape @ref aspect_height gives it.
+   *
+   * The two differ wherever the source's pixels are not square. A display the
+   * unit space is authored against is a physical screen with an aspect of its
+   * own, and stating that aspect separately is what lets a renderer put a
+   * rectangular pixel on screen as a rectangle.
+   */
+  double display_aspect_height = 0.0;
+
+  /**
+   * The physical pixel grid the list was resolved against, across and down the
+   * drawable area, or zero for a list that names none.
+   *
+   * A display list is geometry, not pixels, but the source it came from may
+   * have been authored for a receiver of a particular resolution, and some of
+   * its geometry only means anything against that resolution — a stroke of no
+   * stated width is one *pixel* wide, not one unit or one device dot. A
+   * renderer uses this to size such things; without it, a device pixel is all
+   * it can fall back on, which makes them depend on how large the list is
+   * drawn.
+   */
+  int nominal_width = 0;
+  int nominal_height = 0;
+
+  /**
+   * The operations tile the grid above rather than describing shapes drawn on
+   * it: each is one pixel of it, or a run of pixels along a row.
+   *
+   * A renderer draws such a list with its edges hard and aligned to whole
+   * device pixels. Smoothing them would be smoothing the source's pixels, which
+   * are the content here rather than an artefact of drawing it — and where two
+   * runs abut, blending both sides of the boundary leaves a seam along a join
+   * that should be invisible.
+   */
+  bool pixel_aligned = false;
 
   /// The colour palette as it stood at the end, carried for display even though
   /// the operations already have their colours resolved.
@@ -464,6 +503,56 @@ struct CatalogueItem {
 };
 
 /**
+ * @brief One way of presenting the same catalogue, offered to the reader
+ *
+ * Not a filter and not a setting: every option shows the same items, drawn
+ * differently. What differs is a property of the display rather than of the
+ * decode — which receiver a page is resolved against, say — so the reader picks
+ * between them while looking, and the stage builds the catalogue again under
+ * whichever is asked for.
+ */
+struct CatalogueViewOption {
+  /// Opaque, unique within the schema, and round-tripped back to the stage
+  /// untouched.
+  std::string id;
+  /// What the reader picks from the list — "240p (256 x 200)".
+  std::string label;
+  /// Explanation shown on hover, for an option whose label cannot carry why
+  /// anyone would want it. Empty for one that needs none.
+  std::string tooltip;
+};
+
+/**
+ * @brief One presentation choice the reader turns on or off
+ *
+ * A CatalogueViewOption in every respect but its shape: it changes how the same
+ * items are presented rather than what was found, and the stage is re-asked for
+ * the catalogue whenever the reader changes it. What it is *not* is a second
+ * way of spelling a view option — the two are separate because they are
+ * independent axes, and folding a toggle into the dropdown would multiply out
+ * the options rather than add to them.
+ *
+ * Use one where the choice is genuinely two-state and independent of the rest:
+ * whether damaged data is presented as recovered or as transmitted, say. A
+ * choice between three or more presentations belongs in @ref
+ * CatalogueSchema::view_options.
+ */
+struct CatalogueViewToggle {
+  /// Opaque, unique within the schema, and round-tripped back to the stage
+  /// untouched.
+  std::string id;
+  /// What the reader sees beside the checkbox — "Error correction".
+  std::string label;
+  /// Explanation shown on hover. Empty for a toggle whose label needs none.
+  std::string tooltip;
+  /// Whether this catalogue was built with the toggle on, so the host can show
+  /// the reader what they are looking at without having to remember what it
+  /// asked for. The state the stage puts here on the first build is the default
+  /// the reader is offered.
+  bool active = false;
+};
+
+/**
  * @brief How the host should label and shape the browser
  *
  * All of it optional: a schema with columns and nothing else gets a plain list
@@ -487,6 +576,22 @@ struct CatalogueSchema {
   /// When non-empty the host offers a toggle that overlays recovery damage on
   /// the payload. Empty for a service that reports no damage.
   std::string highlight_label;
+
+  /// When @ref view_options is non-empty the host offers a dropdown labelled
+  /// this way that re-asks the stage for its catalogue under the option the
+  /// reader picks. Empty for a service that presents its payloads one way only.
+  std::string view_label;
+  std::vector<CatalogueViewOption> view_options;
+  /// Which of @ref view_options this catalogue was built under, so the host can
+  /// show what it is looking at without having to remember what it asked for.
+  /// Empty selects the first option.
+  std::string view_option;
+
+  /// Presentation choices the reader turns on and off, shown beside the view
+  /// dropdown. Empty for a service that offers none, which is what leaves
+  /// today's browser unchanged. Each carries the state this catalogue was built
+  /// under (CatalogueViewToggle::active).
+  std::vector<CatalogueViewToggle> toggles;
 
   /// Shown in place of the payload when the run catalogued nothing at all —
   /// "No teletext pages were recovered". A recording that carried none of the
@@ -533,7 +638,51 @@ struct CatalogueDataset {
 class ICatalogueResults {
  public:
   virtual bool has_results() const = 0;
+  /// The catalogue as the stage's own settings have it, which is what the host
+  /// asks for when it first opens the browser.
   virtual const CatalogueDataset& catalogue() const = 0;
+
+  /**
+   * @brief The catalogue built under one of CatalogueSchema::view_options
+   *
+   * The host calls this when the reader picks an option, passing the id
+   * verbatim; an id the stage does not recognise means the settings' own view,
+   * so a host need not police what it round-trips. The default ignores the
+   * option, which is right for the stage that offers none.
+   *
+   * Same terms as @ref catalogue: called on a worker thread, at most once per
+   * change of option, and what it returns is copied before the next call. A
+   * stage is therefore free to build under one option at a time and replace
+   * what it holds, which is the reference the previous call returned.
+   */
+  virtual const CatalogueDataset& catalogue(
+      const std::string& view_option) const {
+    (void)view_option;
+    return catalogue();
+  }
+
+  /**
+   * @brief The catalogue built under a view option and a set of toggles
+   *
+   * The host calls this when the reader changes either, passing the view
+   * option's id and the ids of every toggle now on, all verbatim; ids the stage
+   * does not recognise mean the settings' own view, so a host need not police
+   * what it round-trips. A toggle the stage offers and the host does not name
+   * is off.
+   *
+   * The default ignores the toggles and forwards to @ref catalogue(const
+   * std::string&), which is right for the stage that offers none.
+   *
+   * Same terms as @ref catalogue: called on a worker thread, at most once per
+   * change, and what it returns is copied before the next call.
+   */
+  virtual const CatalogueDataset& catalogue(
+      const std::string& view_option,
+      const std::vector<std::string>& active_toggles) const {
+    (void)active_toggles;
+    return catalogue(view_option);
+  }
+
   virtual ~ICatalogueResults() = default;
 };
 

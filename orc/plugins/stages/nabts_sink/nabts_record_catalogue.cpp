@@ -9,13 +9,17 @@
 
 #include "nabts_record_catalogue.h"
 
+#include <orc/support/logging.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <set>
+#include <string>
 #include <utility>
 
+#include "naplps_lint_repair.h"
 #include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
@@ -132,24 +136,125 @@ bool algorithmic_more_address(uint64_t address, uint64_t& successor) {
   return true;
 }
 
+/**
+ * @brief What is known against |record|'s bytes, for the repair pass
+ *
+ * Parity is recomputable from the data alone, but what the recovery knew beyond
+ * it is not: which bytes never arrived, and how sure the detector and the vote
+ * ended up being of the ones that did. A record kept from a copy that arrived
+ * whole carries neither mask, and falls back to the parity-only reading.
+ */
+NaplpsSuspectMap suspects_of(const NabtsCataloguedRecord& record) {
+  return NaplpsSuspectMap::from_record(record.data, record.data_present,
+                                       record.data_confidence);
+}
+
+/// One position the weights could not settle, and the candidates that were
+/// level there. Held so the grammar can be asked about it once the whole
+/// record has been voted — a candidate is graded by what it does to the record
+/// around it, which is not known until the rest of the record is.
+struct VoteContest {
+  std::size_t position = 0;
+  std::vector<uint8_t> candidates;
+};
+
+/**
+ * @brief Ask the grammar about the positions the weights left level
+ *
+ * Each candidate is put in place and the whole record linted from the state it
+ * will be read in; the candidate that leaves the record most grammatical wins,
+ * and only where it is alone in doing so and does better than what the weights
+ * chose. The discipline is the repair pass's (naplps_lint_repair.h), for the
+ * same reason: a tie-break that guesses when the grammar has no preference is
+ * inventing a record rather than recovering one.
+ *
+ * The damage evidence is computed once, from the record as the weights left it.
+ * A candidate changes the parity of its own byte, so the map is a little stale
+ * for that one position — which costs nothing, because every candidate for a
+ * position is graded against the same map and only their difference matters.
+ */
+void adjudicate_contests(const std::vector<VoteContest>& contests,
+                         const NabtsVoteOptions& options,
+                         NabtsVoteResult& out) {
+  NaplpsLinter unseeded;
+  unseeded.reset_decoder();
+  NaplpsLinter& context =
+      options.context != nullptr ? *options.context : unseeded;
+
+  const NaplpsSuspectMap suspects =
+      NaplpsSuspectMap::from_record(out.data, out.present, out.confidence);
+  const auto trial = [&](const std::vector<uint8_t>& data) {
+    // Forked rather than advanced, exactly as the repair pass forks it: a
+    // candidate byte may define a macro or designate a set, and none of that
+    // may outlive the trial that considered it.
+    NaplpsLinter scratch = context;
+    return naplps_lint_grade(scratch.lint(data, suspects).findings);
+  };
+
+  NaplpsLintGrade baseline = trial(out.data);
+  for (const VoteContest& contest : contests) {
+    const uint8_t original = out.data[contest.position];
+    uint8_t chosen = original;
+    NaplpsLintGrade best;
+    std::size_t attained_best = 0;
+
+    for (const uint8_t candidate : contest.candidates) {
+      if (candidate == original) {
+        continue;  // What the weights chose is the baseline, already graded.
+      }
+      out.data[contest.position] = candidate;
+      const NaplpsLintGrade grade = trial(out.data);
+      out.data[contest.position] = original;
+
+      if (attained_best == 0 || grade < best) {
+        best = grade;
+        chosen = candidate;
+        attained_best = 1;
+      } else if (grade == best) {
+        ++attained_best;
+      }
+    }
+
+    // Strictly better than what the weights chose, and better than every other
+    // candidate: two readings the grammar likes equally are two readings it has
+    // nothing to say about.
+    if (attained_best != 1 || !(best < baseline)) {
+      continue;
+    }
+    out.data[contest.position] = chosen;
+    baseline = best;
+    ++out.positions_adjudicated;
+  }
+}
+
 }  // namespace
 
-std::vector<uint8_t> nabts_vote_record_data(
-    const std::vector<NabtsRecordCopy>& copies) {
+NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
+                                  const NabtsVoteOptions& options) {
+  NabtsVoteResult out;
   if (copies.empty()) {
-    return {};
+    return out;
   }
   if (copies.size() == 1) {
-    return copies.front().data;  // A vote of one is the copy itself.
+    // A vote of one is the copy itself, and what the recovery knew about that
+    // copy is what it knows about the record.
+    out.data = copies.front().data;
+    out.present = copies.front().present;
+    out.confidence = copies.front().confidence;
+    return out;
   }
 
   const std::size_t length = voted_length(copies);
-  std::vector<uint8_t> out(length, 0);
+  out.data.assign(length, 0);
+  out.present.assign(length, 0);
+  out.confidence.assign(length, 0);
+  std::vector<VoteContest> contests;
 
   // One pass over the copies per position, tallying per byte value. The
   // accumulators are epoch-marked by position so none of them has to be cleared
   // between positions.
   std::array<uint64_t, 256> weight_of{};
+  std::array<std::size_t, 256> support_of{};
   std::array<std::size_t, 256> newest_of{};
   std::array<std::size_t, 256> seen_at{};  // epoch: position + 1, 0 = never
   std::array<uint8_t, 256> distinct{};
@@ -172,6 +277,7 @@ std::vector<uint8_t> nabts_vote_record_data(
       if (seen_at[value] != epoch) {
         seen_at[value] = epoch;
         weight_of[value] = 0;
+        support_of[value] = 0;
         newest_of[value] = 0;
         distinct[distinct_count++] = value;
       }
@@ -184,6 +290,7 @@ std::vector<uint8_t> nabts_vote_record_data(
               ? std::max<uint64_t>(1, candidate.confidence[position])
               : 255;
       weight_of[value] += weight;
+      ++support_of[value];
       newest_of[value] = copy;  // copies are held oldest first
     }
 
@@ -213,9 +320,93 @@ std::vector<uint8_t> nabts_vote_record_data(
       best_weight = weight_of[value];
       best_newest = newest_of[value];
     }
-    out[position] = best;
+    out.data[position] = best;
+
+    if (distinct_count == 0) {
+      // No copy delivered this byte. The NUL stands for it, and the mask says
+      // so rather than letting a filler pass for a reading.
+      continue;
+    }
+    out.present[position] = 1;
+
+    // Weight behind a value the parity check has already ruled out is not
+    // weight against the one that won, so both the confidence and the tie test
+    // are taken within the winner's own class.
+    uint64_t class_weight = 0;
+    uint64_t rival_weight = 0;
+    for (std::size_t k = 0; k < distinct_count; ++k) {
+      const uint8_t value = distinct[k];
+      if (teletext_odd_parity_valid(value) != best_clean) {
+        continue;
+      }
+      class_weight += weight_of[value];
+      if (value != best) {
+        rival_weight = std::max(rival_weight, weight_of[value]);
+      }
+    }
+
+    // What the recovery ends up making of the byte: the mean confidence of the
+    // copies that voted for it, reduced by the share of the weight that voted
+    // against it. A byte one copy decided on its own therefore carries that
+    // detector's own figure through unchanged, and a byte every copy agreed on
+    // comes out at whatever they agreed at.
+    const uint64_t mean =
+        best_weight / std::max<std::size_t>(1, support_of[best]);
+    const uint64_t confidence =
+        class_weight > 0 ? (mean * best_weight) / class_weight : 0;
+    out.confidence[position] =
+        static_cast<uint8_t>(std::min<uint64_t>(255, confidence));
+
+    if (rival_weight * 100 < best_weight * kNabtsVoteTiePercent) {
+      continue;
+    }
+
+    // Level: what stands here was settled by recency rather than by evidence,
+    // so nothing actually chose it. Reported at no confidence whatever the
+    // arithmetic above made of it, which is what puts it in front of the repair
+    // pass later even if the grammar has nothing to say about it now.
+    ++out.positions_contested;
+    out.confidence[position] = 0;
+    if (contests.size() >= kNabtsMaxAdjudicatedPositions) {
+      continue;
+    }
+
+    std::vector<std::pair<uint64_t, uint8_t>> level;
+    for (std::size_t k = 0; k < distinct_count; ++k) {
+      const uint8_t value = distinct[k];
+      if (teletext_odd_parity_valid(value) == best_clean &&
+          weight_of[value] * 100 >= best_weight * kNabtsVoteTiePercent) {
+        level.emplace_back(weight_of[value], value);
+      }
+    }
+    // Heaviest first, and by value where even that is level, so which
+    // candidates are put to the grammar does not depend on the order the copies
+    // happened to arrive in.
+    std::sort(level.begin(), level.end(), [](const auto& a, const auto& b) {
+      return a.first != b.first ? a.first > b.first : a.second < b.second;
+    });
+    if (level.size() > kNabtsMaxVoteCandidates) {
+      level.resize(kNabtsMaxVoteCandidates);
+    }
+
+    VoteContest contest;
+    contest.position = position;
+    contest.candidates.reserve(level.size());
+    for (const auto& entry : level) {
+      contest.candidates.push_back(entry.second);
+    }
+    contests.push_back(std::move(contest));
+  }
+
+  if (options.grammar_assisted && !contests.empty()) {
+    adjudicate_contests(contests, options, out);
   }
   return out;
+}
+
+std::vector<uint8_t> nabts_vote_record_data(
+    const std::vector<NabtsRecordCopy>& copies) {
+  return nabts_vote_record(copies).data;
 }
 
 NabtsRecordCatalogue::NabtsRecordCatalogue(std::size_t max_records,
@@ -332,29 +523,263 @@ void NabtsRecordCatalogue::enforce_bounds() {
   }
 }
 
-std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
+std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records(
+    bool grammar_assisted_vote) const {
   std::vector<NabtsCataloguedRecord> out;
+  std::vector<const Entry*> entries;
   out.reserve(records_.size());
+  entries.reserve(records_.size());
   // The map is keyed on {channel, address, version}, so iteration is already
   // the order a reader would list a service in.
   for (const auto& entry : records_) {
     out.push_back(entry.second.record);
-    NabtsCataloguedRecord& record = out.back();
+    entries.push_back(&entry.second);
+  }
 
+  // The state each channel's pages are graded against, which is its Support
+  // Record's (§5.2.7.9). Built as the support records are voted, and empty for
+  // a channel that carried none.
+  std::map<uint16_t, NaplpsLinter> context;
+
+  const auto vote_one = [&](std::size_t index) {
+    NabtsCataloguedRecord& record = out[index];
     // Copies are held only where no undamaged one ever arrived, so this is the
     // recording that never gave up a clean copy of the record: combine what did
     // arrive rather than show whichever copy happened to be longest.
-    if (!entry.second.copies.empty()) {
-      record.data = nabts_vote_record_data(entry.second.copies);
-      record.copies_voted = static_cast<uint32_t>(entry.second.copies.size());
-      if (record.record_type == kNabtsRecordTypeApplication) {
-        // The descriptors were rendered from one copy; the vote may have
-        // recovered bytes that copy had wrong (§7.2.2).
-        record.functions =
-            render_functions(nabts_decode_application_record(record.data));
+    const std::vector<NabtsRecordCopy>& copies = entries[index]->copies;
+    if (copies.empty()) {
+      return;
+    }
+
+    NabtsVoteOptions options;
+    // An application record's data is function descriptors (§7.2.2) rather than
+    // NAPLPS, so there is no grammar here to appeal to.
+    options.grammar_assisted =
+        grammar_assisted_vote && nabts_type_is_presentation(record.record_type);
+    if (options.grammar_assisted && !record.support_record) {
+      // A Support Record is itself presented from a general reset (§8.5), so it
+      // is graded from one too; everything else is graded with its channel's
+      // support definitions in force.
+      const auto found = context.find(record.channel);
+      if (found != context.end()) {
+        options.context = &found->second;
       }
     }
+
+    NabtsVoteResult voted = nabts_vote_record(copies, options);
+    record.data = std::move(voted.data);
+    record.data_present = std::move(voted.present);
+    record.data_confidence = std::move(voted.confidence);
+    record.vote_positions_contested = voted.positions_contested;
+    record.vote_positions_adjudicated = voted.positions_adjudicated;
+    record.copies_voted = static_cast<uint32_t>(copies.size());
+    if (record.record_type == kNabtsRecordTypeApplication) {
+      // The descriptors were rendered from one copy; the vote may have
+      // recovered bytes that copy had wrong (§7.2.2).
+      record.functions =
+          render_functions(nabts_decode_application_record(record.data));
+    }
+  };
+
+  // Support Records first, per Data Channel, for the reason
+  // nabts_interpret_records() presents them first: a page invoking a macro
+  // §5.2.7.9 has defined there is otherwise graded as invoking an undefined
+  // one. Each is read into its channel's state once it has been voted, so the
+  // pages of that channel are weighed against the definitions they will
+  // actually be presented with.
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (!out[i].support_record) {
+      continue;
+    }
+    vote_one(i);
+    if (grammar_assisted_vote &&
+        nabts_type_is_presentation(out[i].record_type)) {
+      NaplpsLinter& linter = context[out[i].channel];
+      linter.reset_decoder();
+      (void)linter.lint(out[i].data);
+    }
   }
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (!out[i].support_record) {
+      vote_one(i);
+    }
+  }
+
+  return out;
+}
+
+std::string NabtsLintTotals::summary() const {
+  if (records_linted == 0) {
+    return {};
+  }
+  if (records_faulted == 0 && suspect_bytes == 0) {
+    return fmt::format(
+        "NAPLPS lint\n"
+        "  Records:       {} presentation record(s), none faulted\n",
+        records_linted);
+  }
+
+  std::string out = "NAPLPS lint\n";
+  out += fmt::format(
+      "  Records:       {} presentation record(s), {} faulted before repair, "
+      "{} after\n",
+      records_linted, records_faulted, records_faulted_after);
+  out += fmt::format(
+      "  Findings:      {} error(s) and {} warning(s) before, {} and {} "
+      "after\n",
+      errors_before, warnings_before, errors_after, warnings_after);
+  out += fmt::format(
+      "  Repairs:       {} byte(s) corrected, {} run(s) resynchronised, {} "
+      "coordinate word(s) dropped\n",
+      bytes_repaired, pdis_resynchronised, coordinate_words_dropped);
+  out += fmt::format(
+      "  Left alone:    {} byte(s) in doubt, of which {} the grammar could not "
+      "decide\n",
+      suspect_bytes, bytes_ambiguous);
+  return out;
+}
+
+NabtsLintTotals nabts_lint_records(
+    const std::vector<NabtsCataloguedRecord>& records) {
+  NabtsLintTotals totals;
+  std::map<uint16_t, NaplpsLintRepairer> repairers;
+
+  const auto lint_one = [&](const NabtsCataloguedRecord& record) {
+    if (!nabts_type_is_presentation(record.record_type) ||
+        record.data.empty()) {
+      return;
+    }
+    const NaplpsRepairResult result =
+        repairers[record.channel].repair(record.data, suspects_of(record));
+    ++totals.records_linted;
+    if (result.summary.errors_before > 0 ||
+        result.summary.warnings_before > 0) {
+      ++totals.records_faulted;
+    }
+    if (result.summary.errors_after > 0 || result.summary.warnings_after > 0) {
+      ++totals.records_faulted_after;
+    }
+    totals.errors_before += result.summary.errors_before;
+    totals.warnings_before += result.summary.warnings_before;
+    totals.errors_after += result.summary.errors_after;
+    totals.warnings_after += result.summary.warnings_after;
+    totals.suspect_bytes += result.summary.suspect_bytes;
+    totals.bytes_repaired += result.summary.bytes_repaired;
+    totals.bytes_ambiguous += result.summary.bytes_ambiguous;
+    totals.pdis_resynchronised += result.summary.pdis_resynchronised;
+    totals.coordinate_words_dropped += result.summary.coordinate_words_dropped;
+  };
+
+  // Support Record first, per Data Channel, for the reason
+  // nabts_interpret_records() does it: a repairer that has not seen the macros
+  // §5.2.7.9 puts there reads every invocation of one as damage.
+  for (const NabtsCataloguedRecord& record : records) {
+    if (record.support_record) {
+      lint_one(record);
+    }
+  }
+  for (const NabtsCataloguedRecord& record : records) {
+    if (!record.support_record) {
+      lint_one(record);
+    }
+  }
+  return totals;
+}
+
+void nabts_interpret_records(std::vector<NabtsCataloguedRecord>& records,
+                             NaplpsRenderGrid grid, bool repair) {
+  NaplpsInterpreter interpreter(grid);
+
+  // Repaired presentation code per record, parallel to |records| and empty
+  // where a record was not repaired. Done in one sweep before anything is
+  // interpreted, because a record is run more than once — as itself, as a
+  // member of a More chain, and as the Support Record another page needs — and
+  // a page assembled from two readings of the same bytes would be neither.
+  std::vector<std::vector<uint8_t>> repaired(repair ? records.size() : 0);
+  std::vector<NaplpsRepairSummary> repairs(repair ? records.size() : 0);
+  if (repair) {
+    // One repairer per Data Channel, and its Support Record first: §5.2.7.9 has
+    // a page's macros defined there, and a repairer that has not seen them
+    // reads every invocation of one as damage.
+    std::map<uint16_t, NaplpsLintRepairer> repairers;
+    const auto repair_record = [&](std::size_t index) {
+      NabtsCataloguedRecord& record = records[index];
+      if (!nabts_type_is_presentation(record.record_type) ||
+          record.data.empty()) {
+        return;
+      }
+      NaplpsRepairResult result =
+          repairers[record.channel].repair(record.data, suspects_of(record));
+      repaired[index] = std::move(result.data);
+      repairs[index] = result.summary;
+
+      // Per record, and only where something was actually done to it: a reader
+      // asking why a page looks the way it does wants to see which records the
+      // grammar touched, not a line for every record it left alone.
+      const NaplpsRepairSummary& did = repairs[index];
+      if (did.total_repairs() > 0 || did.errors_before > 0) {
+        ORC_LOG_DEBUG(
+            "NAPLPS lint: {} — {} error(s)/{} warning(s) before, {}/{} after; "
+            "{} byte(s) corrected, {} run(s) resynchronised, {} coordinate "
+            "word(s) dropped, {} of {} doubtful byte(s) undecidable",
+            record.channel_text, did.errors_before, did.warnings_before,
+            did.errors_after, did.warnings_after, did.bytes_repaired,
+            did.pdis_resynchronised, did.coordinate_words_dropped,
+            did.bytes_ambiguous, did.suspect_bytes);
+      }
+    };
+    for (std::size_t i = 0; i < records.size(); ++i) {
+      if (records[i].support_record) {
+        repair_record(i);
+      }
+    }
+    for (std::size_t i = 0; i < records.size(); ++i) {
+      if (!records[i].support_record) {
+        repair_record(i);
+      }
+    }
+
+    // And one line for the sweep, so a run says plainly whether the linter ran
+    // and what it came to. This is the line to look for when a page is being
+    // read as repaired and it is not obvious that anything was.
+    NaplpsRepairSummary sweep;
+    uint32_t records_repaired = 0;
+    for (const NaplpsRepairSummary& one : repairs) {
+      if (!one.ran) {
+        continue;
+      }
+      sweep.suspect_bytes += one.suspect_bytes;
+      sweep.bytes_repaired += one.bytes_repaired;
+      sweep.bytes_ambiguous += one.bytes_ambiguous;
+      sweep.pdis_resynchronised += one.pdis_resynchronised;
+      sweep.coordinate_words_dropped += one.coordinate_words_dropped;
+      sweep.errors_before += one.errors_before;
+      sweep.errors_after += one.errors_after;
+      if (one.total_repairs() > 0) {
+        ++records_repaired;
+      }
+    }
+    ORC_LOG_INFO(
+        "NAPLPS lint: read {} record(s) with syntax repair on — {} record(s) "
+        "changed, {} byte(s) corrected, {} run(s) resynchronised, {} "
+        "coordinate word(s) dropped; errors {} -> {}, {} of {} doubtful "
+        "byte(s) left undecided",
+        records.size(), records_repaired, sweep.bytes_repaired,
+        sweep.pdis_resynchronised, sweep.coordinate_words_dropped,
+        sweep.errors_before, sweep.errors_after, sweep.bytes_ambiguous,
+        sweep.suspect_bytes);
+  }
+
+  // The bytes to interpret for |entry|: the repaired reading where there is
+  // one, and what was recovered otherwise.
+  const auto code_of =
+      [&](const NabtsCataloguedRecord* entry) -> const std::vector<uint8_t>& {
+    const std::size_t index = static_cast<std::size_t>(entry - records.data());
+    if (index < repaired.size() && !repaired[index].empty()) {
+      return repaired[index];
+    }
+    return entry->data;
+  };
 
   // §8.7.1.4: one Support Record per Data Channel, at address FFF with the
   // Support Record Flag set — the record that "contain[s] one or more macro
@@ -362,7 +787,7 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
   // Data Channel". Where versions differ the highest wins, which iteration
   // order delivers for free: same channel and address, ascending version.
   std::map<uint16_t, const NabtsCataloguedRecord*> support_by_channel;
-  for (const NabtsCataloguedRecord& record : out) {
+  for (const NabtsCataloguedRecord& record : records) {
     if (record.support_record &&
         nabts_type_is_presentation(record.record_type)) {
       support_by_channel[record.channel] = &record;
@@ -374,7 +799,7 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
   // chain, not a particular version of it. Ascending iteration leaves the
   // highest version in place.
   std::map<std::pair<uint16_t, uint64_t>, const NabtsCataloguedRecord*> latest;
-  for (const NabtsCataloguedRecord& record : out) {
+  for (const NabtsCataloguedRecord& record : records) {
     if (nabts_type_is_presentation(record.record_type)) {
       latest[{record.channel, record.address}] = &record;
     }
@@ -419,8 +844,14 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
   // record's predecessors are walked back through the links above, executed
   // in order with the display carried between them, and the record itself
   // drawn on top of what they left.
-  for (NabtsCataloguedRecord& record : out) {
+  for (NabtsCataloguedRecord& record : records) {
     if (!nabts_type_is_presentation(record.record_type)) {
+      continue;
+    }
+    if (record.data.empty()) {
+      // Nothing to run, so nothing to draw: a record whose every copy was lost
+      // has no presentation code, and running it would only replace the page it
+      // already carries with the empty one it would have produced anyway.
       continue;
     }
 
@@ -481,26 +912,33 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
       caption = caption || member->caption;
     }
 
-    interpreter_.reset_decoder();
+    interpreter.reset_decoder();
     if (needs_support && !record.support_record) {
       const auto support = support_by_channel.find(record.channel);
       if (support != support_by_channel.end()) {
         // Run for its definitions; what the support record itself drew is not
         // part of this page.
-        (void)interpreter_.run(support->second->data);
+        (void)interpreter.run(code_of(support->second));
       }
     }
     if (caption) {
-      interpreter_.apply_caption_state();
+      interpreter.apply_caption_state();
     }
     bool keep_display = false;
     for (const NabtsCataloguedRecord* member : prefix) {
-      (void)interpreter_.run(member->data, keep_display);
+      (void)interpreter.run(code_of(member), keep_display);
       keep_display = true;
     }
-    record.page = interpreter_.run(record.data, keep_display);
+    record.page = interpreter.run(code_of(&record), keep_display);
+
+    // What the repair did is the reader's business as much as what the decode
+    // did: a page drawn partly from guesses should say so.
+    const std::size_t index =
+        static_cast<std::size_t>(&record - records.data());
+    if (index < repairs.size()) {
+      naplps_stamp_repair_diagnostics(repairs[index], record.page.diagnostics);
+    }
   }
-  return out;
 }
 
 }  // namespace orc

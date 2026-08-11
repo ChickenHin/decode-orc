@@ -17,6 +17,7 @@
 #include <QShowEvent>
 
 #include "catalogue_flash_clock.h"
+#include "teletext_glyph_painter.h"
 
 namespace {
 
@@ -32,8 +33,9 @@ constexpr int kHintRows = 25;
 // until it is at least this wide.
 constexpr int kSavedPixelsAcross = 720;
 
-// The fixed-pitch font the cells are drawn in, with families named after the
-// platform's own so a glyph it lacks is still drawn by something.
+// The fixed-pitch font the cells the character generator has no glyph for are
+// drawn in, with families named after the platform's own so a glyph it lacks
+// is still drawn by something.
 //
 // A cell grid is not ASCII and never was. The Latin G0 set of a teletext page
 // reaches the arrows, the vulgar fractions and the double vertical bar of
@@ -391,10 +393,11 @@ void CatalogueCellGridWidget::paintContent(QPainter& painter,
     }
   }
 
-  // The glyph is sized to fill the character rectangle vertically and then
-  // squeezed if the font is wider than the cell, so neighbouring characters
-  // never overlap. Double height reuses this glyph under a 2x vertical scale:
-  // height doubles, width does not.
+  // The fallback font, for the characters the character generator's face has
+  // no glyph for. It is sized to fill the character rectangle vertically and
+  // then squeezed if the font is wider than the cell, so neighbouring
+  // characters never overlap. Double height reuses the glyph under a 2x
+  // vertical scale: height doubles, width does not.
   QFont mono = cell_grid_font();
   mono.setPixelSize(qMax(1, static_cast<int>(cell_h)));
   const QFontMetricsF metrics(mono);
@@ -442,6 +445,23 @@ void CatalogueCellGridWidget::paintContent(QPainter& painter,
       if (cell.character == U' ') {
         continue;
       }
+
+      // The character generator's own letterform, scaled from its character
+      // rectangle to this cell's. Antialiasing is on for it because the cell
+      // is rarely a whole number of sub-pixels across, and a sub-pixel that
+      // lands between device pixels either thickens or vanishes without it.
+      if (const QPainterPath* path = glyphPath(cell.character);
+          path != nullptr) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.translate(cell_rect.topLeft());
+        painter.scale(cell_w / kTeletextRoundedColumns,
+                      cell_h * height_scale / kTeletextRoundedRows);
+        painter.fillPath(*path, palette_colour(grid, cell.foreground));
+        painter.restore();
+        continue;
+      }
+
       painter.save();
       painter.setPen(palette_colour(grid, cell.foreground));
       painter.translate(cell_rect.topLeft());
@@ -455,6 +475,20 @@ void CatalogueCellGridWidget::paintContent(QPainter& painter,
   if (show_data_errors_) {
     paintDataErrorOverlay(painter, grid, page_rect, cell_w, cell_h);
   }
+}
+
+const QPainterPath* CatalogueCellGridWidget::glyphPath(
+    char32_t character) const {
+  const auto cached = glyph_paths_.find(character);
+  if (cached != glyph_paths_.end()) {
+    return cached->second.isEmpty() ? nullptr : &cached->second;
+  }
+  // An empty path is cached too: it is the answer for a character the face
+  // does not hold, and looking that up again on every repaint is the same
+  // work as looking up one it does.
+  const auto inserted =
+      glyph_paths_.emplace(character, teletext_glyph_path(character)).first;
+  return inserted->second.isEmpty() ? nullptr : &inserted->second;
 }
 
 void CatalogueCellGridWidget::paintDataErrorOverlay(

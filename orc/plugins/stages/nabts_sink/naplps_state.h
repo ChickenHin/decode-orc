@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "naplps_pdi.h"
+#include "naplps_render_grid.h"
 #include "vbi-services/nabts_page.h"
 
 namespace orc {
@@ -243,6 +244,16 @@ class NaplpsState {
  public:
   NaplpsState() { reset_all(); }
 
+  /**
+   * @brief The receiver resolution DRCS storage is sized against
+   *
+   * §6.2.3 sizes a DRCS buffer from the physical resolution its character field
+   * covers, so the grid is a property of the receiver being emulated rather
+   * than of the presentation. RESET and NSR leave it alone for that reason.
+   */
+  void set_render_grid(NaplpsRenderGrid grid) { render_grid_ = grid; }
+  const NaplpsRenderGrid& render_grid() const { return render_grid_; }
+
   /// Everything to its default, which is what NSR (§6.1.6.5) does apart from
   /// leaving the colour map and the programmable masks alone.
   void reset_all();
@@ -375,14 +386,15 @@ class NaplpsState {
   }
 
   /// §6.2.3: the DRCS storage buffer's aspect ratio is the character field's,
-  /// with the larger dimension spanning its whole axis of the unit screen, at
-  /// the physical resolution Table D1 item 10 gives — 256 by 200.
+  /// at the physical resolution the field covers on the receiver being
+  /// emulated — see set_render_grid().
   void drcs_buffer_size(uint16_t& width, uint16_t& height) const;
 
  private:
   /// Index of |code| within a 96-position set, or kNaplpsMacroCount if outside.
   static size_t index_of_code(uint8_t code);
 
+  NaplpsRenderGrid render_grid_ = kNaplpsGridReference;
   std::array<NaplpsMacro, kNaplpsMacroCount> macros_{};
   std::array<NabtsDrcsCharacter, kNaplpsDrcsCount> drcs_{};
   size_t storage_used_ = 0;

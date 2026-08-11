@@ -194,6 +194,20 @@ std::string NabtsSinkDeps::build_report(
                           scan_state.lines().lines_skipped());
   }
 
+  // What the vote could not settle on the evidence alone. Silent for a
+  // recording whose copies never disagreed by a hair, which is a recording
+  // whose records mostly arrived whole.
+  const NabtsRecoverySummary& recovery = result.dataset.summary;
+  if (recovery.vote_positions_contested > 0) {
+    report += fmt::format(
+        "\n  Record vote:   {} byte position(s) the copies could not separate",
+        recovery.vote_positions_contested);
+    report += options.grammar_assisted_vote
+                  ? fmt::format(", {} settled by the NAPLPS grammar",
+                                recovery.vote_positions_adjudicated)
+                  : std::string(", the grammar not asked");
+  }
+
   if (result.records_exported > 0) {
     report += fmt::format("\n  Records:       {} exported beside the stream",
                           result.records_exported);
@@ -214,6 +228,15 @@ std::string NabtsSinkDeps::build_report(
   report += group_stats.summary();
   report += "\n";
   report += record_stats.summary();
+
+  // How much of what a reader will see was recovered rather than received.
+  // Quiet for a recording whose pages all arrived clean, which is the ordinary
+  // case for a disc and never the case for a tape.
+  const std::string lint = result.lint_totals.summary();
+  if (!lint.empty()) {
+    report += "\n";
+    report += lint;
+  }
   return report;
 }
 
@@ -280,10 +303,23 @@ void NabtsSinkDeps::write_captions(const NabtsSinkOptions& options,
     return;
   }
 
+  // The cues are read off the presented pages, which recovery does not build:
+  // what a page looks like depends on the receiver it is drawn for, so the
+  // catalogue interprets it when it is browsed. Caption text is the one part
+  // that cannot depend on the receiver — a character's code is its code at any
+  // resolution — so the export interprets at the reference receiver and gets
+  // the same cues the viewer will show at whatever resolution it is set to.
+  //
+  // Always repaired, unlike the viewer, which offers the reader the choice: a
+  // subtitle file is itself a reading aid rather than a record of what was
+  // transmitted, and the recording's own bytes are in the packet stream and the
+  // record files either way. The report says how much repair the records took.
+  std::vector<NabtsCataloguedRecord> records = result.dataset.records;
+  nabts_interpret_records(records, kNaplpsGridReference, /*repair=*/true);
+
   // Read the same way the catalogue's caption track reads it — one shared
   // implementation, so the file and the screen cannot disagree.
-  const std::vector<NabtsCaptionCue> cues =
-      nabts_caption_cues(result.dataset.records);
+  const std::vector<NabtsCaptionCue> cues = nabts_caption_cues(records);
   if (cues.empty()) {
     ORC_LOG_DEBUG(
         "NabtsSinkDeps: No caption records in the range; no cues written");
@@ -435,8 +471,23 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     groups.flush();
     records.flush();
 
-    partial.dataset.records = catalogue.records();
+    partial.dataset.records = catalogue.records(options.grammar_assisted_vote);
     NabtsRecoverySummary& summary = partial.dataset.summary;
+    uint32_t records_voted = 0;
+    for (const NabtsCataloguedRecord& record : partial.dataset.records) {
+      summary.vote_positions_contested += record.vote_positions_contested;
+      summary.vote_positions_adjudicated += record.vote_positions_adjudicated;
+      records_voted += record.copies_voted > 0 ? 1 : 0;
+    }
+    if (records_voted > 0) {
+      ORC_LOG_INFO(
+          "NabtsSinkDeps: {} of {} record(s) recovered by combining copies; {} "
+          "byte position(s) left level by the weights, {} settled by the "
+          "NAPLPS grammar{}",
+          records_voted, partial.dataset.records.size(),
+          summary.vote_positions_contested, summary.vote_positions_adjudicated,
+          options.grammar_assisted_vote ? "" : " (the grammar was not asked)");
+    }
     summary.frames_analysed = partial.frames_analysed;
     summary.fields_with_data = partial.fields_with_data;
     summary.packets_recovered = partial.packets_written;
@@ -456,6 +507,27 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     // reason its packet stream is left as a prefix rather than deleted.
     write_records(options, partial);
     write_captions(options, partial);
+
+    // Computed before the report and after the catalogue, because it is a
+    // property of the records the run catalogued rather than of the recovery.
+    partial.lint_totals = nabts_lint_records(partial.dataset.records);
+
+    // Said out loud rather than left in the report, which is written only when
+    // asked for and logged only at debug level: how much of what a reader is
+    // about to browse was recovered by the grammar is worth a line of every
+    // run's log.
+    if (partial.lint_totals.records_linted > 0) {
+      const NabtsLintTotals& lint = partial.lint_totals;
+      ORC_LOG_INFO(
+          "NabtsSinkDeps: NAPLPS lint over {} presentation record(s) — {} "
+          "faulted before repair, {} after; {} byte(s) corrected, {} run(s) "
+          "resynchronised, {} coordinate word(s) dropped, {} of {} doubtful "
+          "byte(s) the grammar could not decide",
+          lint.records_linted, lint.records_faulted, lint.records_faulted_after,
+          lint.bytes_repaired, lint.pdis_resynchronised,
+          lint.coordinate_words_dropped, lint.bytes_ambiguous,
+          lint.suspect_bytes);
+    }
 
     partial.report = build_report(options, partial, total_frames, stats,
                                   scan_state, groups.stats(), records.stats());

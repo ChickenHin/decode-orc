@@ -2732,7 +2732,8 @@ RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
 }
 
 std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
-    NodeID node_id) {
+    NodeID node_id, const std::string& view_option,
+    const std::optional<std::vector<std::string>>& active_toggles) {
   auto dag = impl_->getConcreteDAG();
   if (!dag) {
     return std::nullopt;
@@ -2751,8 +2752,19 @@ std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
 
   // Handed over whole: the stage has already bounded the catalogue by its own
   // cap, and building the payloads is the stage's work rather than something
-  // the host repeats per item.
-  return browser->catalogue();
+  // the host repeats per item. The view option and the toggles go to the stage
+  // untouched — what they mean is the stage's business, and asking for them is
+  // a rebuild of the payloads rather than anything the DAG runs again.
+  //
+  // A reader who has not been asked yet gets the stage's own defaults rather
+  // than every toggle off: the schema that comes back says which ones those
+  // are, and the viewer shows them switched on accordingly. Asking with an
+  // empty list instead would mean the stage could never offer a toggle that
+  // starts on.
+  if (!active_toggles) {
+    return browser->catalogue(view_option);
+  }
+  return browser->catalogue(view_option, *active_toggles);
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

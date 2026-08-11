@@ -38,12 +38,49 @@ namespace {
 /// the layout's own spacing between neighbours within a group.
 constexpr int kControlGroupSpacing = 18;
 
+/// Characters the view dropdown always has room for, so what it holds is read
+/// rather than guessed at.
+constexpr int kViewComboMinimumCharacters = 12;
+
+/// A hairline standing between two groups of controls, which is what makes a
+/// row of switches read as the two or three things it is rather than as one
+/// undifferentiated line.
+QWidget* make_separator(QWidget* parent) {
+  auto* line = new QFrame(parent);
+  line->setFrameShape(QFrame::VLine);
+  // Drawn flat in the palette's own mid tone rather than as a sunken bevel: a
+  // bevel is two near-white hairlines on a light theme and disappears
+  // altogether, which is worse than no rule at all.
+  line->setFrameShadow(QFrame::Plain);
+  line->setLineWidth(1);
+  line->setFixedWidth(1);
+  QPalette rule = line->palette();
+  rule.setColor(QPalette::WindowText, rule.color(QPalette::Mid));
+  line->setPalette(rule);
+  line->setVisible(false);
+  return line;
+}
+
 /// The find box matches on a trimmed, case-folded key, which is as much
 /// tolerance as a host can offer without knowing what the key means.
 QString normalise_key(const QString& text) { return text.trimmed().toUpper(); }
 
 QString to_qstring(const std::string& text) {
   return QString::fromStdString(text);
+}
+
+/// Put |text| on one of the message lines, and take the line away when there is
+/// nothing to say. An empty line left standing is a gap the reader reads as
+/// meaning something.
+void set_message(QLabel* label, const QString& text) {
+  label->setText(text);
+  label->setVisible(!text.isEmpty());
+  // A wrapping QLabel reports a minimum height of nothing much, so a column of
+  // them ends up squeezed a pixel or two short each and the last line loses its
+  // descenders to the window edge. The lines it is actually being asked to hold
+  // are known here, so the height is stated rather than inferred.
+  const int lines = static_cast<int>(text.count(QLatin1Char('\n'))) + 1;
+  label->setMinimumHeight(lines * label->fontMetrics().lineSpacing());
 }
 
 /// A catalogue key made safe to put in a file name. Services name their items
@@ -127,12 +164,48 @@ void CatalogueDialog::setupUI() {
   nav_layout->addWidget(next_item_button_);
   top_row->addWidget(item_nav_);
 
-  notice_label_ = new QLabel(this);
-  notice_label_->setObjectName("catalogueNoticeLabel");
-  notice_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-  notice_label_->setVisible(false);
-  top_row->addWidget(notice_label_);
   top_row->addStretch();
+
+  // Where a service presents the same items more than one way, the choice sits
+  // with the other display switches rather than in the node's parameters: it
+  // changes nothing the decode found, and editing a parameter rebuilds the
+  // graph and closes this window over what is only a change of view.
+  view_bar_ = new QWidget(this);
+  auto* view_layout = new QHBoxLayout(view_bar_);
+  view_layout->setContentsMargins(0, 0, 0, 0);
+  view_label_ = new QLabel(view_bar_);
+  view_layout->addWidget(view_label_);
+  view_combo_ = new QComboBox(view_bar_);
+  view_combo_->setObjectName("catalogueViewCombo");
+  // Wide enough for what it holds, and never squeezed narrower: a dropdown
+  // clipped to "256 x 20" is worse than no dropdown, because it looks like a
+  // value rather than like a truncation.
+  view_combo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  view_combo_->setMinimumContentsLength(kViewComboMinimumCharacters);
+  connect(view_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &CatalogueDialog::onViewOptionSelected);
+  view_layout->addWidget(view_combo_);
+  // The toggles are built from the delivered schema, so the layout is kept to
+  // add them to.
+  view_layout_ = view_layout;
+  view_bar_->setVisible(false);
+  top_row->addWidget(view_bar_);
+  top_row->addSpacing(kControlGroupSpacing);
+
+  // A drawn payload may carry a text form of itself. It is worth having and
+  // worth being able to put away: on a wide page the two side by side leave
+  // neither enough room, and a reader looking at the drawing does not always
+  // want the transcript.
+  show_text_check_ = new QCheckBox(tr("Show text"), this);
+  show_text_check_->setObjectName("catalogueShowTextCheck");
+  show_text_check_->setChecked(true);
+  show_text_check_->setVisible(false);
+  show_text_check_->setToolTip(
+      tr("Show the text form of the payload beside the drawing. Clear this to "
+         "give the drawing the whole pane."));
+  connect(show_text_check_, &QCheckBox::toggled, this,
+          &CatalogueDialog::onShowTextToggled);
+  top_row->addWidget(show_text_check_);
 
   // Flashing text and blinking figures are part of the page, but a page being
   // read or captured is better still, so the reader chooses. Shown only where
@@ -160,7 +233,8 @@ void CatalogueDialog::setupUI() {
   // is the data, not the picture. Last on the row and set apart from the
   // switches before it: those change what is on screen, and this does
   // something with it. Shown only where the payload on display is drawn.
-  top_row->addSpacing(kControlGroupSpacing);
+  action_separator_ = make_separator(this);
+  top_row->addWidget(action_separator_);
   save_page_button_ = new QToolButton(this);
   save_page_button_->setObjectName("catalogueSavePageButton");
   save_page_button_->setText(tr("Save PNG…"));
@@ -286,44 +360,90 @@ void CatalogueDialog::setupUI() {
   body_row->addLayout(payload_column, /*stretch=*/1);
   content_layout->addLayout(body_row, /*stretch=*/1);
 
-  // How the run went as a whole: an empty item list means something quite
-  // different on a recording that yielded nothing at all than on one whose data
-  // never assembled into anything.
-  summary_label_ = new QLabel(this);
-  summary_label_->setObjectName("catalogueSummaryLabel");
-  summary_label_->setWordWrap(true);
-  summary_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-  summary_label_->setVisible(false);
-  content_layout->addWidget(summary_label_);
-
   main_layout->addLayout(content_layout, /*stretch=*/1);
 
-  status_bar_ = new QStatusBar(this);
-  status_bar_->setObjectName("catalogueStatusBar");
-  status_bar_->setSizeGripEnabled(false);
+  // Everything the dialogue has to say goes here, in one column at the foot of
+  // the window: what the viewer is doing, what is on show, what the catalogue
+  // carries, and how the run went. Scattering these around the frame — a
+  // notice above the list, a condition in one corner of a status bar, a run
+  // summary in another — meant a reader had to sweep the window to find out
+  // whether anything had been said at all.
+  //
+  // Read top to bottom it narrows: the most immediate line first, the whole
+  // run last.
+  message_rule_ = new QFrame(this);
+  static_cast<QFrame*>(message_rule_)->setFrameShape(QFrame::HLine);
+  static_cast<QFrame*>(message_rule_)->setFrameShadow(QFrame::Sunken);
+  message_rule_->setVisible(false);
+  main_layout->addWidget(message_rule_);
 
-  // Item status on the left, condition and decode progress on the right; all
-  // in the status bar so a message appearing never reflows the payload.
-  headline_label_ = new QLabel(this);
-  headline_label_->setObjectName("catalogueHeadlineLabel");
-  status_bar_->addWidget(headline_label_, /*stretch=*/1);
+  message_panel_ = new QWidget(this);
+  message_panel_->setObjectName("catalogueMessagePanel");
+  auto* message_layout = new QVBoxLayout(message_panel_);
+  message_layout->setContentsMargins(9, 6, 9, 8);
+  message_layout->setSpacing(2);
+  // The payload gives way to the messages rather than the other way round: a
+  // line of text half cut off by the window edge is worse than a slightly
+  // shorter page, and the panel only ever asks for the few lines it has.
+  message_layout->setSizeConstraint(QLayout::SetMinimumSize);
+  QSizePolicy message_policy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  // The lines wrap, so how tall the panel needs to be depends on how wide it
+  // is. Without this the outer layout asks for one line's worth and the last
+  // message is cut off by the window edge.
+  message_policy.setHeightForWidth(true);
+  message_panel_->setSizePolicy(message_policy);
 
-  condition_label_ = new QLabel(this);
-  condition_label_->setObjectName("catalogueConditionLabel");
-  status_bar_->addPermanentWidget(condition_label_);
-  condition_label_->setVisible(false);
+  const auto add_message_line = [&](const char* object_name) {
+    auto* label = new QLabel(message_panel_);
+    label->setObjectName(QString::fromLatin1(object_name));
+    label->setWordWrap(true);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    label->setVisible(false);
+    message_layout->addWidget(label);
+    return label;
+  };
 
-  status_label_ = new QLabel(this);
-  status_label_->setObjectName("observationStatusLabel");
-  status_bar_->addPermanentWidget(status_label_);
-  status_label_->setVisible(false);
+  // What the viewer is doing, which is only ever true for as long as it is
+  // doing it.
+  status_label_ = add_message_line("observationStatusLabel");
 
-  main_layout->addWidget(status_bar_);
+  // What is on show, and what shape it is in. The reader is looking at this
+  // one, so it leads and it is the line set in bold.
+  headline_label_ = add_message_line("catalogueHeadlineLabel");
+  QFont headline_font = headline_label_->font();
+  headline_font.setBold(true);
+  headline_label_->setFont(headline_font);
+  condition_label_ = add_message_line("catalogueConditionLabel");
+
+  // What the catalogue as a whole carries — the standing notices a service's
+  // own contents earn.
+  notice_label_ = add_message_line("catalogueNoticeLabel");
+
+  // And how the run went, which is background to all of it and dimmed to say
+  // so. The detail behind this line is in the run's report and its log.
+  summary_label_ = add_message_line("catalogueSummaryLabel");
+  QPalette dimmed = summary_label_->palette();
+  dimmed.setColor(QPalette::WindowText,
+                  dimmed.color(QPalette::Disabled, QPalette::WindowText));
+  summary_label_->setPalette(dimmed);
+
+  message_panel_->setVisible(false);
+  main_layout->addWidget(message_panel_);
+}
+
+void CatalogueDialog::refreshMessagePanel() {
+  const bool anything = status_label_->isVisibleTo(message_panel_) ||
+                        headline_label_->isVisibleTo(message_panel_) ||
+                        condition_label_->isVisibleTo(message_panel_) ||
+                        notice_label_->isVisibleTo(message_panel_) ||
+                        summary_label_->isVisibleTo(message_panel_);
+  message_panel_->setVisible(anything);
+  message_rule_->setVisible(anything);
 }
 
 void CatalogueDialog::showPending() {
-  status_label_->setText(tr("Decoding…"));
-  status_label_->setVisible(true);
+  set_message(status_label_, tr("Decoding…"));
+  refreshMessagePanel();
 }
 
 void CatalogueDialog::showError(const QString& message) {
@@ -331,7 +451,8 @@ void CatalogueDialog::showError(const QString& message) {
   // a catalogue that is not coming, so it must say so rather than sit on
   // "Decoding…" forever.
   clearContent();
-  headline_label_->setText(message);
+  set_message(headline_label_, message);
+  refreshMessagePanel();
 }
 
 void CatalogueDialog::clearContent() {
@@ -339,12 +460,12 @@ void CatalogueDialog::clearContent() {
   has_data_ = false;
   current_row_ = -1;
   variant_index_ = 0;
-  status_label_->setVisible(false);
-  status_label_->clear();
-  summary_label_->setVisible(false);
-  summary_label_->clear();
+  set_message(status_label_, QString());
+  set_message(summary_label_, QString());
+  refreshViewOptions();
   refreshItemList();
   showItem(-1);
+  refreshMessagePanel();
 }
 
 void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
@@ -352,8 +473,9 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
     // A dataset whose payloads do not line up with its items is a plugin bug;
     // showing nothing beats indexing past the end of the vector.
     clearContent();
-    headline_label_->setText(
-        tr("The stage returned an inconsistent catalogue"));
+    set_message(headline_label_,
+                tr("The stage returned an inconsistent catalogue"));
+    refreshMessagePanel();
     return;
   }
 
@@ -361,10 +483,22 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
   // catalogue, so a reader stepping a carousel is not thrown back to the top.
   const QString previous_key = normalise_key(find_edit_->text());
 
+  // So does the item on show, for the service that has no find box. A reader
+  // who changes the view is asking to see what is in front of them drawn
+  // another way, and being returned to the first item would be the one thing
+  // that made the comparison hard.
+  const size_t previous_index = displayedIndex();
+  const QString previous_id =
+      previous_index == SIZE_MAX
+          ? QString()
+          : to_qstring(data_.items[previous_index].parent_id.empty()
+                           ? data_.items[previous_index].id
+                           : data_.items[previous_index].parent_id);
+  const int previous_variant = variant_index_;
+
   data_ = data;
   has_data_ = true;
-  status_label_->setVisible(false);
-  status_label_->clear();
+  set_message(status_label_, QString());
 
   // Schema-driven chrome, applied before the table is built from it.
   const auto& schema = data_.schema;
@@ -393,6 +527,8 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
                             ? tr("Nothing was recovered")
                             : to_qstring(schema.empty_message));
 
+  refreshViewOptions();
+
   refreshItemList();
 
   // Restore the reader's position where the same key is still listed; fall
@@ -406,8 +542,166 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
         break;
       }
     }
+  } else if (!previous_id.isEmpty()) {
+    for (size_t i = 0; i < top_level_.size(); ++i) {
+      if (to_qstring(data_.items[top_level_[i]].id) == previous_id) {
+        row = static_cast<int>(i);
+        variant_index_ = previous_variant;
+        break;
+      }
+    }
   }
   showItem(row);
+}
+
+void CatalogueDialog::refreshViewOptions() {
+  const auto& schema = data_.schema;
+  const bool has_options =
+      !schema.view_options.empty() && !schema.view_label.empty();
+  const bool offered = has_options || !schema.toggles.empty();
+  view_bar_->setVisible(offered);
+
+  updating_view_ = true;
+  // Rebuilt from the delivered schema rather than added to, so a catalogue
+  // offering a different set of toggles replaces them instead of accumulating
+  // them.
+  for (QCheckBox* check : toggle_checks_) {
+    view_layout_->removeWidget(check);
+    check->deleteLater();
+  }
+  toggle_checks_.clear();
+  for (const auto& toggle : schema.toggles) {
+    auto* check = new QCheckBox(to_qstring(toggle.label), view_bar_);
+    check->setObjectName("catalogueViewToggle");
+    // The id travels on the widget rather than in a parallel list: nothing here
+    // knows what a toggle means, and the stage gets its own id back untouched.
+    check->setProperty("toggleId", to_qstring(toggle.id));
+    check->setToolTip(to_qstring(toggle.tooltip));
+    // What the stage says it built under, not what was asked for — the two
+    // differ when a stage declines a toggle, and the box should show what is on
+    // screen.
+    check->setChecked(toggle.active);
+    connect(check, &QCheckBox::toggled, this, &CatalogueDialog::onViewToggled);
+    view_layout_->addWidget(check);
+    // Built when a catalogue arrives rather than in the constructor, which for
+    // an already-open dialogue means after its parent was shown — and a widget
+    // created then starts hidden.
+    check->show();
+    toggle_checks_.push_back(check);
+  }
+  updating_view_ = false;
+
+  view_combo_->setVisible(has_options);
+  view_label_->setVisible(has_options);
+  if (!has_options) {
+    return;
+  }
+
+  view_label_->setText(to_qstring(schema.view_label));
+
+  // Filled from the delivered schema rather than added to, so a catalogue that
+  // offers a different set of options replaces the list instead of growing it.
+  updating_view_ = true;
+  view_combo_->clear();
+  int current = 0;
+  for (size_t i = 0; i < schema.view_options.size(); ++i) {
+    const auto& option = schema.view_options[i];
+    view_combo_->addItem(to_qstring(option.label), to_qstring(option.id));
+    view_combo_->setItemData(static_cast<int>(i), to_qstring(option.tooltip),
+                             Qt::ToolTipRole);
+    if (to_qstring(option.id) == to_qstring(schema.view_option)) {
+      current = static_cast<int>(i);
+    }
+  }
+  // What the stage says it built under, not what was asked for: the two differ
+  // when a stage declines an option, and the dropdown should show what is on
+  // screen.
+  view_combo_->setCurrentIndex(current);
+  view_combo_->setToolTip(
+      view_combo_->itemData(current, Qt::ToolTipRole).toString());
+  updating_view_ = false;
+}
+
+void CatalogueDialog::onViewOptionSelected(int index) {
+  if (updating_view_ || index < 0) {
+    return;
+  }
+  view_combo_->setToolTip(
+      view_combo_->itemData(index, Qt::ToolTipRole).toString());
+  emitViewSelection();
+}
+
+void CatalogueDialog::onViewToggled() {
+  if (updating_view_) {
+    return;
+  }
+  emitViewSelection();
+}
+
+void CatalogueDialog::emitViewSelection() {
+  // The whole selection, not the part that changed: the stage builds the
+  // catalogue from both axes at once and has no memory of what it was last
+  // asked for.
+  QStringList active;
+  for (const QCheckBox* check : toggle_checks_) {
+    if (check->isChecked()) {
+      active.append(check->property("toggleId").toString());
+    }
+  }
+  emit viewSelectionChanged(currentViewOption(), active);
+}
+
+std::vector<QString> CatalogueDialog::viewToggles() const {
+  std::vector<QString> ids;
+  ids.reserve(toggle_checks_.size());
+  for (const QCheckBox* check : toggle_checks_) {
+    ids.push_back(check->property("toggleId").toString());
+  }
+  return ids;
+}
+
+bool CatalogueDialog::isToggleActive(const QString& toggle_id) const {
+  for (const QCheckBox* check : toggle_checks_) {
+    if (check->property("toggleId").toString() == toggle_id) {
+      return check->isChecked();
+    }
+  }
+  return false;
+}
+
+void CatalogueDialog::setToggleActive(const QString& toggle_id, bool active) {
+  for (QCheckBox* check : toggle_checks_) {
+    if (check->property("toggleId").toString() == toggle_id) {
+      check->setChecked(active);
+      return;
+    }
+  }
+}
+
+std::vector<QString> CatalogueDialog::viewOptions() const {
+  std::vector<QString> ids;
+  if (!view_combo_->isVisibleTo(this)) {
+    return ids;
+  }
+  ids.reserve(static_cast<size_t>(view_combo_->count()));
+  for (int i = 0; i < view_combo_->count(); ++i) {
+    ids.push_back(view_combo_->itemData(i).toString());
+  }
+  return ids;
+}
+
+QString CatalogueDialog::currentViewOption() const {
+  if (!view_combo_->isVisibleTo(this) || view_combo_->currentIndex() < 0) {
+    return {};
+  }
+  return view_combo_->currentData().toString();
+}
+
+void CatalogueDialog::selectViewOption(const QString& option_id) {
+  const int index = view_combo_->findData(option_id);
+  if (index >= 0) {
+    view_combo_->setCurrentIndex(index);
+  }
 }
 
 void CatalogueDialog::refreshItemList() {
@@ -487,16 +781,16 @@ void CatalogueDialog::refreshItemList() {
   next_item_button_->setEnabled(navigable);
   item_nav_->setVisible(!top_level_.empty());
 
+  // One notice per line rather than run together: they are separate statements
+  // about the catalogue, and reading them as a sentence is what made the old
+  // single line hard to take in.
   QStringList notices;
   for (const auto& notice : data_.summary.notices) {
     notices << to_qstring(notice);
   }
-  notice_label_->setText(notices.join(QStringLiteral("   ")));
-  notice_label_->setVisible(!notices.isEmpty());
-
-  const QString summary = to_qstring(data_.summary.headline);
-  summary_label_->setText(summary);
-  summary_label_->setVisible(!summary.isEmpty());
+  set_message(notice_label_, notices.join(QLatin1Char('\n')));
+  set_message(summary_label_, to_qstring(data_.summary.headline));
+  refreshMessagePanel();
 }
 
 std::vector<size_t> CatalogueDialog::variantsOf(int row) const {
@@ -572,31 +866,34 @@ void CatalogueDialog::renderPayload() {
     text_pane_->clear();
     table_pane_->clearContents();
     table_pane_->setRowCount(0);
-    condition_label_->setVisible(false);
+    set_message(condition_label_, QString());
     animations_check_->setVisible(false);
+    show_text_check_->setVisible(false);
     save_page_button_->setVisible(false);
+    action_separator_->setVisible(false);
     payload_stack_->setCurrentIndex(kPageNothing);
     if (!has_data_) {
-      headline_label_->setText(tr("No data"));
+      set_message(headline_label_, tr("No data"));
     } else if (top_level_.empty()) {
-      headline_label_->setText(empty_label_->text());
+      set_message(headline_label_, empty_label_->text());
     } else {
       const QString typed = find_edit_->text().trimmed();
       const QString noun = data_.schema.item_noun.empty()
                                ? tr("Item")
                                : to_qstring(data_.schema.item_noun);
-      headline_label_->setText(
-          typed.isEmpty() ? tr("Nothing selected")
-                          : tr("%1 %2 was not carried").arg(noun, typed));
+      set_message(headline_label_,
+                  typed.isEmpty()
+                      ? tr("Nothing selected")
+                      : tr("%1 %2 was not carried").arg(noun, typed));
     }
+    refreshMessagePanel();
     return;
   }
 
   const orc::CataloguePayload& payload = data_.payloads[index];
-  headline_label_->setText(to_qstring(payload.headline));
-  const QString condition = to_qstring(payload.condition);
-  condition_label_->setText(condition);
-  condition_label_->setVisible(!condition.isEmpty());
+  set_message(headline_label_, to_qstring(payload.headline));
+  set_message(condition_label_, to_qstring(payload.condition));
+  refreshMessagePanel();
 
   // Only the two drawn payloads can animate, or be saved as an image; a listing
   // or a table has nothing for either control to act on.
@@ -604,6 +901,14 @@ void CatalogueDialog::renderPayload() {
                      payload.kind == orc::CataloguePayload::Kind::kDisplayList;
   animations_check_->setVisible(drawn);
   save_page_button_->setVisible(drawn);
+  action_separator_->setVisible(drawn);
+
+  // The text pane belongs to the display-list payload alone, and only where
+  // that payload brought text with it.
+  const bool has_companion =
+      payload.kind == orc::CataloguePayload::Kind::kDisplayList &&
+      !payload.companion_text.empty();
+  show_text_check_->setVisible(has_companion);
 
   switch (payload.kind) {
     case orc::CataloguePayload::Kind::kCellGrid:
@@ -619,7 +924,8 @@ void CatalogueDialog::renderPayload() {
       display_widget_->setAnimationsEnabled(animations_check_->isChecked());
       const QString companion = to_qstring(payload.companion_text);
       companion_pane_->setPlainText(companion);
-      companion_pane_->setVisible(!companion.isEmpty());
+      companion_pane_->setVisible(!companion.isEmpty() &&
+                                  show_text_check_->isChecked());
       payload_stack_->setCurrentIndex(kPageDisplayList);
       return;
     }
@@ -774,6 +1080,21 @@ void CatalogueDialog::onHighlightToggled(bool checked) {
 void CatalogueDialog::onAnimationsToggled(bool checked) {
   grid_widget_->setAnimationsEnabled(checked);
   display_widget_->setAnimationsEnabled(checked);
+}
+
+void CatalogueDialog::onShowTextToggled(bool checked) {
+  // Nothing is asked of the stage: the text came with the payload, and putting
+  // it away is a change to this window and nothing else.
+  companion_pane_->setVisible(checked &&
+                              !companion_pane_->toPlainText().isEmpty());
+}
+
+bool CatalogueDialog::isTextPaneVisible() const {
+  return companion_pane_->isVisibleTo(display_page_);
+}
+
+void CatalogueDialog::setTextPaneVisible(bool visible) {
+  show_text_check_->setChecked(visible);
 }
 
 void CatalogueDialog::onSavePageClicked() {

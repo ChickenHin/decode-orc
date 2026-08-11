@@ -20,6 +20,9 @@
 #include <utility>
 #include <vector>
 
+#include "nabts_raster_view.h"
+#include "nabts_record_catalogue.h"
+
 namespace orc {
 
 namespace {
@@ -453,6 +456,30 @@ std::string record_condition(const NabtsCataloguedRecord& record,
           plural(diagnostics.storage_refusals, "definition", "definitions") +
           " over the storage budget");
     }
+
+    // What the grammar did to this page on the way to the screen, in the fewest
+    // words that still say it: a reader judging what is in front of them needs
+    // to know it was altered and roughly how much. The rest — which bytes, at
+    // what offsets, against what evidence — is in the log.
+    if (diagnostics.repaired_bytes > 0) {
+      parts.push_back(plural(diagnostics.repaired_bytes, "byte", "bytes") +
+                      " corrected");
+    }
+    if (diagnostics.resynchronised_pdis > 0) {
+      parts.push_back(
+          plural(diagnostics.resynchronised_pdis, "drawing", "drawings") +
+          " trimmed at a gap");
+    }
+    if (diagnostics.dropped_coordinate_words > 0) {
+      parts.push_back(plural(diagnostics.dropped_coordinate_words,
+                             "off-screen point", "off-screen points") +
+                      " dropped");
+    }
+    if (diagnostics.undecided_suspect_bytes > 0) {
+      parts.push_back(
+          plural(diagnostics.undecided_suspect_bytes, "byte", "bytes") +
+          " left in doubt");
+    }
   }
   return join(parts, ", ");
 }
@@ -479,48 +506,117 @@ std::string function_listing(const NabtsCataloguedRecord& record) {
   return join(lines, "\n");
 }
 
-std::string run_headline(const NabtsRecoverySummary& summary) {
+/**
+ * @brief One line on how the run went, for a reader rather than for a decoder
+ *
+ * What a reader needs from this is: how much was read, how much came out, and
+ * whether they should trust it. The packet, group and block accounting behind
+ * those answers — orphaned packets, refused prefixes, corrected blocks — is
+ * diagnostic detail: it goes to the run's report and to the log, where someone
+ * chasing a bad transfer will look for it, rather than across the foot of a
+ * window someone is trying to read a page in.
+ */
+std::string run_headline(const NabtsRecoverySummary& summary,
+                         size_t records_carried) {
   if (summary.frames_analysed == 0 && summary.packets_recovered == 0) {
     return {};
   }
-  std::vector<std::string> parts;
-  parts.push_back(std::to_string(summary.packets_recovered) +
-                  " packets recovered from " +
-                  std::to_string(summary.fields_with_data) + " fields over " +
-                  std::to_string(summary.frames_analysed) + " frames");
-  parts.push_back(std::to_string(summary.groups_completed) +
-                  " data groups complete, " +
-                  std::to_string(summary.groups_incomplete) + " incomplete");
-  parts.push_back(std::to_string(summary.messages_complete) +
-                  " records complete, " +
-                  std::to_string(summary.messages_partial) + " partial");
-  if (summary.packets_prefix_rejected > 0) {
-    // §3.2.2: a packet whose Hamming prefix will not decode cannot even be
-    // filed under a channel, so it is lost before any of the above.
-    parts.push_back(std::to_string(summary.packets_prefix_rejected) +
-                    " packets refused on their prefix");
-  }
-  if (summary.blocks_corrected > 0 || summary.blocks_damaged > 0) {
-    parts.push_back(std::to_string(summary.blocks_corrected) +
-                    " blocks repaired, " +
-                    std::to_string(summary.blocks_damaged) + " beyond repair");
-  }
-  if (summary.lost_packets_estimate > 0) {
-    parts.push_back("about " + std::to_string(summary.lost_packets_estimate) +
-                    " packets lost");
+
+  std::string out = plural(records_carried, "record", "records") +
+                    " read from " +
+                    plural(summary.frames_analysed, "frame", "frames");
+
+  // Whether to trust it. A recording that lost packets, failed to complete
+  // groups or gave up blocks beyond repair is one whose pages may be missing
+  // pieces, and that is worth saying in words rather than in counters.
+  const bool lossy = summary.lost_packets_estimate > 0 ||
+                     summary.groups_incomplete > 0 ||
+                     summary.blocks_damaged > 0 || summary.messages_partial > 0;
+  if (lossy) {
+    out +=
+        "; parts of this recording were lost in transfer, so some pages "
+        "will be incomplete";
   }
   if (summary.records_truncated) {
-    parts.push_back("record list truncated at the catalogue limit");
+    out +=
+        "; the list stops at the catalogue limit, so the recording carried "
+        "more than is shown";
   }
-  return join(parts, "; ");
+  return out;
+}
+
+/**
+ * @brief What the syntax repair did to the catalogue being shown
+ *
+ * A page repaired without saying so is a page a reader cannot judge, and a
+ * reader who cannot see that the pass ran cannot tell "it found nothing" from
+ * "it never happened". So the notice is written either way — but kept to one
+ * clause. How many bytes were corrected in which record is the log's business
+ * (and the run report's); what belongs in front of a reader is whether their
+ * pages have been altered and how widely.
+ */
+std::string lint_notice(const std::vector<NabtsCataloguedRecord>& records,
+                        bool repair) {
+  if (!repair) {
+    return "Syntax repair off: pages are read exactly as they were recovered.";
+  }
+
+  uint64_t pages = 0;
+  uint64_t changed = 0;
+  for (const NabtsCataloguedRecord& record : records) {
+    if (!type_is_presentation(record.record_type)) {
+      continue;
+    }
+    ++pages;
+    const auto& diagnostics = record.page.diagnostics;
+    changed += (diagnostics.repaired_bytes > 0 ||
+                diagnostics.resynchronised_pdis > 0 ||
+                diagnostics.dropped_coordinate_words > 0)
+                   ? 1
+                   : 0;
+  }
+
+  if (changed == 0) {
+    return "Syntax repair on: nothing needed correcting.";
+  }
+  return "Syntax repair on: " + std::to_string(changed) + " of " +
+         std::to_string(pages) + " pages corrected.";
 }
 
 }  // namespace
 
-CatalogueDisplayList nabts_page_display_list(
-    const NabtsPageSnapshot& snapshot) {
+CatalogueDisplayList nabts_page_display_list(const NabtsPageSnapshot& snapshot,
+                                             NaplpsRenderMode mode) {
   CatalogueDisplayList out;
   out.aspect_height = kNabtsDisplayAreaHeight;
+
+  // §4.2.2: the guaranteed-visible part of the unit screen fills a display
+  // area that a television set gives a 4:3 aspect, over a pixel grid that is
+  // not square on screen (Table D1 item 10). Stating the two separately is what
+  // puts a rectangular receiver pixel on screen as a rectangle.
+  out.display_aspect_height = kNaplpsDisplayAspectHeight;
+
+  // The receiver the page is resolved against. Every mode emits the same
+  // geometry and differs only in the grid it carries, which is what sizes
+  // everything §5.3.2.2.6 measures in the receiver's pixels — stroke width
+  // above all. A mode that emits pixels rather than geometry
+  // (naplps_mode_emits_pixels) would deposit the page into this grid and
+  // emit the result instead; that is not built yet, so the pixel modes are
+  // presently the vector emission at their own scale.
+  const NaplpsRenderGrid grid = naplps_render_grid(mode);
+  out.nominal_width = grid.width;
+  out.nominal_height = grid.height;
+
+  if (naplps_mode_emits_pixels(mode)) {
+    // A receiver deposits the page into its frame buffer and displays the
+    // pixels; the emitted list is those pixels, as runs a renderer can scale.
+    // Everything the standard measures in physical pixels — stroke width, the
+    // dot and dash lengths of §5.3.2.4.2, hatch spacing, the incremental raster
+    // — comes out exact rather than approximated, which is the whole point of
+    // naming a receiver.
+    naplps_emit_raster_page(snapshot, grid, out);
+    return out;
+  }
 
   out.palette.reserve(kNabtsColourMapEntries);
   for (size_t i = 0; i < kNabtsColourMapEntries; ++i) {
@@ -677,8 +773,60 @@ std::string chain_base_label(uint16_t channel, uint64_t base) {
 
 }  // namespace
 
-CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
+std::vector<CatalogueViewOption> naplps_view_options() {
+  return {
+      CatalogueViewOption{
+          naplps_render_mode_name(NaplpsRenderMode::kReference),
+          "256 x 200 (reference receiver)",
+          "The receiver the standard's own service reference model describes "
+          "(Table D1 item 10), and the one a set-top decoder of the period "
+          "displayed. The page as its author would have seen it."},
+      CatalogueViewOption{
+          naplps_render_mode_name(NaplpsRenderMode::kTwice), "512 x 400",
+          "The reference grid at twice the resolution, which Appendix D names "
+          "as an example of a receiver that \"may exceed the requirements of "
+          "the respective SRM\" and so \"may produce more pleasing images\"."},
+      CatalogueViewOption{
+          naplps_render_mode_name(NaplpsRenderMode::kThrice), "768 x 600",
+          "The reference grid at three times, for reading the finest detail a "
+          "page carries. No receiver of the period was this good, and a whole "
+          "multiple is what keeps the page's own pixels and letterforms "
+          "intact."},
+      CatalogueViewOption{
+          naplps_render_mode_name(NaplpsRenderMode::kTwiceVector),
+          "512 x 400 (vector)",
+          "The same geometry drawn as shapes rather than pixels: smooth at any "
+          "size, and the clearest reading of what the page describes, but "
+          "without the pixel structure a receiver of any resolution had."},
+  };
+}
+
+CatalogueViewToggle naplps_repair_toggle(bool active) {
+  return CatalogueViewToggle{
+      kNabtsRepairToggleId, "Syntax repair",
+      "NAPLPS is a language with a defined grammar (ANSI X3.110-1983), so a "
+      "page recovered from a damaged recording can be checked against it and, "
+      "where the recording independently says a byte is wrong, corrected. Only "
+      "bytes the recovery already doubts are ever changed, and only where the "
+      "grammar leaves one answer; the rest are left exactly as they arrived. "
+      "Turn it off to read the page as transmitted. Either way this changes "
+      "only what is drawn here — the packet stream and record files a run "
+      "exports are always the recording's own bytes.",
+      active};
+}
+
+CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
+                                       NaplpsRenderMode mode, bool repair) {
   CatalogueDataset out;
+
+  // The pages are built here rather than by recovery, because what a page looks
+  // like depends on the receiver it is drawn for and recovery has no business
+  // fixing that: X3.110 §6.2.3 sizes a DRCS character's storage buffer from the
+  // physical resolution its character field covers. Interpreting on the way to
+  // the screen is what lets the render resolution be changed without reading
+  // the recording again.
+  std::vector<NabtsCataloguedRecord> records = data.records;
+  nabts_interpret_records(records, naplps_render_grid(mode), repair);
 
   out.schema.columns = {
       CatalogueColumn{"address", "Address", false},
@@ -691,12 +839,26 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
   out.schema.highlight_label = "Show display area";
   out.schema.empty_message = "No NABTS records were recovered";
 
+  // Which receiver the pages are drawn against is offered to the reader, not
+  // only to the project: it changes nothing the recovery found and everything
+  // about how a page looks, and the reason to have four of them is to put one
+  // beside another.
+  out.schema.view_label = "Receiver";
+  out.schema.view_options = naplps_view_options();
+  out.schema.view_option = naplps_render_mode_name(mode);
+
+  // Whether a damaged page is presented as recovered or as transmitted is the
+  // reader's to decide while looking, for the same reason the receiver is: it
+  // changes nothing the recovery found, and having the two side by side is how
+  // anyone judges whether a repair improved the page or invented it.
+  out.schema.toggles = {naplps_repair_toggle(repair)};
+
   // The More chains (§5.2.7.6) with more than one catalogued member. Each is
   // presented as one page whose members are stepped through as sub-pages —
   // which is what the records are: §5.2.7.8 presents each More Record over
   // the display its predecessor left.
   std::set<std::pair<uint16_t, uint64_t>> chains;
-  for (const auto& record : data.records) {
+  for (const auto& record : records) {
     if (type_is_presentation(record.record_type) && record.chain_position > 0) {
       chains.insert({record.channel, record.chain_base_address});
     }
@@ -708,29 +870,29 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
   // the order the stepper walks them — rather than by address, which an
   // explicitly-linked chain (§5.2.8.4) need not follow.
   std::map<std::pair<uint16_t, uint64_t>, std::vector<size_t>> members_of;
-  for (size_t i = 0; i < data.records.size(); ++i) {
-    const auto& record = data.records[i];
+  for (size_t i = 0; i < records.size(); ++i) {
+    const auto& record = records[i];
     if (type_is_presentation(record.record_type)) {
       members_of[{record.channel, record.chain_base_address}].push_back(i);
     }
   }
   std::vector<size_t> emit_order;
-  emit_order.reserve(data.records.size());
-  std::vector<bool> scheduled(data.records.size(), false);
-  for (size_t i = 0; i < data.records.size(); ++i) {
+  emit_order.reserve(records.size());
+  std::vector<bool> scheduled(records.size(), false);
+  for (size_t i = 0; i < records.size(); ++i) {
     if (scheduled[i]) {
       continue;
     }
-    const auto& record = data.records[i];
+    const auto& record = records[i];
     const std::pair<uint16_t, uint64_t> key{record.channel,
                                             record.chain_base_address};
     if (type_is_presentation(record.record_type) && chains.count(key) > 0) {
       std::vector<size_t> member_indices = members_of[key];
       // Stable, so versions of one position keep their ascending order.
       std::stable_sort(member_indices.begin(), member_indices.end(),
-                       [&data](size_t a, size_t b) {
-                         return data.records[a].chain_position <
-                                data.records[b].chain_position;
+                       [&records](size_t a, size_t b) {
+                         return records[a].chain_position <
+                                records[b].chain_position;
                        });
       for (const size_t member : member_indices) {
         emit_order.push_back(member);
@@ -743,7 +905,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
   }
 
   for (const size_t record_index : emit_order) {
-    const auto& record = data.records[record_index];
+    const auto& record = records[record_index];
     const bool presentation = type_is_presentation(record.record_type);
     const std::string identity = record_identity(record);
 
@@ -758,7 +920,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
       uint64_t last_frame = 0;
       size_t members = 0;
       uint8_t base_type = record.record_type;
-      for (const auto& member : data.records) {
+      for (const auto& member : records) {
         if (member.channel != record.channel ||
             member.chain_base_address != record.chain_base_address ||
             !type_is_presentation(member.record_type)) {
@@ -841,7 +1003,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
 
     if (presentation) {
       payload.kind = CataloguePayload::Kind::kDisplayList;
-      payload.display_list = nabts_page_display_list(record.page);
+      payload.display_list = nabts_page_display_list(record.page, mode);
       // A caption or an index page is usually read rather than looked at, so
       // the text goes beside the drawing. It comes from the snapshot rather
       // than from the display list: reading a record and drawing it want
@@ -863,7 +1025,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
   // records with the Caption Flag of §5.2.7.3 set, each new caption a new
   // version of the same address, and reading them one record at a time tells a
   // viewer nothing about the service.
-  const auto cues = nabts_caption_cues(data.records);
+  const auto cues = nabts_caption_cues(records);
   if (!cues.empty()) {
     CatalogueItem item;
     // Outside the identity space records occupy: a record id is always
@@ -915,7 +1077,13 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data) {
                                   " on " + join(channels, ", "));
   }
 
-  out.summary.headline = run_headline(data.summary);
+  // Said whichever way the toggle is set, so the reader can always tell what
+  // they are looking at.
+  if (!records.empty()) {
+    out.summary.notices.push_back(lint_notice(records, repair));
+  }
+
+  out.summary.headline = run_headline(data.summary, records.size());
   return out;
 }
 

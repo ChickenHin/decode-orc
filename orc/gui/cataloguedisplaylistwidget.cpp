@@ -22,8 +22,11 @@
 #include <QShowEvent>
 #include <QString>
 #include <QStringList>
+#include <QTransform>
+#include <QVector>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "catalogue_flash_clock.h"
 
@@ -49,9 +52,51 @@ constexpr int kNominalPixelsDown = 200;
 // a single pixel.
 constexpr int kSavedPixelsAcross = 720;
 
+// How wide a saved drawable area is when the list names the grid it was
+// resolved against.
+//
+// One size for every grid, rather than one proportional to each. What the grid
+// changes is how much of the page's detail survives being drawn, and that is
+// exactly what someone saving the same page at two of them is looking at; two
+// images of different sizes make the comparison about the sizes instead. It is
+// also the size a reader gets to keep: a page is saved to put somewhere, and
+// what it is worth on the far side does not depend on which receiver was
+// picked.
+//
+// 1536 is the smallest width that is a whole multiple of every grid a page is
+// drawn against — six times the reference model's 256, three times twice it and
+// twice three times it — so a column of any of them lands on a whole number of
+// image columns. The rows cannot: the grid fills a 4:3 area, which makes the
+// source pixel a twenty-fifth wider than it is tall, and a scale whole both
+// ways would have to be 25 across for every 24 down.
+constexpr int kSavedGridPixelsAcross = 1536;
+
 // A line whose pen is zero is a dimensionless drawing point; it still has to be
-// visible, so it is drawn one device pixel wide.
+// visible, so it is never drawn thinner than one device pixel. Where the list
+// names the grid it was resolved against, one pixel of *that* grid is the floor
+// instead — see nominalPenWidth().
 constexpr qreal kMinimumPenWidth = 1.0;
+
+/**
+ * @brief The thinnest stroke a list's own grid allows, in device pixels
+ *
+ * A source that names the receiver it was authored for sizes a stroke of no
+ * stated width in that receiver's pixels, not in whatever pixels the list is
+ * being drawn into: it is one pixel wide on a 256-across receiver whether that
+ * receiver's picture is shown small or large. Deriving the floor from the grid
+ * is what stops stroke width tracking the size of the window.
+ *
+ * The pen collapses to one width, so the wider of the grid pixel's two
+ * dimensions governs, matching the rule the operations themselves follow. Zero
+ * where the list names no grid, leaving the device-pixel floor alone.
+ */
+qreal nominalPenWidth(const CatalogueDisplayList& list, const QRectF& area) {
+  if (list.nominal_width <= 0 || list.nominal_height <= 0) {
+    return 0.0;
+  }
+  return std::max(area.width() / list.nominal_width,
+                  area.height() / list.nominal_height);
+}
 
 QColor to_qcolor(const CatalogueColour& colour) {
   // A transparent colour shows the lower planes through. A viewer has no video
@@ -62,63 +107,186 @@ QColor to_qcolor(const CatalogueColour& colour) {
   return QColor(colour.red, colour.green, colour.blue);
 }
 
-Qt::PenStyle to_pen_style(CatalogueLineStyle style) {
+// The finest a pattern's step is drawn before it is filled solid instead, in
+// device pixels. A step below one pixel has no band or element left to show,
+// and a tile sampled at that scale is noise rather than a pattern; solid is
+// both the honest answer and the one §5.3.2.4.4 gives the dimensionless pel it
+// is on its way to.
+constexpr qreal kMinimumPatternStep = 1.0;
+
+/**
+ * @brief The lit and unlit run lengths of a line texture, in logical pels
+ *
+ * X3.110 §5.3.2.4.2 states every texture as a count of pels: a dot is one pel
+ * and the gap beside it another, a dash is three pels, and the dotted-dashed
+ * texture puts a dot between two of them with "the inter-dot-dash spacing ...
+ * equivalent to the inter-dot spacing". Qt's own dash styles are a different
+ * set of ratios — its dotted line leaves twice the gap the standard does —
+ * which is why none of them is used here. Empty for a solid line.
+ */
+QVector<qreal> texture_pattern_pels(CatalogueLineStyle style) {
   switch (style) {
     case CatalogueLineStyle::kSolid:
-      return Qt::SolidLine;
+      return {};
     case CatalogueLineStyle::kDotted:
-      return Qt::DotLine;
+      return {1.0, 1.0};
     case CatalogueLineStyle::kDashed:
-      return Qt::DashLine;
+      return {3.0, 3.0};
     case CatalogueLineStyle::kDashDotted:
-      return Qt::DashDotLine;
+      return {3.0, 1.0, 1.0, 1.0};
   }
-  return Qt::SolidLine;
+  return {};
 }
 
 /**
- * @brief The fill for an operation's pattern
+ * @brief How far a line runs for its texture to advance one pel, in device
+ *        pixels
  *
- * The four built-in patterns map onto Qt's hatch brushes directly. The four
- * programmable masks are element bitmaps the source defined, so they become a
- * textured brush built from the mask; a mask that was never defined falls back
- * to solid, which is what an undefined mask leaves.
+ * The pel is a rectangle rather than a length, so how much of a line one of
+ * them covers depends on which way the line goes: the step is the longest one
+ * that advances no further than a pel width across and no further than a pel
+ * height down. It is exactly the pel width on a horizontal line and the pel
+ * height on a vertical one, and it collapses to zero — a solid line — exactly
+ * where §5.3.2.4.2's closing note says it should: "if logical pel size dx = 0,
+ * all nonvertical lines are solid. If logical pel size dy = 0, all
+ * nonhorizontal lines are solid."
+ *
+ * @param direction A unit vector along the line, in device pixels
+ */
+qreal texture_step(const QPointF& direction, qreal pel_width,
+                   qreal pel_height) {
+  qreal step = std::numeric_limits<qreal>::infinity();
+  if (std::fabs(direction.x()) > 1e-9) {
+    step = std::min(step, pel_width / std::fabs(direction.x()));
+  }
+  if (std::fabs(direction.y()) > 1e-9) {
+    step = std::min(step, pel_height / std::fabs(direction.y()));
+  }
+  return std::isfinite(step) ? step : 0.0;
+}
+
+/**
+ * @brief The fill for an operation's pattern, at the size the standard gives it
+ *
+ * Both kinds of pattern are sized by the drawing itself rather than by the
+ * renderer: §5.3.2.4.4 makes a hatch line and the gap beside it each one
+ * logical pel across, and §5.3.2.4.5 steps and repeats a programmable mask over
+ * the mask size the source stated. Both are registered against the *unit
+ * screen's* origin and not the figure's, so that "registration of the patterns
+ * shall be maintained across figures" — two figures filled with the same
+ * pattern line up with each other.
+ *
+ * That is what the brush's own transform carries here: it puts brush space's
+ * origin on unit (0, 0) and runs its y upwards, so the tile repeats across the
+ * whole page at the stated size instead of at whatever pitch a stock Qt brush
+ * happens to have in device pixels. A stock brush would make the pattern a
+ * function of how large the page is drawn, which is the same fault the pen
+ * width had before it was given the list's grid to measure against.
+ *
+ * A mask that was never defined falls back to solid, which is what an undefined
+ * mask leaves.
  */
 QBrush texture_brush(const CatalogueDrawOp& op,
-                     const CatalogueDisplayList& list, const QColor& colour) {
-  switch (op.fill_pattern) {
-    case CatalogueFillPattern::kSolid:
-      return QBrush(colour, Qt::SolidPattern);
-    case CatalogueFillPattern::kVerticalHatch:
-      return QBrush(colour, Qt::VerPattern);
-    case CatalogueFillPattern::kHorizontalHatch:
-      return QBrush(colour, Qt::HorPattern);
-    case CatalogueFillPattern::kCrossHatch:
-      return QBrush(colour, Qt::CrossPattern);
-    default:
-      break;
+                     const CatalogueDisplayList& list, const QColor& colour,
+                     const QRectF& area, qreal unit_x, qreal unit_y) {
+  const QBrush solid(colour, Qt::SolidPattern);
+  if (op.fill_pattern == CatalogueFillPattern::kSolid) {
+    return solid;
+  }
+
+  // Brush space is the tile's own pixels; this puts its origin on the unit
+  // screen's and points its y the way unit y points. |tile_x| and |tile_y| are
+  // how far the whole tile reaches in device pixels before it repeats, which is
+  // one step of a mask but *two* pels of a hatch — a lit band and the gap
+  // beside it.
+  const auto anchored = [&area](const QImage& tile, qreal tile_x,
+                                qreal tile_y) {
+    QBrush brush(tile);
+    QTransform transform;
+    transform.translate(area.left(), area.bottom());
+    transform.scale(tile_x / tile.width(), -tile_y / tile.height());
+    brush.setTransform(transform);
+    return brush;
+  };
+
+  const bool is_hatch =
+      op.fill_pattern == CatalogueFillPattern::kVerticalHatch ||
+      op.fill_pattern == CatalogueFillPattern::kHorizontalHatch ||
+      op.fill_pattern == CatalogueFillPattern::kCrossHatch;
+  if (is_hatch) {
+    // One pel across and one down, in device pixels. Either may be too fine to
+    // draw as bands, in which case that axis is solid — which is also what the
+    // standard's own degenerate case says of a pel with no extent.
+    const qreal step_x = std::fabs(op.pen_size.dx) * unit_x;
+    const qreal step_y = std::fabs(op.pen_size.dy) * unit_y;
+    const bool across_solid = !(step_x > kMinimumPatternStep);
+    const bool down_solid = !(step_y > kMinimumPatternStep);
+
+    // A hatch line and the gap beside it are each one pel, so a band is lit
+    // when its index is even — which over two bands means the first of them.
+    const auto lit = [&](int band_x, int band_y) {
+      switch (op.fill_pattern) {
+        case CatalogueFillPattern::kVerticalHatch:
+          return across_solid || band_x == 0;
+        case CatalogueFillPattern::kHorizontalHatch:
+          return down_solid || band_y == 0;
+        default:
+          // Cross hatch draws both sets, so a band on either is lit.
+          return across_solid || band_x == 0 || down_solid || band_y == 0;
+      }
+    };
+    if (lit(0, 0) && lit(0, 1) && lit(1, 0) && lit(1, 1)) {
+      return solid;
+    }
+
+    QImage tile(2, 2, QImage::Format_ARGB32_Premultiplied);
+    tile.fill(Qt::transparent);
+    for (int band_x = 0; band_x < 2; ++band_x) {
+      for (int band_y = 0; band_y < 2; ++band_y) {
+        if (lit(band_x, band_y)) {
+          tile.setPixelColor(band_x, band_y, colour);
+        }
+      }
+    }
+    // The tile is a lit band and an unlit one on each axis, so it repeats every
+    // two pels. An axis drawn solid tiles at any pitch, so it borrows the
+    // other's rather than scaling by a zero that would collapse the transform.
+    return anchored(tile, 2.0 * (across_solid ? step_y : step_x),
+                    2.0 * (down_solid ? step_x : step_y));
   }
 
   const size_t slot = static_cast<size_t>(op.fill_pattern) -
                       static_cast<size_t>(CatalogueFillPattern::kMask0);
   if (slot >= list.fill_masks.size() || !list.fill_masks[slot].defined()) {
-    return QBrush(colour, Qt::SolidPattern);
+    return solid;
+  }
+  const auto& mask = list.fill_masks[slot];
+
+  const qreal step_x = std::fabs(op.fill_mask_size.dx) * unit_x;
+  const qreal step_y = std::fabs(op.fill_mask_size.dy) * unit_y;
+  if (!(step_x > kMinimumPatternStep) || !(step_y > kMinimumPatternStep)) {
+    // No stated size, or one too fine to resolve into elements.
+    return solid;
   }
 
-  const auto& mask = list.fill_masks[slot];
   QImage tile(mask.width, mask.height, QImage::Format_ARGB32_Premultiplied);
   tile.fill(Qt::transparent);
   for (int row = 0; row < mask.height; ++row) {
-    // Row 0 of the buffer is its bottom, matching unit space; a QImage's row 0
-    // is its top.
-    const int image_row = mask.height - 1 - row;
     for (int column = 0; column < mask.width; ++column) {
-      if (mask.elements[static_cast<size_t>(row) * mask.width + column]) {
-        tile.setPixelColor(column, image_row, colour);
+      if (!mask.elements[static_cast<size_t>(row) * mask.width + column]) {
+        continue;
       }
+      // Row 0 of the buffer is its bottom, which is where the brush transform's
+      // upward y already puts row 0 of the tile. "The sign bits of dx and dy
+      // are used to reflect the mask pattern within the mask field"
+      // (§5.3.2.4.5), and reflecting the tile is reflecting the field.
+      const int x =
+          op.fill_mask_size.dx < 0.0 ? mask.width - 1 - column : column;
+      const int y = op.fill_mask_size.dy < 0.0 ? mask.height - 1 - row : row;
+      tile.setPixelColor(x, y, colour);
     }
   }
-  return QBrush(tile);
+  return anchored(tile, step_x, step_y);
 }
 
 // Two points closer than this in device pixels are the same point — which is
@@ -387,8 +555,13 @@ QSize CatalogueDisplayListWidget::sizeHint() const {
 
 QRectF CatalogueDisplayListWidget::displayAreaRectIn(
     const QSizeF& bounds) const {
-  const double aspect_height =
+  // The area takes the shape the list is displayed at, which is only the extent
+  // of unit y it covers when its nominal pixels are square.
+  double aspect_height =
       list_ && list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
+  if (list_ && list_->display_aspect_height > 0.0) {
+    aspect_height = list_->display_aspect_height;
+  }
   const qreal available_w = bounds.width();
   const qreal available_h = bounds.height();
   qreal draw_w = available_w;
@@ -410,11 +583,40 @@ QSize CatalogueDisplayListWidget::pageImageSize() const {
   if (!list_) {
     return {};
   }
+  double aspect_height =
+      list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
+  if (list_->display_aspect_height > 0.0) {
+    aspect_height = list_->display_aspect_height;
+  }
+
+  // A list that names the grid it was resolved against is saved at the size
+  // every such list is saved at, whatever that grid was; one that names none
+  // has nothing to line up with and keeps the plain width.
+  const int across = (list_->nominal_width > 0 && list_->nominal_height > 0)
+                         ? kSavedGridPixelsAcross
+                         : kSavedPixelsAcross;
+
+  return QSize(
+      across,
+      std::max(1, static_cast<int>(std::lround(across * aspect_height))));
+}
+
+CatalogueDisplayListWidget::Mapping CatalogueDisplayListWidget::mappingFor(
+    const QRectF& area) const {
+  Mapping mapping;
+  if (!list_) {
+    return mapping;
+  }
   const double aspect_height =
       list_->aspect_height > 0.0 ? list_->aspect_height : 1.0;
-  return QSize(kSavedPixelsAcross,
-               std::max(1, static_cast<int>(std::lround(kSavedPixelsAcross *
-                                                        aspect_height))));
+  mapping.unit_x = area.width();
+  // Unit y runs 0 to aspect_height over the area's full height, so a unit of y
+  // is that many device pixels — the same as unit_x only when the area's shape
+  // and the list's extent agree, which is to say when its pixels are square.
+  mapping.unit_y = area.height() / aspect_height;
+  mapping.minimum_pen =
+      std::max(nominalPenWidth(*list_, area), kMinimumPenWidth);
+  return mapping;
 }
 
 QImage CatalogueDisplayListWidget::renderPageImage(const QSize& size) const {
@@ -441,18 +643,19 @@ void CatalogueDisplayListWidget::paintContent(QPainter& painter,
   }
 
   const QRectF area = displayAreaRectIn(bounds.size());
-  // The mapping is isotropic: the drawable area is |unit| pixels per unit of x,
-  // and the same per unit of y, because its nominal pixels are square.
-  const qreal unit = area.width();
+  const Mapping mapping = mappingFor(area);
 
-  painter.setRenderHint(QPainter::Antialiasing, true);
+  // A list that tiles its own pixel grid is drawn hard-edged: smoothing would
+  // blur pixels a receiver had sharp, and blending both sides of the boundary
+  // where two runs abut leaves a seam along a join that should be invisible.
+  painter.setRenderHint(QPainter::Antialiasing, !list_->pixel_aligned);
   painter.save();
   // Nothing outside the drawable area is guaranteed visible on a receiver, so
   // nothing outside it is drawn here either.
   painter.setClipRect(area);
 
   for (const auto& op : list_->ops) {
-    paintOp(painter, *list_, op, area, unit, lit);
+    paintOp(painter, *list_, op, area, mapping, lit);
     ++ops_painted_;
   }
   painter.restore();
@@ -470,12 +673,17 @@ void CatalogueDisplayListWidget::paintContent(QPainter& painter,
 void CatalogueDisplayListWidget::paintOp(QPainter& painter,
                                          const CatalogueDisplayList& list,
                                          const CatalogueDrawOp& op,
-                                         const QRectF& area, qreal unit,
-                                         bool lit) {
+                                         const QRectF& area,
+                                         const Mapping& mapping, bool lit) {
+  const qreal unit_x = mapping.unit_x;
+  const qreal unit_y = mapping.unit_y;
+  const qreal minimum_pen = mapping.minimum_pen;
+  const bool pixel_aligned = list.pixel_aligned;
+
   // Unit space has y upwards from the bottom left; the widget's y runs down.
-  const auto map = [&area, unit](const CataloguePoint& point) {
-    return QPointF(area.left() + point.x * unit,
-                   area.bottom() - point.y * unit);
+  const auto map = [&area, unit_x, unit_y](const CataloguePoint& point) {
+    return QPointF(area.left() + point.x * unit_x,
+                   area.bottom() - point.y * unit_y);
   };
 
   const QColor background =
@@ -491,13 +699,12 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
 
   // The pen is what gives a line its width. Both dimensions map to one pen, so
   // the larger governs — a pen has no orientation.
-  const qreal pel_w = std::fabs(op.pen_size.dx) * unit;
-  const qreal pel_h = std::fabs(op.pen_size.dy) * unit;
-  const qreal pen_width = std::max({pel_w, pel_h, kMinimumPenWidth});
+  const qreal pel_w = std::fabs(op.pen_size.dx) * unit_x;
+  const qreal pel_h = std::fabs(op.pen_size.dy) * unit_y;
+  const qreal pen_width = std::max({pel_w, pel_h, minimum_pen});
 
   QPen pen(colour);
   pen.setWidthF(pen_width);
-  pen.setStyle(to_pen_style(op.line_style));
   pen.setCapStyle(Qt::FlatCap);
   pen.setJoinStyle(Qt::MiterJoin);
 
@@ -507,11 +714,69 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
     points.push_back(map(point));
   }
 
+  // A texture is counted in pels along the line, and the pel is a rectangle, so
+  // how far a dot or a dash reaches depends on which way the line runs. Qt
+  // applies one dash pattern to a whole path, so a path is stroked a segment at
+  // a time with the phase carried over the joins: §5.3.2.4.2's texture runs on
+  // along the path rather than restarting at each vertex. A pattern is given to
+  // Qt in units of the pen's width, which is what setDashPattern measures in.
+  const QVector<qreal> pattern_pels = texture_pattern_pels(op.line_style);
+  qreal period_pels = 0.0;
+  for (const qreal run : pattern_pels) {
+    period_pels += run;
+  }
+
+  const auto textured_pen = [&](qreal step, qreal phase_pels) {
+    QPen textured = pen;
+    if (pattern_pels.isEmpty() || step < kMinimumPatternStep) {
+      // Solid, either because the texture is, or because the pel has no extent
+      // along this line — §5.3.2.4.2's "if logical pel size dx = 0, all
+      // nonvertical lines are solid" and its converse — or because what is left
+      // of it is too fine to break the line up with.
+      return textured;
+    }
+    QVector<qreal> pattern;
+    pattern.reserve(pattern_pels.size());
+    for (const qreal run : pattern_pels) {
+      pattern.push_back(run * step / pen_width);
+    }
+    textured.setDashPattern(pattern);
+    textured.setDashOffset(std::fmod(phase_pels, period_pels) * step /
+                           pen_width);
+    return textured;
+  };
+
+  const auto stroke_textured = [&](const QVector<QPointF>& path) {
+    painter.setBrush(Qt::NoBrush);
+    if (pattern_pels.isEmpty()) {
+      painter.setPen(pen);
+      painter.drawPolyline(QPolygonF(path));
+      return;
+    }
+    qreal phase_pels = 0.0;
+    for (int i = 0; i + 1 < path.size(); ++i) {
+      const QPointF from = path[i];
+      const QPointF to = path[i + 1];
+      const qreal length = std::hypot(to.x() - from.x(), to.y() - from.y());
+      if (!(length > 0.0)) {
+        continue;
+      }
+      const QPointF direction((to.x() - from.x()) / length,
+                              (to.y() - from.y()) / length);
+      const qreal step = texture_step(direction, pel_w, pel_h);
+      painter.setPen(textured_pen(step, phase_pels));
+      painter.drawLine(from, to);
+      if (step >= kMinimumPatternStep) {
+        phase_pels += length / step;
+      }
+    }
+  };
+
   // A highlighted figure is filled as usual and outlined in nominal black, or
   // in the background colour where the colour mode has one.
   const auto outline_pen = [&]() {
     QPen outline(op.has_background ? background : QColor(0, 0, 0));
-    outline.setWidthF(std::max(pen_width, kMinimumPenWidth));
+    outline.setWidthF(std::max(pen_width, minimum_pen));
     return outline;
   };
 
@@ -555,10 +820,9 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       }
       // A visible point is the pen itself, so it is drawn as that rectangle
       // rather than as a dot of arbitrary size.
-      const QRectF pel(points.front().x(),
-                       points.front().y() - std::max(pel_h, kMinimumPenWidth),
-                       std::max(pel_w, kMinimumPenWidth),
-                       std::max(pel_h, kMinimumPenWidth));
+      const QRectF pel(
+          points.front().x(), points.front().y() - std::max(pel_h, minimum_pen),
+          std::max(pel_w, minimum_pen), std::max(pel_h, minimum_pen));
       painter.fillRect(pel, colour);
       return;
     }
@@ -567,9 +831,7 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       if (points.size() < 2) {
         return;
       }
-      painter.setPen(pen);
-      painter.setBrush(Qt::NoBrush);
-      painter.drawPolyline(QPolygonF(points));
+      stroke_textured(points);
       return;
     }
 
@@ -590,7 +852,11 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
         path.lineTo(points[1]);
       }
       if (!op.filled) {
-        painter.setPen(pen);
+        // An arc turns as it goes, so no single step is right along all of it.
+        // The pel measured along an axis is the step where the arc runs level
+        // or upright, and the shortest it ever takes; the pixel modes step it
+        // per segment and are exact.
+        painter.setPen(textured_pen(std::max(pel_w, pel_h), 0.0));
         painter.setBrush(Qt::NoBrush);
         painter.drawPath(path);
         return;
@@ -600,7 +866,8 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       // the region of the outline and the chord traced by the logical pel)".
       QPainterPath closed = path;
       closed.closeSubpath();
-      const QBrush brush = texture_brush(op, list, colour);
+      const QBrush brush =
+          texture_brush(op, list, colour, area, unit_x, unit_y);
       painter.setBrush(brush);
       painter.setPen(fill_outline_pen(brush));
       painter.drawPath(closed);
@@ -620,11 +887,19 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       // A negative extent is a rectangle drawn back from its origin, which
       // normalized() resolves.
       const QPointF origin = map(op.origin);
-      const QPointF far(origin.x() + op.size.dx * unit,
-                        origin.y() - op.size.dy * unit);
-      const QRectF box = QRectF(origin, far).normalized();
+      const QPointF far(origin.x() + op.size.dx * unit_x,
+                        origin.y() - op.size.dy * unit_y);
+      QRectF box = QRectF(origin, far).normalized();
+      if (pixel_aligned) {
+        // Both edges are rounded the same way, so a run and the one beside it
+        // land on the same device column and meet without a gap or an overlap.
+        box =
+            QRectF(QPointF(std::round(box.left()), std::round(box.top())),
+                   QPointF(std::round(box.right()), std::round(box.bottom())));
+      }
       if (op.filled) {
-        const QBrush brush = texture_brush(op, list, colour);
+        const QBrush brush =
+            texture_brush(op, list, colour, area, unit_x, unit_y);
         painter.setPen(op.outlined ? outline_pen() : fill_outline_pen(brush));
         painter.setBrush(brush);
       } else {
@@ -641,14 +916,13 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       }
       const QPolygonF polygon(points);
       if (op.filled) {
-        const QBrush brush = texture_brush(op, list, colour);
+        const QBrush brush =
+            texture_brush(op, list, colour, area, unit_x, unit_y);
         painter.setPen(op.outlined ? outline_pen() : fill_outline_pen(brush));
         painter.setBrush(brush);
         painter.drawPolygon(polygon);
       } else {
-        painter.setPen(pen);
-        painter.setBrush(Qt::NoBrush);
-        painter.drawPolyline(polygon);
+        stroke_textured(points);
       }
       return;
     }
@@ -659,14 +933,14 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       if (op.colour_run.empty()) {
         return;
       }
-      const qreal step_x = std::max(pel_w, kMinimumPenWidth);
-      const qreal step_y = std::max(pel_h, kMinimumPenWidth);
-      const qreal field_w = std::fabs(op.size.dx) * unit;
+      const qreal step_x = std::max(pel_w, minimum_pen);
+      const qreal step_y = std::max(pel_h, minimum_pen);
+      const qreal field_w = std::fabs(op.size.dx) * unit_x;
       const int columns =
           std::max(1, static_cast<int>(std::floor(field_w / step_x)));
       const QPointF origin = map(op.origin);
       // The field's origin is its lower left, and a raster runs top down.
-      const qreal top = origin.y() - std::fabs(op.size.dy) * unit;
+      const qreal top = origin.y() - std::fabs(op.size.dy) * unit_y;
       for (int i = 0; i < static_cast<int>(op.colour_run.size()); ++i) {
         const int column = i % columns;
         const int row = i / columns;
@@ -685,8 +959,8 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       if (op.text.empty()) {
         return;
       }
-      const qreal field_w = std::fabs(op.size.dx) * unit;
-      const qreal field_h = std::fabs(op.size.dy) * unit;
+      const qreal field_w = std::fabs(op.size.dx) * unit_x;
+      const qreal field_h = std::fabs(op.size.dy) * unit_y;
       if (field_w <= 0.0 || field_h <= 0.0) {
         return;
       }
@@ -707,8 +981,8 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
       painter.setFont(font);
 
       const QString text = QString::fromUtf8(op.text.c_str());
-      const qreal advance_x = op.advance.dx * unit;
-      const qreal advance_y = -op.advance.dy * unit;
+      const qreal advance_x = op.advance.dx * unit_x;
+      const qreal advance_y = -op.advance.dy * unit_y;
 
       // One character field at a time: the source placed the characters on a
       // fixed pitch, and letting the font's own advances accumulate would drift
@@ -753,8 +1027,8 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
 
     case CatalogueDrawKind::kMosaic: {
       const QPointF origin = map(op.origin);
-      const qreal field_w = std::fabs(op.size.dx) * unit;
-      const qreal field_h = std::fabs(op.size.dy) * unit;
+      const qreal field_w = std::fabs(op.size.dx) * unit_x;
+      const qreal field_h = std::fabs(op.size.dy) * unit_y;
       const QRectF field(origin.x(), origin.y() - field_h, field_w, field_h);
       if (op.has_background) {
         painter.fillRect(field, background);
@@ -766,8 +1040,8 @@ void CatalogueDisplayListWidget::paintOp(QPainter& painter,
 
     case CatalogueDrawKind::kGlyph: {
       const QPointF origin = map(op.origin);
-      const qreal field_w = std::fabs(op.size.dx) * unit;
-      const qreal field_h = std::fabs(op.size.dy) * unit;
+      const qreal field_w = std::fabs(op.size.dx) * unit_x;
+      const qreal field_h = std::fabs(op.size.dy) * unit_y;
       const QRectF field(origin.x(), origin.y() - field_h, field_w, field_h);
       if (op.has_background) {
         painter.fillRect(field, background);

@@ -22,13 +22,6 @@ namespace {
 // simultaneous colours.
 constexpr size_t kColourMapAddressBits = 4;
 
-// Table D1 item 10: "Resolution shall be on the order of 256 pixels horizontal
-// by 200 pixels vertical", which is also T.101 Table II-3's
-// Presentation-Resolution. This is what §6.2.3 means by "the minimum physical
-// resolution ... covered by the character field".
-constexpr double kPhysicalWidthPixels = 256.0;
-constexpr double kPhysicalHeightPixels = 200.0;
-
 // Table D1 item 11's accounting for a DRCS character: 96 normal-size characters
 // fit in the shared 3072 bytes and still leave 2048 for macros, so a character
 // costs (3072 - 2048) / 96 rounded up.
@@ -327,17 +320,24 @@ NabtsDrcsCharacter* NaplpsState::drcs(uint8_t code) {
 void NaplpsState::drcs_buffer_size(uint16_t& width, uint16_t& height) const {
   // §6.2.3: "The aspect ratio of the storage buffer shall be the same as that
   // of the character field dimensions when the DEF DRCS character is received",
-  // at the physical resolution the character field covers. Table D1 item 8's
-  // own example: a field 6/256 wide and 10/256 high gives a buffer of at least
-  // 6 by 10 elements.
+  // at the physical resolution the character field covers.
+  //
+  // Both axes are measured in the receiver's pixels, which is a different
+  // number from the grid's row count: the grid's rows span only the visible
+  // kNabtsDisplayAreaHeight of unit y, so a unit-y height covers dy / pitch_y
+  // pixels rather than dy * height. Table D1 item 8's own example turns on the
+  // difference — "if the character field size is dx = 6/256 and dy = 10/256,
+  // then the storage buffer shall be an array of at least 6 elements horizontal
+  // by at least 10 elements vertical" — and 10/256 of unit y is 10 rows of the
+  // reference grid precisely because 200 / 0,78125 is 256.
   const double dx = std::fabs(text.character_field.dx);
   const double dy = std::fabs(text.character_field.dy);
-  width = static_cast<uint16_t>(
-      std::clamp<int64_t>(std::llround(dx * kPhysicalWidthPixels), 1,
-                          static_cast<int64_t>(kMaxDrcsDimension)));
-  height = static_cast<uint16_t>(
-      std::clamp<int64_t>(std::llround(dy * kPhysicalHeightPixels), 1,
-                          static_cast<int64_t>(kMaxDrcsDimension)));
+  const double columns = dx / render_grid_.pitch_x();
+  const double rows = dy / render_grid_.pitch_y();
+  width = static_cast<uint16_t>(std::clamp<int64_t>(
+      std::llround(columns), 1, static_cast<int64_t>(kMaxDrcsDimension)));
+  height = static_cast<uint16_t>(std::clamp<int64_t>(
+      std::llround(rows), 1, static_cast<int64_t>(kMaxDrcsDimension)));
 }
 
 NabtsDrcsCharacter* NaplpsState::begin_drcs(uint8_t code, uint16_t width,

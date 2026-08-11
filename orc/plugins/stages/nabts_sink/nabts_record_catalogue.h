@@ -14,11 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <string>
 #include <tuple>
 #include <vector>
 
 #include "nabts_record.h"
 #include "naplps_interpreter.h"
+#include "naplps_lint.h"
 #include "vbi-services/vbi_analysis_results.h"
 
 namespace orc {
@@ -40,6 +42,154 @@ struct NabtsRecordCopy {
   /// is read as full confidence — a detector that cannot express doubt has not
   /// expressed any.
   std::vector<uint8_t> confidence;
+};
+
+/**
+ * @brief What lint-directed repair made of a whole catalogue of records
+ *
+ * Aggregated over every presentation record, so the stage's report can say how
+ * much of what a reader will see was recovered rather than received. The
+ * per-page detail is in each page's own diagnostics.
+ */
+struct NabtsLintTotals {
+  uint32_t records_linted = 0;
+  /// Records the linter faulted before any repair.
+  uint32_t records_faulted = 0;
+  /// Records still faulted after repair — what is left to look at.
+  uint32_t records_faulted_after = 0;
+
+  uint64_t errors_before = 0;
+  uint64_t warnings_before = 0;
+  uint64_t errors_after = 0;
+  uint64_t warnings_after = 0;
+
+  uint64_t suspect_bytes = 0;
+  uint64_t bytes_repaired = 0;
+  uint64_t bytes_ambiguous = 0;
+  uint64_t pdis_resynchronised = 0;
+  uint64_t coordinate_words_dropped = 0;
+
+  /// Human-readable summary for the stage report. Empty where nothing was
+  /// linted and nothing was found.
+  std::string summary() const;
+};
+
+/**
+ * @brief Lint and repair every presentation record, for the totals alone
+ *
+ * Does not change @p records: it exists so a run can report how much repair the
+ * recording needed without a reader having to open every page. Records are
+ * repaired in the same order nabts_interpret_records() repairs them — Support
+ * Record first, per Data Channel — so the totals describe the same readings a
+ * reader will be shown.
+ */
+NabtsLintTotals nabts_lint_records(
+    const std::vector<NabtsCataloguedRecord>& records);
+
+/**
+ * @brief Run every presentation record's code into its page
+ *
+ * §6.1: a presentation record's data is NAPLPS, so this is where it becomes
+ * something a viewer can draw. Each record is presented the way a receiver
+ * would present the page — the general reset of CEA-516 §8.5, the channel's
+ * Support Record where the Support-Needed Flag asks for it (§5.2.7.9), the
+ * caption preset of §5.2.7.3 where the Caption Flag does, and the record drawn
+ * over its own More chain (§5.2.7.8) — so the chains and the support records
+ * have to be resolved across the whole catalogue rather than record by record.
+ *
+ * Separate from recovery because it depends on @p grid, the receiver being
+ * emulated: X3.110 §6.2.3 sizes a DRCS character's storage buffer from the
+ * physical resolution its character field covers, so interpreting during
+ * recovery would pin part of the result to whatever receiver was configured
+ * when the recording was read. Records whose type is not a presentation one
+ * are left alone.
+ *
+ * @param repair Whether to run each record's presentation code through
+ *               lint-directed repair before interpreting it (see
+ *               naplps_lint_repair.h). What the repair changes is how the
+ *               record *reads*; @ref NabtsCataloguedRecord::data keeps the
+ *               bytes as they were recovered, so the packet stream and the
+ *               record files a run exports are unaffected. Each page's
+ *               diagnostics carry what the repair did to it.
+ */
+void nabts_interpret_records(std::vector<NabtsCataloguedRecord>& records,
+                             NaplpsRenderGrid grid, bool repair = false);
+
+// ---------------------------------------------------------------------------
+// The vote
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief How close in weight two candidates have to be to count as tied
+ *
+ * A percentage of the leader's weight. Exact ties are the case this is really
+ * for — two copies of a record saying different things once each — but a lead
+ * of a few per cent is one copy's detector being marginally happier than
+ * another's about a byte they disagree on, which is not evidence enough to
+ * settle it either. Anything further behind than this lost on the weights, and
+ * the grammar is not asked.
+ */
+constexpr unsigned kNabtsVoteTiePercent = 90;
+
+/**
+ * @brief Contested positions in one record the grammar is asked about
+ *
+ * Each one costs a lint pass per candidate, and a record whose copies disagree
+ * in more places than this is one the vote is not going to rescue by argument.
+ * The count is reported either way, so a capped record says so rather than
+ * looking decisive.
+ */
+constexpr size_t kNabtsMaxAdjudicatedPositions = 32;
+
+/// Candidates put to the grammar at one contested position, heaviest first.
+/// Every copy retained could in principle say something different, and a
+/// position where four of them are still level is one no argument is going to
+/// settle.
+constexpr size_t kNabtsMaxVoteCandidates = 4;
+
+/// What the vote is allowed to do beyond weighing the copies.
+struct NabtsVoteOptions {
+  /**
+   * Ask the grammar about positions the weights could not separate: lint the
+   * whole record with each leading candidate in place and keep the one that
+   * leaves it most grammatical (see NaplpsLintGrade). Off here and on at the
+   * stage, which is where the reader decides — this is recovery rather than
+   * presentation, so it changes @ref NabtsCataloguedRecord::data and everything
+   * downstream of it, the exported record files included.
+   *
+   * Meaningful only for a presentation record: an application record's data is
+   * function descriptors (§7.2.2), and grading it as NAPLPS would be reading it
+   * in a language it is not written in.
+   */
+  bool grammar_assisted = false;
+
+  /**
+   * The service state the record will be read in — the channel's Support
+   * Record, chiefly, whose macros §5.2.7.9 has the pages of that channel
+   * invoke. Optional: without it every such invocation lints as an undefined
+   * macro, which costs the tie-break nothing directly (every candidate carries
+   * the same finding) but leaves it grading a record against a grammar it is
+   * only half in possession of.
+   *
+   * Never advanced: each trial forks it, so nothing a candidate byte would
+   * define outlives the trial that considered it.
+   */
+  NaplpsLinter* context = nullptr;
+};
+
+/// One record's data as the vote settled it, with what the vote learned on the
+/// way — see @ref NabtsCataloguedRecord::data_present for what the two masks
+/// mean and why they are worth keeping.
+struct NabtsVoteResult {
+  std::vector<uint8_t> data;
+  std::vector<uint8_t> present;
+  std::vector<uint8_t> confidence;
+  /// Positions where the leading candidates were within
+  /// kNabtsVoteTiePercent of one another.
+  uint32_t positions_contested = 0;
+  /// Contested positions the grammar decided. The rest kept the recency pick,
+  /// either because the grammar was not asked or because it had no preference.
+  uint32_t positions_adjudicated = 0;
 };
 
 /**
@@ -65,7 +215,8 @@ struct NabtsRecordCopy {
  * nothing measured contributes full weight, which is the reading the row
  * squasher gives an unmeasured copy and the only honest one for a detector with
  * no way of saying it is unsure. Ties go to the most recent copy, which is what
- * keeping a single copy would have shown.
+ * keeping a single copy would have shown — unless @ref
+ * NabtsVoteOptions::grammar_assisted asks the grammar first.
  *
  * A copy abstains at the positions its own lost packets took from it, so a
  * recording that never received any one copy whole can still have every
@@ -76,7 +227,15 @@ struct NabtsRecordCopy {
  * as long as the length most copies agree on, and the longest of them where
  * there is no agreement at all; a copy shorter than that votes only over the
  * bytes it has.
+ *
+ * Linear in the record length and the number of copies, plus — only where the
+ * grammar is asked and only for the positions it is asked about — a bounded
+ * number of lint passes over the record (kNabtsMaxAdjudicatedPositions).
  */
+NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
+                                  const NabtsVoteOptions& options = {});
+
+/// The voted data alone, for a caller with no use for the evidence.
 std::vector<uint8_t> nabts_vote_record_data(
     const std::vector<NabtsRecordCopy>& copies);
 
@@ -164,11 +323,20 @@ class NabtsRecordCatalogue {
    * @brief Catalogue contents, ascending by {channel, address, version}
    *
    * Where a record's copies were combined rather than chosen among, the vote is
-   * held here, and the presentation code of §6.1 is run into a display list
-   * here too — once per record rather than once per copy, since only the
-   * combined result is ever drawn.
+   * held here, so each record carries the data a receiver would have presented.
+   * Running that data is nabts_interpret_records()' business and deliberately
+   * not done here: what a page looks like depends on the receiver it is drawn
+   * for, and recovery has no business fixing that.
+   *
+   * @param grammar_assisted_vote Let the grammar settle the positions the
+   * vote's weights could not (NabtsVoteOptions::grammar_assisted). Each Data
+   *        Channel's Support Record is voted first and read into the state its
+   *        pages are then graded against, for the reason
+   *        nabts_interpret_records() presents it first: a page invoking a macro
+   *        defined there is otherwise graded as invoking an undefined one.
    */
-  std::vector<NabtsCataloguedRecord> records() const;
+  std::vector<NabtsCataloguedRecord> records(
+      bool grammar_assisted_vote = false) const;
 
  private:
   struct Entry {
@@ -201,11 +369,6 @@ class NabtsRecordCatalogue {
 
   std::size_t max_records_;
   std::size_t max_copies_;
-  /// Reused across records rather than built per record: an interpreter is a
-  /// few kilobytes of state and run() resets all of it, so one instance decodes
-  /// the whole service. Mutable because records() is where the presentation
-  /// code is run, and reading the catalogue does not change it.
-  mutable NaplpsInterpreter interpreter_;
   std::map<Key, Entry> records_;
   uint64_t touch_counter_ = 0;
   bool truncated_ = false;

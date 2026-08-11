@@ -97,6 +97,7 @@ orc_add_gui_unit_tests(
             preview_audio_chase_test.cpp
             project_load_status_formatter_test.cpp
             quick_project_planner_test.cpp
+            teletext_font_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
             vectorscope_geometry_test.cpp

@@ -21,6 +21,7 @@
 
 #include "nabts_frame_slicer.h"
 #include "nabts_sink_deps.h"
+#include "naplps_render_grid.h"
 
 namespace orc {
 
@@ -282,6 +283,25 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "grammar_assisted_vote";
+    desc.display_name = "Grammar-Assisted Record Vote";
+    desc.description =
+        "A record that never arrived undamaged is recovered by voting its "
+        "copies together byte by byte, and some positions the copies leave "
+        "level. Ask the NAPLPS grammar about those: read the whole record with "
+        "each candidate in place and keep the one that leaves it best formed, "
+        "or none of them where the grammar has no preference. This changes the "
+        "recovered record data itself, and so the exported record files and "
+        "every later reading of the record — turn it off to have a level "
+        "position settled by the most recent copy instead. Presentation "
+        "records only; an application record's data is not NAPLPS";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "decode_threads";
     desc.display_name = "Decoding Threads";
     desc.description =
@@ -403,6 +423,8 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
   options.pin_data_phase = get_bool_or(parameters, "pin_data_phase", true);
   options.learn_active_lines =
       get_bool_or(parameters, "learn_active_lines", true);
+  options.grammar_assisted_vote =
+      get_bool_or(parameters, "grammar_assisted_vote", true);
   options.decode_threads = std::clamp(
       get_int32_or(parameters, "decode_threads", 0), 0, kMaxDecodeThreads);
 
