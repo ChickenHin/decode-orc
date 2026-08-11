@@ -643,7 +643,8 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(2), std::string()))
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(orc::NodeID(2), std::string(), ::testing::_))
       .WillOnce(Return(makeCatalogue("100")));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
@@ -679,8 +680,9 @@ TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(orc::NodeID(2), std::string("512 x 400")))
+  EXPECT_CALL(
+      *mock_presenter,
+      getCatalogueData(orc::NodeID(2), std::string("512 x 400"), ::testing::_))
       .WillOnce(Return(makeCatalogue("100")));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
@@ -706,6 +708,75 @@ TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
   coordinator.stop();
 }
 
+// The first read is not a reader who has turned every toggle off — it is a
+// reader who has not been asked yet, and the stage answers it with its own
+// defaults. Sending an empty list instead would mean a stage could never offer
+// a toggle that starts on, which is exactly what the NABTS records browser
+// does with syntax repair.
+TEST(RenderCoordinatorTest, CatalogueRequest_AsksForTheStagesOwnTogglesFirst) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(2), std::string(),
+                                                ::testing::Eq(std::nullopt)))
+      .WillOnce(Return(makeCatalogue("100")));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+  coordinator.requestCatalogueData(orc::NodeID(2));
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  coordinator.stop();
+}
+
+// And once the reader has been asked, what they said travels verbatim —
+// including "none of them", which is a different statement from the first read
+// and must not be answered with the defaults.
+TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheTogglesTheReaderChose) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(
+      *mock_presenter,
+      getCatalogueData(orc::NodeID(2), std::string(),
+                       ::testing::Optional(::testing::ElementsAre("repair"))))
+      .WillOnce(Return(makeCatalogue("100")));
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(orc::NodeID(2), std::string(),
+                               ::testing::Optional(::testing::IsEmpty())))
+      .WillOnce(Return(makeCatalogue("101")));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+  coordinator.requestCatalogueData(orc::NodeID(2), std::string(),
+                                   std::vector<std::string>{"repair"});
+  coordinator.requestCatalogueData(orc::NodeID(2), std::string(),
+                                   std::vector<std::string>{});
+
+  ASSERT_TRUE(waitForCount(data_spy, 2));
+  coordinator.stop();
+}
+
 // Reading the catalogue of a node that has never been triggered runs nothing:
 // the reader is told there is nothing to show, and the decode stays behind the
 // Trigger Stage action where the reader put it.
@@ -714,7 +785,8 @@ TEST(RenderCoordinatorTest, CatalogueRequest_NeverTriggers) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3), std::string()))
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(orc::NodeID(3), std::string(), ::testing::_))
       .WillOnce(Return(std::nullopt));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
@@ -752,7 +824,8 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ThrowingReadIsAnError) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(4), std::string()))
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(orc::NodeID(4), std::string(), ::testing::_))
       .WillOnce(::testing::Throw(std::runtime_error("catalogue read blew up")));
 
   RenderCoordinator coordinator(
@@ -786,7 +859,8 @@ TEST(RenderCoordinatorTest, CatalogueRequest_DistinctIdsSupportStaleDrop) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_, ::testing::_))
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(::testing::_, ::testing::_, ::testing::_))
       .WillRepeatedly(Return(makeCatalogue("100")));
 
   RenderCoordinator coordinator(
@@ -819,7 +893,8 @@ TEST(RenderCoordinatorTest, CatalogueRequest_StopsCleanlyWhileInFlight) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_, ::testing::_))
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(::testing::_, ::testing::_, ::testing::_))
       .WillRepeatedly(Return(makeCatalogue("100")));
 
   RenderCoordinator coordinator(

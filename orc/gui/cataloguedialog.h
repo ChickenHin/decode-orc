@@ -20,7 +20,6 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QStackedWidget>
-#include <QStatusBar>
 #include <QString>
 #include <QTableWidget>
 #include <QToolButton>
@@ -75,10 +74,15 @@ class CatalogueDialog : public QDialog {
   void setCatalogue(const orc::CatalogueDataset& data);
 
  signals:
-  /// The reader picked one of CatalogueSchema::view_options. The dialogue has
-  /// no way of building the catalogue again itself, so the owner asks the stage
-  /// for it under @p option_id and delivers it back through setCatalogue().
-  void viewOptionChanged(const QString& option_id);
+  /// The reader changed how the catalogue is presented — picked one of
+  /// CatalogueSchema::view_options, or turned one of its toggles on or off. The
+  /// dialogue has no way of building the catalogue again itself, so the owner
+  /// asks the stage for it under @p option_id with @p active_toggles and
+  /// delivers it back through setCatalogue(). Both travel together because the
+  /// stage needs the whole selection to build anything, not the part that
+  /// changed.
+  void viewSelectionChanged(const QString& option_id,
+                            const QStringList& active_toggles);
 
  public:
   // ---- Test seams --------------------------------------------------------
@@ -104,6 +108,20 @@ class CatalogueDialog : public QDialog {
   /// Pick a view option by id, as the reader would (no-op for an unknown id)
   void selectViewOption(const QString& option_id);
 
+  /// Whether the text pane beside a drawn payload is on show (false when the
+  /// payload on display carries no text to show)
+  bool isTextPaneVisible() const;
+  /// Show or hide the text pane, as the reader would
+  void setTextPaneVisible(bool visible);
+
+  /// Ids of the toggles offered, in order (empty when none are)
+  std::vector<QString> viewToggles() const;
+  /// Whether the toggle |toggle_id| is on (false for an unknown id)
+  bool isToggleActive(const QString& toggle_id) const;
+  /// Turn a toggle on or off by id, as the reader would (no-op for an unknown
+  /// id, and for a value it is already at)
+  void setToggleActive(const QString& toggle_id, bool active);
+
   /// Variant readout — "Sub-page 2 of 8 (0002)" — for the displayed item
   /// (empty when the variant bar is hidden)
   QString variantText() const;
@@ -112,7 +130,7 @@ class CatalogueDialog : public QDialog {
   void showNextVariant();
   void showPreviousVariant();
 
-  /// Status-bar readouts (empty when hidden)
+  /// Message-panel readouts (empty when hidden)
   QString headlineText() const;
   QString conditionText() const;
   QString summaryText() const;
@@ -143,7 +161,11 @@ class CatalogueDialog : public QDialog {
   void onItemSelected();
   void onHighlightToggled(bool checked);
   void onAnimationsToggled(bool checked);
+  void onShowTextToggled(bool checked);
   void onViewOptionSelected(int index);
+  void onViewToggled();
+  /// Emit the whole presentation selection — view option and active toggles.
+  void emitViewSelection();
   void onSavePageClicked();
 
  private:
@@ -202,9 +224,19 @@ class CatalogueDialog : public QDialog {
   QLineEdit* find_edit_ = nullptr;
   QCheckBox* highlight_check_ = nullptr;
   QCheckBox* animations_check_ = nullptr;
+  QCheckBox* show_text_check_ = nullptr;
   QWidget* view_bar_ = nullptr;
   QLabel* view_label_ = nullptr;
   QComboBox* view_combo_ = nullptr;
+  /// One checkbox per CatalogueSchema::toggles entry, rebuilt whenever a
+  /// delivered schema offers a different set. Each carries its opaque id in
+  /// its object property so nothing here has to know what a toggle means.
+  std::vector<QCheckBox*> toggle_checks_;
+  /// Layout the checkboxes are added to, beside the view dropdown.
+  class QHBoxLayout* view_layout_ = nullptr;
+  /// The rule that sets the switches changing what is on screen apart from the
+  /// button that does something with it. Shown only while the button is.
+  QWidget* action_separator_ = nullptr;
   QToolButton* save_page_button_ = nullptr;
   QToolButton* prev_item_button_ = nullptr;
   QToolButton* next_item_button_ = nullptr;
@@ -230,12 +262,20 @@ class CatalogueDialog : public QDialog {
   QToolButton* next_variant_button_ = nullptr;
   QLabel* variant_label_ = nullptr;
 
-  QLabel* notice_label_ = nullptr;
-  QLabel* summary_label_ = nullptr;
-  QStatusBar* status_bar_ = nullptr;
+  /// Everything the dialogue has to say, in one place at the foot of the
+  /// window: what the viewer is doing, what is on show, what the catalogue as a
+  /// whole carries, and how the run went. Each line hides when it has nothing
+  /// to say, and the panel with them when they all do.
+  QWidget* message_panel_ = nullptr;
+  QWidget* message_rule_ = nullptr;
+  QLabel* status_label_ = nullptr;
   QLabel* headline_label_ = nullptr;
   QLabel* condition_label_ = nullptr;
-  QLabel* status_label_ = nullptr;
+  QLabel* notice_label_ = nullptr;
+  QLabel* summary_label_ = nullptr;
+
+  /// Refresh the message panel's visibility from the lines inside it.
+  void refreshMessagePanel();
 };
 
 #endif  // CATALOGUEDIALOG_H

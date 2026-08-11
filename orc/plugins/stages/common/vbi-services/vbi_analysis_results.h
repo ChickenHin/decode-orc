@@ -277,6 +277,37 @@ struct NabtsCataloguedRecord {
   /// means the record was only ever seen damaged and only once.
   uint32_t copies_voted = 0;
 
+  /**
+   * What the recovery knows about each byte of @ref data, index for index with
+   * it. Both are empty for a record kept from a copy that arrived whole and
+   * undamaged, which is the honest reading: there is nothing to doubt and
+   * nothing was measured that says otherwise.
+   *
+   * @ref data_present is zero where no copy of the record ever delivered the
+   * byte, so the value standing there is a filler rather than a reading (see
+   * NabtsDataGroup::present). @ref data_confidence is how sure the recovery
+   * ended up being of each byte on the 0-255 scale of NabtsPacket::confidence
+   * — the detector's own figure where one copy decided the byte, and the
+   * agreement of the copies that voted for it where several did.
+   *
+   * Kept past the vote because everything downstream of it — the linter, the
+   * repair pass — can otherwise only tell a damaged byte from a clean one by
+   * its parity, and the recovery knew more than that. Two bytes per byte of
+   * record data: at the catalogue's own bounds
+   * (NabtsRecordCatalogue::kMaxCataloguedRecords records of
+   * kNabtsMaxGroupBytes each) that is under 4 MB, against the 31 MB the copies
+   * they are derived from already cost.
+   */
+  std::vector<uint8_t> data_present;
+  std::vector<uint8_t> data_confidence;
+
+  /// Positions where the vote's weights could not separate the leading
+  /// candidates, and how many of those the grammar then settled (see
+  /// nabts_vote_record). Both zero where no vote was held, and the second zero
+  /// where the grammar tie-break was not asked for or could not decide.
+  uint32_t vote_positions_contested = 0;
+  uint32_t vote_positions_adjudicated = 0;
+
   /// Function descriptors, for an application record. Empty otherwise.
   std::vector<NabtsRecordFunction> functions;
 
@@ -316,6 +347,11 @@ struct NabtsRecoverySummary {
   /// True when the record cap was reached and the least recently seen ones were
   /// dropped, so the catalogue is not everything the range carried.
   bool records_truncated = false;
+  /// Byte positions the vote across a record's copies could not settle on the
+  /// weights alone, totalled over the catalogue, and how many of them the
+  /// grammar tie-break then decided.
+  uint64_t vote_positions_contested = 0;
+  uint64_t vote_positions_adjudicated = 0;
 };
 
 /// Everything the NABTS sink caches from one trigger run.

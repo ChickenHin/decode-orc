@@ -340,3 +340,14 @@ history:
       virtual has a default that ignores the option and returns `catalogue()`,
       so a stage offering none needs no change, but it takes a vtable slot: the
       interface's layout moves and every plugin implementing it must be rebuilt.
+      `CatalogueSchema` further gains `toggles`, and `ICatalogueResults` a
+      virtual `catalogue(view_option, active_toggles)`, so a browser can offer
+      presentation choices that are on or off as well as the several it chooses
+      between. The two are separate controls because they are independent axes:
+      folding a two-state choice into the view dropdown multiplies the options
+      out rather than adding to them, and every further such choice doubles the
+      list again. The new `CatalogueViewToggle` carries the state the catalogue
+      was built under, so the host shows what it is looking at without
+      remembering what it asked for, and a stage offering no toggles leaves the
+      browser exactly as it was. This virtual likewise defaults to forwarding to
+      `catalogue(view_option)` and likewise takes a vtable slot.

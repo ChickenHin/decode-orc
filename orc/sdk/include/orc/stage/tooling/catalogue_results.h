@@ -523,6 +523,36 @@ struct CatalogueViewOption {
 };
 
 /**
+ * @brief One presentation choice the reader turns on or off
+ *
+ * A CatalogueViewOption in every respect but its shape: it changes how the same
+ * items are presented rather than what was found, and the stage is re-asked for
+ * the catalogue whenever the reader changes it. What it is *not* is a second
+ * way of spelling a view option — the two are separate because they are
+ * independent axes, and folding a toggle into the dropdown would multiply out
+ * the options rather than add to them.
+ *
+ * Use one where the choice is genuinely two-state and independent of the rest:
+ * whether damaged data is presented as recovered or as transmitted, say. A
+ * choice between three or more presentations belongs in @ref
+ * CatalogueSchema::view_options.
+ */
+struct CatalogueViewToggle {
+  /// Opaque, unique within the schema, and round-tripped back to the stage
+  /// untouched.
+  std::string id;
+  /// What the reader sees beside the checkbox — "Error correction".
+  std::string label;
+  /// Explanation shown on hover. Empty for a toggle whose label needs none.
+  std::string tooltip;
+  /// Whether this catalogue was built with the toggle on, so the host can show
+  /// the reader what they are looking at without having to remember what it
+  /// asked for. The state the stage puts here on the first build is the default
+  /// the reader is offered.
+  bool active = false;
+};
+
+/**
  * @brief How the host should label and shape the browser
  *
  * All of it optional: a schema with columns and nothing else gets a plain list
@@ -556,6 +586,12 @@ struct CatalogueSchema {
   /// show what it is looking at without having to remember what it asked for.
   /// Empty selects the first option.
   std::string view_option;
+
+  /// Presentation choices the reader turns on and off, shown beside the view
+  /// dropdown. Empty for a service that offers none, which is what leaves
+  /// today's browser unchanged. Each carries the state this catalogue was built
+  /// under (CatalogueViewToggle::active).
+  std::vector<CatalogueViewToggle> toggles;
 
   /// Shown in place of the payload when the run catalogued nothing at all —
   /// "No teletext pages were recovered". A recording that carried none of the
@@ -624,6 +660,29 @@ class ICatalogueResults {
     (void)view_option;
     return catalogue();
   }
+
+  /**
+   * @brief The catalogue built under a view option and a set of toggles
+   *
+   * The host calls this when the reader changes either, passing the view
+   * option's id and the ids of every toggle now on, all verbatim; ids the stage
+   * does not recognise mean the settings' own view, so a host need not police
+   * what it round-trips. A toggle the stage offers and the host does not name
+   * is off.
+   *
+   * The default ignores the toggles and forwards to @ref catalogue(const
+   * std::string&), which is right for the stage that offers none.
+   *
+   * Same terms as @ref catalogue: called on a worker thread, at most once per
+   * change, and what it returns is copied before the next call.
+   */
+  virtual const CatalogueDataset& catalogue(
+      const std::string& view_option,
+      const std::vector<std::string>& active_toggles) const {
+    (void)active_toggles;
+    return catalogue(view_option);
+  }
+
   virtual ~ICatalogueResults() = default;
 };
 

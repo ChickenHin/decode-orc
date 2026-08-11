@@ -201,6 +201,8 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_catalogue_view_test.cpp
         stages/nabts_sink/naplps_code_env_test.cpp
         stages/nabts_sink/naplps_font_test.cpp
+        stages/nabts_sink/naplps_lint_test.cpp
+        stages/nabts_sink/naplps_lint_repair_test.cpp
         stages/nabts_sink/naplps_interpreter_test.cpp
         stages/nabts_sink/naplps_raster_test.cpp
         stages/nabts_sink/naplps_render_grid_test.cpp

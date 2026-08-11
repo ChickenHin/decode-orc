@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "naplps_lint.h"
+
 namespace orc_unit_test {
 namespace {
 
@@ -537,6 +539,222 @@ TEST(NabtsRecordCatalogue, AZeroConfidenceByteStillBeatsAHole) {
   const auto records = catalogue.records();
   ASSERT_EQ(records.size(), 1u);
   EXPECT_EQ(records[0].data, (std::vector<uint8_t>{odd('A')}));
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// What the vote leaves behind, and what the grammar makes of what it could not
+// settle
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// A code position in the standard's column/row notation.
+constexpr uint8_t code(int column, int row) {
+  return static_cast<uint8_t>((column << 4) | row);
+}
+
+/// A numeric data byte carrying |payload| in b6-b1 (§5.3.1, Figure 10).
+constexpr uint8_t numeric(uint8_t payload) {
+  return static_cast<uint8_t>(0x40 | (payload & 0x3F));
+}
+
+/// §4.3.2's shift out, which invokes the PDI set into GL.
+constexpr uint8_t kSo = 0x0E;
+
+/// One three-byte coordinate word carrying |x| and |y| (Figure 11), three bits
+/// of each component per byte, most significant first. A value below 0x100
+/// leaves the sign bit clear and so names a point inside the unit screen.
+std::vector<uint8_t> coordinate(uint16_t x, uint16_t y) {
+  std::vector<uint8_t> out;
+  for (int field = 2; field >= 0; --field) {
+    const uint8_t shift = static_cast<uint8_t>(field * 3);
+    const uint8_t packed = static_cast<uint8_t>((((x >> shift) & 0x7u) << 3) |
+                                                ((y >> shift) & 0x7u));
+    out.push_back(numeric(packed));
+  }
+  return out;
+}
+
+/// A record that draws two lines: SO invokes the PDI set, then LINE ABS (2/8)
+/// takes two absolute coordinate words, the second repeating the opcode
+/// (§5.3.2.2.5). Parity applied, which is how a record arrives.
+std::vector<uint8_t> line_record() {
+  std::vector<uint8_t> plain = {kSo, code(2, 8)};
+  for (const std::vector<uint8_t>& word :
+       {coordinate(0x040, 0x050), coordinate(0x0C0, 0x0D0)}) {
+    plain.insert(plain.end(), word.begin(), word.end());
+  }
+  std::vector<uint8_t> out;
+  out.reserve(plain.size());
+  for (const uint8_t byte : plain) {
+    out.push_back(odd(byte));
+  }
+  return out;
+}
+
+/// Errors the linter finds in |record|, from a general reset.
+uint32_t lint_errors(const std::vector<uint8_t>& record) {
+  orc::NaplpsLinter linter;
+  return linter.lint(record).findings.errors;
+}
+
+/// |record| with the byte at |offset| moved out of the numeric columns by a
+/// two-bit error. Two bits, so CEA-516 §3.3's odd parity still holds and the
+/// recovery has no way of knowing the byte is wrong — which is what leaves the
+/// vote with two candidates it cannot separate.
+std::vector<uint8_t> break_operand(std::vector<uint8_t> record, size_t offset) {
+  record[offset] = static_cast<uint8_t>(record[offset] ^ 0x60);
+  return record;
+}
+
+// Task 4.1: parity is recomputable from the data, but what the recovery knew
+// beyond it dies at the vote unless the vote says so. The masks are what let
+// the repair pass tell a byte that arrived and is wrong from one that never
+// arrived at all.
+TEST(NabtsRecordCatalogue, TheVoteKeepsWhatItKnewAboutEachByte) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(holed({odd('A'), 0x00, odd('C')}, {1, 0, 1}), 0);
+  catalogue.merge(holed({odd('A'), 0x00, odd('C')}, {1, 0, 1}), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  ASSERT_EQ(records[0].data_present.size(), records[0].data.size());
+  ASSERT_EQ(records[0].data_confidence.size(), records[0].data.size());
+
+  // The middle byte no copy ever delivered, so the NUL standing there is a
+  // filler and the mask says so.
+  EXPECT_NE(records[0].data_present[0], 0);
+  EXPECT_EQ(records[0].data_present[1], 0);
+  EXPECT_NE(records[0].data_present[2], 0);
+
+  // Both copies agreed, and nothing measured them, so the bytes that did arrive
+  // came out as sure as a vote can be.
+  EXPECT_EQ(records[0].data_confidence[0], 255);
+  EXPECT_EQ(records[0].data_confidence[2], 255);
+}
+
+// A detector that was unsure of a byte no other copy contradicts has still said
+// something, and the figure it said it at is the figure that survives.
+TEST(NabtsRecordCatalogue, ADoubtfulByteNoCopyContradictsKeepsItsOwnFigure) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(measured({odd('A'), odd('B')}, {40, 255}), 0);
+  catalogue.merge(measured({odd('A'), odd('B')}, {40, 255}), 1);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data_confidence[0], 40);
+  EXPECT_EQ(records[0].data_confidence[1], 255);
+}
+
+// A record that arrived whole is not a record with evidence against it: no
+// vote was held, nothing is in doubt, and the masks say nothing rather than
+// saying something reassuring.
+TEST(NabtsRecordCatalogue, AnIntactRecordCarriesNoDamageEvidence) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(message(0x000, 0x001, 0, bytes(0x40, 10)), 0);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_TRUE(records[0].data_present.empty());
+  EXPECT_TRUE(records[0].data_confidence.empty());
+  EXPECT_EQ(records[0].vote_positions_contested, 0u);
+}
+
+// Task 4.2: two copies disagreeing once each leave the position to whichever
+// arrived last, which is a coin toss. Here one of the two candidates breaks the
+// PDI structure of §5.3.1 and the other does not, so the grammar knows the
+// answer the weights could not reach.
+TEST(NabtsRecordCatalogue, TheGrammarSettlesAPositionTheCopiesLeaveLevel) {
+  const std::vector<uint8_t> clean = line_record();
+  const std::vector<uint8_t> broken = break_operand(clean, 3);
+  // The premise: both readings are parity-clean, so the vote's own gate cannot
+  // separate them, and only one of them parses.
+  ASSERT_EQ(clean.size(), broken.size());
+  ASSERT_EQ(lint_errors(clean), 0u);
+  ASSERT_GT(lint_errors(broken), 0u);
+
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged(clean), 0);
+  catalogue.merge(damaged(broken), 1);  // the most recent copy, so the default
+
+  const auto records = catalogue.records(/*grammar_assisted_vote=*/true);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, clean)
+      << "the vote kept the reading that breaks the PDI structure";
+  EXPECT_EQ(records[0].vote_positions_contested, 1u);
+  EXPECT_EQ(records[0].vote_positions_adjudicated, 1u);
+}
+
+// And with the tie-break off the vote is what it always was: the position goes
+// to the most recent copy, and the run still says the position was level.
+TEST(NabtsRecordCatalogue, WithoutTheTieBreakALevelPositionGoesToRecency) {
+  const std::vector<uint8_t> clean = line_record();
+  const std::vector<uint8_t> broken = break_operand(clean, 3);
+
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged(clean), 0);
+  catalogue.merge(damaged(broken), 1);
+
+  const auto records = catalogue.records(/*grammar_assisted_vote=*/false);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, broken);
+  EXPECT_EQ(records[0].vote_positions_contested, 1u);
+  EXPECT_EQ(records[0].vote_positions_adjudicated, 0u);
+}
+
+// The tie-break only ever looks at positions the weights left level. A position
+// one candidate wins outright is not reopened because the grammar would have
+// preferred the loser — the evidence beats the argument.
+TEST(NabtsRecordCatalogue,
+     TheGrammarIsNotAskedAboutAPositionTheWeightsSettled) {
+  const std::vector<uint8_t> clean = line_record();
+  const std::vector<uint8_t> broken = break_operand(clean, 3);
+
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged(broken), 0);
+  catalogue.merge(damaged(broken), 1);
+  catalogue.merge(damaged(clean), 2);
+
+  const auto records = catalogue.records(/*grammar_assisted_vote=*/true);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, broken);
+  EXPECT_EQ(records[0].vote_positions_contested, 0u);
+}
+
+// Where both candidates leave the record equally well formed the grammar has no
+// preference, and a tie-break that guessed anyway would be inventing a record
+// rather than recovering one.
+TEST(NabtsRecordCatalogue, TheGrammarDeclinesWhereBothReadingsParse) {
+  // Two graphic characters. Either is a perfectly good character, so the
+  // linter faults neither.
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged({odd('A')}), 0);
+  catalogue.merge(damaged({odd('B')}), 1);
+
+  const auto records = catalogue.records(/*grammar_assisted_vote=*/true);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, (std::vector<uint8_t>{odd('B')}));
+  EXPECT_EQ(records[0].vote_positions_contested, 1u);
+  EXPECT_EQ(records[0].vote_positions_adjudicated, 0u);
+}
+
+// An application record's data is function descriptors (§7.2.2), not NAPLPS.
+// Grading it against the NAPLPS grammar would be reading it in a language it is
+// not written in, so the tie-break leaves it to the weights.
+TEST(NabtsRecordCatalogue, TheGrammarIsNotAskedAboutAnApplicationRecord) {
+  const std::vector<uint8_t> clean = line_record();
+  const std::vector<uint8_t> broken = break_operand(clean, 3);
+
+  orc::NabtsRecordCatalogue catalogue;
+  auto first = damaged(clean);
+  first.type = orc::kNabtsRecordTypeApplication;
+  auto second = damaged(broken);
+  second.type = orc::kNabtsRecordTypeApplication;
+  catalogue.merge(first, 0);
+  catalogue.merge(second, 1);
+
+  const auto records = catalogue.records(/*grammar_assisted_vote=*/true);
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, broken);
+  EXPECT_EQ(records[0].vote_positions_adjudicated, 0u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////

@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QImage>
+#include <QLabel>
 #include <QLineEdit>
 #include <QRect>
 #include <QSize>
@@ -544,6 +545,98 @@ TEST(CatalogueDialogTest, DisplayListPayloadShowsItsCompanionText) {
   dialog.close();
 }
 
+// The text beside a drawing is worth having and worth being able to put away:
+// two panes side by side leave neither enough room on a page-sized window.
+TEST(CatalogueDialogTest, TheTextPaneCanBePutAway) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);
+
+  auto* check = dialog.findChild<QCheckBox*>("catalogueShowTextCheck");
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  EXPECT_TRUE(check->isChecked());
+  EXPECT_TRUE(dialog.isTextPaneVisible());
+
+  dialog.setTextPaneVisible(false);
+  EXPECT_FALSE(dialog.isTextPaneVisible());
+  // Put away, not thrown away: the text is still what the payload carries, and
+  // nothing was asked of the stage to hide it.
+  EXPECT_EQ(dialog.currentText(), "HELLO NABTS");
+
+  dialog.setTextPaneVisible(true);
+  EXPECT_TRUE(dialog.isTextPaneVisible());
+
+  dialog.close();
+}
+
+// And the switch is only offered where there is text to put away. A listing is
+// text all the way down, and a table has no drawing to sit beside.
+TEST(CatalogueDialogTest, TheTextSwitchIsOfferedOnlyBesideADrawing) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makeFlatCatalogue());
+  auto* check = dialog.findChild<QCheckBox*>("catalogueShowTextCheck");
+  ASSERT_NE(check, nullptr);
+
+  dialog.selectItem(0);  // a drawing with text beside it
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+
+  dialog.selectItem(1);  // a listing
+  EXPECT_FALSE(check->isVisibleTo(&dialog));
+
+  dialog.selectItem(2);  // a table
+  EXPECT_FALSE(check->isVisibleTo(&dialog));
+
+  dialog.close();
+}
+
+// Everything the dialogue has to say goes in one panel at the foot of the
+// window. A reader should not have to sweep three corners of the frame to find
+// out whether anything was said.
+TEST(CatalogueDialogTest, EveryMessageIsInTheOneMessagePanel) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(0);
+
+  auto* panel = dialog.findChild<QWidget*>("catalogueMessagePanel");
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(panel->isVisibleTo(&dialog));
+
+  for (const char* name : {"catalogueHeadlineLabel", "catalogueConditionLabel",
+                           "catalogueNoticeLabel", "catalogueSummaryLabel",
+                           "observationStatusLabel"}) {
+    auto* label = dialog.findChild<QLabel*>(QString::fromLatin1(name));
+    ASSERT_NE(label, nullptr) << name;
+    EXPECT_EQ(label->parentWidget(), panel)
+        << name << " is not in the message panel";
+  }
+
+  // Cleared, the panel keeps only what is still true — that there is nothing
+  // to show — rather than going blank and leaving the reader to wonder.
+  dialog.clearContent();
+  EXPECT_TRUE(panel->isVisibleTo(&dialog));
+  EXPECT_EQ(dialog.headlineText(), "No data");
+  EXPECT_EQ(dialog.conditionText(), QString());
+  EXPECT_EQ(dialog.summaryText(), QString());
+
+  // And a viewer that has been told nothing at all shows no panel, rather than
+  // an empty band along the bottom of the window.
+  CatalogueDialog fresh;
+  fresh.show();
+  auto* fresh_panel = fresh.findChild<QWidget*>("catalogueMessagePanel");
+  ASSERT_NE(fresh_panel, nullptr);
+  EXPECT_FALSE(fresh_panel->isVisibleTo(&fresh));
+  fresh.close();
+
+  dialog.close();
+}
+
 TEST(CatalogueDialogTest, TextPayloadIsListed) {
   ensureApplication();
   CatalogueDialog dialog;
@@ -736,8 +829,9 @@ TEST(CatalogueDialogTest, PickingAViewOptionAsksForItOnce) {
   dialog.show();
 
   std::vector<QString> asked;
-  QObject::connect(&dialog, &CatalogueDialog::viewOptionChanged,
-                   [&asked](const QString& id) { asked.push_back(id); });
+  QObject::connect(
+      &dialog, &CatalogueDialog::viewSelectionChanged,
+      [&asked](const QString& id, const QStringList&) { asked.push_back(id); });
 
   dialog.setCatalogue(withViewOptions(makeFlatCatalogue()));
   EXPECT_TRUE(asked.empty()) << "filling the dropdown asked for a rebuild";
@@ -751,6 +845,141 @@ TEST(CatalogueDialogTest, PickingAViewOptionAsksForItOnce) {
   dialog.setCatalogue(withViewOptions(makeFlatCatalogue(), "coarse"));
   EXPECT_EQ(asked.size(), 1u);
   EXPECT_EQ(dialog.currentViewOption(), QStringLiteral("coarse"));
+
+  dialog.close();
+}
+
+// --- View toggles ---------------------------------------------------------
+
+/// |data| with one two-state presentation choice declared.
+orc::CatalogueDataset withViewToggle(orc::CatalogueDataset data,
+                                     bool active = true) {
+  data.schema.toggles = {
+      orc::CatalogueViewToggle{"repair", "Error correction",
+                               "Present damaged data as recovered", active}};
+  return data;
+}
+
+// A two-state presentation choice is a checkbox beside the dropdown, and the
+// host offers it without knowing what it means.
+TEST(CatalogueDialogTest, ToggleIsOfferedWhenTheSchemaDeclaresOne) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(withViewToggle(withViewOptions(makeFlatCatalogue())));
+
+  auto* check = dialog.findChild<QCheckBox*>("catalogueViewToggle");
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  EXPECT_EQ(check->text(), QStringLiteral("Error correction"));
+  EXPECT_EQ(dialog.viewToggles(),
+            (std::vector<QString>{QStringLiteral("repair")}));
+  // What the stage says it built under, not a default of the host's.
+  EXPECT_TRUE(dialog.isToggleActive(QStringLiteral("repair")));
+
+  dialog.close();
+}
+
+// A stage declaring no toggles gets the browser exactly as it was.
+TEST(CatalogueDialogTest, NoToggleIsOfferedWithoutSchemaToggles) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(withViewOptions(makeFlatCatalogue()));
+
+  EXPECT_EQ(dialog.findChild<QCheckBox*>("catalogueViewToggle"), nullptr);
+  EXPECT_TRUE(dialog.viewToggles().empty());
+  EXPECT_FALSE(dialog.isToggleActive(QStringLiteral("repair")));
+
+  dialog.close();
+}
+
+// A toggle is offered on its own too: a service may present its items one way
+// and still have something to switch about them.
+TEST(CatalogueDialogTest, ToggleIsOfferedWithoutAViewDropdown) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(withViewToggle(makeFlatCatalogue()));
+
+  auto* check = dialog.findChild<QCheckBox*>("catalogueViewToggle");
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->isVisibleTo(&dialog));
+  auto* combo = dialog.findChild<QComboBox*>("catalogueViewCombo");
+  ASSERT_NE(combo, nullptr);
+  EXPECT_FALSE(combo->isVisibleTo(&dialog));
+
+  dialog.close();
+}
+
+// The stage builds from both axes at once and has no memory of what it was last
+// asked for, so the whole selection travels on every change.
+TEST(CatalogueDialogTest, ChangingAToggleAsksWithTheWholeSelection) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+
+  std::vector<std::pair<QString, QStringList>> asked;
+  QObject::connect(&dialog, &CatalogueDialog::viewSelectionChanged,
+                   [&asked](const QString& id, const QStringList& toggles) {
+                     asked.emplace_back(id, toggles);
+                   });
+
+  dialog.setCatalogue(withViewToggle(withViewOptions(makeFlatCatalogue())));
+  EXPECT_TRUE(asked.empty()) << "filling the bar asked for a rebuild";
+
+  dialog.setToggleActive(QStringLiteral("repair"), false);
+  ASSERT_EQ(asked.size(), 1u);
+  EXPECT_EQ(asked[0].first, QStringLiteral("fine")) << "the view option too";
+  EXPECT_TRUE(asked[0].second.isEmpty());
+
+  dialog.setToggleActive(QStringLiteral("repair"), true);
+  ASSERT_EQ(asked.size(), 2u);
+  EXPECT_EQ(asked[1].second, QStringList{QStringLiteral("repair")});
+
+  // Picking a view option carries the toggles with it.
+  dialog.selectViewOption(QStringLiteral("coarse"));
+  ASSERT_EQ(asked.size(), 3u);
+  EXPECT_EQ(asked[2].first, QStringLiteral("coarse"));
+  EXPECT_EQ(asked[2].second, QStringList{QStringLiteral("repair")});
+
+  dialog.close();
+}
+
+// The catalogue built under a toggle arrives the same way any other does, and
+// does not ask again for what it already is.
+TEST(CatalogueDialogTest, ShowingACatalogueBuiltUnderAToggleAsksForNothing) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(withViewToggle(withViewOptions(makeFlatCatalogue())));
+
+  int asked = 0;
+  QObject::connect(&dialog, &CatalogueDialog::viewSelectionChanged,
+                   [&asked](const QString&, const QStringList&) { ++asked; });
+
+  dialog.setCatalogue(
+      withViewToggle(withViewOptions(makeFlatCatalogue()), false));
+  EXPECT_EQ(asked, 0);
+  EXPECT_FALSE(dialog.isToggleActive(QStringLiteral("repair")));
+
+  dialog.close();
+}
+
+// A catalogue offering a different set replaces the checkboxes rather than
+// accumulating them.
+TEST(CatalogueDialogTest, RedeliveringReplacesTheTogglesRatherThanAddingThem) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(withViewToggle(makeFlatCatalogue()));
+  dialog.setCatalogue(withViewToggle(makeFlatCatalogue()));
+
+  EXPECT_EQ(dialog.viewToggles().size(), 1u);
+
+  // And a catalogue offering none takes them away again.
+  dialog.setCatalogue(makeFlatCatalogue());
+  EXPECT_TRUE(dialog.viewToggles().empty());
 
   dialog.close();
 }

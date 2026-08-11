@@ -456,6 +456,30 @@ std::string record_condition(const NabtsCataloguedRecord& record,
           plural(diagnostics.storage_refusals, "definition", "definitions") +
           " over the storage budget");
     }
+
+    // What the grammar did to this page on the way to the screen, in the fewest
+    // words that still say it: a reader judging what is in front of them needs
+    // to know it was altered and roughly how much. The rest — which bytes, at
+    // what offsets, against what evidence — is in the log.
+    if (diagnostics.repaired_bytes > 0) {
+      parts.push_back(plural(diagnostics.repaired_bytes, "byte", "bytes") +
+                      " corrected");
+    }
+    if (diagnostics.resynchronised_pdis > 0) {
+      parts.push_back(
+          plural(diagnostics.resynchronised_pdis, "drawing", "drawings") +
+          " trimmed at a gap");
+    }
+    if (diagnostics.dropped_coordinate_words > 0) {
+      parts.push_back(plural(diagnostics.dropped_coordinate_words,
+                             "off-screen point", "off-screen points") +
+                      " dropped");
+    }
+    if (diagnostics.undecided_suspect_bytes > 0) {
+      parts.push_back(
+          plural(diagnostics.undecided_suspect_bytes, "byte", "bytes") +
+          " left in doubt");
+    }
   }
   return join(parts, ", ");
 }
@@ -482,40 +506,81 @@ std::string function_listing(const NabtsCataloguedRecord& record) {
   return join(lines, "\n");
 }
 
-std::string run_headline(const NabtsRecoverySummary& summary) {
+/**
+ * @brief One line on how the run went, for a reader rather than for a decoder
+ *
+ * What a reader needs from this is: how much was read, how much came out, and
+ * whether they should trust it. The packet, group and block accounting behind
+ * those answers — orphaned packets, refused prefixes, corrected blocks — is
+ * diagnostic detail: it goes to the run's report and to the log, where someone
+ * chasing a bad transfer will look for it, rather than across the foot of a
+ * window someone is trying to read a page in.
+ */
+std::string run_headline(const NabtsRecoverySummary& summary,
+                         size_t records_carried) {
   if (summary.frames_analysed == 0 && summary.packets_recovered == 0) {
     return {};
   }
-  std::vector<std::string> parts;
-  parts.push_back(std::to_string(summary.packets_recovered) +
-                  " packets recovered from " +
-                  std::to_string(summary.fields_with_data) + " fields over " +
-                  std::to_string(summary.frames_analysed) + " frames");
-  parts.push_back(std::to_string(summary.groups_completed) +
-                  " data groups complete, " +
-                  std::to_string(summary.groups_incomplete) + " incomplete");
-  parts.push_back(std::to_string(summary.messages_complete) +
-                  " records complete, " +
-                  std::to_string(summary.messages_partial) + " partial");
-  if (summary.packets_prefix_rejected > 0) {
-    // §3.2.2: a packet whose Hamming prefix will not decode cannot even be
-    // filed under a channel, so it is lost before any of the above.
-    parts.push_back(std::to_string(summary.packets_prefix_rejected) +
-                    " packets refused on their prefix");
-  }
-  if (summary.blocks_corrected > 0 || summary.blocks_damaged > 0) {
-    parts.push_back(std::to_string(summary.blocks_corrected) +
-                    " blocks repaired, " +
-                    std::to_string(summary.blocks_damaged) + " beyond repair");
-  }
-  if (summary.lost_packets_estimate > 0) {
-    parts.push_back("about " + std::to_string(summary.lost_packets_estimate) +
-                    " packets lost");
+
+  std::string out = plural(records_carried, "record", "records") +
+                    " read from " +
+                    plural(summary.frames_analysed, "frame", "frames");
+
+  // Whether to trust it. A recording that lost packets, failed to complete
+  // groups or gave up blocks beyond repair is one whose pages may be missing
+  // pieces, and that is worth saying in words rather than in counters.
+  const bool lossy = summary.lost_packets_estimate > 0 ||
+                     summary.groups_incomplete > 0 ||
+                     summary.blocks_damaged > 0 || summary.messages_partial > 0;
+  if (lossy) {
+    out +=
+        "; parts of this recording were lost in transfer, so some pages "
+        "will be incomplete";
   }
   if (summary.records_truncated) {
-    parts.push_back("record list truncated at the catalogue limit");
+    out +=
+        "; the list stops at the catalogue limit, so the recording carried "
+        "more than is shown";
   }
-  return join(parts, "; ");
+  return out;
+}
+
+/**
+ * @brief What the syntax repair did to the catalogue being shown
+ *
+ * A page repaired without saying so is a page a reader cannot judge, and a
+ * reader who cannot see that the pass ran cannot tell "it found nothing" from
+ * "it never happened". So the notice is written either way — but kept to one
+ * clause. How many bytes were corrected in which record is the log's business
+ * (and the run report's); what belongs in front of a reader is whether their
+ * pages have been altered and how widely.
+ */
+std::string lint_notice(const std::vector<NabtsCataloguedRecord>& records,
+                        bool repair) {
+  if (!repair) {
+    return "Syntax repair off: pages are read exactly as they were recovered.";
+  }
+
+  uint64_t pages = 0;
+  uint64_t changed = 0;
+  for (const NabtsCataloguedRecord& record : records) {
+    if (!type_is_presentation(record.record_type)) {
+      continue;
+    }
+    ++pages;
+    const auto& diagnostics = record.page.diagnostics;
+    changed += (diagnostics.repaired_bytes > 0 ||
+                diagnostics.resynchronised_pdis > 0 ||
+                diagnostics.dropped_coordinate_words > 0)
+                   ? 1
+                   : 0;
+  }
+
+  if (changed == 0) {
+    return "Syntax repair on: nothing needed correcting.";
+  }
+  return "Syntax repair on: " + std::to_string(changed) + " of " +
+         std::to_string(pages) + " pages corrected.";
 }
 
 }  // namespace
@@ -736,8 +801,22 @@ std::vector<CatalogueViewOption> naplps_view_options() {
   };
 }
 
+CatalogueViewToggle naplps_repair_toggle(bool active) {
+  return CatalogueViewToggle{
+      kNabtsRepairToggleId, "Syntax repair",
+      "NAPLPS is a language with a defined grammar (ANSI X3.110-1983), so a "
+      "page recovered from a damaged recording can be checked against it and, "
+      "where the recording independently says a byte is wrong, corrected. Only "
+      "bytes the recovery already doubts are ever changed, and only where the "
+      "grammar leaves one answer; the rest are left exactly as they arrived. "
+      "Turn it off to read the page as transmitted. Either way this changes "
+      "only what is drawn here — the packet stream and record files a run "
+      "exports are always the recording's own bytes.",
+      active};
+}
+
 CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
-                                       NaplpsRenderMode mode) {
+                                       NaplpsRenderMode mode, bool repair) {
   CatalogueDataset out;
 
   // The pages are built here rather than by recovery, because what a page looks
@@ -747,7 +826,7 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
   // the screen is what lets the render resolution be changed without reading
   // the recording again.
   std::vector<NabtsCataloguedRecord> records = data.records;
-  nabts_interpret_records(records, naplps_render_grid(mode));
+  nabts_interpret_records(records, naplps_render_grid(mode), repair);
 
   out.schema.columns = {
       CatalogueColumn{"address", "Address", false},
@@ -767,6 +846,12 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
   out.schema.view_label = "Receiver";
   out.schema.view_options = naplps_view_options();
   out.schema.view_option = naplps_render_mode_name(mode);
+
+  // Whether a damaged page is presented as recovered or as transmitted is the
+  // reader's to decide while looking, for the same reason the receiver is: it
+  // changes nothing the recovery found, and having the two side by side is how
+  // anyone judges whether a repair improved the page or invented it.
+  out.schema.toggles = {naplps_repair_toggle(repair)};
 
   // The More chains (§5.2.7.6) with more than one catalogued member. Each is
   // presented as one page whose members are stepped through as sub-pages —
@@ -992,7 +1077,13 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
                                   " on " + join(channels, ", "));
   }
 
-  out.summary.headline = run_headline(data.summary);
+  // Said whichever way the toggle is set, so the reader can always tell what
+  // they are looking at.
+  if (!records.empty()) {
+    out.summary.notices.push_back(lint_notice(records, repair));
+  }
+
+  out.summary.headline = run_headline(data.summary, records.size());
   return out;
 }
 

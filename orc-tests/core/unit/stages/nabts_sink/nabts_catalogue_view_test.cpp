@@ -11,10 +11,14 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
 #include <vector>
 
 #include "nabts_record_catalogue.h"
 #include "naplps_render_grid.h"
+#include "vbi-services/teletext_page_decoder.h"
 
 namespace orc {
 namespace {
@@ -250,6 +254,209 @@ TEST(NabtsCatalogueViewTest, TheSchemaOffersTheReceiversAsViewOptions) {
   // And the catalogue says which of them it was built under.
   EXPECT_EQ(catalogue.schema.view_option,
             naplps_render_mode_name(NaplpsRenderMode::kThrice));
+}
+
+// ---------------------------------------------------------------------------
+// Syntax repair, offered to the reader
+// ---------------------------------------------------------------------------
+
+/// A presentation record drawing one line, with |damage| exclusive-ored into
+/// the byte at |offset| — which is what a single-bit error looks like on the
+/// wire, the payload changing while the odd parity of CEA-516 §3.3 does not.
+NabtsAnalysisDataset datasetWithLineRecord(size_t offset = 0,
+                                           uint8_t damage = 0) {
+  NabtsAnalysisDataset data;
+  NabtsCataloguedRecord record;
+  record.channel = 0x000;
+  record.address_text = "000";
+  record.record_type = 1;  // §5.2.2.3 non-cyclic presentation
+  record.times_seen = 1;
+  record.times_intact = 1;
+  record.complete = true;
+  // SO invokes the PDI set, LINE ABS (2/8) takes one three-byte coordinate
+  // word — the default multi-value length of §5.3.2.2.3.
+  const std::vector<uint8_t> plain = {0x0E, 0x28, 0x49, 0x42, 0x40};
+  for (const uint8_t byte : plain) {
+    record.data.push_back(teletext_odd_parity_encode(byte));
+  }
+  if (damage != 0 && offset < record.data.size()) {
+    record.data[offset] = static_cast<uint8_t>(record.data[offset] ^ damage);
+  }
+  data.records.push_back(record);
+  return data;
+}
+
+// The browser offers the choice, because whether a damaged page is presented as
+// recovered or as transmitted changes nothing the recovery found and everything
+// about what is on screen.
+TEST(NabtsCatalogueViewTest, TheCatalogueOffersTheSyntaxRepairToggle) {
+  const CatalogueDataset catalogue = build_nabts_catalogue(
+      datasetWithLineRecord(), NaplpsRenderMode::kReference,
+      /*repair=*/true);
+
+  ASSERT_EQ(catalogue.schema.toggles.size(), 1u);
+  EXPECT_EQ(catalogue.schema.toggles.front().id, kNabtsRepairToggleId);
+  EXPECT_TRUE(catalogue.schema.toggles.front().active);
+  EXPECT_FALSE(catalogue.schema.toggles.front().label.empty());
+
+  const CatalogueDataset off = build_nabts_catalogue(
+      datasetWithLineRecord(), NaplpsRenderMode::kReference, /*repair=*/false);
+  ASSERT_EQ(off.schema.toggles.size(), 1u);
+  EXPECT_FALSE(off.schema.toggles.front().active);
+}
+
+// With the toggle off, a record is interpreted exactly as it always was.
+TEST(NabtsCatalogueViewTest, RepairOffInterpretsTheRecordAsTransmitted) {
+  const NabtsAnalysisDataset data = datasetWithDrcsRecord();
+
+  std::vector<NabtsCataloguedRecord> baseline = data.records;
+  nabts_interpret_records(baseline, kNaplpsGridReference);
+  std::vector<NabtsCataloguedRecord> unrepaired = data.records;
+  nabts_interpret_records(unrepaired, kNaplpsGridReference, /*repair=*/false);
+
+  ASSERT_EQ(baseline.size(), unrepaired.size());
+  EXPECT_EQ(baseline.front().page.primitives.size(),
+            unrepaired.front().page.primitives.size());
+  EXPECT_EQ(unrepaired.front().page.diagnostics.repaired_bytes, 0u);
+}
+
+// §5.3.1 puts numeric data in columns 4 to 7. Knock b7 out of an operand and
+// the byte becomes a transparent control, which §5.3.1 lets stand inside the
+// PDI without ending it — so the line is still drawn, to a point assembled from
+// what is left and zero-extended. The damage does not hide the page; it draws a
+// different one. The grammar admits one correction, and with the toggle on the
+// page comes back.
+TEST(NabtsCatalogueViewTest, RepairOnDrawsThePageTheSenderDescribed) {
+  const NabtsAnalysisDataset damaged = datasetWithLineRecord(3, 0x40);
+
+  std::vector<NabtsCataloguedRecord> pristine = datasetWithLineRecord().records;
+  nabts_interpret_records(pristine, kNaplpsGridReference, /*repair=*/false);
+  std::vector<NabtsCataloguedRecord> as_sent = damaged.records;
+  nabts_interpret_records(as_sent, kNaplpsGridReference, /*repair=*/false);
+  std::vector<NabtsCataloguedRecord> repaired = damaged.records;
+  nabts_interpret_records(repaired, kNaplpsGridReference, /*repair=*/true);
+
+  ASSERT_EQ(pristine.front().page.primitives.size(), 1u);
+  ASSERT_EQ(as_sent.front().page.primitives.size(), 1u);
+  ASSERT_EQ(repaired.front().page.primitives.size(), 1u);
+
+  const NabtsPoint wanted =
+      pristine.front().page.primitives.front().points.back();
+  const NabtsPoint drawn =
+      as_sent.front().page.primitives.front().points.back();
+  const NabtsPoint mended =
+      repaired.front().page.primitives.front().points.back();
+
+  // The lost byte carried low-order bits of both components, so what survives
+  // still puts the line's end on the right column and the wrong row.
+  EXPECT_TRUE(drawn.x != wanted.x || drawn.y != wanted.y)
+      << "the damage drew the line somewhere else";
+  EXPECT_DOUBLE_EQ(mended.x, wanted.x);
+  EXPECT_DOUBLE_EQ(mended.y, wanted.y);
+
+  // What was recovered is left exactly as it was recovered: the repair changes
+  // how the record reads, not what the run found or what it would export.
+  EXPECT_EQ(repaired.front().data, damaged.records.front().data);
+}
+
+// A page drawn partly from guesses says so, so a reader can weigh what they are
+// looking at.
+TEST(NabtsCatalogueViewTest, ARepairedPageCarriesWhatWasDoneToIt) {
+  std::vector<NabtsCataloguedRecord> records =
+      datasetWithLineRecord(3, 0x40).records;
+  nabts_interpret_records(records, kNaplpsGridReference, /*repair=*/true);
+
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records.front().page.diagnostics.repaired_bytes, 1u);
+  // And the interpreter's own diagnostics are untouched by the stamping.
+  EXPECT_GT(records.front().page.diagnostics.bytes_read, 0u);
+}
+
+// The totals a run reports are the same readings a reader will be shown.
+TEST(NabtsCatalogueViewTest, TheRunTotalsCountWhatTheRepairDid) {
+  const NabtsLintTotals clean =
+      nabts_lint_records(datasetWithLineRecord().records);
+  EXPECT_EQ(clean.records_linted, 1u);
+  EXPECT_EQ(clean.records_faulted, 0u);
+  EXPECT_EQ(clean.bytes_repaired, 0u);
+  // Nothing to say about a recording whose pages all arrived clean.
+  EXPECT_NE(clean.summary().find("none faulted"), std::string::npos);
+
+  const NabtsLintTotals damaged =
+      nabts_lint_records(datasetWithLineRecord(3, 0x40).records);
+  EXPECT_EQ(damaged.records_linted, 1u);
+  EXPECT_EQ(damaged.records_faulted, 1u);
+  EXPECT_EQ(damaged.bytes_repaired, 1u);
+  EXPECT_LT(damaged.errors_after, damaged.errors_before);
+  EXPECT_NE(damaged.summary().find("corrected"), std::string::npos);
+}
+
+// An application record carries function descriptors rather than presentation
+// code, so there is nothing here for a NAPLPS linter to say about it.
+TEST(NabtsCatalogueViewTest, TheRunTotalsIgnoreNonPresentationRecords) {
+  NabtsAnalysisDataset data = datasetWithLineRecord();
+  data.records.front().record_type = 2;  // §5.2.2.4 application
+
+  const NabtsLintTotals totals = nabts_lint_records(data.records);
+  EXPECT_EQ(totals.records_linted, 0u);
+  EXPECT_TRUE(totals.summary().empty());
+}
+
+/// The catalogue's notice about the repair, or empty where it said nothing.
+std::string repair_notice(const CatalogueDataset& catalogue) {
+  for (const std::string& notice : catalogue.summary.notices) {
+    if (notice.find("Syntax repair") != std::string::npos) {
+      return notice;
+    }
+  }
+  return {};
+}
+
+// A reader cannot judge a repaired page without being told it was repaired, and
+// cannot tell "the grammar found nothing" from "the pass never ran" unless the
+// catalogue says which. So the notice is written either way.
+TEST(NabtsCatalogueViewTest, TheCatalogueSaysWhatTheRepairDid) {
+  const CatalogueDataset repaired = build_nabts_catalogue(
+      datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
+      /*repair=*/true);
+  // One clause, for a reader: how widely the pages were altered. The byte
+  // counts behind it are the log's business.
+  const std::string did = repair_notice(repaired);
+  EXPECT_NE(did.find("1 of 1 pages corrected"), std::string::npos) << did;
+
+  // Off, and the notice says the pages are the recording's own.
+  const CatalogueDataset as_received = build_nabts_catalogue(
+      datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
+      /*repair=*/false);
+  EXPECT_NE(repair_notice(as_received).find("off"), std::string::npos)
+      << repair_notice(as_received);
+
+  // On, over a recording that needed nothing: the pass ran and said so.
+  const CatalogueDataset clean = build_nabts_catalogue(
+      datasetWithLineRecord(), NaplpsRenderMode::kReference, /*repair=*/true);
+  EXPECT_NE(repair_notice(clean).find("nothing needed correcting"),
+            std::string::npos)
+      << repair_notice(clean);
+}
+
+// And the page a reader is looking at says what was done to *it*, on the
+// condition line beside it — the notice is about the catalogue, and a reader
+// stepping through pages needs to know which one in front of them was touched.
+TEST(NabtsCatalogueViewTest, ARepairedPageSaysSoOnItsOwnConditionLine) {
+  const CatalogueDataset repaired = build_nabts_catalogue(
+      datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
+      /*repair=*/true);
+  ASSERT_FALSE(repaired.payloads.empty());
+  EXPECT_NE(repaired.payloads.front().condition.find("1 byte corrected"),
+            std::string::npos)
+      << repaired.payloads.front().condition;
+
+  const CatalogueDataset as_received = build_nabts_catalogue(
+      datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
+      /*repair=*/false);
+  EXPECT_EQ(as_received.payloads.front().condition.find("corrected"),
+            std::string::npos)
+      << as_received.payloads.front().condition;
 }
 
 }  // namespace

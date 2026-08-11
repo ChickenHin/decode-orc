@@ -25,7 +25,9 @@
 #include <utility>
 #include <vector>
 
+#include "nabts_catalogue_view.h"
 #include "nabts_record.h"
+#include "nabts_record_catalogue.h"
 #include "nabts_sink_stage.h"
 #include "naplps_state.h"
 #include "sha256_hash.h"
@@ -884,6 +886,170 @@ TEST_F(NabtsSinkPipelineTest, TheCaptioningRecordDecodesAsPresentationCode) {
   // A caption is a fraction of a page: §7.1.3 makes captioning non-cyclic, sent
   // as it is needed rather than carouselled.
   EXPECT_LT(captioning->data.size(), 100u);
+}
+
+// ---------------------------------------------------------------------------
+// Lint-directed recovery and repair (X3.110 §5.3)
+// ---------------------------------------------------------------------------
+
+void report_lint(const char* what, const NabtsLintTotals& totals) {
+  std::cout << "[ INFO     ] " << what << ": lint " << totals.records_linted
+            << " record(s), " << totals.records_faulted << " faulted before / "
+            << totals.records_faulted_after << " after, errors "
+            << totals.errors_before << " -> " << totals.errors_after
+            << ", warnings " << totals.warnings_before << " -> "
+            << totals.warnings_after << "\n"
+            << "[ INFO     ] " << what << ": repair " << totals.bytes_repaired
+            << " byte(s) corrected, " << totals.pdis_resynchronised
+            << " run(s) resynchronised, " << totals.coordinate_words_dropped
+            << " coordinate word(s) dropped"
+            << ", of " << totals.suspect_bytes << " in doubt ("
+            << totals.bytes_ambiguous << " undecidable)" << std::endl;
+}
+
+// The NBC EP transfer is the marginal one — 7 % of its record bytes fail parity
+// — so it is where the grammar has something to work with. What is asserted is
+// the direction of travel rather than a figure: repairs happen, and the records
+// come out no less well formed than they went in. A tuning change may move the
+// counts; it must not move the sign.
+TEST_F(NabtsSinkPipelineTest, SyntaxRepairLeavesTheMarginalCaptureNoWorse) {
+  if (!std::filesystem::exists(kNbtsCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kNbtsCapture;
+  }
+
+  const RecoveryRun run =
+      recover(kNbtsCapture, ".tbc VBI crop, 16-bit (NABTS)", dir_ / "repair");
+  ASSERT_TRUE(run.triggered) << run.status;
+  ASSERT_GT(run.dataset.records.size(), 5u);
+
+  const NabtsLintTotals totals = nabts_lint_records(run.dataset.records);
+  report_lint("NBC Teletext", totals);
+
+  ASSERT_GT(totals.records_linted, 0u)
+      << "no presentation records to lint, so this proves nothing";
+
+  // A repair is applied only where it improves the record's grade, so the
+  // errors can only come down. Warnings can go either way: clearing an error
+  // often exposes the operand run behind it, which is a warning.
+  EXPECT_LE(totals.errors_after, totals.errors_before)
+      << "repair left the records less well formed than it found them";
+  EXPECT_LE(totals.records_faulted_after, totals.records_faulted);
+
+  // On a recording this damaged the grammar always finds something. A zero here
+  // means the evidence never reached the repair pass — the suspect map is empty
+  // — rather than that the recording is clean.
+  EXPECT_GT(totals.suspect_bytes, 0u)
+      << "a recording with 7 % of its record bytes failing parity offered the "
+         "repair pass nothing to look at";
+
+  // And the viewer's toggle really does reach it, on real data: the same
+  // records, read twice.
+  FunctionalStageServices services;
+  NabtsSinkStage stage(&services);
+  ObservationContext observations;
+  VBISourceStage source;
+  const std::vector<ArtifactPtr> outputs =
+      source.execute({},
+                     {{"input_path", std::string(kNbtsCapture)},
+                      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")}},
+                     observations);
+  ASSERT_FALSE(outputs.empty());
+  const auto representation =
+      std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
+  ASSERT_TRUE(representation);
+  const auto window = std::make_shared<FrameWindow>(
+      representation, static_cast<FrameID>(representation->frame_count() / 4),
+      kFrameCount);
+  auto parameters = recovery_parameters((dir_ / "toggle").string(), true, 0);
+  parameters["write_report"] = false;
+  stage.set_parameters(parameters);
+  ASSERT_TRUE(stage.trigger({window}, parameters, observations))
+      << stage.get_trigger_status();
+
+  const std::vector<std::string> repaired_toggle{
+      std::string(kNabtsRepairToggleId)};
+  const std::size_t repaired_items =
+      stage.catalogue(std::string(), repaired_toggle).items.size();
+  const std::size_t as_received_items =
+      stage.catalogue(std::string(), {}).items.size();
+
+  // The toggle changes how the records read, never which records there are.
+  EXPECT_EQ(repaired_items, as_received_items);
+  EXPECT_GT(repaired_items, 0u);
+}
+
+// Task 4.2, against a real carousel: the tie-break may only settle positions
+// the copies left level, so it cannot make the recovered records less well
+// formed than recency does. Skips rather than passing vacuously where this
+// window gave the vote nothing to argue about.
+TEST_F(NabtsSinkPipelineTest, TheGrammarAssistedVoteDoesNotLeaveRecordsWorse) {
+  if (!std::filesystem::exists(kNbtsCapture)) {
+    GTEST_SKIP() << "NABTS capture not present: " << kNbtsCapture;
+  }
+
+  VBISourceStage source;
+  ObservationContext observations;
+  const std::vector<ArtifactPtr> outputs =
+      source.execute({},
+                     {{"input_path", std::string(kNbtsCapture)},
+                      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")}},
+                     observations);
+  ASSERT_FALSE(outputs.empty());
+  const auto representation =
+      std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
+  ASSERT_TRUE(representation);
+  const auto window = std::make_shared<FrameWindow>(
+      representation, static_cast<FrameID>(representation->frame_count() / 4),
+      kFrameCount);
+
+  struct Run {
+    bool assisted;
+    NabtsAnalysisDataset dataset;
+    NabtsLintTotals totals;
+  };
+  Run runs[] = {{false, {}, {}}, {true, {}, {}}};
+
+  for (Run& run : runs) {
+    FunctionalStageServices services;
+    NabtsSinkStage stage(&services);
+    auto parameters = recovery_parameters(
+        (dir_ / (run.assisted ? "assisted" : "recency")).string(), true, 0);
+    parameters["write_report"] = false;
+    parameters["grammar_assisted_vote"] = run.assisted;
+    stage.set_parameters(parameters);
+    ASSERT_TRUE(stage.trigger({window}, parameters, observations))
+        << stage.get_trigger_status();
+    run.dataset = stage.dataset();
+    run.totals = nabts_lint_records(run.dataset.records);
+  }
+
+  report_lint("NBC, vote by recency", runs[0].totals);
+  report_lint("NBC, vote with the grammar", runs[1].totals);
+  std::cout << "[ INFO     ] contested positions: "
+            << runs[0].dataset.summary.vote_positions_contested << " level, "
+            << runs[1].dataset.summary.vote_positions_adjudicated
+            << " settled by the grammar" << std::endl;
+
+  // Same service either way: the tie-break decides bytes, never records.
+  ASSERT_EQ(runs[0].dataset.records.size(), runs[1].dataset.records.size());
+  EXPECT_EQ(runs[0].dataset.summary.vote_positions_contested,
+            runs[1].dataset.summary.vote_positions_contested)
+      << "which positions are level is a property of the copies, so asking the "
+         "grammar about them must not change how many there are";
+  EXPECT_EQ(runs[0].dataset.summary.vote_positions_adjudicated, 0u);
+
+  if (runs[0].dataset.summary.vote_positions_contested == 0) {
+    GTEST_SKIP() << "no position in this window was left level by the copies, "
+                    "so the tie-break had nothing to decide";
+  }
+
+  // The claim: what the grammar settles is no worse than what recency settles.
+  // Not an identity — the vote grades a record against its channel's Support
+  // Record alone, and the sweep below grades it against every record read
+  // before it — but the direction has to hold.
+  EXPECT_LE(runs[1].totals.errors_before, runs[0].totals.errors_before)
+      << "the grammar-assisted vote produced records the linter likes less "
+         "than the ones recency produced";
 }
 
 }  // namespace

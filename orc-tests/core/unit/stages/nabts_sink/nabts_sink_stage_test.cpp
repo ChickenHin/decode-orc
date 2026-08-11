@@ -184,6 +184,58 @@ TEST_F(NabtsSinkStage, Trigger_ConvertsTheUiLineWindowToFieldLines) {
   EXPECT_EQ(captured.last_field_line, 20);
 }
 
+// The grammar tie-break changes recovered record data rather than a reading of
+// it, which is why it is a stage parameter and not a viewer toggle — so it has
+// to reach the recovery, and it has to default to on there as well as in the
+// descriptor.
+TEST_F(NabtsSinkStage, Trigger_CarriesTheGrammarAssistedVoteToTheRecovery) {
+  for (const bool asked : {true, false}) {
+    orc::NabtsSinkStage stage{nullptr};
+    auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
+    orc::NabtsSinkOptions captured;
+    EXPECT_CALL(*deps, init(_, _));
+    EXPECT_CALL(*deps, analyse(_, _))
+        .WillOnce(testing::DoAll(SaveArg<1>(&captured),
+                                 Return(orc::NabtsSinkResult{})));
+    stage.set_deps_override(deps);
+
+    auto parameters = default_parameters();
+    parameters["grammar_assisted_vote"] = asked;
+
+    MockObservationContext observations;
+    auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+    stage.trigger({input}, parameters, observations);
+    EXPECT_EQ(captured.grammar_assisted_vote, asked);
+  }
+
+  // And a parameter set that predates it — a project saved before the stage
+  // offered it — recovers as the descriptor says it should.
+  auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
+  orc::NabtsSinkOptions captured;
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, analyse(_, _))
+      .WillOnce(testing::DoAll(SaveArg<1>(&captured),
+                               Return(orc::NabtsSinkResult{})));
+  stage_.set_deps_override(deps);
+  MockObservationContext observations;
+  auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+  stage_.trigger({input}, default_parameters(), observations);
+  EXPECT_TRUE(captured.grammar_assisted_vote);
+}
+
+// On by default: it only ever settles positions nothing else could, and only
+// where the grammar leaves one answer.
+TEST_F(NabtsSinkStage, GrammarAssistedVotingIsAdvertisedAndOnByDefault) {
+  const auto descriptors = stage_.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+  const auto* found = find_descriptor(descriptors, "grammar_assisted_vote");
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(found->constraints.default_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<bool>(*found->constraints.default_value));
+  EXPECT_TRUE(std::get<bool>(*found->constraints.default_value));
+}
+
 TEST_F(NabtsSinkStage, Trigger_RejectsAnInvertedLineWindow) {
   auto parameters = default_parameters();
   parameters["first_vbi_line"] = int32_t{18};
@@ -310,16 +362,22 @@ void triggerWithOneRecord(orc::NabtsSinkStage& stage,
   ASSERT_TRUE(stage.has_results());
 }
 
-// Asked for nothing in particular, the stage draws for the receiver the
-// project's parameter names.
-TEST_F(NabtsSinkStage, Catalogue_DrawsForTheParametersReceiver) {
-  auto parameters = default_parameters();
-  parameters["render_resolution"] = std::string("768 x 600");
-  stage_.set_parameters(parameters);
-  triggerWithOneRecord(stage_, parameters);
+// Asked for nothing in particular, the stage draws for the receiver X3.110
+// Table D1 requires — what a set-top decoder of the period put on screen. There
+// is no parameter behind this: which receiver a page is drawn for changes
+// nothing the recovery found, so it is a way of looking rather than a setting.
+TEST_F(NabtsSinkStage, Catalogue_DrawsForTheReferenceReceiverByDefault) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
 
-  EXPECT_EQ(stage_.catalogue().schema.view_option, "768 x 600");
-  EXPECT_EQ(stage_.catalogue().payloads[0].display_list.nominal_width, 768);
+  EXPECT_EQ(stage_.catalogue().schema.view_option, "256 x 200");
+  EXPECT_EQ(stage_.catalogue().payloads[0].display_list.nominal_width, 256);
+
+  const auto descriptors = stage_.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+  EXPECT_EQ(find_descriptor(descriptors, "render_resolution"), nullptr)
+      << "the receiver is offered as a parameter, so changing it costs a "
+         "re-run of a recovery pass that cannot see it";
 }
 
 // A reader who picks a receiver in the viewer gets it, and the records are not
@@ -340,16 +398,60 @@ TEST_F(NabtsSinkStage, Catalogue_DrawsForTheReceiverTheViewerAsksFor) {
 }
 
 // An option the stage does not know is not worth refusing to draw over: the
-// host round-trips what a schema gave it, and anything else means "as the
-// project has it".
-TEST_F(NabtsSinkStage, Catalogue_FallsBackToTheProjectForAnUnknownOption) {
-  auto parameters = default_parameters();
-  parameters["render_resolution"] = std::string("768 x 600");
-  stage_.set_parameters(parameters);
-  triggerWithOneRecord(stage_, parameters);
+// host round-trips what a schema gave it, and anything else means "the
+// receiver the viewer opens on".
+TEST_F(NabtsSinkStage, Catalogue_FallsBackToTheReferenceForAnUnknownOption) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
 
-  EXPECT_EQ(stage_.catalogue("144p").schema.view_option, "768 x 600");
-  EXPECT_EQ(stage_.catalogue(std::string()).schema.view_option, "768 x 600");
+  EXPECT_EQ(stage_.catalogue("144p").schema.view_option, "256 x 200");
+  EXPECT_EQ(stage_.catalogue(std::string()).schema.view_option, "256 x 200");
+}
+
+// Whether a damaged page is presented as recovered or as transmitted is the
+// reader's to switch while looking, so the browser is offered it.
+TEST_F(NabtsSinkStage, Catalogue_OffersSyntaxRepairToTheReader) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
+
+  const auto& catalogue = stage_.catalogue();
+  ASSERT_EQ(catalogue.schema.toggles.size(), 1u);
+  EXPECT_EQ(catalogue.schema.toggles.front().id, orc::kNabtsRepairToggleId);
+  // On unless the reader says otherwise: repair only touches bytes the recovery
+  // already doubts, and reading the recording as transmitted is one click away.
+  EXPECT_TRUE(catalogue.schema.toggles.front().active);
+}
+
+// The toggle is part of what the cached catalogue was built under, so switching
+// it rebuilds rather than serving the other reading.
+TEST_F(NabtsSinkStage, Catalogue_RebuildsWhenTheRepairToggleChanges) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
+
+  const std::vector<std::string> on{std::string(orc::kNabtsRepairToggleId)};
+  const std::vector<std::string> off{};
+
+  EXPECT_TRUE(stage_.catalogue("256 x 200", on).schema.toggles.front().active);
+  EXPECT_FALSE(
+      stage_.catalogue("256 x 200", off).schema.toggles.front().active);
+  EXPECT_TRUE(stage_.catalogue("256 x 200", on).schema.toggles.front().active);
+
+  // And the receiver is still the other axis: changing one keeps the other.
+  const auto& fine = stage_.catalogue("512 x 400", off);
+  EXPECT_EQ(fine.schema.view_option, "512 x 400");
+  EXPECT_FALSE(fine.schema.toggles.front().active);
+}
+
+// A toggle id the stage does not know is not worth refusing to draw over, for
+// the reason an unknown view option is not: the host round-trips what a schema
+// gave it.
+TEST_F(NabtsSinkStage, Catalogue_TreatsAnUnknownToggleAsOff) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
+
+  const auto& catalogue =
+      stage_.catalogue("256 x 200", {std::string("something_else")});
+  EXPECT_FALSE(catalogue.schema.toggles.front().active);
 }
 
 // ---------------------------------------------------------------------------

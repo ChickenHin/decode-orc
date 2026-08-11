@@ -31,6 +31,18 @@ namespace orc {
 std::vector<CatalogueViewOption> naplps_view_options();
 
 /**
+ * @brief Id of the toggle offering the reader lint-directed repair
+ *
+ * Round-tripped by the host untouched, so it is named once here and compared
+ * against rather than spelled out at each end.
+ */
+inline constexpr const char* kNabtsRepairToggleId = "syntax_repair";
+
+/// The toggle as the browser should offer it, built with |active| the state it
+/// is in.
+CatalogueViewToggle naplps_repair_toggle(bool active);
+
+/**
  * @brief Build the browsable catalogue the host's viewer reads
  *
  * Each record is a top-level item; records have no variants, so nothing nests.
@@ -42,10 +54,16 @@ std::vector<CatalogueViewOption> naplps_view_options();
  *
  * @p mode is the receiver resolution the display lists are resolved against;
  * nothing else in the catalogue depends on it.
+ *
+ * @p repair runs each presentation record through lint-directed repair before
+ * interpreting it (see naplps_lint_repair.h). Like @p mode it changes how the
+ * records read rather than what was recovered: the record data the catalogue
+ * carries is what arrived, and a run's exported packet stream and record files
+ * are untouched either way.
  */
 CatalogueDataset build_nabts_catalogue(
     const NabtsAnalysisDataset& data,
-    NaplpsRenderMode mode = NaplpsRenderMode::kReference);
+    NaplpsRenderMode mode = NaplpsRenderMode::kReference, bool repair = true);
 
 /**
  * @brief One NAPLPS record snapshot as a drawable display list

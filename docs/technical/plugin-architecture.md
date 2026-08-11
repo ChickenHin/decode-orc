@@ -167,8 +167,9 @@ signatures, and the `register_stage` callback contract.
 **Current value:** `15` (`<orc/stage/tooling/catalogue_results.h>`: a display
 list can state the pixel grid it was resolved against and the shape it is drawn
 at, and say that its operations are that grid's pixels rather than shapes on it;
-and a schema can offer the reader several ways of presenting the same items,
-which `ICatalogueResults` gains a virtual to be re-asked under).
+and a schema can offer the reader several ways of presenting the same items and
+presentation choices that are on or off, which `ICatalogueResults` gains
+virtuals to be re-asked under).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 

@@ -10,6 +10,8 @@ set(STAGE_PLUGIN_SOURCES
     nabts_record.cpp
     nabts_record_catalogue.cpp
     naplps_code_env.cpp
+    naplps_lint.cpp
+    naplps_lint_repair.cpp
     naplps_pdi.cpp
     naplps_state.cpp
     naplps_interpreter.cpp

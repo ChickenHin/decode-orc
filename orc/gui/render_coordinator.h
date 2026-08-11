@@ -215,11 +215,18 @@ struct GetCatalogueDataRequest : public RenderRequest {
   /// Which of the schema's view options to build under; empty for the one the
   /// stage's own settings give.
   std::string view_option;
+  /// Ids of the schema's toggles the reader has on; one it offers and this does
+  /// not name is off. Absent where the reader has not been asked yet, which is
+  /// answered with whatever the stage has its toggles at by default — an empty
+  /// list would say the reader had turned them all off.
+  std::optional<std::vector<std::string>> active_toggles;
 
-  GetCatalogueDataRequest(uint64_t id, orc::NodeID node, std::string option)
+  GetCatalogueDataRequest(uint64_t id, orc::NodeID node, std::string option,
+                          std::optional<std::vector<std::string>> toggles)
       : RenderRequest(RenderRequestType::GetCatalogueData, id),
         node_id(std::move(node)),
-        view_option(std::move(option)) {}
+        view_option(std::move(option)),
+        active_toggles(std::move(toggles)) {}
 };
 
 /**
@@ -540,7 +547,8 @@ class IRenderPresenter {
   virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(NodeID node_id) = 0;
   virtual std::optional<orc::CatalogueDataset> getCatalogueData(
-      NodeID node_id, const std::string& view_option) = 0;
+      NodeID node_id, const std::string& view_option,
+      const std::optional<std::vector<std::string>>& active_toggles) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -784,16 +792,20 @@ class RenderCoordinator : public QObject {
    * behind via catalogueDataReady, or emits resultsNotAvailable when the node
    * has not been triggered since the DAG was last built.
    *
-   * Asking for a view option is still a read: the stage draws the items it
-   * already has a second way, and nothing upstream of it runs.
+   * Asking for a view option or a toggle is still a read: the stage draws the
+   * items it already has a second way, and nothing upstream of it runs.
    *
    * @param node_id Node whose stage offers orc::ICatalogueResults
    * @param view_option One of the schema's view options, or empty for the view
    *        the stage's own settings give
+   * @param active_toggles Ids of the schema's toggles the reader has on, or
+   *        nothing where the reader has not been asked yet — which is the
+   *        first read, and is answered with the toggles as the stage has them
    * @return Request ID
    */
-  uint64_t requestCatalogueData(const orc::NodeID& node_id,
-                                const std::string& view_option = {});
+  uint64_t requestCatalogueData(
+      const orc::NodeID& node_id, const std::string& view_option = {},
+      const std::optional<std::vector<std::string>>& active_toggles = {});
 
   /**
    * @brief Request available outputs for a node (async)
