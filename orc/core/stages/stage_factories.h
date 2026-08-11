@@ -36,7 +36,7 @@ class StageFactories : public IStageFactories {
   std::shared_ptr<IDaphneVBIWriterUtil> CreateInstanceDaphneVBIWriterUtil(
       IFileWriter<uint8_t>& writer) override;
 
-  std::shared_ptr<ILDSinkStageDeps> CreateInstanceLDSinkStageDeps(
+  std::shared_ptr<ITBCSinkStageDeps> CreateInstanceTBCSinkStageDeps(
       TriggerProgressCallback& progress_callback,
       std::atomic<bool>& is_processing,
       std::atomic<bool>& cancel_requested) override;

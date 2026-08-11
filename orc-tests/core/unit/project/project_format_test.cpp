@@ -106,6 +106,48 @@ dag:
   edges: []
 )yaml";
 
+// A project saved before the ld-decode sink was renamed to the TBC sink
+// (issue #258). Old projects must keep opening, with the node brought forward
+// to the new stage id and label.
+constexpr const char* kLegacyLdSinkProject = R"yaml(
+project:
+  name: legacy-ld-sink-project
+  version: "2.0"
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: mV
+dag:
+  nodes:
+    - id: 1
+      stage: ld_sink
+      display_name: ld-decode Sink
+      user_label: ld-decode Sink
+      node_type: SINK
+      x: 0.0
+      y: 0.0
+  edges: []
+)yaml";
+
+// The same project after the user renamed the node themselves.
+constexpr const char* kLegacyLdSinkProjectWithUserLabel = R"yaml(
+project:
+  name: legacy-ld-sink-labelled-project
+  version: "2.0"
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: mV
+dag:
+  nodes:
+    - id: 1
+      stage: ld_sink
+      display_name: ld-decode Sink
+      user_label: Archive master
+      node_type: SINK
+      x: 0.0
+      y: 0.0
+  edges: []
+)yaml";
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -975,6 +1017,28 @@ TEST(ProjectFormatTest, LegacyTeletextAnalysisSink_MigratesToTeletextSink) {
   // The stored ANALYSIS_SINK is corrected, not carried forward: it is what
   // project_to_dag reads to decide the DAG's output nodes.
   EXPECT_EQ(node.node_type, orc::NodeType::SINK);
+}
+
+TEST(ProjectFormatTest, LegacyLdSink_MigratesToTbcSink) {
+  const auto project = orc::project_io::load_project_from_yaml(
+      kLegacyLdSinkProject, "/tmp/legacy-ld-sink.orcprj");
+
+  ASSERT_EQ(project.get_nodes().size(), 1u);
+  const auto& node = project.get_nodes().front();
+  EXPECT_EQ(node.stage_name, "tbc_sink");
+  EXPECT_EQ(node.display_name, "TBC Sink");
+  EXPECT_EQ(node.user_label, "TBC Sink");
+  EXPECT_EQ(node.node_type, orc::NodeType::SINK);
+}
+
+TEST(ProjectFormatTest, LegacyLdSink_KeepsAUserChosenLabel) {
+  const auto project = orc::project_io::load_project_from_yaml(
+      kLegacyLdSinkProjectWithUserLabel, "/tmp/legacy-ld-sink-labelled.orcprj");
+
+  ASSERT_EQ(project.get_nodes().size(), 1u);
+  const auto& node = project.get_nodes().front();
+  EXPECT_EQ(node.stage_name, "tbc_sink");
+  EXPECT_EQ(node.user_label, "Archive master");
 }
 
 }  // namespace orc_unit_test

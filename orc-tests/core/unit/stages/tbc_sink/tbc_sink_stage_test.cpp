@@ -1,14 +1,14 @@
 /*
- * File:        ld_sink_stage_test.cpp
+ * File:        tbc_sink_stage_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for LDSinkStage parameter contracts and trigger
+ * Purpose:     Unit tests for TBCSinkStage parameter contracts and trigger
  * validation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "ld_sink_stage.h"
+#include "tbc_sink_stage.h"
 
 #include <gtest/gtest.h>
 
@@ -16,7 +16,7 @@
 
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
-#include "ld_sink_stage_deps_interface_mock.h"
+#include "tbc_sink_stage_deps_interface_mock.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Ref;
@@ -25,15 +25,15 @@ using testing::ReturnRef;
 using testing::StrictMock;
 
 namespace orc_unit_test {
-// test fixture for LDSinkStage suite of tests
-class LDSinkStageTest : public ::testing::Test {
+// test fixture for TBCSinkStage suite of tests
+class TBCSinkStageTest : public ::testing::Test {
  public:
   void SetUp() override {
-    pMockDeps_ = std::make_shared<StrictMock<MockLDSinkStageDeps>>();
+    pMockDeps_ = std::make_shared<StrictMock<MockTBCSinkStageDeps>>();
     pMockRepresentation_ =
         std::make_shared<StrictMock<MockVideoFrameRepresentationArtifact>>();
 
-    instance_ = std::make_unique<orc::LDSinkStage>(
+    instance_ = std::make_unique<orc::TBCSinkStage>(
         static_cast<orc::IStageServices*>(nullptr));
   }
 
@@ -44,17 +44,17 @@ class LDSinkStageTest : public ::testing::Test {
     return {std::static_pointer_cast<orc::Artifact>(pMockRepresentation_)};
   }
 
-  std::shared_ptr<StrictMock<MockLDSinkStageDeps>> pMockDeps_;
+  std::shared_ptr<StrictMock<MockTBCSinkStageDeps>> pMockDeps_;
   std::shared_ptr<StrictMock<MockVideoFrameRepresentationArtifact>>
       pMockRepresentation_;
   MockObservationContext mockObservationContext_;
 
-  std::unique_ptr<orc::LDSinkStage> instance_;
+  std::unique_ptr<orc::TBCSinkStage> instance_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-TEST_F(LDSinkStageTest, Descriptor_DefaultsOutputPathIsEmptyTbc) {
+TEST_F(TBCSinkStageTest, Descriptor_DefaultsOutputPathIsEmptyTbc) {
   const auto descriptors = instance_->get_parameter_descriptors();
 
   auto it = std::find_if(descriptors.begin(), descriptors.end(),
@@ -76,14 +76,14 @@ TEST_F(LDSinkStageTest, Descriptor_DefaultsOutputPathIsEmptyTbc) {
   EXPECT_EQ(std::get<std::string>(params.at("output_path")), "");
 }
 
-TEST_F(LDSinkStageTest, Trigger_ReturnsFalseWhenOutputPathMissing) {
+TEST_F(TBCSinkStageTest, Trigger_ReturnsFalseWhenOutputPathMissing) {
   const bool result = instance_->trigger({}, {}, mockObservationContext_);
 
   EXPECT_FALSE(result);
   EXPECT_EQ(instance_->get_trigger_status(), "Error: No output path specified");
 }
 
-TEST_F(LDSinkStageTest, Trigger_ReturnsFalseWhenOutputPathIsEmpty) {
+TEST_F(TBCSinkStageTest, Trigger_ReturnsFalseWhenOutputPathIsEmpty) {
   const std::map<std::string, orc::ParameterValue> parameters = {
       {"output_path", std::string("")}};
 
@@ -94,7 +94,7 @@ TEST_F(LDSinkStageTest, Trigger_ReturnsFalseWhenOutputPathIsEmpty) {
   EXPECT_EQ(instance_->get_trigger_status(), "Error: Output path is empty");
 }
 
-TEST_F(LDSinkStageTest, Trigger_ReturnsFalseWhenNoInputConnected) {
+TEST_F(TBCSinkStageTest, Trigger_ReturnsFalseWhenNoInputConnected) {
   const std::map<std::string, orc::ParameterValue> parameters = {
       {"output_path", std::string("out")}};
 
@@ -105,7 +105,7 @@ TEST_F(LDSinkStageTest, Trigger_ReturnsFalseWhenNoInputConnected) {
   EXPECT_EQ(instance_->get_trigger_status(), "Error: No input connected");
 }
 
-TEST_F(LDSinkStageTest,
+TEST_F(TBCSinkStageTest,
        Trigger_ReturnsFalseWhenInputNotVideoFrameRepresentation) {
   const std::map<std::string, orc::ParameterValue> parameters = {
       {"output_path", std::string("out")}};
@@ -119,7 +119,7 @@ TEST_F(LDSinkStageTest,
             "Error: Input is not a video frame representation");
 }
 
-TEST_F(LDSinkStageTest, Trigger_WritesTbcAndSetsSuccessStatus) {
+TEST_F(TBCSinkStageTest, Trigger_WritesTbcAndSetsSuccessStatus) {
   const std::map<std::string, orc::ParameterValue> parameters = {
       {"output_path", std::string("out_path")}};
   const std::vector<orc::ArtifactPtr> inputs = make_valid_input();
@@ -129,7 +129,7 @@ TEST_F(LDSinkStageTest, Trigger_WritesTbcAndSetsSuccessStatus) {
   instance_->set_deps_override(pMockDeps_);
 
   EXPECT_CALL(*pMockDeps_,
-              write_tbc_and_metadata(pMockRepresentation_.get(), "out_path",
+              write_tbc_and_metadata(pMockRepresentation_.get(), "out_path", 0,
                                      Ref(mockObservationContext_)))
       .Times(1)
       .WillOnce(Return(true));
@@ -146,7 +146,7 @@ TEST_F(LDSinkStageTest, Trigger_WritesTbcAndSetsSuccessStatus) {
   EXPECT_FALSE(instance_->is_trigger_in_progress());
 }
 
-TEST_F(LDSinkStageTest, Trigger_SetsErrorStatusWhenDepWriteFails) {
+TEST_F(TBCSinkStageTest, Trigger_SetsErrorStatusWhenDepWriteFails) {
   const std::map<std::string, orc::ParameterValue> parameters = {
       {"output_path", std::string("out_path")}};
   const std::vector<orc::ArtifactPtr> inputs = make_valid_input();
@@ -156,7 +156,7 @@ TEST_F(LDSinkStageTest, Trigger_SetsErrorStatusWhenDepWriteFails) {
   instance_->set_deps_override(pMockDeps_);
 
   EXPECT_CALL(*pMockDeps_,
-              write_tbc_and_metadata(pMockRepresentation_.get(), "out_path",
+              write_tbc_and_metadata(pMockRepresentation_.get(), "out_path", 0,
                                      Ref(mockObservationContext_)))
       .Times(1)
       .WillOnce(Return(false));
@@ -172,7 +172,7 @@ TEST_F(LDSinkStageTest, Trigger_SetsErrorStatusWhenDepWriteFails) {
   EXPECT_FALSE(instance_->is_trigger_in_progress());
 }
 
-TEST_F(LDSinkStageTest, SetParameters_AcceptsOutputPathString) {
+TEST_F(TBCSinkStageTest, SetParameters_AcceptsOutputPathString) {
   const bool result =
       instance_->set_parameters({{"output_path", std::string("out.tbc")}});
   const auto params = instance_->get_parameters();
@@ -182,7 +182,7 @@ TEST_F(LDSinkStageTest, SetParameters_AcceptsOutputPathString) {
   EXPECT_EQ(std::get<std::string>(params.at("output_path")), "out.tbc");
 }
 
-TEST_F(LDSinkStageTest, SetParameters_RejectsNonStringOutputPath) {
+TEST_F(TBCSinkStageTest, SetParameters_RejectsNonStringOutputPath) {
   const bool result =
       instance_->set_parameters({{"output_path", static_cast<int32_t>(7)}});
 

@@ -42,7 +42,7 @@ class TBCMetadataWriter : public ITBCMetadataWriter {
   bool write_video_parameters(const SourceParameters& params) override;
 
   // Write PCM audio parameters (optional)
-  bool write_pcm_audio_parameters(const PcmAudioParameters& params);
+  bool write_pcm_audio_parameters(const PcmAudioParameters& params) override;
 
   // Write field metadata
   bool write_field_metadata(const FieldMetadata& field) override;

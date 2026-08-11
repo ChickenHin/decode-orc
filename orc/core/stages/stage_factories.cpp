@@ -30,7 +30,8 @@ StageFactories::CreateInstanceDaphneVBIWriterUtil(
   return nullptr;
 }
 
-std::shared_ptr<ILDSinkStageDeps> StageFactories::CreateInstanceLDSinkStageDeps(
+std::shared_ptr<ITBCSinkStageDeps>
+StageFactories::CreateInstanceTBCSinkStageDeps(
     TriggerProgressCallback& progress_callback,
     std::atomic<bool>& is_processing, std::atomic<bool>& cancel_requested) {
   (void)progress_callback;

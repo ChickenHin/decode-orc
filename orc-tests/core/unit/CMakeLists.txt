@@ -19,7 +19,7 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/audio_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/common
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/daphne_vbi_sink
-                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ld_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/raw_efm_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
@@ -77,7 +77,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-daphne-vbi-sink
                         orc-stage-plugin-audio-sink
                         orc-stage-plugin-cc-sink
-                        orc-stage-plugin-ld-sink
+                        orc-stage-plugin-tbc-sink
                         orc-stage-plugin-efm-sink
                         orc-stage-plugin-efm-audio-decode
                         orc-stage-plugin-audio-import
@@ -177,8 +177,9 @@ orc_add_core_unit_tests(
         stages/audio_sink/audio_sink_stage_deps_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
-        stages/ld_sink/ld_sink_stage_test.cpp
-        stages/ld_sink/ld_sink_stage_deps_test.cpp
+        stages/tbc_sink/tbc_sink_stage_test.cpp
+        stages/tbc_sink/tbc_sink_stage_deps_test.cpp
+        stages/tbc_sink/tbc_sink_levels_test.cpp
         stages/efm_sink/efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp

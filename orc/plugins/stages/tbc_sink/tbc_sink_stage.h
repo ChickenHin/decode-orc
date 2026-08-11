@@ -1,14 +1,14 @@
 /*
- * File:        ld_sink_stage.h
+ * File:        tbc_sink_stage.h
  * Module:      orc-core
- * Purpose:     ld-decode sink Stage - writes TBC and metadata to disk
+ * Purpose:     TBC Sink Stage - writes TBC and metadata to disk
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
  */
 
-#ifndef ORC_CORE_LD_SINK_STAGE_H
-#define ORC_CORE_LD_SINK_STAGE_H
+#ifndef ORC_CORE_TBC_SINK_STAGE_H
+#define ORC_CORE_TBC_SINK_STAGE_H
 
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
@@ -19,6 +19,7 @@
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -26,10 +27,10 @@
 namespace orc {
 
 class IStageServices;
-class ILDSinkStageDeps;
+class ITBCSinkStageDeps;
 
 /**
- * @brief ld-decode Sink Stage
+ * @brief TBC Sink Stage
  *
  * Writes TBC fields and metadata to disk in format compatible with legacy
  * tools. This is a SINK stage - it has inputs but no outputs.
@@ -43,19 +44,19 @@ class ILDSinkStageDeps;
  * Parameters:
  * - output_path: Output file path (metadata will be output_path + ".db")
  */
-class LDSinkStage : public DAGStage,
-                    public ParameterizedStage,
-                    public TriggerableStage,
-                    public IStagePreviewCapability {
+class TBCSinkStage : public DAGStage,
+                     public ParameterizedStage,
+                     public TriggerableStage,
+                     public IStagePreviewCapability {
  public:
-  explicit LDSinkStage(IStageServices* stage_services);
+  explicit TBCSinkStage(IStageServices* stage_services);
 
   /// Testing seam: inject a pre-built deps instance to substitute concrete dep
   /// creation in trigger().
-  void set_deps_override(std::shared_ptr<ILDSinkStageDeps> deps) {
+  void set_deps_override(std::shared_ptr<ITBCSinkStageDeps> deps) {
     deps_override_ = std::move(deps);
   }
-  ~LDSinkStage() override = default;
+  ~TBCSinkStage() override = default;
 
   // DAGStage interface
   std::string version() const override { return "1.0"; }
@@ -105,6 +106,9 @@ class LDSinkStage : public DAGStage,
 
  private:
   std::string output_path_;
+  // Which pipeline audio channel pair becomes the .pcm sidecar; the lowest
+  // pair by default (see get_parameter_descriptors).
+  size_t audio_channel_pair_{0};
   std::string trigger_status_;
   mutable std::shared_ptr<const VideoFrameRepresentation>
       cached_input_;  // For preview
@@ -113,9 +117,9 @@ class LDSinkStage : public DAGStage,
   std::atomic<bool> is_processing_{false};
   std::atomic<bool> cancel_requested_{false};
   IStageServices* stage_services_{nullptr};
-  std::shared_ptr<ILDSinkStageDeps> deps_override_;
+  std::shared_ptr<ITBCSinkStageDeps> deps_override_;
 };
 
 }  // namespace orc
 
-#endif  // ORC_CORE_LD_SINK_STAGE_H
+#endif  // ORC_CORE_TBC_SINK_STAGE_H

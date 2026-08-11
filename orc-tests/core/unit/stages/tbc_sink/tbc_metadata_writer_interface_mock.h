@@ -21,6 +21,7 @@ using orc::DropoutInfo;
 using orc::FieldID;
 using orc::FieldMetadata;
 using orc::IObservationContext;
+using orc::PcmAudioParameters;
 using orc::SourceParameters;
 /**
  * See https://google.github.io/googletest/gmock_cook_book.html
@@ -38,6 +39,9 @@ class MockTBCMetadataWriter : public orc::ITBCMetadataWriter {
               (override));
 
   // virtual bool write_field_metadata(const FieldMetadata& field) = 0;
+  MOCK_METHOD(bool, write_pcm_audio_parameters, (const PcmAudioParameters&),
+              (override));
+
   MOCK_METHOD(bool, write_field_metadata, (const FieldMetadata&), (override));
 
   // virtual bool write_observations(FieldID source_field_id, FieldID

@@ -4,7 +4,7 @@ Decodes AC3 RF (Dolby Digital) audio samples from the pipeline and writes the re
 
 ## When to use
 
-Add this sink when processing later North American NTSC LaserDiscs that used AC3 RF encoding for 5.1 surround sound. Run it in parallel with the LD Sink stage so you obtain both the video output and the extracted AC3 audio in a single pipeline trigger. The resulting `.ac3` file can be played back directly or muxed into a video container alongside the decoded video.
+Add this sink when processing later North American NTSC LaserDiscs that used AC3 RF encoding for 5.1 surround sound. Run it in parallel with the TBC Sink stage so you obtain both the video output and the extracted AC3 audio in a single pipeline trigger. The resulting `.ac3` file can be played back directly or muxed into a video container alongside the decoded video.
 
 ## What it does
 

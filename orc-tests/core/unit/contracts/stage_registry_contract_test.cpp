@@ -215,7 +215,7 @@ TEST(StageRegistryContractTest, Migrated_StagesLoadFromRuntimePlugins) {
   EXPECT_TRUE(loaded_stage_names.count("CCSink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("video_sink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("daphne_vbi_sink") > 0);
-  EXPECT_TRUE(loaded_stage_names.count("ld_sink") > 0);
+  EXPECT_TRUE(loaded_stage_names.count("tbc_sink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("CVBSSink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("RawEFMSink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("EFMSink") > 0);

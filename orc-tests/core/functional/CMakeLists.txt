@@ -17,7 +17,7 @@ function(orc_add_core_functional_tests target labels)
         ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cvbs_sink
         ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cvbs_source
         ${CMAKE_SOURCE_DIR}/orc/plugins/stages/daphne_vbi_sink
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ld_sink
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink
         ${CMAKE_SOURCE_DIR}/orc/sdk/include
     )
     target_link_libraries(${target}
@@ -51,7 +51,7 @@ function(orc_add_core_functional_tests target labels)
             orc-stage-plugin-daphne-vbi-sink
             orc-stage-plugin-audio-sink
             orc-stage-plugin-cc-sink
-            orc-stage-plugin-ld-sink
+            orc-stage-plugin-tbc-sink
             orc-stage-plugin-efm-sink
             orc-stage-plugin-raw-efm-sink
             orc-stage-plugin-hackdac-sink
