@@ -301,6 +301,11 @@ history:
     cause: contract-vtable
     contracts:
       - orc/stage/tooling/catalogue_results.h
+    notes: >-
+      ABI-neutral while abi 15 is current: the comment in
+      `orc/stage/cvbs_signal_constants.h` naming the two stages allowed to use
+      the ld-decode ×64 scale constants was updated when `ld_sink` was renamed
+      `tbc_sink`. Comment only; no constant value or layout changed.
     summary: >-
       `CatalogueDisplayList` gains `display_aspect_height`, `nominal_width`,
       `nominal_height` and `pixel_aligned`. A display list is geometry rather
