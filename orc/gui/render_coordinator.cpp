@@ -235,7 +235,7 @@ class Project;
 // "burst_level_analysis_sink_stage.h"
 
 // Phase 2.7: Trigger operations migrated to RenderPresenter
-// Removed: #include "ld_sink_stage.h"
+// Removed: #include "tbc_sink_stage.h"
 
 namespace {
 

@@ -278,45 +278,6 @@ This stage accumulates EFM t-values from the incoming stream and runs the full E
 ---
 
 
-## ld-decode Sink
-
-| | |
-|-|-|
-| **Stage id** | `ld_sink` |
-| **Stage name** | ld-decode Sink |
-| **Connections** | 1 input → no outputs |
-| **Purpose** | Write an ld-decode-compatible TBC and metadata output |
-
-**Use this stage when:**
-
-* Producing final archival-quality outputs
-* Feeding results back into the ld-decode ecosystem (ld-chroma-decoder, ld-analyse, ld-process-vbi, …)
-* Preserving full per-field metadata
-
-**What it does**
-
-This stage writes:
-
-* A `.tbc` file containing processed video fields
-* A `.tbc.db` metadata database compatible with ld-decode
-
-The output can be used directly with existing ld-decode tools.
-
-**Parameters**
-
-* `output_path` (string)
-    - Base path for the output files — the stage appends the `.tbc` and `.tbc.db` extensions automatically.
-    - Required.
-
-**Notes**
-
-* This is the most common "final output" sink stage.
-* All upstream corrections, stacking, and parameter overrides should be complete before this stage.
-* The target directory must exist and be writable at trigger time.
-* This stage writes video and metadata only — export analogue audio, EFM, or AC3 RF data with the Audio Sink, Raw EFM Data Sink / EFM Decoder Sink, or AC3 RF Sink stages connected in parallel.
-
----
-
 ## NABTS Sink
 
 | | |
@@ -444,6 +405,62 @@ This stage extracts raw EFM (Eight-to-Fourteen Modulation) t-values from the inc
 * The source stage must supply an EFM file; the pipeline will abort if no EFM data is present in the incoming stream.
 * EFM stacking behaviour is controlled upstream (e.g. via `stacker`).
 * This stage does not modify or decode EFM data. Use the EFM Decoder Sink stage to decode t-values to audio or sector data.
+
+---
+
+## TBC Sink
+
+| | |
+|-|-|
+| **Stage id** | `tbc_sink` (formerly `ld_sink`) |
+| **Stage name** | TBC Sink |
+| **Connections** | 1 input → no outputs |
+| **Purpose** | Write an ld-decode-compatible TBC and metadata output |
+
+**Use this stage when:**
+
+* Producing final archival-quality outputs
+* Feeding results back into the ld-decode ecosystem (ld-chroma-decoder, ld-analyse, ld-process-vbi, …)
+* Preserving full per-field metadata
+
+**What it does**
+
+This stage writes:
+
+* A `.tbc` file containing processed video fields
+* A `.tbc.db` metadata database compatible with ld-decode
+* A `.pcm` analogue audio sidecar, when the pipeline carries audio
+* An `.efm` t-value sidecar, when the pipeline carries EFM
+
+The output can be used directly with existing ld-decode tools.
+
+**Sidecar files**
+
+The sidecars are named off the same base as the TBC with the `.tbc` replaced, so `disc.tbc` is accompanied by `disc.pcm` and `disc.efm` — the layout TBC Source auto-detects, which means an export drops straight back in as a source.
+
+They are built from what reaches the sink through the pipeline, not from any file the original source read, so it makes no difference whether the chain started at a TBC Source, a CVBS Source, or a stage that produced the audio itself.
+
+* `disc.pcm` — headerless signed 16-bit little-endian stereo at 44100 Hz, as ld-decode writes it, with the layout recorded in the metadata database. Pipeline audio is 48 kHz 24-bit, so it is resampled and narrowed on the way out; this is not lossless, and repeated export/re-import cycles will degrade the audio slightly each time. Only one channel pair fits, chosen with the **Audio Channel Pair** parameter.
+* `disc.efm` — one byte per t-value in field order. The per-field counts written to the metadata database are what let TBC Source locate each frame's payload again.
+
+**Parameters**
+
+* `output_path` (string)
+    - Base path for the output files — the stage appends the `.tbc` and `.tbc.db` extensions automatically. The `.pcm` and `.efm` sidecars replace the `.tbc` rather than extending it.
+    - Required.
+* `audio_channel_pair` (string)
+    - Which audio channel pair is written to the `.pcm` sidecar, as a 0-based index matching the CVBS container channel pair numbering.
+    - Defaults to `0`, the lowest pair — where a TBC or CVBS source puts the analogue audio it read.
+    - Set another index when the pipeline carries several pairs and you want a different one exported, for example the digital audio pair added by EFM Audio Decode. The dialogue lists only the pairs the input actually carries and labels each with its name — `0: Analogue`, `1: EFM digital audio` — so you can pick by what the pair is; the project stores the bare index.
+    - Ignored when the input has no audio; a pair the input does not carry falls back to the lowest one.
+
+**Notes**
+
+* This is the most common "final output" sink stage.
+* All upstream corrections, stacking, and parameter overrides should be complete before this stage.
+* The target directory must exist and be writable at trigger time.
+* AC3 RF is not written as a sidecar — use the AC3 RF Sink in parallel. The Audio Sink and Raw EFM Data Sink are still useful for putting a WAV or a standalone `.efm` somewhere other than beside the TBC, or for exporting a second channel pair as well.
+* This stage was called **ld-decode Sink** (`ld_sink`) before it was renamed to pair with TBC Source. Projects saved under the old name are migrated automatically when they are opened.
 
 ---
 

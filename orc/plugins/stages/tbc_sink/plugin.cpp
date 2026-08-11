@@ -1,7 +1,7 @@
 /*
  * File:        plugin.cpp
- * Module:      orc-stage-plugin-ld_sink
- * Purpose:     Runtime plugin bundle for LDSinkStage
+ * Module:      orc-stage-plugin-tbc-sink
+ * Purpose:     Runtime plugin bundle for TBCSinkStage
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -9,7 +9,7 @@
 
 #include <orc/abi/orc_plugin_sdk.h>
 
-#include "ld_sink_stage.h"
+#include "tbc_sink_stage.h"
 
 #ifndef ORC_STAGE_PLUGIN_VERSION
 #define ORC_STAGE_PLUGIN_VERSION "dev"
@@ -18,10 +18,10 @@
 namespace {
 
 constexpr orc::StagePluginDescriptor kPluginDescriptor =
-    ORC_STAGE_PLUGIN_DESCRIPTOR("decode-orc.stage.ld_sink",
+    ORC_STAGE_PLUGIN_DESCRIPTOR("decode-orc.stage.tbc_sink",
                                 ORC_STAGE_PLUGIN_VERSION, "GPL-3.0-or-later",
                                 true);
 
 }  // namespace
 
-ORC_DEFINE_STAGE_PLUGIN(kPluginDescriptor, orc::LDSinkStage)
+ORC_DEFINE_STAGE_PLUGIN(kPluginDescriptor, orc::TBCSinkStage)

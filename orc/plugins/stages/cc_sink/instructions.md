@@ -1,6 +1,6 @@
 # Closed Caption Sink
 
-Extracts NTSC Line 21 closed caption data from the processed video pipeline and writes it to either Scenarist SCC format or plain text. Use this stage in parallel with the LD Sink stage when archiving captioned NTSC LaserDiscs.
+Extracts NTSC Line 21 closed caption data from the processed video pipeline and writes it to either Scenarist SCC format or plain text. Use this stage in parallel with the TBC Sink stage when archiving captioned NTSC LaserDiscs.
 
 ## When to use
 

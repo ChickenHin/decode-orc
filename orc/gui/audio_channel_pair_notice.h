@@ -15,6 +15,19 @@
 
 namespace orc::gui {
 
+// One entry for a channel-pair dropdown, in the dialog's "value<sep>label"
+// form: the stored value stays the bare index while the label shows the pair
+// description alongside it, e.g. "0: Analogue". A pair the pipeline left
+// unnamed shows its index alone.
+inline std::string audioChannelPairComboEntry(std::size_t pair,
+                                              const std::string& name,
+                                              char separator) {
+  const std::string value = std::to_string(pair);
+  std::string label = value;
+  if (!name.empty()) label += ": " + name;
+  return value + separator + label;
+}
+
 // Note shown in an audio stage's parameter dialog when the node's input
 // carries |pair_count| audio channel pairs. Empty unless the input carries
 // none: with no pairs to choose from, the channel-pair dropdown falls back to
@@ -31,6 +44,20 @@ inline std::string audioChannelPairNotice(std::size_t pair_count) {
          "aligning channel pairs.";
 }
 
+// Note shown in a sink's parameter dialog when the node's input carries no
+// audio channel pairs and the sink writes audio only as an optional sidecar
+// (the TBC Sink). Separate from audioChannelPairNotice() because nothing is
+// passed through and nothing fails: the video export is unaffected, so the
+// only consequence is that the channel-pair setting has nothing to act on.
+inline std::string audioChannelPairSidecarNotice(std::size_t pair_count) {
+  if (pair_count > 0) {
+    return {};
+  }
+  return "The input to this node carries no audio channel pairs, so no .pcm "
+         "audio sidecar will be written and this setting has no effect. The "
+         "TBC and its metadata are exported as normal.";
+}
+
 // Note shown on the preview dialogue's audio selector when the viewed node
 // carries no audio channel pairs. Separate from audioChannelPairNotice()
 // because nothing is being passed through here: the preview simply has no
@@ -43,11 +70,10 @@ inline std::string audioChannelPairPreviewNotice() {
          "audio.";
 }
 
-// Appends audioChannelPairNotice() to a stage description, separated by a
-// blank line. Returns |description| unchanged when there is nothing to note.
-inline std::string withAudioChannelPairNotice(const std::string& description,
-                                              std::size_t pair_count) {
-  const std::string note = audioChannelPairNotice(pair_count);
+// Appends |note| to a stage description, separated by a blank line. Returns
+// |description| unchanged when there is nothing to note.
+inline std::string withNotice(const std::string& description,
+                              const std::string& note) {
   if (note.empty()) {
     return description;
   }
@@ -55,6 +81,18 @@ inline std::string withAudioChannelPairNotice(const std::string& description,
     return note;
   }
   return description + "\n\n" + note;
+}
+
+// Appends audioChannelPairNotice() to a stage description.
+inline std::string withAudioChannelPairNotice(const std::string& description,
+                                              std::size_t pair_count) {
+  return withNotice(description, audioChannelPairNotice(pair_count));
+}
+
+// Appends audioChannelPairSidecarNotice() to a stage description.
+inline std::string withAudioChannelPairSidecarNotice(
+    const std::string& description, std::size_t pair_count) {
+  return withNotice(description, audioChannelPairSidecarNotice(pair_count));
 }
 
 }  // namespace orc::gui

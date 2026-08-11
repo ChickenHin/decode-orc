@@ -4,7 +4,7 @@ Extracts one audio channel pair from the processed video pipeline and writes it 
 
 ## When to use
 
-Add this sink in parallel with the LD Sink stage when your LaserDisc or tape source carries audio and you need it as a standalone file — for example to process it in a DAW, verify audio/video sync, or archive it separately. Because it is a parallel sink, adding it does not affect the video output.
+Add this sink in parallel with the TBC Sink stage when your LaserDisc or tape source carries audio and you need it as a standalone file — for example to process it in a DAW, verify audio/video sync, or archive it separately. Because it is a parallel sink, adding it does not affect the video output.
 
 ## What it does
 

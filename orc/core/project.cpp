@@ -634,8 +634,27 @@ Project load_project_from_yaml(const std::string& yaml_text,
         }
       }
 
+      // Migrate the legacy ld_sink stage, renamed to tbc_sink so it pairs
+      // obviously with tbc_source (issue #258). Behaviour is unchanged, so
+      // the node only needs its stage name and stored labels rewritten.
+      const bool migrated_tbc_sink = (node.stage_name == "ld_sink");
+      if (migrated_tbc_sink) {
+        ORC_LOG_INFO("Migrating legacy stage 'ld_sink' (node {}) to 'tbc_sink'",
+                     node.node_id.to_string());
+        node.stage_name = "tbc_sink";
+        if (node.display_name == "ld-decode Sink") {
+          node.display_name = "TBC Sink";
+        }
+      }
+
       node.user_label = node_yaml["user_label"].as<std::string>(
           node.display_name);  // Default to display_name if not present
+
+      // The old default label was stored verbatim; only an untouched one is
+      // rewritten, so a label the user chose is left alone.
+      if (migrated_tbc_sink && node.user_label == "ld-decode Sink") {
+        node.user_label = node.display_name;
+      }
       node.x_position = node_yaml["x"].as<double>(0.0);
       node.y_position = node_yaml["y"].as<double>(0.0);
 

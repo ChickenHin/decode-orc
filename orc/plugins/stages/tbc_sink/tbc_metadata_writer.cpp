@@ -16,6 +16,8 @@
 #include <filesystem>
 #include <stdexcept>
 
+#include "tbc_sink_levels.h"
+
 namespace orc {
 
 // TBCMetadataWriter::Impl (Private implementation using SQLite)
@@ -279,19 +281,15 @@ bool TBCMetadataWriter::write_video_parameters(const SourceParameters& params) {
   sqlite3_bind_int(stmt, 14,
                    1);  // is_subcarrier_locked: always true (deprecated field)
   sqlite3_bind_int(stmt, 15, params.is_widescreen ? 1 : 0);
-  // System-specific ld-decode 16-bit TBC domain levels (CVBS_U10_4FSC × 64).
-  // NTSC/PAL_M: black16bIre is the 7.5 IRE setup (kTbcNtscBlack); blanking is
-  // kTbcNtscBlanking.  PAL: no setup pedestal; black == blanking ==
-  // kTbcPalBlanking. SMPTE 244M-2003 §4.2.1 / SMPTE 170M-2004 Table 1 / EBU
-  // Tech. 3280-E §1.1.1.
-  const bool is_ntsc_like = (params.system == VideoSystem::NTSC ||
-                             params.system == VideoSystem::PAL_M);
-  const int32_t db_white = is_ntsc_like ? kTbcNtscWhite : kTbcPalWhite;
-  const int32_t db_black = is_ntsc_like ? kTbcNtscBlack : kTbcPalBlanking;
-  const int32_t db_blanking = is_ntsc_like ? kTbcNtscBlanking : kTbcPalBlanking;
-  sqlite3_bind_int(stmt, 16, db_white);
-  sqlite3_bind_int(stmt, 17, db_black);
-  sqlite3_bind_int(stmt, 18, db_blanking);
+  // ld-decode 16-bit TBC domain levels (CVBS_U10_4FSC × 64), taken from the
+  // levels the pipeline reports rather than the spec constants so a non-spec
+  // black level — NTSC-J picture black at 0 IRE, a video_params override —
+  // survives the export instead of being re-labelled as standard setup
+  // (issue #257).  See tbc_sink_levels.h.
+  const TbcCaptureLevels db_levels = tbc_capture_levels(params);
+  sqlite3_bind_int(stmt, 16, db_levels.white_16b);
+  sqlite3_bind_int(stmt, 17, db_levels.black_16b);
+  sqlite3_bind_int(stmt, 18, db_levels.blanking_16b);
   sqlite3_bind_text(stmt, 19, "", -1, SQLITE_TRANSIENT);  // capture_notes
 
   rc = sqlite3_step(stmt);

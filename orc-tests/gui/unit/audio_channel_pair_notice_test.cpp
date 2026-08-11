@@ -50,5 +50,45 @@ TEST(AudioChannelPairNotice, EmptyDescriptionYieldsTheNoticeAlone) {
   EXPECT_EQ(withAudioChannelPairNotice("", 3), "");
 }
 
+// The channel-pair dropdown shows the pair's description next to its index so
+// the user picks by name, while the stored value stays the bare index.
+TEST(AudioChannelPairNotice, ComboEntryShowsIndexAndName) {
+  EXPECT_EQ(audioChannelPairComboEntry(0, "Analogue", '\x1f'),
+            std::string("0\x1f") + "0: Analogue");
+  EXPECT_EQ(audioChannelPairComboEntry(1, "EFM digital audio", '\x1f'),
+            std::string("1\x1f") + "1: EFM digital audio");
+}
+
+// An unnamed pair still has to be selectable; it shows its index alone.
+TEST(AudioChannelPairNotice, ComboEntryFallsBackToTheBareIndex) {
+  EXPECT_EQ(audioChannelPairComboEntry(2, "", '\x1f'),
+            std::string("2\x1f") + "2");
+}
+
+// A sink that writes audio only as an optional sidecar still exports; only the
+// channel-pair setting is inert, so it must not claim a pass-through.
+TEST(AudioChannelPairNotice, SidecarNoticeIsEmptyWhenAudioIsPresent) {
+  EXPECT_EQ(audioChannelPairSidecarNotice(1), "");
+  EXPECT_EQ(audioChannelPairSidecarNotice(8), "");
+}
+
+TEST(AudioChannelPairNotice, SidecarNoticeExplainsTheMissingPcmOnly) {
+  const std::string note = audioChannelPairSidecarNotice(0);
+  EXPECT_NE(note.find(".pcm"), std::string::npos);
+  EXPECT_NE(note.find("no effect"), std::string::npos);
+  EXPECT_NE(note.find("exported as normal"), std::string::npos);
+  // The pass-through wording belongs to the transform stages, not here.
+  EXPECT_EQ(note.find("pass its input through unchanged"), std::string::npos);
+}
+
+TEST(AudioChannelPairNotice, SidecarNoticeAppendsToADescription) {
+  const std::string combined =
+      withAudioChannelPairSidecarNotice("Writes a TBC.", 0);
+  EXPECT_NE(combined.find("Writes a TBC."), std::string::npos);
+  EXPECT_NE(combined.find(audioChannelPairSidecarNotice(0)), std::string::npos);
+  EXPECT_EQ(withAudioChannelPairSidecarNotice("Writes a TBC.", 2),
+            "Writes a TBC.");
+}
+
 }  // namespace
 }  // namespace orc::gui

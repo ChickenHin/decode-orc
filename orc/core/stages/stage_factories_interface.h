@@ -18,7 +18,7 @@
 
 #include "../../plugins/stages/daphne_vbi_sink/daphne_vbi_sink_stage_deps_interface.h"
 #include "../../plugins/stages/daphne_vbi_sink/daphne_vbi_writer_util_interface.h"
-#include "../../plugins/stages/ld_sink/ld_sink_stage_deps_interface.h"
+#include "../../plugins/stages/tbc_sink/tbc_sink_stage_deps_interface.h"
 
 namespace orc {
 /**
@@ -55,7 +55,7 @@ class IStageFactories {
   virtual std::shared_ptr<IDaphneVBIWriterUtil>
   CreateInstanceDaphneVBIWriterUtil(IFileWriter<uint8_t>& writer) = 0;
 
-  virtual std::shared_ptr<ILDSinkStageDeps> CreateInstanceLDSinkStageDeps(
+  virtual std::shared_ptr<ITBCSinkStageDeps> CreateInstanceTBCSinkStageDeps(
       TriggerProgressCallback& progress_callback,
       std::atomic<bool>& is_processing,
       std::atomic<bool>& cancel_requested) = 0;

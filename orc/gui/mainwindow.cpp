@@ -2724,13 +2724,13 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
   // Get current parameter values from the node
   auto current_values = project_.presenter()->getNodeParameters(node_id);
 
-  // audio_channel_map / audio_align / AudioSink: restrict the channel-pair
-  // dropdown to the pairs the node's input actually carries. The stage
-  // descriptor lists all container slots; here we narrow it using the upstream
-  // node's audio pair count.
+  // audio_channel_map / audio_align / AudioSink / tbc_sink: restrict the
+  // channel-pair dropdown to the pairs the node's input actually carries. The
+  // stage descriptor lists all container slots; here we narrow it using the
+  // upstream node's audio pair count.
   std::optional<size_t> input_audio_pair_count;
   if (stage_name == "audio_channel_map" || stage_name == "audio_align" ||
-      stage_name == "AudioSink") {
+      stage_name == "AudioSink" || stage_name == "tbc_sink") {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
     if (core_project) {
       orc::presenters::RenderPresenter render_presenter(core_project);
@@ -2756,17 +2756,15 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
       input_audio_pair_count = pair_names.size();
       if (!pair_names.empty()) {
         // Combo entry "value␟label": stored value is the bare index (or "new"),
-        // display adds the pair description when present, e.g. "0 - Analogue".
+        // display adds the pair description when present, e.g. "0: Analogue".
         const char sep = StageParameterDialog::kComboValueLabelSeparator;
         auto pair_entry = [&](size_t p) {
-          const std::string value = std::to_string(p);
-          std::string label = value;
-          if (!pair_names[p].empty()) label += " - " + pair_names[p];
-          return value + sep + label;
+          return orc::gui::audioChannelPairComboEntry(p, pair_names[p], sep);
         };
 
         for (auto& desc : param_descriptors) {
-          if (desc.name == "channel_pair") {
+          if (desc.name == "channel_pair" ||
+              desc.name == "audio_channel_pair") {
             desc.constraints.allowed_strings.clear();
             for (size_t p = 0; p < pair_names.size(); ++p) {
               desc.constraints.allowed_strings.push_back(pair_entry(p));
@@ -2839,10 +2837,15 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
 
   // An audio stage whose input carries no channel pairs cannot be configured
   // usefully — say so in the dialog header rather than letting the user pick a
-  // pair the input does not have.
+  // pair the input does not have. The TBC sink is the exception: its export
+  // succeeds either way and only the optional .pcm sidecar is affected, so it
+  // gets the milder note.
   if (input_audio_pair_count) {
-    stage_description = orc::gui::withAudioChannelPairNotice(
-        stage_description, *input_audio_pair_count);
+    stage_description = (stage_name == "tbc_sink")
+                            ? orc::gui::withAudioChannelPairSidecarNotice(
+                                  stage_description, *input_audio_pair_count)
+                            : orc::gui::withAudioChannelPairNotice(
+                                  stage_description, *input_audio_pair_count);
   }
 
   // Show parameter dialog

@@ -34,6 +34,10 @@ class ITBCMetadataWriter {
   // Write video parameters (creates capture record)
   virtual bool write_video_parameters(const SourceParameters& params) = 0;
 
+  // Describe the layout of the analogue audio .pcm sidecar. Only written when
+  // the export carries audio; requires the capture record to exist already.
+  virtual bool write_pcm_audio_parameters(const PcmAudioParameters& params) = 0;
+
   // Write field metadata
   virtual bool write_field_metadata(const FieldMetadata& field) = 0;
 

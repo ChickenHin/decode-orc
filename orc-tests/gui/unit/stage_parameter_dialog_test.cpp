@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "audio_channel_pair_notice.h"
 #include "stageparameterdialog.h"
 
 namespace gui_unit_test {
@@ -179,6 +180,39 @@ TEST(StageParameterDialogTest,
   EXPECT_FALSE(std::get<bool>(values.at("bool_param")));
   EXPECT_EQ(std::get<std::string>(values.at("string_param")), "updated-value");
   EXPECT_EQ(std::get<std::string>(values.at("enum_param")), "gamma");
+}
+
+// The TBC sink's pair picker uses the same value/label combo entries, so the
+// dialog shows "0: Analogue" while the project stores "0".
+TEST(StageParameterDialogTest, Combo_TbcSinkAudioChannelPairShowsPairNames) {
+  (void)ensureApplication();
+
+  const char sep = StageParameterDialog::kComboValueLabelSeparator;
+  std::vector<orc::ParameterDescriptor> descriptors;
+  descriptors.push_back(makeDescriptor(
+      "audio_channel_pair", "Audio Channel Pair", orc::ParameterType::STRING,
+      std::string("0"), std::nullopt, std::nullopt,
+      {orc::gui::audioChannelPairComboEntry(0, "Analogue", sep),
+       orc::gui::audioChannelPairComboEntry(1, "EFM digital audio", sep)}));
+
+  std::map<std::string, orc::ParameterValue> current_values;
+  current_values["audio_channel_pair"] = std::string("1");
+
+  StageParameterDialog dialog("tbc_sink", "TBC Sink", "desc", descriptors,
+                              current_values);
+
+  auto* combo = qobject_cast<QComboBox*>(
+      widgetForDisplayName(dialog, "Audio Channel Pair"));
+  ASSERT_NE(combo, nullptr);
+
+  EXPECT_EQ(combo->itemText(0).toStdString(), "0: Analogue");
+  EXPECT_EQ(combo->itemText(1).toStdString(), "1: EFM digital audio");
+  EXPECT_EQ(combo->currentText().toStdString(), "1: EFM digital audio");
+
+  auto values = dialog.get_values();
+  ASSERT_TRUE(
+      std::holds_alternative<std::string>(values.at("audio_channel_pair")));
+  EXPECT_EQ(std::get<std::string>(values.at("audio_channel_pair")), "1");
 }
 
 TEST(StageParameterDialogTest, Combo_ShowsLabelWhileStoringBareValue) {

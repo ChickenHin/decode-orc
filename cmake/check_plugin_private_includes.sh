@@ -95,7 +95,7 @@ THIRD_PARTY_PATTERNS=(
     "libavcodec/*" "libavfilter/*" "libavformat/*" "libavutil/*"
     "libswscale/*" "libswresample/*"  # ffmpeg video sink
     "fftw3.h"                   # Transform PAL chroma decoder
-    "sqlite3.h"                 # tbc_source / ld_sink / cvbs_source metadata
+    "sqlite3.h"                 # tbc_source / tbc_sink / cvbs_source metadata
     "soxr.h"                    # shared audio-resample library
     "sys/*"                     # POSIX
 )
@@ -233,7 +233,7 @@ check_include() {
     #   - every stage plugin may use orc/plugins/stages/common/ (shared
     #     plugin-side static libraries, e.g. audio-resample)
     #   - sink plugins share orc/plugins/stages/sinks/common/
-    #   - ld_sink shares tbc_source's ld-decode metadata structures
+    #   - tbc_sink shares tbc_source's ld-decode metadata structures
     if resolves_in_tree "$include_path" "$including_dir" \
         "${root_dir}/common"; then
         return 0
@@ -247,7 +247,7 @@ check_include() {
             ;;
     esac
     case "$owner_dir" in
-        */ld_sink)
+        */tbc_sink)
             if resolves_in_tree "$include_path" "$including_dir" \
                 "${root_dir}/tbc_source"; then
                 return 0
