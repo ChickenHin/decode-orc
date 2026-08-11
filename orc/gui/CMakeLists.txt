@@ -132,6 +132,14 @@ set(ORC_GUI_LIB_SOURCES
     cataloguedialog.cpp
     cataloguedialog.h
 
+    # The teletext character generator's face, which the cell grid draws
+    # alphanumeric cells from. teletext_font.cpp is generated; see
+    # tools/generate_teletext_font.py.
+    teletext_font.cpp
+    teletext_font.h
+    teletext_glyph_painter.cpp
+    teletext_glyph_painter.h
+
     # Closed caption preview dialog
     closed_caption_assembler.cpp
     closed_caption_assembler.h

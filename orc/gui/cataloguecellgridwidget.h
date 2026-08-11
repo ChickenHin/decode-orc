@@ -13,11 +13,13 @@
 #include <orc/stage/tooling/catalogue_results.h>
 
 #include <QImage>
+#include <QPainterPath>
 #include <QPointer>
 #include <QRectF>
 #include <QSize>
 #include <QWidget>
 #include <optional>
+#include <unordered_map>
 
 class CatalogueFlashClock;
 class QPainter;
@@ -29,15 +31,17 @@ class QPainter;
  * rectangle the payload carries, so glyphs and mosaic blocks keep their
  * proportions whatever shape the widget is given.
  *
- * Alphanumeric cells use the system monospace font; mosaic cells are painted as
- * 2x3 sub-element blocks, contiguous or separated. Cell attributes are
- * honoured: foreground and background out of the payload's own palette, double
- * height (the character spans both rows at unchanged width), boxing on a
- * boxed-only page, conceal (rendered as SPACE — no reveal control) and flash
- * (animated against a CatalogueFlashClock, or held in its lit phase when there
- * is no clock or animation is switched off). The palette travels with the
- * payload rather than being theme-derived, because a service with a fixed
- * display palette means it.
+ * Alphanumeric cells are drawn from the teletext character generator's own
+ * face (teletext_glyph_painter.h), scaled to the character rectangle, and fall
+ * back to the platform's monospaced font for a character that face has no
+ * glyph for. Mosaic cells are painted as 2x3 sub-element blocks, contiguous or
+ * separated. Cell attributes are honoured: foreground and background out of
+ * the payload's own palette, double height (the character spans both rows at
+ * unchanged width), boxing on a boxed-only page, conceal (rendered as SPACE —
+ * no reveal control) and flash (animated against a CatalogueFlashClock, or
+ * held in its lit phase when there is no clock or animation is switched off).
+ * The palette travels with the payload rather than being theme-derived,
+ * because a service with a fixed display palette means it.
  *
  * Painting is two-pass — every background first, then every foreground —
  * because a double-height character occupies the row below its origin and a
@@ -142,6 +146,13 @@ class CatalogueCellGridWidget : public QWidget {
   /// both the widget's own paint and an exported image are.
   void paintContent(QPainter& painter, const QRectF& bounds, bool lit) const;
 
+  /// The character generator's outline for |character|, in the unit character
+  /// rectangle teletext_glyph_path() gives, or nullptr where the face has no
+  /// glyph for it and the platform font has to draw it instead. Cached: a page
+  /// is a thousand cells drawn from a few dozen distinct characters, and every
+  /// flash phase redraws them.
+  const QPainterPath* glyphPath(char32_t character) const;
+
   /// Hatch rows that carried no packet and outline damaged cells
   static void paintDataErrorOverlay(QPainter& painter,
                                     const orc::CatalogueCellGrid& grid,
@@ -155,6 +166,7 @@ class CatalogueCellGridWidget : public QWidget {
   void repaintFlashingCells();
 
   std::optional<orc::CatalogueCellGrid> grid_;
+  mutable std::unordered_map<char32_t, QPainterPath> glyph_paths_;
   QString placeholder_;
   bool show_data_errors_ = false;
 

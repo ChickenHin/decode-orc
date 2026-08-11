@@ -1058,6 +1058,42 @@ TEST(CatalogueCellGridWidgetTest, OutOfRangePaletteIndexIsClamped) {
   EXPECT_EQ(cellCentre(image, grid, /*row=*/0, /*column=*/0).blue(), 255);
 }
 
+// Alphanumeric cells are drawn from the teletext character generator's own
+// face, on the 6 by 10 character rectangle it drew into: the matrix sits
+// against the rectangle's bottom right, leaving the blank column that
+// separates a character from the one beside it and the blank row that
+// separates a row of text from the one above.
+//
+// 7/F of every G0 set is the filled rectangle, whose left and top edges are
+// the matrix's own, so it says where the matrix was put without depending on a
+// letterform. A glyph from a proportional or centred font would have neither
+// edge in the same place.
+TEST(CatalogueCellGridWidgetTest, CharactersAreDrawnOnTheCharacterRectangle) {
+  ensureApplication();
+
+  orc::CatalogueCellGrid grid = makeGrid("", /*rows=*/1, /*columns=*/1);
+  grid.cells[0].character = U'■';
+
+  const QImage image = renderGrid(grid);
+  // Sub-pixels of the rounded character rectangle: 12 across and 20 down.
+  const double sub_w = static_cast<double>(image.width()) / 12.0;
+  const double sub_h = static_cast<double>(image.height()) / 20.0;
+  const auto sub_pixel = [&](double column, double row) {
+    return image.pixelColor(static_cast<int>(column * sub_w),
+                            static_cast<int>(row * sub_h));
+  };
+
+  // The blank column down the left of the rectangle, and the blank row along
+  // the top of it.
+  EXPECT_EQ(sub_pixel(0.5, 6.5), QColor(Qt::black));
+  EXPECT_EQ(sub_pixel(6.5, 0.5), QColor(Qt::black));
+  // The matrix itself, which the filled rectangle covers to both those edges.
+  EXPECT_EQ(sub_pixel(2.5, 6.5), QColor(Qt::white));
+  EXPECT_EQ(sub_pixel(11.5, 6.5), QColor(Qt::white));
+  // Below the matrix's seven rows: the two rows a descender uses.
+  EXPECT_EQ(sub_pixel(6.5, 18.5), QColor(Qt::black));
+}
+
 TEST(CatalogueDisplayListWidgetTest, WalksEveryOperation) {
   ensureApplication();
   CatalogueDisplayListWidget widget;
