@@ -121,12 +121,16 @@ class NabtsSinkStage : public DAGStage,
   // packet stream never needs it, so it is built on first ask and cached.
   // Called from the host's render worker, hence the lock.
   const CatalogueDataset& catalogue() const override {
-    std::lock_guard<std::mutex> lock(catalogue_mutex_);
-    if (!catalogue_) {
-      catalogue_ =
-          std::make_unique<CatalogueDataset>(build_nabts_catalogue(dataset_));
-    }
-    return *catalogue_;
+    return catalogue_for(std::string());
+  }
+
+  // The same records drawn for a receiver the reader picked in the viewer
+  // rather than the one the project's parameter names. Only the display lists
+  // differ, so this rebuilds the catalogue and nothing above it: the records
+  // themselves were recovered once and are not read again.
+  const CatalogueDataset& catalogue(
+      const std::string& view_option) const override {
+    return catalogue_for(view_option);
   }
 
   // IStagePreviewCapability
@@ -140,11 +144,39 @@ class NabtsSinkStage : public DAGStage,
   }
 
  private:
+  /// The catalogue as drawn for the receiver @p view_option names, or for the
+  /// project's own where it names none — which an empty string and an
+  /// unrecognised one both do. Built if what is held was built for another
+  /// receiver. One is held rather than one per receiver: the host copies what
+  /// it is given before it asks again, and a page of deposited pixels is a
+  /// large thing to keep four copies of for a reader looking at one.
+  const CatalogueDataset& catalogue_for(const std::string& view_option) const {
+    std::lock_guard<std::mutex> lock(catalogue_mutex_);
+    const NaplpsRenderMode mode =
+        naplps_render_mode_from_name(view_option, render_mode_);
+    if (!catalogue_ || catalogue_mode_ != mode) {
+      catalogue_ = std::make_unique<CatalogueDataset>(
+          build_nabts_catalogue(dataset_, mode));
+      catalogue_mode_ = mode;
+    }
+    return *catalogue_;
+  }
+
   /// Drop the cached catalogue so the next reader rebuilds it from the dataset
   /// that has just replaced the one it was built from.
   void invalidate_catalogue() {
     std::lock_guard<std::mutex> lock(catalogue_mutex_);
     catalogue_.reset();
+  }
+
+  /// Set the receiver resolution the project asks for, which is the one a
+  /// reader who picks none in the viewer gets. Shares the catalogue's lock
+  /// because it is read on the render worker alongside it; what is cached needs
+  /// no dropping, since catalogue_for() rebuilds whenever the receiver asked
+  /// for is not the one it holds.
+  void set_render_mode(NaplpsRenderMode mode) {
+    std::lock_guard<std::mutex> lock(catalogue_mutex_);
+    render_mode_ = mode;
   }
 
   // Parses the parameter set into deps options, converting the 1-based UI line
@@ -168,6 +200,12 @@ class NabtsSinkStage : public DAGStage,
   // Built from dataset_ on first catalogue() call; cleared with it.
   mutable std::mutex catalogue_mutex_;
   mutable std::unique_ptr<CatalogueDataset> catalogue_;
+  // The receiver catalogue_ was built for, which is the project's unless a
+  // reader asked the viewer for another.
+  mutable NaplpsRenderMode catalogue_mode_{NaplpsRenderMode::kReference};
+  // The receiver the project asks for. Guarded by catalogue_mutex_, which is
+  // what makes it safe to read on the render worker.
+  NaplpsRenderMode render_mode_{NaplpsRenderMode::kReference};
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_input_;
 };

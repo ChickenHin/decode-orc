@@ -4385,6 +4385,26 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       connect(dialog, &QObject::destroyed,
               [this, node_id]() { catalogue_dialogs_.erase(node_id); });
 
+      // Picking a view option asks the stage to build the same catalogue
+      // another way. It is a read like the first one — nothing upstream runs —
+      // so the page on screen stays put until the new one arrives rather than
+      // being replaced by a pending state.
+      connect(dialog, &CatalogueDialog::viewOptionChanged, this,
+              [this, node_id](const QString& option_id) {
+                if (!render_coordinator_) {
+                  return;
+                }
+                const uint64_t view_request_id =
+                    render_coordinator_->requestCatalogueData(
+                        node_id, option_id.toStdString());
+                pending_catalogue_requests_[view_request_id] = node_id;
+                ORC_LOG_DEBUG(
+                    "Requested catalogue for node '{}' under view option "
+                    "'{}', request_id={}",
+                    node_id.to_string(), option_id.toStdString(),
+                    view_request_id);
+              });
+
       catalogue_dialogs_[node_id] = dialog;
     } else {
       dialog = it->second;

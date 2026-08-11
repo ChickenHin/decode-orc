@@ -77,6 +77,21 @@ std::vector<uint8_t> bytes(uint8_t first, size_t count) {
 // Identity
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+/**
+ * @brief Catalogued records with their presentation code run
+ *
+ * Recovery catalogues the record data; running it is a separate step, because
+ * what a page looks like depends on the receiver being emulated (X3.110 §6.2.3
+ * sizes DRCS storage from it). A test that reads a page therefore presents the
+ * records first, exactly as a browser does.
+ */
+std::vector<orc::NabtsCataloguedRecord> presented(
+    const orc::NabtsRecordCatalogue& catalogue) {
+  std::vector<orc::NabtsCataloguedRecord> records = catalogue.records();
+  orc::nabts_interpret_records(records, orc::kNaplpsGridReference);
+  return records;
+}
+
 // §7.1.2: a cyclic service brings the same record round throughout a recording,
 // so a hundred copies are one catalogue entry seen a hundred times.
 TEST(NabtsRecordCatalogue, CataloguesRepeatedCopiesAsOneRecord) {
@@ -683,7 +698,7 @@ TEST(NabtsRecordCatalogue, ASupportRecordsMacrosReachThePagesThatNeedThem) {
   page.classification.support_needed = true;
   catalogue.merge(page, 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   // Map order is ascending by address, so the page comes first.
   const auto& page_record = records[0];
@@ -706,7 +721,7 @@ TEST(NabtsRecordCatalogue, APageWithoutTheFlagIsPresentedWithoutSupport) {
 
   catalogue.merge(message(0x000, 0x100, 0, macro_invocation()), 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   EXPECT_TRUE(records[0].page.primitives.empty());
   EXPECT_EQ(records[0].page.diagnostics.unresolved_macros, 1u);
@@ -726,7 +741,7 @@ TEST(NabtsRecordCatalogue, SupportDoesNotLeakAcrossDataChannels) {
   page.classification.support_needed = true;
   catalogue.merge(page, 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   const auto& page_record =
       records[0].address_text == "100" ? records[0] : records[1];
@@ -765,7 +780,7 @@ TEST(NabtsRecordCatalogue, AMoreRecordIsPresentedOverItsPredecessorsDisplay) {
   catalogue.merge(base, 0);
   catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
 
   const auto& first = records[0];
@@ -792,7 +807,7 @@ TEST(NabtsRecordCatalogue, ARecordWithoutAMoreFlaggedPredecessorStandsAlone) {
   catalogue.merge(message(0x000, 0x044, 0, draw_letter('X')), 0);
   catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   const auto& lone = records[1];
   EXPECT_EQ(lone.chain_base_address, 0x4401u);
@@ -815,7 +830,7 @@ TEST(NabtsRecordCatalogue, AMoreHeaderExtensionLinksAChainWithoutTheFlag) {
   catalogue.merge(base, 0);
   catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   const auto& continuation = records[1];
   EXPECT_EQ(continuation.chain_base_address, 0x4400u);
@@ -835,7 +850,7 @@ TEST(NabtsRecordCatalogue, TheAlgorithmicMoreAddressCountsInDecimal) {
   catalogue.merge(ninth, 0);
   catalogue.merge(long_address_message(0x000, 0x4410, 0, draw_letter('Y')), 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   const auto& continuation = records[1];
   EXPECT_EQ(continuation.chain_position, 1u)
@@ -860,7 +875,7 @@ TEST(NabtsRecordCatalogue, ARingOfMoreLinksSharesOneCanonicalBase) {
       orc::NabtsHeaderExtension{1, 9, {0, 0, 0, 0, 0, 4, 4, 0, 9}});
   catalogue.merge(second, 1);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 2u);
   EXPECT_EQ(records[0].chain_base_address, 0x4409u);
   EXPECT_EQ(records[0].chain_position, 0u);
@@ -886,7 +901,7 @@ TEST(NabtsRecordCatalogue, AChainFollowsTheNewestVersionOfEachMember) {
   catalogue.merge(new_base, 1);
   catalogue.merge(long_address_message(0x000, 0x4401, 0, draw_letter('Y')), 2);
 
-  const auto records = catalogue.records();
+  const auto records = presented(catalogue);
   ASSERT_EQ(records.size(), 3u);
   const auto& continuation = records[2];
   ASSERT_EQ(continuation.page.primitives.size(), 2u);

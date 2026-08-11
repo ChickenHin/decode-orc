@@ -280,10 +280,18 @@ void NabtsSinkDeps::write_captions(const NabtsSinkOptions& options,
     return;
   }
 
+  // The cues are read off the presented pages, which recovery does not build:
+  // what a page looks like depends on the receiver it is drawn for, so the
+  // catalogue interprets it when it is browsed. Caption text is the one part
+  // that cannot depend on the receiver — a character's code is its code at any
+  // resolution — so the export interprets at the reference receiver and gets
+  // the same cues the viewer will show at whatever resolution it is set to.
+  std::vector<NabtsCataloguedRecord> records = result.dataset.records;
+  nabts_interpret_records(records, kNaplpsGridReference);
+
   // Read the same way the catalogue's caption track reads it — one shared
   // implementation, so the file and the screen cannot disagree.
-  const std::vector<NabtsCaptionCue> cues =
-      nabts_caption_cues(result.dataset.records);
+  const std::vector<NabtsCaptionCue> cues = nabts_caption_cues(records);
   if (cues.empty()) {
     ORC_LOG_DEBUG(
         "NabtsSinkDeps: No caption records in the range; no cues written");

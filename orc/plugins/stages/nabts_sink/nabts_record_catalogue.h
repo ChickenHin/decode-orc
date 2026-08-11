@@ -77,6 +77,27 @@ struct NabtsRecordCopy {
  * there is no agreement at all; a copy shorter than that votes only over the
  * bytes it has.
  */
+/**
+ * @brief Run every presentation record's code into its page
+ *
+ * §6.1: a presentation record's data is NAPLPS, so this is where it becomes
+ * something a viewer can draw. Each record is presented the way a receiver
+ * would present the page — the general reset of CEA-516 §8.5, the channel's
+ * Support Record where the Support-Needed Flag asks for it (§5.2.7.9), the
+ * caption preset of §5.2.7.3 where the Caption Flag does, and the record drawn
+ * over its own More chain (§5.2.7.8) — so the chains and the support records
+ * have to be resolved across the whole catalogue rather than record by record.
+ *
+ * Separate from recovery because it depends on @p grid, the receiver being
+ * emulated: X3.110 §6.2.3 sizes a DRCS character's storage buffer from the
+ * physical resolution its character field covers, so interpreting during
+ * recovery would pin part of the result to whatever receiver was configured
+ * when the recording was read. Records whose type is not a presentation one
+ * are left alone.
+ */
+void nabts_interpret_records(std::vector<NabtsCataloguedRecord>& records,
+                             NaplpsRenderGrid grid);
+
 std::vector<uint8_t> nabts_vote_record_data(
     const std::vector<NabtsRecordCopy>& copies);
 
@@ -164,9 +185,10 @@ class NabtsRecordCatalogue {
    * @brief Catalogue contents, ascending by {channel, address, version}
    *
    * Where a record's copies were combined rather than chosen among, the vote is
-   * held here, and the presentation code of §6.1 is run into a display list
-   * here too — once per record rather than once per copy, since only the
-   * combined result is ever drawn.
+   * held here, so each record carries the data a receiver would have presented.
+   * Running that data is nabts_interpret_records()' business and deliberately
+   * not done here: what a page looks like depends on the receiver it is drawn
+   * for, and recovery has no business fixing that.
    */
   std::vector<NabtsCataloguedRecord> records() const;
 
@@ -201,11 +223,6 @@ class NabtsRecordCatalogue {
 
   std::size_t max_records_;
   std::size_t max_copies_;
-  /// Reused across records rather than built per record: an interpreter is a
-  /// few kilobytes of state and run() resets all of it, so one instance decodes
-  /// the whole service. Mutable because records() is where the presentation
-  /// code is run, and reading the catalogue does not change it.
-  mutable NaplpsInterpreter interpreter_;
   std::map<Key, Entry> records_;
   uint64_t touch_counter_ = 0;
   bool truncated_ = false;

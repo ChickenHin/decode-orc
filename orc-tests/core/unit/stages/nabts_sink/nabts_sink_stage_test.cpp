@@ -278,6 +278,81 @@ TEST_F(NabtsSinkStage, Trigger_ReportsAFailedRun) {
 }
 
 // ---------------------------------------------------------------------------
+// The catalogue and the receiver it is drawn for
+// ---------------------------------------------------------------------------
+
+/// Trigger |stage| with a result carrying one presentation record, so it has a
+/// catalogue to serve. The record's data draws a filled rectangle, which is
+/// enough for a display list either mode can emit.
+void triggerWithOneRecord(orc::NabtsSinkStage& stage,
+                          const std::map<std::string, orc::ParameterValue>&
+                              parameters = default_parameters()) {
+  orc::NabtsSinkResult result;
+  result.success = true;
+  orc::NabtsCataloguedRecord record;
+  record.channel = 0x000;
+  record.address_text = "000";
+  record.record_type = 1;  // §5.2.2.3 non-cyclic presentation
+  record.times_seen = 1;
+  record.times_intact = 1;
+  record.complete = true;
+  record.data = {0x0E, 0x6B, 0x7F};  // SO, then a filled rectangle
+  result.dataset.records.push_back(record);
+
+  auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, analyse(_, _)).WillOnce(Return(result));
+  stage.set_deps_override(deps);
+
+  MockObservationContext observations;
+  auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+  ASSERT_TRUE(stage.trigger({input}, parameters, observations));
+  ASSERT_TRUE(stage.has_results());
+}
+
+// Asked for nothing in particular, the stage draws for the receiver the
+// project's parameter names.
+TEST_F(NabtsSinkStage, Catalogue_DrawsForTheParametersReceiver) {
+  auto parameters = default_parameters();
+  parameters["render_resolution"] = std::string("768 x 600");
+  stage_.set_parameters(parameters);
+  triggerWithOneRecord(stage_, parameters);
+
+  EXPECT_EQ(stage_.catalogue().schema.view_option, "768 x 600");
+  EXPECT_EQ(stage_.catalogue().payloads[0].display_list.nominal_width, 768);
+}
+
+// A reader who picks a receiver in the viewer gets it, and the records are not
+// read again to give it to them: the same trigger's data is drawn a second way.
+TEST_F(NabtsSinkStage, Catalogue_DrawsForTheReceiverTheViewerAsksFor) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
+
+  const auto& fine = stage_.catalogue("512 x 400");
+  EXPECT_EQ(fine.schema.view_option, "512 x 400");
+  ASSERT_FALSE(fine.payloads.empty());
+  EXPECT_EQ(fine.payloads[0].display_list.nominal_width, 512);
+
+  // And back again, which is what comparing two receivers amounts to.
+  const auto& coarse = stage_.catalogue("256 x 200");
+  EXPECT_EQ(coarse.schema.view_option, "256 x 200");
+  EXPECT_EQ(coarse.payloads[0].display_list.nominal_width, 256);
+}
+
+// An option the stage does not know is not worth refusing to draw over: the
+// host round-trips what a schema gave it, and anything else means "as the
+// project has it".
+TEST_F(NabtsSinkStage, Catalogue_FallsBackToTheProjectForAnUnknownOption) {
+  auto parameters = default_parameters();
+  parameters["render_resolution"] = std::string("768 x 600");
+  stage_.set_parameters(parameters);
+  triggerWithOneRecord(stage_, parameters);
+
+  EXPECT_EQ(stage_.catalogue("144p").schema.view_option, "768 x 600");
+  EXPECT_EQ(stage_.catalogue(std::string()).schema.view_option, "768 x 600");
+}
+
+// ---------------------------------------------------------------------------
 // execute()
 // ---------------------------------------------------------------------------
 

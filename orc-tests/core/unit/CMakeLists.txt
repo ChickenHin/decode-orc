@@ -198,8 +198,12 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_record_test.cpp
         stages/nabts_sink/nabts_record_catalogue_test.cpp
         stages/nabts_sink/nabts_caption_publication_test.cpp
+        stages/nabts_sink/nabts_catalogue_view_test.cpp
         stages/nabts_sink/naplps_code_env_test.cpp
+        stages/nabts_sink/naplps_font_test.cpp
         stages/nabts_sink/naplps_interpreter_test.cpp
+        stages/nabts_sink/naplps_raster_test.cpp
+        stages/nabts_sink/naplps_render_grid_test.cpp
         stages/nabts_sink/nabts_scan_state_test.cpp
         stages/teletext_sink/teletext_sink_stage_test.cpp
         stages/teletext_sink/teletext_sink_deps_test.cpp

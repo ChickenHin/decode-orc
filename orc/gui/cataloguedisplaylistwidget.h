@@ -116,9 +116,29 @@ class CatalogueDisplayListWidget : public QWidget {
   void hideEvent(QHideEvent* event) override;
 
  private:
+  /**
+   * @brief How one paint maps unit space onto the surface it draws to
+   *
+   * The two scales differ wherever the list's nominal pixels are not square:
+   * the drawable area takes the shape the list is displayed at, while unit y
+   * still runs over the extent the list covers, so a unit of y is not the same
+   * number of device pixels as a unit of x.
+   */
+  struct Mapping {
+    /// Device pixels per unit of x, and per unit of y.
+    qreal unit_x = 0.0;
+    qreal unit_y = 0.0;
+    /// The thinnest stroke that is drawn, in device pixels. One pixel of the
+    /// list's own grid where it names one, and one device pixel otherwise.
+    qreal minimum_pen = 1.0;
+  };
+
   static void paintOp(QPainter& painter, const orc::CatalogueDisplayList& list,
                       const orc::CatalogueDrawOp& op, const QRectF& area,
-                      qreal unit, bool lit);
+                      const Mapping& mapping, bool lit);
+
+  /// The mapping from unit space onto a drawable area of |area|
+  Mapping mappingFor(const QRectF& area) const;
 
   /// The drawable area within a paint surface |bounds| pixels across and down,
   /// whose origin is (0, 0) — the widget itself, or the image a save renders

@@ -212,10 +212,14 @@ struct GetBurstLevelDataRequest : public RenderRequest {
  */
 struct GetCatalogueDataRequest : public RenderRequest {
   orc::NodeID node_id;
+  /// Which of the schema's view options to build under; empty for the one the
+  /// stage's own settings give.
+  std::string view_option;
 
-  GetCatalogueDataRequest(uint64_t id, orc::NodeID node)
+  GetCatalogueDataRequest(uint64_t id, orc::NodeID node, std::string option)
       : RenderRequest(RenderRequestType::GetCatalogueData, id),
-        node_id(std::move(node)) {}
+        node_id(std::move(node)),
+        view_option(std::move(option)) {}
 };
 
 /**
@@ -536,7 +540,7 @@ class IRenderPresenter {
   virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(NodeID node_id) = 0;
   virtual std::optional<orc::CatalogueDataset> getCatalogueData(
-      NodeID node_id) = 0;
+      NodeID node_id, const std::string& view_option) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -780,10 +784,16 @@ class RenderCoordinator : public QObject {
    * behind via catalogueDataReady, or emits resultsNotAvailable when the node
    * has not been triggered since the DAG was last built.
    *
+   * Asking for a view option is still a read: the stage draws the items it
+   * already has a second way, and nothing upstream of it runs.
+   *
    * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @param view_option One of the schema's view options, or empty for the view
+   *        the stage's own settings give
    * @return Request ID
    */
-  uint64_t requestCatalogueData(const orc::NodeID& node_id);
+  uint64_t requestCatalogueData(const orc::NodeID& node_id,
+                                const std::string& view_option = {});
 
   /**
    * @brief Request available outputs for a node (async)

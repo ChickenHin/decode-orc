@@ -13,6 +13,8 @@
 #include <cmath>
 #include <utility>
 
+#include "naplps_raster.h"
+
 namespace orc {
 
 namespace {
@@ -20,6 +22,10 @@ namespace {
 /// §3.3 of CEA-516 puts odd parity in b8 of every data byte of a type-zero
 /// group, so a NAPLPS byte is the low seven bits.
 constexpr uint8_t kSevenBits = 0x7F;
+
+/// A character field of no stated height still names one row, so a movement
+/// across it is measured against at least this much.
+constexpr double kRowHeightFloor = 1e-9;
 
 /// Graphic bytes of a 7-bit in-use table: columns 2 to 7.
 constexpr bool is_graphic(uint8_t byte) { return byte >= 0x20; }
@@ -47,7 +53,12 @@ NabtsPrimitive::Repertoire repertoire_of(NaplpsGSet set) {
 
 }  // namespace
 
-NaplpsInterpreter::NaplpsInterpreter() = default;
+NaplpsInterpreter::NaplpsInterpreter()
+    : NaplpsInterpreter(kNaplpsGridReference) {}
+
+NaplpsInterpreter::NaplpsInterpreter(NaplpsRenderGrid grid) {
+  state_.set_render_grid(grid);
+}
 
 // ---------------------------------------------------------------------------
 // The main loop
@@ -1572,22 +1583,39 @@ void NaplpsInterpreter::emit(NabtsPrimitive primitive) {
   snapshot_.primitives.push_back(std::move(primitive));
 }
 
+bool NaplpsInterpreter::stays_on_row(const NabtsPoint& point) const {
+  const bool path_is_horizontal = state_.text.path == NabtsCharPath::kRight ||
+                                  state_.text.path == NabtsCharPath::kLeft;
+  const double across = path_is_horizontal ? point.y - state_.cursor.y
+                                           : point.x - state_.cursor.x;
+  const double row =
+      std::fabs(path_is_horizontal ? state_.text.character_field.dy
+                                   : state_.text.character_field.dx);
+  // Half a row: nearer than that to where it already is and the origin has not
+  // been put on another row, however the coordinate was resolved.
+  return std::fabs(across) < std::max(row, kRowHeightFloor) * 0.5;
+}
+
 void NaplpsInterpreter::move_drawing_point(const NabtsPoint& point) {
   state_.drawing_point = point;
   // §5.3.2.3.7 Table 10: move together (0) or drawing point leads (2) both take
   // the cursor with it.
   if (state_.text.move_attribute == 0 || state_.text.move_attribute == 2) {
+    // The character field origin moved to another row, so §5.3.2.3.6's
+    // suppression window closes.
+    if (!stays_on_row(point)) {
+      wrap_suppress_ = WrapSuppress::kNone;
+    }
     state_.cursor = point;
-    // The character field origin moved, so §5.3.2.3.6's suppression window
-    // closes.
-    wrap_suppress_ = WrapSuppress::kNone;
   }
 }
 
 void NaplpsInterpreter::move_cursor(const NabtsPoint& point) {
   // §5.3.2.3.6: any movement of the character field origin ends the window in
-  // which an explicit APR APD would be suppressed. The automatic wrap itself
-  // also passes through here; move_cursor_by() re-arms after it.
+  // which an explicit APR APD would be suppressed — including the one a
+  // displayed character makes, which is what tells a service's own line ending
+  // from a real one further down the line. The automatic wrap itself also
+  // passes through here; move_cursor_by() re-arms after it.
   wrap_suppress_ = WrapSuppress::kNone;
   state_.cursor = resolve(point);
   // Move together (0) or cursor leads (1).
@@ -1811,73 +1839,97 @@ void NaplpsInterpreter::draw_into_definition(const NabtsPrimitive& primitive) {
     return;
   }
 
-  // Only the extent a primitive covers is written, and only along the axes the
-  // buffer spans. A full rasteriser is deliberately not built here: the buffer
-  // is a bitmap the renderer scales, and what the standard needs of a decoder
-  // is which elements the drawing touched. Points, lines and rectangles cover
-  // that — they are what a DRCS definition is made of in practice — and an arc
-  // or polygon marks its control points' bounding box.
-  const auto mark = [&](double x, double y) {
-    const double fx =
-        x /
-        std::max(1e-9, std::fabs(state_.text.character_field.dx) *
-                           (1.0 / std::fabs(state_.text.character_field.dx)));
-    (void)fx;
-    if (x < 0.0 || y < 0.0) {
-      return;
-    }
-    const auto column = static_cast<size_t>(x * width);
-    const auto row = static_cast<size_t>(y * height);
-    if (column >= width || row >= height) {
-      return;
-    }
-    (*elements)[row * width + column] = !black;
-  };
+  // The definition is drawn by exactly the rules the display is drawn by:
+  // §6.2.3 executes the defining code "in the same manner as if it were being
+  // displayed", into the buffer rather than onto the screen. So the buffer is
+  // a receiver of its own size and the shared rasteriser fills it — which is
+  // what makes an arc in a definition an arc rather than the box around it.
+  const NaplpsRenderGrid buffer_grid{static_cast<int>(width),
+                                     static_cast<int>(height)};
+  NaplpsCellSurface surface(buffer_grid);
+  NaplpsRasteriser raster(surface,
+                          NaplpsGridMapping::over_unit_screen(buffer_grid));
+
+  NaplpsInk ink;
+  ink.colour = primitive.colour;
 
   switch (primitive.kind) {
     case NabtsPrimitiveKind::kPoint:
-    case NabtsPrimitiveKind::kCharacter:
-      for (const NabtsPoint& point : primitive.points) {
-        mark(point.x, point.y);
+      if (!primitive.points.empty()) {
+        raster.stamp_pel(primitive.points.front(), primitive.logical_pel, ink);
       }
       break;
+
+    case NabtsPrimitiveKind::kCharacter:
+      // A character deposits its own pattern; the definition sets the elements
+      // its shape covers.
+      raster.deposit_character(primitive, snapshot_.drcs, ink, nullptr);
+      break;
+
     case NabtsPrimitiveKind::kLine:
-    case NabtsPrimitiveKind::kArc:
-    case NabtsPrimitiveKind::kPolygon:
-    case NabtsPrimitiveKind::kIncrementalPoints: {
-      // Bresenham-free: sample the polyline densely enough that no element the
-      // path crosses is missed, which is one step per buffer element.
-      const size_t steps = static_cast<size_t>(std::max(width, height)) * 2;
-      for (size_t segment = 1; segment < primitive.points.size(); ++segment) {
-        const NabtsPoint& a = primitive.points[segment - 1];
-        const NabtsPoint& b = primitive.points[segment];
-        for (size_t i = 0; i <= steps; ++i) {
-          const double t = static_cast<double>(i) / static_cast<double>(steps);
-          mark(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
-        }
+      raster.stroke_path(primitive.points, primitive.logical_pel,
+                         primitive.line_texture, ink);
+      break;
+
+    case NabtsPrimitiveKind::kArc: {
+      const std::vector<NabtsPoint> outline =
+          raster.arc_polyline(primitive.points);
+      if (primitive.filled) {
+        raster.fill_path(outline, primitive.logical_pel,
+                         primitive.texture_pattern, primitive.texture_mask_size,
+                         nullptr, ink);
+      } else {
+        raster.stroke_path(outline, primitive.logical_pel,
+                           primitive.line_texture, ink);
       }
       break;
     }
-    case NabtsPrimitiveKind::kRectangle: {
-      const double x0 =
-          std::min(primitive.origin.x, primitive.origin.x + primitive.size.dx);
-      const double x1 =
-          std::max(primitive.origin.x, primitive.origin.x + primitive.size.dx);
-      const double y0 =
-          std::min(primitive.origin.y, primitive.origin.y + primitive.size.dy);
-      const double y1 =
-          std::max(primitive.origin.y, primitive.origin.y + primitive.size.dy);
-      const double step_x = 1.0 / static_cast<double>(width) / 2.0;
-      const double step_y = 1.0 / static_cast<double>(height) / 2.0;
-      for (double y = y0; y <= y1; y += step_y) {
-        for (double x = x0; x <= x1; x += step_x) {
-          if (primitive.filled || x == x0 || y == y0 || x + step_x > x1 ||
-              y + step_y > y1) {
-            mark(x, y);
-          }
-        }
+
+    case NabtsPrimitiveKind::kPolygon:
+      if (primitive.filled) {
+        raster.fill_path(primitive.points, primitive.logical_pel,
+                         primitive.texture_pattern, primitive.texture_mask_size,
+                         nullptr, ink);
+      } else {
+        raster.stroke_path(primitive.points, primitive.logical_pel,
+                           primitive.line_texture, ink);
       }
       break;
+
+    case NabtsPrimitiveKind::kRectangle: {
+      const NabtsPoint origin = primitive.origin;
+      const NabtsPoint far{origin.x + primitive.size.dx,
+                           origin.y + primitive.size.dy};
+      const std::vector<NabtsPoint> corners = {origin,
+                                               NabtsPoint{far.x, origin.y}, far,
+                                               NabtsPoint{origin.x, far.y}};
+      if (primitive.filled) {
+        raster.fill_path(corners, primitive.logical_pel,
+                         primitive.texture_pattern, primitive.texture_mask_size,
+                         nullptr, ink);
+      } else {
+        raster.stroke_path(corners, primitive.logical_pel,
+                           primitive.line_texture, ink, /*closed=*/true);
+      }
+      break;
+    }
+
+    case NabtsPrimitiveKind::kIncrementalPoints:
+      // §5.3.3.6.3's raster, one element per pel, in the definition's own
+      // colour: the values it carries address a colour map the buffer has no
+      // use for, since an element is only on or off.
+      raster.stroke_path(primitive.points, primitive.logical_pel,
+                         primitive.line_texture, ink);
+      break;
+  }
+
+  for (int row = 0; row < surface.height(); ++row) {
+    for (int column = 0; column < surface.width(); ++column) {
+      if (!surface.at(column, row).painted) {
+        continue;
+      }
+      (*elements)[static_cast<size_t>(row) * width +
+                  static_cast<size_t>(column)] = !black;
     }
   }
 }

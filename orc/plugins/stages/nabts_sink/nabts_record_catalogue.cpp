@@ -356,13 +356,20 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
     }
   }
 
+  return out;
+}
+
+void nabts_interpret_records(std::vector<NabtsCataloguedRecord>& records,
+                             NaplpsRenderGrid grid) {
+  NaplpsInterpreter interpreter(grid);
+
   // §8.7.1.4: one Support Record per Data Channel, at address FFF with the
   // Support Record Flag set — the record that "contain[s] one or more macro
   // definitions ... invoked directly by other Presentation Records in the same
   // Data Channel". Where versions differ the highest wins, which iteration
   // order delivers for free: same channel and address, ascending version.
   std::map<uint16_t, const NabtsCataloguedRecord*> support_by_channel;
-  for (const NabtsCataloguedRecord& record : out) {
+  for (const NabtsCataloguedRecord& record : records) {
     if (record.support_record &&
         nabts_type_is_presentation(record.record_type)) {
       support_by_channel[record.channel] = &record;
@@ -374,7 +381,7 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
   // chain, not a particular version of it. Ascending iteration leaves the
   // highest version in place.
   std::map<std::pair<uint16_t, uint64_t>, const NabtsCataloguedRecord*> latest;
-  for (const NabtsCataloguedRecord& record : out) {
+  for (const NabtsCataloguedRecord& record : records) {
     if (nabts_type_is_presentation(record.record_type)) {
       latest[{record.channel, record.address}] = &record;
     }
@@ -419,8 +426,14 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
   // record's predecessors are walked back through the links above, executed
   // in order with the display carried between them, and the record itself
   // drawn on top of what they left.
-  for (NabtsCataloguedRecord& record : out) {
+  for (NabtsCataloguedRecord& record : records) {
     if (!nabts_type_is_presentation(record.record_type)) {
+      continue;
+    }
+    if (record.data.empty()) {
+      // Nothing to run, so nothing to draw: a record whose every copy was lost
+      // has no presentation code, and running it would only replace the page it
+      // already carries with the empty one it would have produced anyway.
       continue;
     }
 
@@ -481,26 +494,25 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records() const {
       caption = caption || member->caption;
     }
 
-    interpreter_.reset_decoder();
+    interpreter.reset_decoder();
     if (needs_support && !record.support_record) {
       const auto support = support_by_channel.find(record.channel);
       if (support != support_by_channel.end()) {
         // Run for its definitions; what the support record itself drew is not
         // part of this page.
-        (void)interpreter_.run(support->second->data);
+        (void)interpreter.run(support->second->data);
       }
     }
     if (caption) {
-      interpreter_.apply_caption_state();
+      interpreter.apply_caption_state();
     }
     bool keep_display = false;
     for (const NabtsCataloguedRecord* member : prefix) {
-      (void)interpreter_.run(member->data, keep_display);
+      (void)interpreter.run(member->data, keep_display);
       keep_display = true;
     }
-    record.page = interpreter_.run(record.data, keep_display);
+    record.page = interpreter.run(record.data, keep_display);
   }
-  return out;
 }
 
 }  // namespace orc

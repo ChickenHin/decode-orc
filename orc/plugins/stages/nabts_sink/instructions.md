@@ -91,6 +91,42 @@ How data bits are recovered from each line.
 * **MLSE** fits the recording's frequency response to the known 24-bit start of each line and finds the bit sequence that response would most likely have produced. This is what recovers data from tape, where the limited bandwidth smears each bit into its neighbours and no bit-centre threshold can work. Roughly an order of magnitude more work per line.
 * **Automatic** (default) tries Threshold first and falls back to MLSE only on lines it could not lock, so a clean source pays nothing extra.
 
+### render_resolution (string)
+The receiver resolution NAPLPS pages are drawn against in the **NABTS Records** tool, and the one the tool opens on. The same four choices sit on a **Receiver** dropdown at the top of that window, which is where you would normally change it — see *Choosing a receiver while reading* below.
+
+ANSI X3.110 draws into an abstract unit screen, but it sizes several things in the physical pixels of the receiver displaying them: §5.3.2.2.6 defines the logical pel — what gives a line its width — as covering "all of those pixels that lie under any portion of the logical pel as it is mapped to the display screen", and guarantees it "will always map to at least one and possibly many display pixels". Line texture dot and dash lengths (§5.3.2.4.2), hatch spacing (§5.3.2.4.4) and the raster step of INCREMENTAL POINT are all multiples of that pel. A page therefore has no single correct appearance until a receiver is named; in particular a stroke the service left dimensionless is one *pixel* wide, and without a resolution there is no pixel to measure it in.
+
+* **256 x 200 (reference receiver)** (default) is the grid Table D1 item 10 requires of a receiver — "resolution shall be on the order of 256 pixels horizontal by 200 pixels vertical" — and so what a set-top decoder of the period put on screen. Choose it to see the page as its author would have.
+* **512 x 400** and **768 x 600** are that grid at twice and three times, for a sharper reading of the same page. Appendix D Scope note (2) contemplates exactly this: a receiver exceeding the reference model "may produce more pleasing images". Each keeps the grid pixel square in unit space, so nothing the service drew is distorted.
+* **512 x 400 (vector)** draws the same geometry as resolution-independent shapes rather than pixels. Curves stay smooth at any zoom, which suits reading fine detail, but the pixel structure a receiver had is lost.
+
+The choices are named after the grid rather than by the 240p/480p shorthand a television is described by, because that shorthand counts the lines a set *scanned* and these count the pixels a decoder *drew into* — the reference model's buffer is 200 rows whatever the set showing it scanned, so calling it 240p would invite reading 240 rows into it.
+
+Only whole multiples of the reference grid are offered. A page is authored against that grid, so at twice or three times everything its author placed on a pixel boundary lands on one again; at some fraction in between it lands between pixels, which thickens strokes unevenly and — because a character pattern is a bitmap of a fixed cell — breaks the letterforms outright.
+
+The three pixel modes deposit the page into the receiver's frame buffer exactly as the standard describes and show you those pixels. The pixels are drawn as scalable blocks, not as a fixed-size image, so they stay sharp at any window size and in an exported PNG.
+
+Everything the standard sizes in logical pels — stroke width, the dot and dash lengths of §5.3.2.4.2, hatch width and spacing, a programmable fill mask's step and repeat — comes out at that size in every mode, so a figure keeps its weight and its texture whichever receiver is chosen and however large the window is. The pixel modes step a texture along a line one grid cell at a time and are exact everywhere; the vector mode does the same for straight lines, and along an arc, which turns as it goes, uses the pel measured along an axis for the whole curve.
+
+The built-in character patterns follow the receiver like everything else. §5.1 leaves them to it — "the particular patterns (font) chosen for the characters are implementation-dependent and are constrained only by the specified character field at each size for a given display resolution" — and a set with more pixels had a character generator with finer patterns, not the same coarse ones magnified. **256 x 200** draws from a 6 by 10 face, which is both the cell Appendix B arrives at from first principles ("the most readable characters in this size range are 6 pixels by 10 pixels") and exactly the character field that grid gives the standard's default text size; **512 x 400** draws from a 10 by 20 and **768 x 600** from a 9 by 15 at double size, so text sharpens with the rest of the page rather than staying blocky in the middle of it. All three are members of the public-domain X11 "misc-fixed" family, so the letterforms are of a piece across receivers, and the face is chosen per character field rather than per page: a field too small for the finer patterns takes the 6 by 10, which is what a receiver with one generator and a field below it does. Downloadable characters have always followed the receiver, because the service sizes those itself (§6.2.3).
+
+A stroke comes out the pel's weight wherever it falls on the grid and whichever way it runs: a one-pel line is one pixel across drawn horizontally, vertically or on any slope between. The standard sizes the pel without reference to either, so a line that grew a pixel where it happened to straddle a pixel boundary, or where it turned a corner, would be showing the grid rather than the page. A filled figure and the same figure outlined agree pixel for pixel, so a service that fills a shape and then draws its border — as a weather map does with each region — gets a border with no colour showing past it and no gap behind it.
+
+**Save PNG…** writes the same size whichever is chosen — 1536 by 1152, a whole multiple of every grid across. Comparing one receiver with another is what the choice is for, and images of different sizes would make the comparison about the sizes instead.
+
+Whichever is chosen, the page is displayed in a 4:3 area: §4.2.2 puts the guaranteed-visible unit screen — x 0 to 1 and y 0 to 0.78125 — in the display area of a television set, which makes the receiver's pixels slightly wider than they are tall.
+
+#### Choosing a receiver while reading
+
+Nothing in the recovery depends on this setting — the records are read off the recording, and the receiver decides only how they are drawn afterwards — so the **NABTS Records** window offers the same four choices on a **Receiver** dropdown beside its other display switches. Picking one redraws the page you are looking at and leaves you on it, without reading the recording again. That includes downloadable characters: §6.2.3 sizes a DRCS character's storage buffer from the physical resolution its character field covers, and the presentation code is run when the page is browsed rather than when the recording is read, so those buffers follow the choice too.
+
+The two controls do different jobs, and where they disagree the dropdown wins:
+
+* This parameter is the project's own setting. It is saved with the project, the command-line interface can set it, and it is what the window opens on.
+* The dropdown overrides it for as long as the window is open, and is not saved. Close the window and reopen it and you are back to the parameter.
+
+Prefer the dropdown for comparing receivers, which is the reason there is more than one: editing any stage parameter rebuilds the graph and discards every stage's results, closing this window with them, so changing the parameter to compare two receivers costs a full re-run of the recovery pass for a change that affects nothing it found.
+
 ### tolerant_framing (boolean)
 Accept a framing code with one bit error. Off by default, and worth leaving off: the framing code is the only thing that separates NABTS from the 525-line World System Teletext service, so tolerating an error in it both raises the false-positive rate on noise and weakens that separation.
 

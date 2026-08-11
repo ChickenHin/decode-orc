@@ -59,6 +59,22 @@ class NaplpsInterpreter {
   NaplpsInterpreter();
 
   /**
+   * @brief Decode for a receiver of the given resolution
+   *
+   * Almost nothing the interpreter does depends on the receiver — it resolves
+   * the presentation into unit-space geometry and leaves rendering to a
+   * consumer. DRCS is the exception: §6.2.3 sizes a downloadable character's
+   * storage buffer from "the minimum physical resolution ... covered by the
+   * character field", so the buffer a definition is captured into is as coarse
+   * or as fine as the receiver is.
+   */
+  explicit NaplpsInterpreter(NaplpsRenderGrid grid);
+
+  /// Change the receiver resolution. Affects DRCS definitions read after it,
+  /// which is why a caller sets it before running any presentation code.
+  void set_render_grid(NaplpsRenderGrid grid) { state_.set_render_grid(grid); }
+
+  /**
    * @brief The general reset of CEA-516 §8.5
    *
    * "On power-up or TV-channel change ... A general reset is equivalent to a
@@ -251,6 +267,26 @@ class NaplpsInterpreter {
     kSawApr,  ///< First half (APR) of the suppressed pair consumed.
     kSawApd,  ///< First half (APD) of the suppressed pair consumed.
   };
+
+  /**
+   * @brief Whether a move to |point| leaves the cursor on the row it is on
+   *
+   * Measured across the character path, since that is the direction a row
+   * advance is in (§5.3.2.3.5) — a move along the path is a move within the
+   * row however the path is turned.
+   *
+   * §5.3.2.3.6 closes its suppression window when the character field origin is
+   * "moved, aligned, or set by any other received command". A drawing-point
+   * command that sets the left margin of the row the cursor is already on has
+   * not left that row, and the row advance the window stands for is still
+   * outstanding — so the window survives it. Reading the clause to cover that
+   * too double-spaces every line a service indents, and indenting is how the
+   * services in hand write a paragraph: carriage return, set the indent, line
+   * feed. Anything that moves the origin to another row closes the window, as
+   * does displaying a character, which is what tells a service's own line
+   * ending from a real one further down the line.
+   */
+  bool stays_on_row(const NabtsPoint& point) const;
 
   /// Advance the cursor one character along the character path (§5.3.2.3.3).
   void advance_cursor() { move_cursor_by(CursorMove::kForward); }

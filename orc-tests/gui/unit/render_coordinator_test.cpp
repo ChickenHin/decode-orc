@@ -643,7 +643,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(2)))
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(2), std::string()))
       .WillOnce(Return(makeCatalogue("100")));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
@@ -672,6 +672,40 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
   coordinator.stop();
 }
 
+// Picking one of the schema's view options is still a read: it reaches the
+// stage verbatim, and nothing is triggered to satisfy it.
+TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(*mock_presenter,
+              getCatalogueData(orc::NodeID(2), std::string("512 x 400")))
+      .WillOnce(Return(makeCatalogue("100")));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestCatalogueData(orc::NodeID(2), "512 x 400");
+
+  ASSERT_TRUE(waitForCount(data_spy, 1));
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
+
+  coordinator.stop();
+}
+
 // Reading the catalogue of a node that has never been triggered runs nothing:
 // the reader is told there is nothing to show, and the decode stays behind the
 // Trigger Stage action where the reader put it.
@@ -680,7 +714,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_NeverTriggers) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3)))
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(3), std::string()))
       .WillOnce(Return(std::nullopt));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
@@ -718,7 +752,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ThrowingReadIsAnError) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(4)))
+  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(4), std::string()))
       .WillOnce(::testing::Throw(std::runtime_error("catalogue read blew up")));
 
   RenderCoordinator coordinator(
@@ -752,7 +786,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_DistinctIdsSupportStaleDrop) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_))
+  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_, ::testing::_))
       .WillRepeatedly(Return(makeCatalogue("100")));
 
   RenderCoordinator coordinator(
@@ -785,7 +819,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_StopsCleanlyWhileInFlight) {
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_))
+  EXPECT_CALL(*mock_presenter, getCatalogueData(::testing::_, ::testing::_))
       .WillRepeatedly(Return(makeCatalogue("100")));
 
   RenderCoordinator coordinator(

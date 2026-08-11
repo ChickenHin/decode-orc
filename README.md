@@ -110,3 +110,5 @@ Decode-Orc was designed and written by Simon Inns.  Decode-Orc's development hea
 - ...and others (see the original ld-decode-tools source)
 
 It should be noted that the original code for the observers is also based heavily on the ld-decode python code-base (written by Chad Page et al).
+
+Decode-Orc embeds the 6x10, 9x15 and 10x20 members of the X11 "misc-fixed" bitmap font family (X.Org `font-misc-misc`, public domain: "Public domain font. Share and enjoy."), which the NABTS record viewer draws NAPLPS characters from. The tables are generated from the upstream BDF sources by `orc/plugins/stages/nabts_sink/tools/generate_naplps_font.py`.

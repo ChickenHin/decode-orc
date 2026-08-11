@@ -13,6 +13,9 @@ set(STAGE_PLUGIN_SOURCES
     naplps_pdi.cpp
     naplps_state.cpp
     naplps_interpreter.cpp
+    naplps_raster.cpp
+    naplps_font.cpp
+    nabts_raster_view.cpp
     nabts_catalogue_view.cpp
 )
 

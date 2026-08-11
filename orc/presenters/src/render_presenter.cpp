@@ -2732,7 +2732,7 @@ RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
 }
 
 std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
-    NodeID node_id) {
+    NodeID node_id, const std::string& view_option) {
   auto dag = impl_->getConcreteDAG();
   if (!dag) {
     return std::nullopt;
@@ -2751,8 +2751,10 @@ std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
 
   // Handed over whole: the stage has already bounded the catalogue by its own
   // cap, and building the payloads is the stage's work rather than something
-  // the host repeats per item.
-  return browser->catalogue();
+  // the host repeats per item. The view option goes to the stage untouched —
+  // what the options mean is the stage's business, and asking for one is a
+  // rebuild of the payloads rather than anything the DAG runs again.
+  return browser->catalogue(view_option);
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

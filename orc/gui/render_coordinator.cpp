@@ -87,8 +87,8 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   }
 
   std::optional<orc::CatalogueDataset> getCatalogueData(
-      orc::NodeID node_id) override {
-    return presenter_.getCatalogueData(node_id);
+      orc::NodeID node_id, const std::string& view_option) override {
+    return presenter_.getCatalogueData(node_id, view_option);
   }
 
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
@@ -425,9 +425,11 @@ uint64_t RenderCoordinator::requestBurstLevelData(const orc::NodeID& node_id) {
   return id;
 }
 
-uint64_t RenderCoordinator::requestCatalogueData(const orc::NodeID& node_id) {
+uint64_t RenderCoordinator::requestCatalogueData(
+    const orc::NodeID& node_id, const std::string& view_option) {
   uint64_t id = nextRequestId();
-  auto req = std::make_unique<GetCatalogueDataRequest>(id, node_id);
+  auto req =
+      std::make_unique<GetCatalogueDataRequest>(id, node_id, view_option);
   enqueueRequest(std::move(req));
   return id;
 }
@@ -1148,7 +1150,8 @@ void RenderCoordinator::handleGetCatalogueData(
       return;
     }
 
-    auto data = worker_render_presenter_->getCatalogueData(req.node_id);
+    auto data = worker_render_presenter_->getCatalogueData(req.node_id,
+                                                           req.view_option);
     if (!data) {
       // Reading results never runs the stage. A viewer that decoded on demand
       // would duplicate Trigger Stage — the same work behind a second name,

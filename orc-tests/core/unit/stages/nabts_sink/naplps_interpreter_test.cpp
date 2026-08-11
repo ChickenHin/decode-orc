@@ -36,6 +36,27 @@ constexpr uint8_t coord1(uint8_t x, uint8_t y) {
   return numeric(static_cast<uint8_t>(((x & 0x7) << 3) | (y & 0x7)));
 }
 
+/// A three-byte coordinate word: three bits of X then three of Y per byte, most
+/// significant first (Figure 11), which is nine bits an axis — a sign and eight
+/// of magnitude, so any 1/256 of the unit screen can be named exactly.
+std::vector<uint8_t> coord3(double x, double y) {
+  const auto encode = [](double value) {
+    const uint32_t magnitude = std::min<uint32_t>(
+        static_cast<uint32_t>(value < 0.0 ? -value * 256.0 : value * 256.0),
+        0xFF);
+    return value < 0.0 ? (0x100u | magnitude) : magnitude;
+  };
+  const uint32_t xb = encode(x);
+  const uint32_t yb = encode(y);
+  std::vector<uint8_t> out;
+  for (int i = 0; i < 3; ++i) {
+    const int shift = 6 - 3 * i;
+    out.push_back(numeric(static_cast<uint8_t>((((xb >> shift) & 0x7) << 3) |
+                                               ((yb >> shift) & 0x7))));
+  }
+  return out;
+}
+
 /**
  * @brief Builds a presentation record byte by byte
  *
@@ -684,6 +705,47 @@ TEST(NaplpsInterpreter, AnExplicitCrLfAfterAnAutomaticWrapIsANullOperation) {
   EXPECT_DOUBLE_EQ(next_line.origin.y, first.origin.y - 5.0 / 128.0);
 }
 
+// The services in hand end a line by carriage return, setting the indent, then
+// line feed — so the explicit APR APD §5.3.2.3.6 makes null has a POINT SET
+// between its halves. Closing the window on that, as the clause's "moved,
+// aligned, or set by any other received command" reads on its face, double
+// spaces every line a service indents: over the reference ExtraVision
+// recording it displaced 108 lines of 135 wrapped ones, most of them out of the
+// panel they belonged in. A command setting the margin of the row the cursor is
+// already on has not taken the row advance the window stands for.
+TEST(NaplpsInterpreter, AnIndentBetweenTheCrAndTheLfDoesNotEndTheSuppression) {
+  // CS homes the cursor a character's height below the top of the display area,
+  // and the automatic wrap takes it one row further down.
+  constexpr double kHomeRow = kNabtsDisplayAreaHeight - 5.0 / 128.0;
+  constexpr double kWrappedRow = kHomeRow - 5.0 / 128.0;
+
+  Record record;
+  record.text_mode().byte(0x0C);
+  for (int i = 0; i < 40; ++i) {
+    record.byte('A');
+  }
+  record.byte(0x0D);  // APR, the first half of the explicit pair
+  // POINT SET absolute to the line's indent, on the row the wrap moved to —
+  // which is one row below the top of the display area.
+  record.pdi().byte(0x24);
+  for (const uint8_t operand : coord3(0.125, kWrappedRow)) {
+    record.byte(operand);
+  }
+  record.text_mode();
+  record.byte(0x0A);  // APD, the second half
+  record.byte('B');
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 41u);
+  const NabtsPrimitive& first = snapshot.primitives[0];
+  const NabtsPrimitive& next_line = snapshot.primitives[40];
+  EXPECT_DOUBLE_EQ(first.origin.y, kHomeRow);
+  EXPECT_EQ(next_line.character, 'B');
+  // At the indent, one row below the first line rather than two.
+  EXPECT_DOUBLE_EQ(next_line.origin.x, 0.125);
+  EXPECT_DOUBLE_EQ(next_line.origin.y, kWrappedRow);
+}
+
 // The suppression window closes the moment the cursor moves by anything else:
 // a CR LF later in the stream is a real one.
 TEST(NaplpsInterpreter, TheWrapSuppressionEndsOnceTheCursorMovesAgain) {
@@ -1086,6 +1148,85 @@ TEST(NaplpsInterpreter, DefDrcsDrawsIntoABufferRatherThanTheDisplay) {
   const auto on = std::count(snapshot.drcs[0].elements.begin(),
                              snapshot.drcs[0].elements.end(), true);
   EXPECT_GT(on, 0);
+}
+
+// §6.2.3 sizes the storage buffer at "the minimum physical resolution ...
+// covered by the character field", and Table D1 item 8 gives the worked
+// example: "if the character field size is dx = 6/256 and dy = 10/256, then the
+// storage buffer shall be an array of at least 6 elements horizontal by at
+// least 10 elements vertical".
+//
+// Both axes are counted in the receiver's pixels, and a unit-y height covers
+// more rows than the grid has: the grid's 200 rows span only the visible
+// 0,78125 of unit y, so 10/256 of unit y is 10 pixels rather than the 8 that
+// scaling by the row count alone would give.
+TEST(NaplpsInterpreter, ADrcsBufferIsSizedInTheReceiversPixels) {
+  NaplpsState state;
+  state.text.character_field = NabtsSize{6.0 / 256.0, 10.0 / 256.0};
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  state.drcs_buffer_size(width, height);
+  EXPECT_EQ(width, 6);
+  EXPECT_EQ(height, 10);
+}
+
+// A finer receiver stores the same character field at its own resolution, which
+// is what §6.2.3's "minimum physical resolution covered by the character field"
+// means once the receiver is not the reference one.
+TEST(NaplpsInterpreter, ADrcsBufferFollowsTheReceiverResolution) {
+  NaplpsState state;
+  state.set_render_grid(kNaplpsGridTwice);
+  state.text.character_field = NabtsSize{6.0 / 256.0, 10.0 / 256.0};
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  state.drcs_buffer_size(width, height);
+  EXPECT_EQ(width, 12);
+  EXPECT_EQ(height, 20);
+}
+
+// The grid is a property of the receiver rather than of the presentation, so
+// the resets that return the presentation state to its defaults leave it alone.
+TEST(NaplpsInterpreter, AResetLeavesTheReceiverResolutionAlone) {
+  NaplpsState state;
+  state.set_render_grid(kNaplpsGridTwice);
+  state.reset_all();
+  EXPECT_EQ(state.render_grid().width, kNaplpsGridTwice.width);
+}
+
+// A definition is executed "in the same manner as if it were being displayed"
+// (§6.2.3), so what lands in the buffer is the figure the code drew. An arc is
+// the case that shows it: capturing only the box around its control points
+// would fill the buffer solid, and the middle of a stroked arc is empty.
+TEST(NaplpsInterpreter, ADrcsDefinitionCapturesTheFigureNotItsBoundingBox) {
+  Record record;
+  record
+      .escape({code(4, 3)})  // DEF DRCS
+      .byte(code(2, 0))
+      .pdi()
+      // A large character field, so the buffer has room for the figure to have
+      // an inside worth checking.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      // ARC (outlined): a start point, an intermediate point and an end point.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined))
+      .byte(coord1(0b001, 0b011))
+      .byte(coord1(0b011, 0b111))
+      .byte(coord1(0b111, 0b011))
+      .escape({code(4, 5)});  // END
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.drcs.size(), 1u);
+  const NabtsDrcsCharacter& glyph = snapshot.drcs[0];
+  ASSERT_TRUE(glyph.defined());
+
+  const auto on =
+      std::count(glyph.elements.begin(), glyph.elements.end(), true);
+  EXPECT_GT(on, 0) << "the arc captured nothing at all";
+  EXPECT_LT(on, static_cast<long>(glyph.elements.size()))
+      << "the arc filled its whole buffer, which is the bounding box, not the "
+         "figure";
 }
 
 // §6.2.3: "When the current DRCS downloading operation is terminated by another

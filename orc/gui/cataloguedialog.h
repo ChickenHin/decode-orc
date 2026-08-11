@@ -13,6 +13,7 @@
 #include <orc/stage/tooling/catalogue_results.h>
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialog>
 #include <QImage>
 #include <QLabel>
@@ -73,6 +74,13 @@ class CatalogueDialog : public QDialog {
   /// Show one trigger run's catalogue, replacing whatever was displayed
   void setCatalogue(const orc::CatalogueDataset& data);
 
+ signals:
+  /// The reader picked one of CatalogueSchema::view_options. The dialogue has
+  /// no way of building the catalogue again itself, so the owner asks the stage
+  /// for it under @p option_id and delivers it back through setCatalogue().
+  void viewOptionChanged(const QString& option_id);
+
+ public:
   // ---- Test seams --------------------------------------------------------
 
   /// First-column values of the listed items, in table order
@@ -88,6 +96,13 @@ class CatalogueDialog : public QDialog {
   /// Find-box text (empty when the schema offers no find box)
   QString findText() const;
   void setFindText(const QString& text);
+
+  /// Ids of the view options offered, in order (empty when none are)
+  std::vector<QString> viewOptions() const;
+  /// Id of the view option on show, or empty when no dropdown is offered
+  QString currentViewOption() const;
+  /// Pick a view option by id, as the reader would (no-op for an unknown id)
+  void selectViewOption(const QString& option_id);
 
   /// Variant readout — "Sub-page 2 of 8 (0002)" — for the displayed item
   /// (empty when the variant bar is hidden)
@@ -128,6 +143,7 @@ class CatalogueDialog : public QDialog {
   void onItemSelected();
   void onHighlightToggled(bool checked);
   void onAnimationsToggled(bool checked);
+  void onViewOptionSelected(int index);
   void onSavePageClicked();
 
  private:
@@ -141,6 +157,9 @@ class CatalogueDialog : public QDialog {
   };
 
   void setupUI();
+  /// Fill the view dropdown from the current schema, hiding it where the
+  /// service offers only one way of presenting its items
+  void refreshViewOptions();
   /// Rebuild the item table and the notices from the current dataset
   void refreshItemList();
   /// Show the top-level item at |row| of the table, or nothing when out of
@@ -174,12 +193,18 @@ class CatalogueDialog : public QDialog {
   // Set while the table is being rebuilt or programmatically selected, so
   // selection changes do not feed back into the find box.
   bool updating_list_ = false;
+  // Set while the view dropdown is being filled from a delivered schema, so
+  // showing what the stage built does not read as the reader asking for it.
+  bool updating_view_ = false;
 
   QWidget* find_bar_ = nullptr;
   QLabel* find_label_ = nullptr;
   QLineEdit* find_edit_ = nullptr;
   QCheckBox* highlight_check_ = nullptr;
   QCheckBox* animations_check_ = nullptr;
+  QWidget* view_bar_ = nullptr;
+  QLabel* view_label_ = nullptr;
+  QComboBox* view_combo_ = nullptr;
   QToolButton* save_page_button_ = nullptr;
   QToolButton* prev_item_button_ = nullptr;
   QToolButton* next_item_button_ = nullptr;

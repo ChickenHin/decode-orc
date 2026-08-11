@@ -134,6 +134,24 @@ void CatalogueDialog::setupUI() {
   top_row->addWidget(notice_label_);
   top_row->addStretch();
 
+  // Where a service presents the same items more than one way, the choice sits
+  // with the other display switches rather than in the node's parameters: it
+  // changes nothing the decode found, and editing a parameter rebuilds the
+  // graph and closes this window over what is only a change of view.
+  view_bar_ = new QWidget(this);
+  auto* view_layout = new QHBoxLayout(view_bar_);
+  view_layout->setContentsMargins(0, 0, 0, 0);
+  view_label_ = new QLabel(view_bar_);
+  view_layout->addWidget(view_label_);
+  view_combo_ = new QComboBox(view_bar_);
+  view_combo_->setObjectName("catalogueViewCombo");
+  connect(view_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &CatalogueDialog::onViewOptionSelected);
+  view_layout->addWidget(view_combo_);
+  view_bar_->setVisible(false);
+  top_row->addWidget(view_bar_);
+  top_row->addSpacing(kControlGroupSpacing);
+
   // Flashing text and blinking figures are part of the page, but a page being
   // read or captured is better still, so the reader chooses. Shown only where
   // the payload on display is one that can animate.
@@ -343,6 +361,7 @@ void CatalogueDialog::clearContent() {
   status_label_->clear();
   summary_label_->setVisible(false);
   summary_label_->clear();
+  refreshViewOptions();
   refreshItemList();
   showItem(-1);
 }
@@ -360,6 +379,19 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
   // The find box's current text survives a fresh delivery of the same
   // catalogue, so a reader stepping a carousel is not thrown back to the top.
   const QString previous_key = normalise_key(find_edit_->text());
+
+  // So does the item on show, for the service that has no find box. A reader
+  // who changes the view is asking to see what is in front of them drawn
+  // another way, and being returned to the first item would be the one thing
+  // that made the comparison hard.
+  const size_t previous_index = displayedIndex();
+  const QString previous_id =
+      previous_index == SIZE_MAX
+          ? QString()
+          : to_qstring(data_.items[previous_index].parent_id.empty()
+                           ? data_.items[previous_index].id
+                           : data_.items[previous_index].parent_id);
+  const int previous_variant = variant_index_;
 
   data_ = data;
   has_data_ = true;
@@ -393,6 +425,8 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
                             ? tr("Nothing was recovered")
                             : to_qstring(schema.empty_message));
 
+  refreshViewOptions();
+
   refreshItemList();
 
   // Restore the reader's position where the same key is still listed; fall
@@ -406,8 +440,85 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
         break;
       }
     }
+  } else if (!previous_id.isEmpty()) {
+    for (size_t i = 0; i < top_level_.size(); ++i) {
+      if (to_qstring(data_.items[top_level_[i]].id) == previous_id) {
+        row = static_cast<int>(i);
+        variant_index_ = previous_variant;
+        break;
+      }
+    }
   }
   showItem(row);
+}
+
+void CatalogueDialog::refreshViewOptions() {
+  const auto& schema = data_.schema;
+  const bool offered =
+      !schema.view_options.empty() && !schema.view_label.empty();
+  view_bar_->setVisible(offered);
+  if (!offered) {
+    return;
+  }
+
+  view_label_->setText(to_qstring(schema.view_label));
+
+  // Filled from the delivered schema rather than added to, so a catalogue that
+  // offers a different set of options replaces the list instead of growing it.
+  updating_view_ = true;
+  view_combo_->clear();
+  int current = 0;
+  for (size_t i = 0; i < schema.view_options.size(); ++i) {
+    const auto& option = schema.view_options[i];
+    view_combo_->addItem(to_qstring(option.label), to_qstring(option.id));
+    view_combo_->setItemData(static_cast<int>(i), to_qstring(option.tooltip),
+                             Qt::ToolTipRole);
+    if (to_qstring(option.id) == to_qstring(schema.view_option)) {
+      current = static_cast<int>(i);
+    }
+  }
+  // What the stage says it built under, not what was asked for: the two differ
+  // when a stage declines an option, and the dropdown should show what is on
+  // screen.
+  view_combo_->setCurrentIndex(current);
+  view_combo_->setToolTip(
+      view_combo_->itemData(current, Qt::ToolTipRole).toString());
+  updating_view_ = false;
+}
+
+void CatalogueDialog::onViewOptionSelected(int index) {
+  if (updating_view_ || index < 0) {
+    return;
+  }
+  view_combo_->setToolTip(
+      view_combo_->itemData(index, Qt::ToolTipRole).toString());
+  emit viewOptionChanged(view_combo_->itemData(index).toString());
+}
+
+std::vector<QString> CatalogueDialog::viewOptions() const {
+  std::vector<QString> ids;
+  if (!view_bar_->isVisibleTo(this)) {
+    return ids;
+  }
+  ids.reserve(static_cast<size_t>(view_combo_->count()));
+  for (int i = 0; i < view_combo_->count(); ++i) {
+    ids.push_back(view_combo_->itemData(i).toString());
+  }
+  return ids;
+}
+
+QString CatalogueDialog::currentViewOption() const {
+  if (!view_bar_->isVisibleTo(this) || view_combo_->currentIndex() < 0) {
+    return {};
+  }
+  return view_combo_->currentData().toString();
+}
+
+void CatalogueDialog::selectViewOption(const QString& option_id) {
+  const int index = view_combo_->findData(option_id);
+  if (index >= 0) {
+    view_combo_->setCurrentIndex(index);
+  }
 }
 
 void CatalogueDialog::refreshItemList() {

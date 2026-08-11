@@ -21,6 +21,7 @@
 
 #include "nabts_frame_slicer.h"
 #include "nabts_sink_deps.h"
+#include "naplps_render_grid.h"
 
 namespace orc {
 
@@ -40,6 +41,13 @@ constexpr int32_t kMaxDecodeThreads = 256;
 // sample exists to validate against, so the parameter stops at the VBI window.
 constexpr int32_t kFirstAllowedUiLine = 1;
 constexpr int32_t kLastAllowedUiLine = 22;
+
+// The receiver a page is drawn against unless the project names another. The
+// 256 by 200 grid of Table D1 item 10 is the resolution the standard's own
+// service reference model requires, and so what a decoder of the period put on
+// screen; anything sharper is a later reading of the same page rather than the
+// one its author was working to.
+constexpr NaplpsRenderMode kDefaultRenderMode = NaplpsRenderMode::kReference;
 
 // Field lines are 0-based everywhere in recovery and 1-based everywhere the
 // user sees them (see frame_numbering.h for the project-wide convention).
@@ -222,6 +230,37 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "render_resolution";
+    desc.display_name = "Render Resolution";
+    desc.description =
+        "The receiver resolution NAPLPS pages are drawn against, as the pixel "
+        "grid a receiver draws into. X3.110 draws into an abstract unit "
+        "screen, but sizes stroke width, dot and dash lengths, hatch spacing "
+        "and incremental rasters in the physical pixels of the receiver "
+        "displaying them (§5.3.2.2.6), so a page has no one correct "
+        "appearance until a receiver is named. 256 by 200 is the standard's "
+        "own service reference model (Table D1 item 10), which is what a "
+        "set-top decoder of the period displayed; 512 by 400 and 768 by 600 "
+        "are that grid at twice and three times, for a sharper reading of the "
+        "same page. Only whole multiples are offered, because a page is "
+        "authored against the reference grid and a fraction of it lands "
+        "between pixels, thickening strokes unevenly and breaking letterforms. "
+        "512 by 400 (vector) draws the same geometry as "
+        "resolution-independent shapes, which stay smooth at any zoom but lose "
+        "the pixel structure a receiver had";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {
+        naplps_render_mode_name(NaplpsRenderMode::kReference),
+        naplps_render_mode_name(NaplpsRenderMode::kTwice),
+        naplps_render_mode_name(NaplpsRenderMode::kThrice),
+        naplps_render_mode_name(NaplpsRenderMode::kTwiceVector)};
+    desc.constraints.default_value =
+        naplps_render_mode_name(kDefaultRenderMode);
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "tolerant_framing";
     desc.display_name = "Tolerant Framing";
     desc.description =
@@ -355,6 +394,14 @@ std::map<std::string, ParameterValue> NabtsSinkStage::get_parameters() const {
 bool NabtsSinkStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
   parameters_ = params;
+
+  // The catalogue's display lists are resolved against the render resolution,
+  // so one already built for another receiver no longer describes the page the
+  // project asks for and is dropped.
+  set_render_mode(naplps_render_mode_from_name(
+      get_string_or(params, "render_resolution",
+                    naplps_render_mode_name(kDefaultRenderMode)),
+      kDefaultRenderMode));
 
   const auto it = params.find("output_path");
   const bool has_path =
