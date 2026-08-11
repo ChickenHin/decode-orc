@@ -557,17 +557,19 @@ TEST(CatalogueDialogTest, TheTextPaneCanBePutAway) {
   auto* check = dialog.findChild<QCheckBox*>("catalogueShowTextCheck");
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->isVisibleTo(&dialog));
-  EXPECT_TRUE(check->isChecked());
-  EXPECT_TRUE(dialog.isTextPaneVisible());
-
-  dialog.setTextPaneVisible(false);
+  // Away to begin with, the drawing having the whole pane until it is asked
+  // for — but the text is there, not thrown away, and nothing is asked of the
+  // stage to show it.
+  EXPECT_FALSE(check->isChecked());
   EXPECT_FALSE(dialog.isTextPaneVisible());
-  // Put away, not thrown away: the text is still what the payload carries, and
-  // nothing was asked of the stage to hide it.
   EXPECT_EQ(dialog.currentText(), "HELLO NABTS");
 
   dialog.setTextPaneVisible(true);
   EXPECT_TRUE(dialog.isTextPaneVisible());
+
+  dialog.setTextPaneVisible(false);
+  EXPECT_FALSE(dialog.isTextPaneVisible());
+  EXPECT_EQ(dialog.currentText(), "HELLO NABTS");
 
   dialog.close();
 }

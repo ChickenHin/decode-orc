@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -419,10 +420,13 @@ TEST(NabtsCatalogueViewTest, TheCatalogueSaysWhatTheRepairDid) {
   const CatalogueDataset repaired = build_nabts_catalogue(
       datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
       /*repair=*/true);
-  // One clause, for a reader: how widely the pages were altered. The byte
-  // counts behind it are the log's business.
+  // Two clauses, for a reader: how widely the records were altered, and how
+  // many of the pages that reached. "Corrected" is a claim about the outcome
+  // that nothing here can support, so it is not made. The byte counts behind
+  // it are the log's business.
   const std::string did = repair_notice(repaired);
-  EXPECT_NE(did.find("1 of 1 pages corrected"), std::string::npos) << did;
+  EXPECT_NE(did.find("1 of 1 pages altered"), std::string::npos) << did;
+  EXPECT_NE(did.find("drawing differently"), std::string::npos) << did;
 
   // Off, and the notice says the pages are the recording's own.
   const CatalogueDataset as_received = build_nabts_catalogue(
@@ -434,7 +438,7 @@ TEST(NabtsCatalogueViewTest, TheCatalogueSaysWhatTheRepairDid) {
   // On, over a recording that needed nothing: the pass ran and said so.
   const CatalogueDataset clean = build_nabts_catalogue(
       datasetWithLineRecord(), NaplpsRenderMode::kReference, /*repair=*/true);
-  EXPECT_NE(repair_notice(clean).find("nothing needed correcting"),
+  EXPECT_NE(repair_notice(clean).find("no page needed altering"),
             std::string::npos)
       << repair_notice(clean);
 }
@@ -457,6 +461,39 @@ TEST(NabtsCatalogueViewTest, ARepairedPageSaysSoOnItsOwnConditionLine) {
   EXPECT_EQ(as_received.payloads.front().condition.find("corrected"),
             std::string::npos)
       << as_received.payloads.front().condition;
+}
+
+// And in the list itself, so a reader stepping through pages can see at a
+// glance which of them the grammar had a hand in. The condition line says what
+// was done; the mark says where to look for it.
+TEST(NabtsCatalogueViewTest, ARepairedPageIsMarkedInTheList) {
+  const CatalogueDataset repaired = build_nabts_catalogue(
+      datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
+      /*repair=*/true);
+  ASSERT_FALSE(repaired.items.empty());
+  const std::vector<std::string>& marks = repaired.items.front().badges;
+  EXPECT_NE(std::find(marks.begin(), marks.end(), "*"), marks.end());
+  // The identity itself is untouched: the mark is a badge beside it, so the
+  // find box and every id the host round-trips still say what they said.
+  EXPECT_EQ(repaired.items.front().values.front(),
+            repaired.items.front().find_key);
+  EXPECT_NE(repaired.items.front().tooltip.find("Syntax repair altered"),
+            std::string::npos)
+      << repaired.items.front().tooltip;
+
+  // Nothing is marked with the repair turned off, and nothing is marked on a
+  // page that needed none of it.
+  const CatalogueDataset as_received = build_nabts_catalogue(
+      datasetWithLineRecord(3, 0x40), NaplpsRenderMode::kReference,
+      /*repair=*/false);
+  const std::vector<std::string>& none = as_received.items.front().badges;
+  EXPECT_EQ(std::find(none.begin(), none.end(), "*"), none.end());
+
+  const CatalogueDataset clean = build_nabts_catalogue(
+      datasetWithLineRecord(), NaplpsRenderMode::kReference, /*repair=*/true);
+  const std::vector<std::string>& clean_marks = clean.items.front().badges;
+  EXPECT_EQ(std::find(clean_marks.begin(), clean_marks.end(), "*"),
+            clean_marks.end());
 }
 
 }  // namespace

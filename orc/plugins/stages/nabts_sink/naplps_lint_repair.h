@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "naplps_interpreter.h"
 #include "naplps_lint.h"
 #include "vbi-services/nabts_page.h"
 
@@ -26,18 +27,53 @@ namespace orc {
  * @brief Lint-directed repair
  *
  * The linter says where a record breaks its own grammar; this decides what to
- * do about it. Two signals have to agree before anything is changed:
+ * do about it. The rule the whole file follows is that **doubt may stop this
+ * pass acting, but only proof may license it to act**. Five things have to hold
+ * before a byte is changed:
  *
- *   1. The recovery independently doubts the byte — it failed the odd parity
- *      CEA-516 §3.3 puts on every data byte, or it stands where a lost packet
- *      left a filler, or the detector was unsure of it (NaplpsSuspectMap).
+ *   1. The byte is *known* to be wrong: it failed the odd parity CEA-516 §3.3
+ *      puts on every data byte. A byte the recovery merely felt unsure of —
+ *      a close vote between copies, a detector reporting low confidence — is
+ *      not evidence that anything is wrong with it.
  *   2. Changing it makes the record *more* grammatical, and no other change to
  *      the same byte does as well.
+ *   3. The byte still puts marks on the page afterwards. One that draws — an
+ *      opcode, an operand, a character, a macro invocation — may not become
+ *      one that does not, however much more grammatical that would make the
+ *      record.
+ *   4. The byte does not decide how the bytes after it are read, and does not
+ *      come to. Escape sequences, locking shifts, DOMAIN and RESET reach the
+ *      whole record from where they stand.
+ *   5. The page it draws afterwards is still recognisably the page it drew
+ *      before. One bit of damage cannot account for repainting a page.
+ *
+ * Rules 3 to 5 are what keep rule 2 honest, because the grade is not a measure
+ * of whether a page is right — only of whether it parses.
+ *
+ *   - Silence is always grammatical. Knocking b7 off an operand moves it out
+ *     of columns 4 to 7, which ends its run (§5.3.1) and takes every fault
+ *     after it away together with the drawing.
+ *   - So is reading the rest of the record as something else. One bit turns an
+ *     ESC into an ordinary control, and the designation it introduced becomes
+ *     characters printed on the page; one bit moves a designation from one
+ *     G-set slot to another, and every byte after it means something different.
+ *   - And so is drawing the whole page in the wrong colour. An operand read
+ *     as SET COLOUR draws more than the record ever asked for, all of it
+ *     invisible.
+ *
+ * Each of those looks like a large improvement to a grader that counts faults,
+ * and each of them is a page replaced rather than repaired. Rules 3 and 4 rule
+ * out the two classes cheaply, from the part the byte plays; rule 5 is the
+ * backstop, and asks the interpreter what actually changed on screen.
+ *
+ * The cost is real: a control byte damaged into a character cannot be restored,
+ * and neither can a damaged escape sequence. Both are rarer than the damage the
+ * rules prevent, and both fail safe — the page reads as it arrived.
  *
  * A byte that parses cleanly is never touched however odd it looks, and a byte
- * the evidence doubts is left alone unless the grammar picks out one answer.
- * The failure mode is therefore always "declined to guess", which is what a
- * reader wants from something standing between them and the recording.
+ * that is known to be wrong is left alone unless the grammar picks out one
+ * answer. The failure mode is therefore always "declined to guess", which is
+ * what a reader wants from something standing between them and the recording.
  *
  * Bytes are weighed one at a time, so two faults that mask each other — where
  * neither correction is an improvement until the other has been made too — are
@@ -61,17 +97,24 @@ struct NaplpsRepairSummary {
   /// never asked", which read the same in the counters alone.
   bool ran = false;
 
-  /// Bytes the evidence held in doubt.
+  /// Bytes the evidence held in doubt, for any reason at all.
   uint32_t suspect_bytes = 0;
-  /// Suspect bytes past the inspection cap, never considered for substitution.
+  /// Doubted bytes that also failed their parity, which is what a substitution
+  /// needs before it may be considered at all. The rest are reported and left.
+  uint32_t bytes_offered = 0;
+  /// Offered bytes past the inspection cap, never considered for substitution.
   uint32_t suspect_bytes_uninspected = 0;
 
   /// Single-byte substitutions applied, the grammar having picked out one
   /// answer.
   uint32_t bytes_repaired = 0;
-  /// Suspect bytes where more than one substitution would have improved the
+  /// Offered bytes where more than one substitution would have improved the
   /// record, so none was made.
   uint32_t bytes_ambiguous = 0;
+  /// Changes the grammar did pick out but which would have redrawn more of the
+  /// page than one bit of damage can account for, so were refused (§5.3.1's
+  /// grammar has nothing to say about this — the interpreter does).
+  uint32_t changes_declined_by_reach = 0;
 
   /// Operand runs cut back to a whole operand boundary because bytes had gone
   /// missing from the middle of them.
@@ -91,6 +134,17 @@ struct NaplpsRepairSummary {
   uint32_t errors_after = 0;
   uint32_t warnings_before = 0;
   uint32_t warnings_after = 0;
+
+  /// What the record *drew* before and after, from the same service state.
+  /// The fault counts say whether the record parses better; only these say
+  /// whether the page a reader is shown was altered, which is the question a
+  /// reader is actually asking. Both zero where the pass changed nothing, the
+  /// record never having been run.
+  uint32_t primitives_before = 0;
+  uint32_t primitives_after = 0;
+  /// Whether the page draws differently — any primitive added, dropped or
+  /// altered, not merely a different number of them.
+  bool drawing_changed = false;
 
   /// Changes made to the record, of every kind.
   uint32_t total_repairs() const {
@@ -121,6 +175,34 @@ struct NaplpsRepairResult {
  * capped run says so rather than looking clean.
  */
 constexpr size_t kNaplpsMaxInspectedSuspectBytes = 128;
+
+/**
+ * @brief The share of a page one change may redraw
+ *
+ * One flipped bit is one damaged instruction. It can lose a line, move a
+ * vertex, or restore a run that was being discarded — but a change that leaves
+ * this much of what the page was drawing altered or gone has not corrected an
+ * instruction, it has made the record say something else. That is what a
+ * repainted page looks like from the inside, and the fault counts cannot see
+ * it: the replacement page parses beautifully.
+ *
+ * Read as a denominator: a quarter. Additions are not counted against a change
+ * — a repair that puts back an opcode the damage had orphaned restores a whole
+ * run of drawing at once, and that is exactly what it is for.
+ */
+constexpr size_t kNaplpsMaxRedrawnDenominator = 4;
+
+/**
+ * @brief Drawings one change may alter however small the page
+ *
+ * A share alone would forbid every repair to a page with only a few drawings
+ * on it: correcting an instruction alters the drawing it takes part in, so a
+ * page of one line has a quarter of nothing to spend. A coordinate word can be
+ * the end of one drawing and the start of the next, so two is what a single
+ * correction is allowed outright — and on a page with any real content the
+ * share is what binds instead.
+ */
+constexpr size_t kNaplpsMinRedrawnPrimitives = 2;
 
 /**
  * @brief Repairs NAPLPS records against the grammar of X3.110
@@ -154,8 +236,20 @@ class NaplpsLintRepairer {
   NaplpsLintResult trial_lint(const std::vector<uint8_t>& data,
                               const NaplpsSuspectMap& suspects) const;
 
-  /// Task one: try each single-bit correction of every suspect byte, and take
-  /// one only where it alone improves the record.
+  /**
+   * @brief What |data| draws, from the committed service state
+   *
+   * The same discipline as trial_lint(), and for a stronger reason: running a
+   * candidate defines its macros and writes its colour map, and none of that
+   * may reach the next record on the strength of a trial. Asked once per byte
+   * inspected and once per cut weighed, never per candidate — the grammar
+   * narrows the field first, and this settles what is left of it.
+   */
+  std::vector<NabtsPrimitive> trial_render(
+      const std::vector<uint8_t>& data) const;
+
+  /// Task one: try each single-bit correction of every byte known to be wrong,
+  /// and take one only where it alone improves the record.
   void substitute_bytes(const NaplpsSuspectMap& suspects,
                         std::vector<uint8_t>& data,
                         NaplpsRepairSummary& summary) const;
@@ -190,14 +284,27 @@ class NaplpsLintRepairer {
    * "opcode, two words, null, opcode, three words" — which draws exactly what
    * the surviving words describe.
    *
+   * The cut is weighed before it is made, as a substitution is: it is applied
+   * only where it leaves the record more grammatical than it found it, and only
+   * where the page it leaves is still the page that was there. The grade alone
+   * is a weak test here — nulling bytes cannot make a record less grammatical,
+   * so it only catches the cut that buys nothing at all. The page comparison is
+   * what has teeth: a cut is meant to drop the operands one damaged run could
+   * not read, and one run is a small part of a page.
+   *
    * @return whether anything was changed
    */
   bool cut_run(const NaplpsPdiObservation& pdi, size_t cut_index,
-               size_t resume_index, std::vector<uint8_t>& data,
-               NaplpsRepairSummary& summary) const;
+               size_t resume_index, const NaplpsSuspectMap& suspects,
+               std::vector<uint8_t>& data, NaplpsRepairSummary& summary) const;
 
   /// The service state, advanced by each repaired record as it is finished.
+  /// Two of them, because the two questions asked of a candidate are asked of
+  /// different machines: the linter says whether the record parses, and the
+  /// interpreter says what it draws. Both advance together on the record that
+  /// is finally committed, so both stand where the next record will find them.
   NaplpsLinter linter_;
+  NaplpsInterpreter interpreter_;
 };
 
 /**

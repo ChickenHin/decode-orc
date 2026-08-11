@@ -41,13 +41,18 @@ class IStageServices;
  * @brief Whether a page is presented as recovered unless the reader says
  *        otherwise
  *
- * On, because repair only ever touches bytes the recovery independently says
- * are wrong, only ever where the grammar leaves one answer, and counts every
- * intervention on the page it produced. Reading the recording as transmitted is
- * then one click away, which is the right way round: the reader who wants to
- * check a repair can, and the reader who does not is shown the better page.
+ * Off. What a viewer shows by default should be what the recording carried,
+ * because that is the one reading nobody has to take on trust: every other is
+ * an argument about what the bytes meant. Repair is disciplined about the
+ * arguments it will make (naplps_lint_repair.h) and says on every page it
+ * touched what it did — but it is still this program's reading of a damaged
+ * recording rather than the recording, and a reader who has not asked for one
+ * should not have to notice that they were given one.
+ *
+ * Turning it on is one click, and the pages it altered are marked in the list,
+ * so comparing the two readings is as quick either way round.
  */
-inline constexpr bool kDefaultRepair = true;
+inline constexpr bool kDefaultRepair = false;
 
 /**
  * @brief The receiver a page is drawn against until a reader picks another

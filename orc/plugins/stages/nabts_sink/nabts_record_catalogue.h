@@ -64,10 +64,21 @@ struct NabtsLintTotals {
   uint64_t warnings_after = 0;
 
   uint64_t suspect_bytes = 0;
+  /// Doubted bytes that also failed their parity, which is what the repair
+  /// needs before it may change one. The gap between the two is how much of
+  /// the doubt is being reported rather than acted on.
+  uint64_t bytes_offered = 0;
   uint64_t bytes_repaired = 0;
   uint64_t bytes_ambiguous = 0;
+  uint64_t changes_declined_by_reach = 0;
   uint64_t pdis_resynchronised = 0;
   uint64_t coordinate_words_dropped = 0;
+
+  /// Records the pass altered, and those of them whose *page* came out
+  /// different. The fault counts below say whether the records parse better;
+  /// only this says whether what a reader is shown was changed.
+  uint32_t records_altered = 0;
+  uint32_t records_drawing_changed = 0;
 
   /// Human-readable summary for the stage report. Empty where nothing was
   /// linted and nothing was found.
