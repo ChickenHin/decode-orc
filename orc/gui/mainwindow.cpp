@@ -45,6 +45,7 @@
 #include "quick_project_planner.h"
 #include "render_coordinator.h"
 #include "snranalysisdialog.h"
+#include "source_join_notice.h"
 #include "stage_help_dialog.h"
 #include "stageparameterdialog.h"
 #include "theme_controller.h"
@@ -2951,6 +2952,36 @@ void MainWindow::onEditParameters(const orc::NodeID& node_id) {
                                   stage_description, *input_audio_pair_count)
                             : orc::gui::withAudioChannelPairNotice(
                                   stage_description, *input_audio_pair_count);
+  }
+
+  // Source Join orders its inputs by node ID, and nothing in the form says
+  // which numbers those are — a multi-input stage has one input port, so the
+  // connections do not name their sources. Put the connected nodes, with the
+  // IDs the graph draws on them, at the top of the dialog.
+  if (stage_name == "source_join") {
+    std::vector<orc::gui::ConnectedInputNode> connected_inputs;
+    for (const auto& edge : project_.presenter()->getEdges()) {
+      if (edge.target_node != node_id) continue;
+      auto source_it =
+          std::find_if(nodes.begin(), nodes.end(),
+                       [&edge](const orc::presenters::NodeInfo& n) {
+                         return n.node_id == edge.source_node;
+                       });
+      std::string name;
+      if (source_it != nodes.end()) {
+        name = source_it->label;
+        if (name.empty()) {
+          const orc::NodeTypeInfo* source_type =
+              orc::get_node_type_info(source_it->stage_name);
+          name =
+              source_type ? source_type->display_name : source_it->stage_name;
+        }
+      }
+      connected_inputs.push_back(
+          orc::gui::ConnectedInputNode{edge.source_node.value(), name});
+    }
+    stage_description = orc::gui::withSourceJoinInputNodesNotice(
+        stage_description, connected_inputs);
   }
 
   // Show parameter dialog

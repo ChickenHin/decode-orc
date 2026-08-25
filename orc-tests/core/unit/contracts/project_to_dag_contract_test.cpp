@@ -239,6 +239,92 @@ TEST(DagCloneContractTest, Clone_CarriesTheConfiguredParameters) {
   EXPECT_EQ(std::get<std::string>(it->second), "3-7");
 }
 
+// ── Reserved input-identity parameter ────────────────────────────────────
+//
+// A stage that orders its inputs by node ID (source_join does) can only learn
+// which node feeds each entry of execute()'s inputs vector from the host:
+// artifacts carry no node identity. project_to_dag() fills the reserved
+// parameter in for the stages that declare it, and leaves every other stage
+// alone.
+
+namespace {
+std::optional<std::string> parameter_of(const orc::DAG& dag,
+                                        orc::NodeID node_id,
+                                        const std::string& name) {
+  for (const auto& node : dag.nodes()) {
+    if (node.node_id != node_id) continue;
+    const auto it = node.parameters.find(name);
+    if (it == node.parameters.end()) return std::nullopt;
+    return std::get<std::string>(it->second);
+  }
+  return std::nullopt;
+}
+}  // namespace
+
+TEST(ProjectToDagInputIdentityTest, FillsReservedParameterInConnectionOrder) {
+  auto project = orc::project_io::create_empty_project(
+      "join-identity-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto first = orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto second = orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto join = orc::project_io::add_node(project, "source_join", 0.0, 0.0);
+  orc::project_io::add_edge(project, first, join);
+  orc::project_io::add_edge(project, second, join);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+
+  const auto value = parameter_of(*dag, join, orc::kInputNodeIdsParameter);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(*value, std::to_string(first.value()) + "," +
+                        std::to_string(second.value()));
+}
+
+// The value is host-owned, so it has to reach the stage instance the executor
+// runs — not just the node's parameter map.
+TEST(ProjectToDagInputIdentityTest, ReservedParameterReachesTheStageInstance) {
+  auto project = orc::project_io::create_empty_project(
+      "join-identity-stage-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto upstream =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto join = orc::project_io::add_node(project, "source_join", 0.0, 0.0);
+  orc::project_io::add_edge(project, upstream, join);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+
+  for (const auto& node : dag->nodes()) {
+    if (node.node_id != join) continue;
+    auto* parameterized =
+        dynamic_cast<orc::ParameterizedStage*>(node.stage.get());
+    ASSERT_NE(parameterized, nullptr);
+    const auto params = parameterized->get_parameters();
+    const auto it = params.find(orc::kInputNodeIdsParameter);
+    ASSERT_NE(it, params.end());
+    EXPECT_EQ(std::get<std::string>(it->second),
+              std::to_string(upstream.value()));
+    return;
+  }
+  FAIL() << "join node missing from the DAG";
+}
+
+TEST(ProjectToDagInputIdentityTest, LeavesStagesThatDoNotDeclareItAlone) {
+  auto project = orc::project_io::create_empty_project(
+      "no-identity-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto upstream =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto downstream =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  orc::project_io::add_edge(project, upstream, downstream);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+  EXPECT_FALSE(
+      parameter_of(*dag, downstream, orc::kInputNodeIdsParameter).has_value());
+}
+
 // ── Format-aware default parameter tests ─────────────────────────────────
 //
 // These tests guard against a class of bug where a project file does not

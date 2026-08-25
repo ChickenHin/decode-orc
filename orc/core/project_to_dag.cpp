@@ -61,6 +61,20 @@ bool is_file_path_parameter(const std::string& parameter_name) {
          parameter_name == "output_path" || parameter_name == "input_path";
 }
 
+// Source node IDs of a node's incoming connections, in project edge order —
+// the same order the executor gathers the artifacts into execute()'s inputs
+// vector.
+std::vector<NodeID> input_node_ids_of(const Project& project,
+                                      const NodeID& node_id) {
+  std::vector<NodeID> ids;
+  for (const auto& edge : project.get_edges()) {
+    if (edge.target_node_id == node_id) {
+      ids.push_back(edge.source_node_id);
+    }
+  }
+  return ids;
+}
+
 }  // namespace
 
 // Helper function to resolve paths relative to project root
@@ -116,6 +130,30 @@ void resolve_path_parameters(std::map<std::string, ParameterValue>& parameters,
     }
     param_value = resolve_path_for_execution(path, project_root);
   }
+}
+
+void apply_input_node_ids_parameter(
+    const DAGStage& stage, VideoSystem project_format, SourceType source_type,
+    const std::vector<NodeID>& input_node_ids,
+    std::map<std::string, ParameterValue>& parameters) {
+  const auto* param_stage = dynamic_cast<const ParameterizedStage*>(&stage);
+  if (!param_stage) return;
+
+  const auto descriptors =
+      param_stage->get_parameter_descriptors(project_format, source_type);
+  const bool declared =
+      std::any_of(descriptors.begin(), descriptors.end(),
+                  [](const ParameterDescriptor& descriptor) {
+                    return descriptor.name == kInputNodeIdsParameter;
+                  });
+  if (!declared) return;
+
+  std::string value;
+  for (const auto& id : input_node_ids) {
+    if (!value.empty()) value += ",";
+    value += std::to_string(id.value());
+  }
+  parameters[kInputNodeIdsParameter] = value;
 }
 
 std::shared_ptr<DAG> project_to_dag(const Project& project) {
@@ -175,6 +213,16 @@ std::shared_ptr<DAG> project_to_dag(const Project& project) {
     // Resolve file paths relative to project root
     resolve_path_parameters(dag_node.parameters, project_root);
 
+    // A stage that identifies its inputs by node ID can only be told by the
+    // host: artifacts carry no node identity. Fill the reserved parameter in
+    // before the stage is configured, so set_parameters() sees the inputs the
+    // node actually has.
+    const std::vector<NodeID> input_ids =
+        input_node_ids_of(project, proj_node.node_id);
+    apply_input_node_ids_parameter(*dag_node.stage, project.get_video_format(),
+                                   project.get_source_format(), input_ids,
+                                   dag_node.parameters);
+
     for (const auto& [key, value] : dag_node.parameters) {
       std::visit(
           [&proj_node,
@@ -193,13 +241,9 @@ std::shared_ptr<DAG> project_to_dag(const Project& project) {
                     proj_node.node_id, dag_node.parameters.size());
     }
 
-    // Find input edges for this node
-    for (const auto& edge : project.get_edges()) {
-      if (edge.target_node_id == proj_node.node_id) {
-        dag_node.input_node_ids.push_back(edge.source_node_id);
-        dag_node.input_indices.push_back(0);  // Assume output index 0
-      }
-    }
+    // Input edges for this node, in the order the executor gathers them
+    dag_node.input_node_ids = input_ids;
+    dag_node.input_indices.assign(input_ids.size(), 0);  // Output index 0
 
     dag_nodes.push_back(dag_node);
   }

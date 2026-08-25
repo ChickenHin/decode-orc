@@ -1810,6 +1810,19 @@ orc::ConfigurationStatus ProjectPresenter::getNodeConfigurationStatus(
       auto parameters = node_it->parameters;
       orc::resolve_path_parameters(parameters,
                                    getProject()->get_project_root());
+      // A stage that judges its configuration against the nodes feeding it
+      // (Source Join does) has to be told what they are, exactly as the DAG
+      // builder tells it at execution time — otherwise its status dot reports
+      // on inputs it cannot see.
+      std::vector<orc::NodeID> input_node_ids;
+      for (const auto& edge : getProject()->get_edges()) {
+        if (edge.target_node_id == node_id) {
+          input_node_ids.push_back(edge.source_node_id);
+        }
+      }
+      orc::apply_input_node_ids_parameter(
+          *stage, getProject()->get_video_format(),
+          getProject()->get_source_format(), input_node_ids, parameters);
       param_stage->set_parameters(parameters);
     }
 
@@ -1890,8 +1903,18 @@ std::vector<ParameterDescriptor> ProjectPresenter::getStageParameters(
         project_ ? project_->get_source_type() : orc::SourceType::Unknown;
 
     // Get parameter descriptors with project context
-    return param_stage->get_parameter_descriptors(video_format,
-                                                  source_type_core);
+    auto descriptors =
+        param_stage->get_parameter_descriptors(video_format, source_type_core);
+    // The reserved input-identity parameter is host-owned: the DAG builder
+    // fills it in from the node's incoming connections. Never offer it for
+    // editing, in the GUI dialog or on the CLI.
+    descriptors.erase(std::remove_if(descriptors.begin(), descriptors.end(),
+                                     [](const ParameterDescriptor& descriptor) {
+                                       return descriptor.name ==
+                                              orc::kInputNodeIdsParameter;
+                                     }),
+                      descriptors.end());
+    return descriptors;
   } catch (const std::exception&) {
     return {};
   }

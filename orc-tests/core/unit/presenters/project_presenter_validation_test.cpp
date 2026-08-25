@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -120,6 +121,94 @@ TEST(ProjectPresenterValidationTest, TransformOnly_ReportsBothMissing) {
   const std::vector<std::string> expected{"Project has no source nodes",
                                           "Project has no sink nodes"};
   EXPECT_EQ(presenter.getValidationErrors(), expected);
+}
+
+// ── Reserved input-identity parameter ────────────────────────────────────
+
+namespace {
+
+// A two-source Source Join project: both sources feed the join node, so the
+// presenter has real edges to report as the join's input identity.
+orc::Project make_join_project() {
+  const std::string yaml =
+      "project:\n"
+      "  name: join-test\n"
+      "  version: \"2.0\"\n"
+      "  video_format: PAL\n"
+      "  source_format: Composite\n"
+      "  amplitude_unit: mV\n"
+      "dag:\n"
+      "  nodes:\n"
+      "    - id: 1\n"
+      "      stage: frame_map\n"
+      "      node_type: TRANSFORM\n"
+      "    - id: 2\n"
+      "      stage: frame_map\n"
+      "      node_type: TRANSFORM\n"
+      "    - id: 3\n"
+      "      stage: source_join\n"
+      "      node_type: TRANSFORM\n"
+      "      parameters:\n"
+      "        input_order:\n"
+      "          type: string\n"
+      "          value: \"2,1\"\n"
+      "  edges:\n"
+      "    - from: 1\n"
+      "      to: 3\n"
+      "    - from: 2\n"
+      "      to: 3\n";
+  return orc::project_io::load_project_from_yaml(yaml, "/virtual/join.orcprj");
+}
+
+}  // namespace
+
+// The reserved parameter is host-owned: the DAG builder fills it in from the
+// node's connections, so it must never be offered for editing in the GUI
+// dialog or on the CLI.
+TEST(ProjectPresenterParameterTest, StageParameters_HideInputNodeIds) {
+  auto project = make_join_project();
+  auto presenter = wrap(project);
+
+  const auto descriptors = presenter.getStageParameters("source_join");
+  ASSERT_FALSE(descriptors.empty());
+  EXPECT_TRUE(std::any_of(descriptors.begin(), descriptors.end(),
+                          [](const orc::ParameterDescriptor& d) {
+                            return d.name == "input_order";
+                          }));
+  EXPECT_FALSE(std::any_of(descriptors.begin(), descriptors.end(),
+                           [](const orc::ParameterDescriptor& d) {
+                             return d.name == orc::kInputNodeIdsParameter;
+                           }));
+}
+
+// A stage that judges its configuration against the nodes feeding it has to be
+// told what they are, or its status dot reports on inputs it cannot see.
+TEST(ProjectPresenterParameterTest, NodeStatus_GreenWhenOrderMatchesInputs) {
+  auto project = make_join_project();
+  auto presenter = wrap(project);
+  EXPECT_EQ(presenter.getNodeConfigurationStatus(orc::NodeID(3)),
+            orc::ConfigurationStatus::Green);
+}
+
+// Disconnecting every input is not "identity unknown" — it is the graph saying
+// there is nothing for the stored order to name.
+TEST(ProjectPresenterParameterTest, NodeStatus_YellowWhenAllInputsAreRemoved) {
+  auto project = make_join_project();
+  orc::project_io::remove_edge(project, orc::NodeID(1), orc::NodeID(3));
+  orc::project_io::remove_edge(project, orc::NodeID(2), orc::NodeID(3));
+  auto presenter = wrap(project);
+  EXPECT_EQ(presenter.getNodeConfigurationStatus(orc::NodeID(3)),
+            orc::ConfigurationStatus::Yellow);
+}
+
+// Rewiring the node leaves the stored order describing a graph that no longer
+// exists; dropping the second connection has to show as an unfinished node.
+TEST(ProjectPresenterParameterTest, NodeStatus_YellowWhenAnInputIsRemoved) {
+  auto project = make_join_project();
+  orc::project_io::remove_edge(project, orc::NodeID(2), orc::NodeID(3));
+  auto presenter = wrap(project);
+  EXPECT_EQ(presenter.getNodeConfigurationStatus(orc::NodeID(3)),
+            orc::ConfigurationStatus::Yellow);
 }
 
 }  // namespace orc_unit_test

@@ -544,6 +544,29 @@ This contract is verified by
 additionally distinguishes `FILE_PATH` (a string for which the GUI shows a
 file browser).
 
+#### Reserved parameter: `input_node_ids`
+
+A multi-input stage receives its inputs as an unnamed vector whose order
+follows the order the connections were made, and artifacts carry no node
+identity — so a stage that has to distinguish one input from another cannot do
+it on its own.
+
+Declare a `STRING` parameter named `orc::kInputNodeIdsParameter`
+(`"input_node_ids"`, from `<orc/stage/params/parameter_types.h>`) and the host
+fills it in when it builds the execution graph: the source node IDs of the
+node's incoming connections, comma-separated, in the same order as the
+`inputs` vector handed to `execute()` — for example `"2,4,16"`. Node IDs are
+drawn on the nodes in the graph editor, so they are also what a user can put
+in a parameter of their own to name an input (the core `source_join` stage
+does exactly this).
+
+The value is host-owned: the parameter is filtered out of the GUI and CLI
+parameter surfaces, is never editable, and is never written to the project
+file. A stage that declares it must still behave sensibly when handed an empty
+value — no host support, or nothing connected yet — by falling back to
+positional handling of its inputs. Stages that do not declare the parameter
+are never handed it.
+
 ### Configuration status
 
 Stages can report their readiness to the host UI via `set_configuration_status()`,

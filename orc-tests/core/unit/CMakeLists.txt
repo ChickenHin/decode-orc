@@ -68,6 +68,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-vbi-source
                         orc-stage-plugin-stacker
                         orc-stage-plugin-frame-map
+                        orc-stage-plugin-source-join
                         orc-stage-plugin-video-params
                         orc-stage-plugin-dropout-correct
                         orc-stage-plugin-dropout-map
@@ -140,6 +141,7 @@ orc_add_core_unit_tests(
 
         stages/stacker/stacker_stage_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
+        stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp
         stages/video_params/video_params_stage_test.cpp
         stages/dropout_correct/dropout_correct_stage_test.cpp
