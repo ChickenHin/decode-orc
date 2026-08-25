@@ -166,7 +166,7 @@ A **selector** is how both front ends name one entry: the plugin's id when it ha
 
 The collapsible **Diagnostics** section at the bottom lists what the plugin runtime recorded while loading plugins at startup, each line prefixed **Info**, **Warning** or **Error**. These are the same messages `orc-cli process` and `orc-cli filter` print for a run; CLI: `orc-cli plugins doctor`, which also reports the plugin search paths.
 
-Registry changes take effect on the next application launch; the dialog offers a restart when you close it after making changes.
+Registry changes take effect on the next application launch; when you close the dialog after making changes it offers to quit Decode-Orc so you can start it again.
 
 ##### Browse Plugins
 
