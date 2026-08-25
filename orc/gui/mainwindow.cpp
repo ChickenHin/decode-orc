@@ -27,6 +27,8 @@
 #include "generic_analysis_dialog.h"
 #include "line_navigation_mapper.h"
 #include "logging.h"
+#include "logging_controller.h"
+#include "logging_settings_dialog.h"
 #include "masklineconfigdialog.h"
 #include "ntscobserverdialog.h"
 #include "orcgraphicsview.h"
@@ -965,6 +967,13 @@ void MainWindow::setupMenus() {
     orc::PluginManagerDialog dlg(this);
     dlg.exec();
   });
+
+  // Diagnostic logging: turns a log file on, chooses how much detail it
+  // records, and says where it goes, so a bug report can carry one without the
+  // reporter having to relaunch from a command line.
+  logging_action_ = tools_menu->addAction("&Logging...");
+  connect(logging_action_, &QAction::triggered, this,
+          &MainWindow::onConfigureLogging);
 
   // Themes submenu: overrides the --theme command-line option at runtime.
   tools_menu->addSeparator();
@@ -3197,6 +3206,44 @@ void MainWindow::onAbout() {
   about_box.setTextFormat(Qt::RichText);
   about_box.setTextInteractionFlags(Qt::TextBrowserInteraction);
   about_box.exec();
+}
+
+void MainWindow::onConfigureLogging() {
+  auto* controller = orc::LoggingController::instance();
+  if (controller == nullptr) {
+    // No controller exists when the window is hosted outside the application
+    // (a test harness); there is nothing to reconfigure.
+    QMessageBox::warning(this, "Logging",
+                         "Logging cannot be reconfigured in this session.");
+    return;
+  }
+
+  orc::LoggingSettingsDialog dialog(
+      controller->settings(), orc::LoggingController::defaultLogFilePath(),
+      this);
+
+  // A log file that cannot be opened keeps the dialogue up so the path can be
+  // corrected; everything else closes it.
+  while (dialog.exec() == QDialog::Accepted) {
+    const orc::LoggingSettings requested = dialog.settings();
+    const auto result = controller->apply(requested);
+    if (result.ok) {
+      if (requested.file_logging_enabled) {
+        ORC_LOG_INFO("Logging to '{}' at level '{}'",
+                     result.log_file.toStdString(),
+                     requested.level.toStdString());
+      } else {
+        ORC_LOG_INFO("Logging to a file turned off");
+      }
+      return;
+    }
+
+    QMessageBox::warning(
+        this, "Logging",
+        QString("The log file '%1' could not be opened:\n%2\n\nMessages are "
+                "still being written to the console.")
+            .arg(result.log_file, result.error));
+  }
 }
 
 void MainWindow::updatePreview() {

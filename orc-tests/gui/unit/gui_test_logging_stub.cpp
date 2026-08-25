@@ -20,4 +20,10 @@ void reset_gui_logger() {}
 void init_gui_logging(const std::string&, const std::string&,
                       const std::string&, LogDestination) {}
 
+bool reconfigure_gui_logging(const std::string&, const std::string&,
+                             const std::string&, LogDestination, bool,
+                             std::string*) {
+  return true;
+}
+
 }  // namespace orc

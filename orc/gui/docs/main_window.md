@@ -46,7 +46,36 @@ The toolbar can be hidden or shown from **View → Show Toolbar**.
 | Action | Description |
 |--------|-------------|
 | Plugin Manager... | Open the Plugin Manager to load, inspect, and manage runtime stage plugins. |
+| Logging... | Turn diagnostic logging to a file on or off, choose how much detail it records, and choose where the file goes. Takes effect immediately and is remembered between runs. |
 | Themes | Choose the UI theme: Auto (follow the operating system), Dark, or Light. Overrides the `--theme` command-line option and is remembered between runs. |
+
+### Logging
+
+Records what the application is doing to a file so it can be attached to a bug
+report, without having to relaunch from a command line.
+
+| Control | Description |
+|---------|-------------|
+| Write log messages to a file | Turns file logging on and off. Console output is unaffected. |
+| Detail | How much is recorded: trace, debug, info, warn, error, critical, or off. Use debug for a bug report. |
+| Log file | Where the file goes. Leave it blank to use the default location shown in the field. |
+| Open Log Folder | Opens the folder holding the log file in the system file manager. |
+
+The change takes effect as soon as you click OK - the application does not need
+to be restarted, and stage plugins that are already loaded start writing to the
+new file too.
+
+The log file is replaced, never appended to, so it only ever holds one capture.
+Every run of the application starts it again from empty, as does turning
+logging on or choosing a different file. Changing only the detail level while
+the same file stays open keeps what has been recorded so far.
+
+Release builds compile trace records out, so trace records nothing more than
+debug there; the dialogue says so when that applies.
+
+The settings are remembered for the next run. The `--log-level`, `--log-file`
+and `--log-out` command-line options override them for a single run without
+changing what is remembered.
 
 ## DAG Editor
 

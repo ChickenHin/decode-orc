@@ -180,6 +180,41 @@ Reached from the Plugin Manager's **Browse Plugins…** button. It lists the **a
 
 The id the details pane shows is exactly what `orc-cli plugins info` and `orc-cli plugins install` accept, and once the plugin is installed it is also its registry selector.
 
+#### Logging…
+
+Records what the application is doing to a file. Turn it on before reproducing a
+problem, then attach the file to your bug report — see
+[Reporting issues](../../misc/issue-reporting.md). CLI: `orc-cli --log-level`,
+`--log-file` and `--log-out`.
+
+* **Write log messages to a file** turns file logging on and off. Anything the application prints to the console when it is started from a terminal keeps going there either way.
+* **Detail** chooses how much is recorded, from `trace` (everything, including per-frame detail) down through `debug`, `info`, `warn`, `error` and `critical` to `off`. **debug** is the level to send with a bug report; `info` is the default. A line beneath the box says what the selected level records.
+* **Log file** is where the file goes. Leave it blank to use the location shown greyed out in the field — a `decode-orc-logs` folder in your documents directory, beside where crash bundles are written. **Browse…** picks a different one; the folder is created if it does not exist.
+* **Open Log Folder** opens the folder holding the log file in your file manager, ready for you to attach it to a report.
+
+The summary line at the bottom of the dialog says what will be captured and
+where. Clicking **OK** applies the change straight away: there is no need to
+restart, and stage plugins that are already loaded start writing to the new file
+too.
+
+The log file is replaced rather than appended to, so it only ever holds one
+capture and can never mix two sessions together. It starts again from empty
+every time the application is run, and whenever you turn logging on or point it
+at a different file. Raising or lowering **Detail** part-way through a capture
+keeps what has already been recorded.
+
+A detailed log grows quickly, so turn logging off again once you have captured
+the problem.
+
+Release builds have trace records compiled out of them, so on a released
+version `trace` records no more than `debug` does. The dialog says so when that
+applies to the build you are running.
+
+Your choice is remembered for the next run. The `--log-level`, `--log-file` and
+`--log-out` command-line options configure a single run instead and leave the
+remembered settings alone; when any of them is given, the dialog opens showing
+what that run is using.
+
 #### Themes
 
 Chooses the user-interface theme, applied immediately:
