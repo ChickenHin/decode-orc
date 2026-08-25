@@ -27,6 +27,7 @@
 
 #include "nabts_page.h"
 #include "teletext_page_decoder.h"
+#include "vbi_identity_attestation.h"
 
 namespace orc {
 
@@ -54,6 +55,16 @@ struct TeletextCataloguedSubPage {
   /// re-sent part-way through the sub-page's own transmission is the same
   /// appearance, not another one.
   uint64_t times_seen = 0;
+
+  /// Appearances that named the page as transmitted, of @ref times_seen: the
+  /// two MRAG bytes and the two page-number bytes of the opening header all
+  /// arrived as Hamming 8/4 codewords rather than being corrected into them
+  /// (§7.1.2, §9.3.1.1; see TeletextPageSnapshot::identity_attested).
+  ///
+  /// Zero here on a page the carousel brought round many times is the signature
+  /// of a mis-corrected page number rather than of a real page — see
+  /// TeletextPageCatalogue::reconcile_identities(), which is what acts on it.
+  uint64_t times_attested = 0;
 
   /// Packet slots this sub-page's own transmissions lost, estimated the same
   /// way as TeletextRecoverySummary::lost_packets_estimate but scoped to the
@@ -99,6 +110,10 @@ struct TeletextCataloguedPage {
   /// a multi-page set this counts the transmissions rather than the cycles.
   uint64_t times_seen = 0;
 
+  /// Appearances that named the page as transmitted, summed over the
+  /// sub-pages (see TeletextCataloguedSubPage::times_attested).
+  uint64_t times_attested = 0;
+
   /// The page has been transmitted with C6 (subtitle, ETSI EN 300 706 §9.3.1.3
   /// Table 2) set at least once. Sticky: a service may drop C6 between
   /// captions, and the page is still the subtitle page in between.
@@ -137,6 +152,11 @@ struct TeletextRecoverySummary {
   /// True when the sub-page cap was reached and the least recently seen ones
   /// were dropped, so the catalogue is not the whole set the range carried.
   bool pages_truncated = false;
+  /// What separating the page numbers the service transmitted from the ones
+  /// Hamming 8/4 mis-correction invented came to (see
+  /// TeletextPageCatalogue::reconcile_identities()). All zero on an undamaged
+  /// recording, where every page number arrives as transmitted.
+  VbiIdentityReconciliation identity_reconciliation;
 
   /// G0 character set the pages were read in — the alphabet, not the data.
   ///
@@ -241,6 +261,17 @@ struct NabtsCataloguedRecord {
   uint64_t times_seen = 0;
   /// Copies that arrived whole and undamaged, of @ref times_seen.
   uint64_t times_intact = 0;
+  /// Copies that named this record as transmitted, of @ref times_seen: every
+  /// Hamming 8/4 byte of the packet address and of the record header through
+  /// its classification sequence arrived as a codeword rather than being
+  /// corrected into one (§3.2.2, §5.2.1; see NabtsMessage::identity_attested).
+  ///
+  /// Zero here on a record the recording brought round many times is the
+  /// signature of a mis-corrected identity rather than of a real record — see
+  /// NabtsRecordCatalogue::reconcile_identities(), which is what acts on it.
+  /// Equal to @ref times_seen on any undamaged source, where every byte
+  /// arrives as transmitted.
+  uint64_t times_attested = 0;
 
   /// §5.2.8.4: a header extension field naming this record's More Record
   /// explicitly, which §7.3.4 has the receiver consult before the More Flag.
@@ -352,6 +383,11 @@ struct NabtsRecoverySummary {
   /// grammar tie-break then decided.
   uint64_t vote_positions_contested = 0;
   uint64_t vote_positions_adjudicated = 0;
+  /// What separating the record identities the service transmitted from the
+  /// ones Hamming 8/4 mis-correction invented came to (see
+  /// NabtsRecordCatalogue::reconcile_identities()). All zero on an undamaged
+  /// recording, where every identity arrives as transmitted.
+  VbiIdentityReconciliation identity_reconciliation;
 };
 
 /// Everything the NABTS sink caches from one trigger run.

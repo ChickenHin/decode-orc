@@ -1127,5 +1127,170 @@ TEST(NabtsRecordCatalogue, AChainFollowsTheNewestVersionOfEachMember) {
       << "the continuation was presented over an outdated predecessor";
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+// Identity attestation (issue #267)
+////////////////////////////////////////////////////////////////////////////////////////////
+//
+// Every digit of §5.2.1's identity arrives in its own Hamming 8/4 byte, and
+// ETSI EN 300 706 §8.2 gives that code minimum distance 4 — so three bit errors
+// resolve silently into a neighbouring codeword. The record that happens to is
+// not damaged: it is copied, to a channel, address or version the service never
+// transmitted, and only whether the identity arrived as transmitted tells the
+// copy from the original.
+
+/// |message()|, with a note of whether the arrival named the record as
+/// transmitted.
+orc::NabtsMessage attested_message(uint16_t channel, uint16_t short_address,
+                                   uint8_t version, std::vector<uint8_t> data,
+                                   bool attested) {
+  auto out = message(channel, short_address, version, std::move(data));
+  out.identity_attested = attested;
+  return out;
+}
+
+/// |appearances| copies of one record, none of which arrived intact, so the
+/// catalogue holds them for the vote.
+void carousel(orc::NabtsRecordCatalogue& catalogue, uint16_t channel,
+              uint16_t short_address, uint8_t version,
+              std::vector<uint8_t> data, int appearances, bool attested,
+              uint64_t first_frame = 0) {
+  for (int index = 0; index < appearances; ++index) {
+    auto copy = message(channel, short_address, version, data,
+                        /*complete=*/true, /*intact=*/false);
+    copy.identity_attested = attested;
+    catalogue.merge(copy, first_frame + static_cast<uint64_t>(index));
+  }
+}
+
+TEST(NabtsRecordCatalogueIdentities, AttestedAppearancesAreCounted) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(attested_message(0x000, 0x009, 7, bytes(0x40, 8), true), 0);
+  catalogue.merge(attested_message(0x000, 0x009, 7, bytes(0x40, 8), true), 1);
+  catalogue.merge(attested_message(0x000, 0x009, 7, bytes(0x40, 8), false), 2);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].times_seen, 3u);
+  EXPECT_EQ(records[0].times_attested, 2u);
+}
+
+// The shape of the reported bug: 000/009 v7 brought round throughout the
+// recording, and 000/709 v7 — the same page, one address digit away — never
+// once received as transmitted.
+TEST(NabtsRecordCatalogueIdentities, FoldUnattestedRecordIntoItsOneNeighbour) {
+  orc::NabtsRecordCatalogue catalogue;
+  carousel(catalogue, 0x000, 0x009, 7, bytes(0x40, 8), /*appearances=*/40,
+           /*attested=*/true);
+  carousel(catalogue, 0x000, 0x709, 7, bytes(0x40, 8), /*appearances=*/2,
+           /*attested=*/false, /*first_frame=*/900);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_seen, 2u);
+  EXPECT_EQ(reconciliation.identities_unattested, 1u);
+  EXPECT_EQ(reconciliation.identities_folded, 1u);
+  EXPECT_EQ(reconciliation.appearances_folded, 2u);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].address, long_of(0x009));
+  EXPECT_EQ(records[0].times_seen, 42u);
+  EXPECT_EQ(records[0].last_seen_frame, 901u);
+}
+
+// A misread channel digit is the same failure one level up: it opens a data
+// group on a channel the service never used.
+TEST(NabtsRecordCatalogueIdentities, FoldAMisreadChannelDigit) {
+  orc::NabtsRecordCatalogue catalogue;
+  carousel(catalogue, 0x000, 0x021, 6, bytes(0x40, 8), /*appearances=*/30,
+           /*attested=*/true);
+  carousel(catalogue, 0x700, 0x021, 6, bytes(0x40, 8), /*appearances=*/3,
+           /*attested=*/false, /*first_frame=*/900);
+
+  EXPECT_EQ(catalogue.reconcile_identities().identities_folded, 1u);
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].channel, 0x000);
+  EXPECT_EQ(records[0].times_seen, 33u);
+}
+
+// Folding rather than discarding is the point: the misread copies are bytes of
+// the record that were received, so they join its vote.
+TEST(NabtsRecordCatalogueIdentities, FoldedCopiesJoinTheVote) {
+  orc::NabtsRecordCatalogue catalogue;
+  // Two copies of the attested record, each damaged in a different byte, and
+  // three of the misread one carrying the byte both of them lost.
+  carousel(catalogue, 0x000, 0x009, 7, {0x41, 0x99, 0x43}, /*appearances=*/2,
+           /*attested=*/true);
+  carousel(catalogue, 0x000, 0x709, 7, {0x41, 0x42, 0x43}, /*appearances=*/3,
+           /*attested=*/false, /*first_frame=*/900);
+
+  ASSERT_EQ(catalogue.reconcile_identities().identities_folded, 1u);
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].copies_voted, 5u);
+  ASSERT_EQ(records[0].data.size(), 3u);
+  EXPECT_EQ(records[0].data[1], 0x42)
+      << "the misread copies outvoted the byte both attested copies had wrong";
+}
+
+// A service numbering its records densely offers two equally good explanations
+// for a misreading, and neither is evidence of anything.
+TEST(NabtsRecordCatalogueIdentities, LeaveAnAmbiguousMisreadingUnfolded) {
+  orc::NabtsRecordCatalogue catalogue;
+  carousel(catalogue, 0x000, 0x003, 6, bytes(0x40, 8), /*appearances=*/20,
+           /*attested=*/true);
+  carousel(catalogue, 0x000, 0x007, 6, bytes(0x50, 8), /*appearances=*/20,
+           /*attested=*/true, /*first_frame=*/100);
+  // 000/005 is one digit from both.
+  carousel(catalogue, 0x000, 0x005, 6, bytes(0x50, 8), /*appearances=*/2,
+           /*attested=*/false, /*first_frame=*/900);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_folded, 0u);
+  EXPECT_EQ(reconciliation.identities_dropped, 1u);
+  EXPECT_EQ(catalogue.records().size(), 2u);
+}
+
+// A false lock on noise names a channel and address nothing else is near.
+TEST(NabtsRecordCatalogueIdentities, DropAMisreadingWithNoNeighbour) {
+  orc::NabtsRecordCatalogue catalogue;
+  carousel(catalogue, 0x000, 0x009, 7, bytes(0x40, 8), /*appearances=*/20,
+           /*attested=*/true);
+  carousel(catalogue, 0xFFF, 0xEEE, 3, bytes(0x50, 8), /*appearances=*/1,
+           /*attested=*/false, /*first_frame=*/900);
+
+  EXPECT_EQ(catalogue.reconcile_identities().identities_dropped, 1u);
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].channel, 0x000);
+}
+
+// On an undamaged recording every identity arrives as transmitted, so the pass
+// has nothing to do and must not disturb the catalogue.
+TEST(NabtsRecordCatalogueIdentities, LeaveAnUndamagedCatalogueAlone) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(attested_message(0x000, 0x003, 6, bytes(0x40, 8), true), 0);
+  catalogue.merge(attested_message(0x000, 0x007, 6, bytes(0x50, 8), true), 1);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_FALSE(reconciliation.acted());
+  EXPECT_FALSE(reconciliation.withheld);
+  EXPECT_TRUE(reconciliation.summary("record").empty());
+  EXPECT_EQ(catalogue.records().size(), 2u);
+}
+
+// A recording so damaged that nothing at all was received as transmitted
+// offers no baseline to judge the rest against.
+TEST(NabtsRecordCatalogueIdentities, WithholdWhenNothingWasAttested) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(attested_message(0x000, 0x003, 6, bytes(0x40, 8), false), 0);
+  catalogue.merge(attested_message(0x000, 0x007, 6, bytes(0x50, 8), false), 1);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_TRUE(reconciliation.withheld);
+  EXPECT_FALSE(reconciliation.acted());
+  EXPECT_EQ(catalogue.records().size(), 2u);
+}
+
 }  // namespace
 }  // namespace orc_unit_test

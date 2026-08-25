@@ -92,6 +92,11 @@ enum class NabtsGroupOutcome {
 struct NabtsDataGroup {
   /// Channel the group's packets were addressed to (§3.2.3).
   uint16_t channel = 0;
+  /// Whether the synchronizing packet's address arrived as Hamming 8/4
+  /// codewords rather than being corrected into them (see
+  /// NabtsPacket::address_attested). The synchronizing packet's own address is
+  /// what opened the group, so it is the one the group's channel rests on.
+  bool channel_attested = false;
   NabtsGroupHeader header;
   NabtsGroupOutcome outcome = NabtsGroupOutcome::kComplete;
 
@@ -210,6 +215,8 @@ class NabtsGroupAssembler {
  private:
   struct OpenGroup {
     NabtsGroupHeader header;
+    /// The synchronizing packet's NabtsPacket::address_attested.
+    bool channel_attested = false;
     /// Every data-block byte the group has yielded, the synchronizing packet's
     /// eight header bytes included, so an offset into this is an offset into
     /// the group as §4.2.6 counts it.

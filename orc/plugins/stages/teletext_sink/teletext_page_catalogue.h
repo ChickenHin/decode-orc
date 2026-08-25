@@ -19,6 +19,7 @@
 
 #include "vbi-services/teletext_page_decoder.h"
 #include "vbi-services/vbi_analysis_results.h"
+#include "vbi-services/vbi_identity_attestation.h"
 
 namespace orc {
 
@@ -115,6 +116,41 @@ class TeletextPageCatalogue {
    * reports under the appearance's original header field index.
    */
   void merge(const TeletextPageSnapshot& snapshot, uint64_t frame_id);
+
+  /**
+   * @brief Remove the page numbers the recording never actually named
+   *
+   * A page is identified by its magazine and page number (ETSI EN 300 706
+   * §9.3.1.1) and its sub-code (§9.3.1.2), and every digit of all three is
+   * carried by its own Hamming 8/4 byte. §8.2 gives that code minimum distance
+   * 4, so a burst of three bit errors — the ordinary error on a band-limited
+   * recording rather than the exotic one — resolves silently to a neighbouring
+   * codeword. That does not damage the page it happens to: it *duplicates* it,
+   * at a number the service never transmitted, and this catalogue then holds
+   * the copy beside the original with no way to tell them apart.
+   *
+   * So the catalogue counts, per sub-page, how often the identity arrived as
+   * transmitted (TeletextCataloguedSubPage::times_attested), and this pass acts
+   * on it. A sub-page no appearance ever attested is not a page:
+   *
+   *  - where exactly one attested identity differs from it in a single
+   *    hexadecimal digit, it is a misreading of that one, and its appearances
+   *    and frame extent are added to it. Its rows cannot be: the row squasher
+   *    combined them under the misread page's own key long before the catalogue
+   *    saw them, and there is nothing here to merge.
+   *  - otherwise it is removed. Several attested neighbours make the misreading
+   *    ambiguous — a service carrying both 1/03 and 1/07 is ordinary — and none
+   *    at all is a false lock on noise.
+   *
+   * Withheld entirely on a catalogue where nothing was ever attested, which
+   * offers no baseline to judge the rest against (see
+   * vbi_identity_reconciliation_applies()). On an undamaged source every byte
+   * arrives as transmitted, so the pass finds nothing and costs one walk of the
+   * catalogue.
+   *
+   * Call once, after the last merge() and before pages().
+   */
+  VbiIdentityReconciliation reconcile_identities();
 
   /// Page numbers catalogued so far
   std::size_t size() const { return pages_.size(); }

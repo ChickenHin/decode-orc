@@ -59,6 +59,9 @@ class HammingCursor {
       failed_ = true;
       return -1;
     }
+    if (!teletext_hamming84_clean(bytes_[position_])) {
+      clean_ = false;
+    }
     ++position_;
     return value;
   }
@@ -66,11 +69,18 @@ class HammingCursor {
   bool failed() const { return failed_; }
   size_t position() const { return position_; }
 
+  /// Whether every byte read so far arrived as a codeword rather than being
+  /// corrected into one. Monotone: once a byte has needed correcting, nothing
+  /// read afterwards can restore the guarantee, which is what makes a single
+  /// reading of this at any point in the walk cover everything before it.
+  bool clean() const { return clean_; }
+
  private:
   const uint8_t* bytes_;
   size_t length_;
   size_t position_ = 0;
   bool failed_ = false;
+  bool clean_ = true;
 };
 
 /// Read the nine, or three, address nibbles into the long form §5.2.5 defines.
@@ -283,6 +293,14 @@ NabtsRecordHeader nabts_decode_record_header(const uint8_t* bytes,
     }
   }
 
+  // Everything the record's identity rests on has now been read: RT and RD,
+  // which decide how long the address is; the address itself; and the
+  // classification sequence, which is where the version number lives
+  // (§5.2.7.2 Y16). A header extension may follow, and it says nothing about
+  // which record this is — only where its data starts — so the reading is taken
+  // here rather than at the end of the walk.
+  header.identity_attested = cursor.clean();
+
   if (has_header_extension) {
     header.extensions = read_extensions(cursor);
     if (cursor.failed()) {
@@ -414,6 +432,7 @@ void NabtsRecordAssembler::emit_unlinked(const NabtsRecord& record) {
   message.links_expected = 1;
   message.complete = true;
   message.intact = record.intact;
+  message.identity_attested = record.identity_attested;
   // An unlinked record is the whole message, so it starts where the record
   // starts and its holes are already held open at their true width.
   message.aligned = true;
@@ -517,6 +536,9 @@ void NabtsRecordAssembler::add_linked(const NabtsRecord& record) {
   if (!record.intact) {
     open.message.intact = false;
   }
+  if (record.identity_attested) {
+    open.message.identity_attested = true;
+  }
   if (!record.header.more_links) {
     open.final_order = record.header.link_order;
   }
@@ -556,6 +578,7 @@ void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   record.channel = group.channel;
   record.header = header;
   record.intact = group.intact();
+  record.identity_attested = header.identity_attested && group.channel_attested;
   if (group.data.size() > header.header_bytes) {
     record.data.assign(
         group.data.begin() + static_cast<ptrdiff_t>(header.header_bytes),

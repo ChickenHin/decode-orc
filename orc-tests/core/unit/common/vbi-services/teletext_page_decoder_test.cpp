@@ -182,6 +182,63 @@ TEST_F(TeletextPageDecoderTest, AssemblesPageAcrossHeaderAndBodyPackets) {
   EXPECT_EQ(row_text(page, 3), "ROW THREE");
 }
 
+// A mis-corrected MRAG or page-number byte does not damage a page: it copies
+// it to a number the service never sent, and a catalogue cannot tell the copy
+// from the original by looking at it. So the snapshot carries whether the
+// header that opened the transmission named the page as transmitted
+// (issue #267).
+TEST_F(TeletextPageDecoderTest, AttestsAPageNumberThatArrivedAsCodewords) {
+  decoder_.process_packet(make_header(1, 0x20, 0, {}, "CLEAN"), 0);
+  decoder_.process_packet(make_time_filling_header(1), 1);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_TRUE(snapshots_[0].identity_attested);
+}
+
+TEST_F(TeletextPageDecoderTest, DoesNotAttestACorrectedAddressingByte) {
+  // Bytes 0 and 1 are the MRAG (§7.1.2), 2 and 3 the page number (§9.3.1.1):
+  // the whole of what names the page.
+  for (size_t byte = 0; byte < 4; ++byte) {
+    snapshots_.clear();
+    auto header = make_header(1, 0x20, 0, {}, "DAMAGED");
+    header[byte] = static_cast<uint8_t>(header[byte] ^ 0x01);
+    decoder_.process_packet(header, 0);
+    decoder_.process_packet(make_time_filling_header(1), 1);
+
+    ASSERT_EQ(snapshots_.size(), 1u) << "byte " << byte;
+    // Corrected, and correctly — the page still comes out at 1/20.
+    EXPECT_EQ(snapshots_[0].magazine, 1) << "byte " << byte;
+    EXPECT_EQ(snapshots_[0].page_number, 0x20) << "byte " << byte;
+    EXPECT_FALSE(snapshots_[0].identity_attested) << "byte " << byte;
+  }
+}
+
+// The sub-code and control bytes describe the page rather than name it, and a
+// correction in one is not a doubt about which page this is.
+TEST_F(TeletextPageDecoderTest, AttestationIgnoresTheSubCodeAndControlBytes) {
+  auto header = make_header(1, 0x20, 0, {}, "SUBCODE");
+  header[6] = static_cast<uint8_t>(header[6] ^ 0x01);  // S3
+  decoder_.process_packet(header, 0);
+  decoder_.process_packet(make_time_filling_header(1), 1);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_TRUE(snapshots_[0].identity_attested);
+}
+
+// A rolling header (§9.3.1.4) is the same transmission, so it must not restamp
+// what the opening header said — for the same reason it does not restamp
+// header_field_index.
+TEST_F(TeletextPageDecoderTest, ARollingHeaderDoesNotRestampAttestation) {
+  decoder_.process_packet(make_header(1, 0x20, 0, {}, "CLEAN"), 0);
+  auto rolling = make_header(1, 0x20, 0, {}, "ROLLED");
+  rolling[2] = static_cast<uint8_t>(rolling[2] ^ 0x01);
+  decoder_.process_packet(rolling, 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_TRUE(snapshots_.back().identity_attested);
+}
+
 TEST_F(TeletextPageDecoderTest, FinalizeFlushesOpenPageAssemblies) {
   decoder_.process_packet(make_header(2, 0x34, 0, {}), 0);
   decoder_.process_packet(make_row(2, 1, "UNTERMINATED"), 1);

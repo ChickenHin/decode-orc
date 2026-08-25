@@ -487,6 +487,7 @@ orc_add_core_unit_tests(
         common/vbi-services/teletext_page_decoder_test.cpp
         common/vbi-services/teletext_recovery_stats_test.cpp
         common/vbi-services/teletext_row_squasher_test.cpp
+        common/vbi-services/vbi_identity_attestation_test.cpp
 )
 
 orc_add_core_unit_tests(

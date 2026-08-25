@@ -222,6 +222,24 @@ It is actively dangerous where the grammar is asked to choose between readings r
 
 The run's report has a **NAPLPS lint** section giving the totals: how many records were faulted before repair and after, how many were altered and how many of *those* now draw differently, how many bytes were corrected, how many runs resynchronised, and how many of the bytes the recording doubted were actually known to be wrong. Two figures are worth reading over the rest. The pages that draw differently is what the pass did to the service, as against what it did to the records. And the gap between the bytes doubted and the bytes known wrong is the honest measure of how much of the service is still guesswork — on a badly damaged recording it is most of them.
 
+### Addresses the recording named but the service never sent
+
+A damaged tape does not only lose records — it invents them, and the invention is convincing.
+
+Every digit of the identity CEA-516 §5.2.1 gives a record — the three packet-address digits, the record address, the version — arrives in its own Hamming 8/4 byte. That code has minimum distance 4 (ETSI EN 300 706 §8.2), so it corrects one bit error and detects two, but a burst of **three** lands inside a neighbouring codeword's correction sphere and is resolved there silently, with no indication that anything was guessed at. On a band-limited recording that is the ordinary error rather than the exotic one: the MLSE detector's characteristic failure is a run of alternating bit inversions, and the codeword for digit 0 is itself an alternating pattern, so digit 0 is carried onto digit 7 over and over.
+
+The damage that does is not to the record. The record still decodes; it is simply filed under an address the service never transmitted, where it sits in the catalogue beside the real one holding the same page. The reference ExtraVision EP capture reports 1389 distinct identities, of which only 184 were ever received as transmitted; the rest are that.
+
+So the run counts, per record, how often its identity arrived **as transmitted** rather than corrected into shape, and prunes the catalogue on it:
+
+* a record no copy ever named as transmitted is not a record. Where exactly one attested identity differs from it in a single hexadecimal digit, it is a misreading of that one: its copies join that record's vote — they are that record's bytes, and they were received — and its appearances are added to it.
+* where several attested identities are a single digit away, the misreading has two explanations and neither is evidence. A service carrying both 003 and 007 is ordinary. The entry is removed rather than attributed.
+* where none is, it was a false lock on noise. Removed.
+
+The run's report says how many identities were folded and how many dropped, and the records viewer says so across its foot, so a shorter list than an earlier run gave is explained rather than mysterious.
+
+On an undamaged source every byte arrives as transmitted, the pass finds nothing, and nothing changes. The one case it declines outright is a recording where *no* identity was ever attested: there is then no baseline to judge the rest against, and the catalogue is left exactly as recovered.
+
 ## Notes
 
 * NTSC and PAL-M sources are accepted. A 625-line source is reported as an error: CEA-516 §1.1.1 specifies NABTS on the 525-line NTSC signal, and no 625-line service exists to recover.

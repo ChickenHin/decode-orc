@@ -23,6 +23,7 @@ add_library(orc-vbi-services STATIC
     teletext_row_squasher.cpp
     nabts_page.cpp
     nabts_captions.cpp
+    vbi_identity_attestation.cpp
 )
 
 # Consumers include the headers as "vbi-services/teletext_slicer.h" so the

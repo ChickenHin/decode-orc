@@ -81,6 +81,9 @@ void TeletextPageCatalogue::merge(const TeletextPageSnapshot& snapshot,
   if (snapshot.header_field_index != sub_entry.counted_header_field) {
     sub_entry.counted_header_field = snapshot.header_field_index;
     ++sub_entry.subpage.times_seen;
+    if (snapshot.identity_attested) {
+      ++sub_entry.subpage.times_attested;
+    }
   }
 
   if (is_new) {
@@ -131,6 +134,132 @@ void TeletextPageCatalogue::enforce_subpage_bounds(Entry& page_entry) {
   }
 }
 
+namespace {
+
+// A page's identity written out digit by digit, in transmission order: the
+// magazine, the two page-number digits (ETSI EN 300 706 §9.3.1.1) and the four
+// sub-code digits S1 to S4 (§9.3.1.2). Seven digits, each of which arrived in
+// its own Hamming 8/4 byte and so can be moved on its own.
+//
+// The sub-code is unpacked back into the four fields the header carries rather
+// than compared as the packed value TeletextPageSnapshot holds: S2 occupies
+// three bits and S4 two, so a single digit of the packed form spans two of the
+// transmitted fields and a single-digit test over it would be testing something
+// the transmission never had.
+VbiIdentityDigits page_identity_digits(int magazine, int page_number,
+                                       int subcode) {
+  VbiIdentityDigits digits;
+  digits.reserve(7);
+  digits.push_back(static_cast<uint8_t>(magazine & 0xF));
+  digits.push_back(static_cast<uint8_t>((page_number >> 4) & 0xF));
+  digits.push_back(static_cast<uint8_t>(page_number & 0xF));
+  digits.push_back(static_cast<uint8_t>(subcode & 0xF));          // S1
+  digits.push_back(static_cast<uint8_t>((subcode >> 4) & 0x7));   // S2
+  digits.push_back(static_cast<uint8_t>((subcode >> 7) & 0xF));   // S3
+  digits.push_back(static_cast<uint8_t>((subcode >> 11) & 0x3));  // S4
+  return digits;
+}
+
+}  // namespace
+
+VbiIdentityReconciliation TeletextPageCatalogue::reconcile_identities() {
+  // One identity per sub-page: the sub-code is part of what a header names, so
+  // a misread S1 duplicates a sub-page inside a page number that is itself
+  // perfectly attested.
+  struct Located {
+    std::pair<int, int> page_key;
+    int subcode = 0;
+    VbiIdentityDigits digits;
+  };
+
+  VbiIdentityReconciliation out;
+  std::vector<Located> attested;
+  std::vector<Located> unattested;
+  for (const auto& [page_key, entry] : pages_) {
+    for (const auto& [subcode, sub_entry] : entry.subpages) {
+      Located located{
+          page_key, subcode,
+          page_identity_digits(page_key.first, page_key.second, subcode)};
+      if (sub_entry.subpage.times_attested > 0) {
+        attested.push_back(std::move(located));
+      } else {
+        unattested.push_back(std::move(located));
+      }
+    }
+  }
+  out.identities_seen =
+      static_cast<uint32_t>(attested.size() + unattested.size());
+  out.identities_unattested = static_cast<uint32_t>(unattested.size());
+
+  if (!vbi_identity_reconciliation_applies(attested.size())) {
+    // Nothing arrived as transmitted, so there is no baseline and the rule has
+    // nothing to say. Leaving the catalogue as recovered is the honest answer;
+    // emptying it would be the confident one.
+    out.withheld = out.identities_unattested > 0;
+    return out;
+  }
+
+  std::vector<VbiIdentityDigits> attested_digits;
+  attested_digits.reserve(attested.size());
+  for (const Located& located : attested) {
+    attested_digits.push_back(located.digits);
+  }
+
+  for (const Located& located : unattested) {
+    auto page_it = pages_.find(located.page_key);
+    if (page_it == pages_.end()) {
+      continue;
+    }
+    auto sub_it = page_it->second.subpages.find(located.subcode);
+    if (sub_it == page_it->second.subpages.end()) {
+      continue;
+    }
+    const TeletextCataloguedSubPage& misread = sub_it->second.subpage;
+
+    const auto neighbour =
+        vbi_single_digit_neighbour(located.digits, attested_digits);
+    bool folded = false;
+    if (neighbour.has_value()) {
+      const Located& target = attested[*neighbour];
+      auto target_page = pages_.find(target.page_key);
+      if (target_page != pages_.end()) {
+        auto target_sub = target_page->second.subpages.find(target.subcode);
+        if (target_sub != target_page->second.subpages.end()) {
+          // The appearances were appearances of the target: the carousel
+          // brought that page round and this recording misread its number on
+          // the way past. Its rows stay behind — the squasher combined them
+          // under the misread number, so there is nothing here to merge — but
+          // counting the appearances keeps times_seen a property of the service
+          // rather than of the damage.
+          TeletextCataloguedSubPage& kept = target_sub->second.subpage;
+          kept.times_seen += misread.times_seen;
+          kept.first_seen_frame =
+              std::min(kept.first_seen_frame, misread.first_seen_frame);
+          kept.last_seen_frame =
+              std::max(kept.last_seen_frame, misread.last_seen_frame);
+          folded = true;
+        }
+      }
+    }
+
+    if (folded) {
+      ++out.identities_folded;
+      out.appearances_folded += misread.times_seen;
+    } else {
+      ++out.identities_dropped;
+      out.appearances_dropped += misread.times_seen;
+    }
+
+    page_it->second.subpages.erase(sub_it);
+    --subpage_count_;
+    // A page number is only in the catalogue for the sub-pages it carried.
+    if (page_it->second.subpages.empty()) {
+      pages_.erase(page_it);
+    }
+  }
+  return out;
+}
+
 std::vector<TeletextCataloguedPage> TeletextPageCatalogue::pages() const {
   std::vector<TeletextCataloguedPage> out;
   out.reserve(pages_.size());
@@ -150,6 +279,7 @@ std::vector<TeletextCataloguedPage> TeletextPageCatalogue::pages() const {
     for (const auto& [subcode, sub_entry] : entry.subpages) {
       const auto& subpage = sub_entry.subpage;
       page.times_seen += subpage.times_seen;
+      page.times_attested += subpage.times_attested;
       page.first_seen_frame =
           first ? subpage.first_seen_frame
                 : std::min(page.first_seen_frame, subpage.first_seen_frame);
