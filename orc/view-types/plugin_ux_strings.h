@@ -56,6 +56,14 @@ inline constexpr const char* kNotePrefix = "Note: ";
 inline constexpr const char* kRegistryChangeNote =
     "Registry changes take effect on the next application launch.";
 
+/// Asked when a dialog that changed the registry is closed. Decode-Orc cannot
+/// relaunch itself, so the prompt promises only the half it can deliver: the
+/// quit. Starting the application again is the user's step.
+inline constexpr const char* kQuitToApplyPrompt =
+    "Plugin changes take effect the next time Decode-Orc starts.\n\n"
+    "Quit now? Decode-Orc cannot restart itself, so you will need to start it "
+    "again yourself.";
+
 // --- Load state -------------------------------------------------------------
 //
 // "Enabled" means "will load at the next launch". Every other label names the

@@ -114,6 +114,7 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
                                NabtsGroupOutcome outcome) {
   NabtsDataGroup out;
   out.channel = channel;
+  out.channel_attested = group.channel_attested;
   out.header = group.header;
   out.outcome = outcome;
   out.packets = group.packets;
@@ -196,6 +197,7 @@ void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
 
   OpenGroup group;
   group.header = header;
+  group.channel_attested = packet.address_attested;
   group.last_continuity = packet.continuity;
   group.packets = 1;
   // Reserved from the header's own claim rather than the standard's ceiling, so

@@ -99,6 +99,36 @@ TEST(NabtsPacket, Prefix_RejectsTheWholePacketOnAnUncorrectableByte) {
   }
 }
 
+// The channel a mis-corrected address digit invents is indistinguishable from
+// a real one downstream, so the packet has to carry whether its address was
+// received or inferred (issue #267).
+TEST(NabtsPacket, Prefix_AttestsAnAddressThatArrivedAsCodewords) {
+  const auto clean = make_packet(0x123, 9, /*synchronizing=*/true,
+                                 NabtsSuffixKind::kLongitudinal, {});
+  EXPECT_TRUE(decode(clean).address_attested);
+
+  // A corrected address byte decodes to the right channel and says so.
+  for (size_t byte = 0; byte < 3; ++byte) {
+    auto damaged = clean;
+    damaged[byte] = static_cast<uint8_t>(damaged[byte] ^ 0x01);
+    const auto decoded = decode(damaged);
+    ASSERT_TRUE(decoded.valid) << "byte " << byte;
+    EXPECT_EQ(decoded.channel, 0x123u) << "byte " << byte;
+    EXPECT_FALSE(decoded.address_attested) << "byte " << byte;
+  }
+}
+
+// Only the three address bytes bear on which channel this is: the continuity
+// index and the structure byte say what the packet is, not who it belongs to.
+TEST(NabtsPacket, Prefix_AttestationIgnoresTheContinuityAndStructureBytes) {
+  auto packet = make_packet(0x123, 9, /*synchronizing=*/true,
+                            NabtsSuffixKind::kLongitudinal, {});
+  packet[3] = static_cast<uint8_t>(packet[3] ^ 0x01);
+  const auto decoded = decode(packet);
+  ASSERT_TRUE(decoded.valid);
+  EXPECT_TRUE(decoded.address_attested);
+}
+
 TEST(NabtsPacket, Prefix_RefusesAShortBuffer) {
   const auto clean = make_packet(0x000, 0, /*synchronizing=*/false,
                                  NabtsSuffixKind::kNone, {});

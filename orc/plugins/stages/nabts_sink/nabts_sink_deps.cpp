@@ -208,6 +208,16 @@ std::string NabtsSinkDeps::build_report(
                   : std::string(", the grammar not asked");
   }
 
+  // The identities the recording named but the service never transmitted.
+  // Reported whenever the pass had anything to say, including when it stood
+  // aside: a reader comparing this run's record count with an earlier one's
+  // needs to know which of the two is looking at a pruned catalogue.
+  const std::string reconciliation =
+      recovery.identity_reconciliation.summary("record");
+  if (!reconciliation.empty()) {
+    report += "\n  Identities:    " + reconciliation;
+  }
+
   if (result.records_exported > 0) {
     report += fmt::format("\n  Records:       {} exported beside the stream",
                           result.records_exported);
@@ -471,8 +481,19 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     groups.flush();
     records.flush();
 
+    // Before the vote, and so before records(): the fold moves a misread
+    // identity's copies into the record it was a misreading of, and the vote
+    // across those copies is held inside records().
+    const VbiIdentityReconciliation reconciliation =
+        catalogue.reconcile_identities();
+    if (reconciliation.acted() || reconciliation.withheld) {
+      ORC_LOG_INFO("NabtsSinkDeps: Identity attestation: {}",
+                   reconciliation.summary("record"));
+    }
+
     partial.dataset.records = catalogue.records(options.grammar_assisted_vote);
     NabtsRecoverySummary& summary = partial.dataset.summary;
+    summary.identity_reconciliation = reconciliation;
     uint32_t records_voted = 0;
     for (const NabtsCataloguedRecord& record : partial.dataset.records) {
       summary.vote_positions_contested += record.vote_positions_contested;

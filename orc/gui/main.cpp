@@ -9,10 +9,13 @@
 
 #include <orc/stage/error_types.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/dist_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDir>
+#include <QFileInfo>
 #include <QIcon>
 #include <QMessageBox>
 #include <QPainter>
@@ -27,9 +30,12 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
 #include "crash_handler.h"
 #include "logging.h"
+#include "logging_controller.h"
+#include "logging_settings.h"
 #include "mainwindow.h"
 #include "project_presenter.h"  // For initCoreLogging
 #include "theme_controller.h"
@@ -39,21 +45,27 @@ namespace fs = std::filesystem;
 
 namespace orc {
 
-static std::shared_ptr<spdlog::logger> g_gui_logger;
-/// Initialize GUI logging system
-/// @param level Log level string
-/// @param pattern Log pattern
-/// @param log_file Optional log file path
-/// @param destination Which sinks to install (console, file, or both)
-void init_gui_logging(const std::string& level, const std::string& pattern,
-                      const std::string& log_file, LogDestination destination) {
-  // Reset existing logger
-  g_gui_logger.reset();
+namespace {
 
+std::shared_ptr<spdlog::logger> g_gui_logger;
+
+// The GUI logger's only sink: a mux whose children are swapped under its own
+// lock. Keeping one stable sink object in the logger is what lets
+// reconfigure_gui_logging() change destinations at runtime without replacing
+// the logger every ORC_LOG_* call site resolves through.
+std::shared_ptr<spdlog::sinks::dist_sink_mt> g_gui_dist_sink;
+
+// Build the console/file sinks a destination asks for. A file sink that cannot
+// be opened is reported through `error_message` and omitted; the console is
+// kept so records are never silently discarded.
+std::vector<spdlog::sink_ptr> make_gui_sinks(const std::string& pattern,
+                                             const std::string& log_file,
+                                             LogDestination destination,
+                                             bool truncate_log_file,
+                                             std::string* error_message) {
   const LogSinkSelection selection =
       resolve_log_sinks(destination, !log_file.empty());
 
-  // Create sinks
   std::vector<spdlog::sink_ptr> sinks;
 
   // Console sink (with colors)
@@ -66,12 +78,15 @@ void init_gui_logging(const std::string& level, const std::string& pattern,
   // File sink
   if (selection.file) {
     try {
-      auto file_sink =
-          std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file, true);
+      auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+          log_file, truncate_log_file);
       file_sink->set_pattern(pattern);
       sinks.push_back(file_sink);
     } catch (const spdlog::spdlog_ex& ex) {
       // If file logging fails, just continue with console only
+      if (error_message != nullptr) {
+        *error_message = ex.what();
+      }
       std::cerr << "Failed to create log file: " << ex.what() << std::endl;
     }
   }
@@ -84,34 +99,101 @@ void init_gui_logging(const std::string& level, const std::string& pattern,
     sinks.push_back(console_sink);
   }
 
-  // Create logger
-  g_gui_logger =
-      std::make_shared<spdlog::logger>("gui", sinks.begin(), sinks.end());
-  g_gui_logger->set_pattern(pattern);
+  return sinks;
+}
 
-  // Set log level
+// Translate a level name onto the spdlog enum. Anything unrecognised (and
+// "info" itself) resolves to info, matching the command line's documented
+// default.
+spdlog::level::level_enum parse_gui_level(const std::string& level) {
   if (level == "trace") {
-    g_gui_logger->set_level(spdlog::level::trace);
-  } else if (level == "debug") {
-    g_gui_logger->set_level(spdlog::level::debug);
-  } else if (level == "warn" || level == "warning") {
-    g_gui_logger->set_level(spdlog::level::warn);
-  } else if (level == "error") {
-    g_gui_logger->set_level(spdlog::level::err);
-  } else if (level == "critical") {
-    g_gui_logger->set_level(spdlog::level::critical);
-  } else if (level == "off") {
-    g_gui_logger->set_level(spdlog::level::off);
-  } else {
-    // Default to info (covers "info" and any unrecognised level)
-    g_gui_logger->set_level(spdlog::level::info);
+    return spdlog::level::trace;
   }
+  if (level == "debug") {
+    return spdlog::level::debug;
+  }
+  if (level == "warn" || level == "warning") {
+    return spdlog::level::warn;
+  }
+  if (level == "error") {
+    return spdlog::level::err;
+  }
+  if (level == "critical") {
+    return spdlog::level::critical;
+  }
+  if (level == "off") {
+    return spdlog::level::off;
+  }
+  return spdlog::level::info;
+}
 
-  // Flush on warnings and above
-  g_gui_logger->flush_on(spdlog::level::warn);
+// While a log file is open every record is flushed as it is written. The GUI
+// and core loggers hold separate handles on that one file, so a buffered
+// logger's records would otherwise reach the file long after the other's and
+// leave the log out of chronological order - exactly what makes it unreadable
+// in a bug report. Console-only logging keeps the cheaper warn threshold.
+spdlog::level::level_enum flush_level_for(LogDestination destination,
+                                          const std::string& log_file) {
+  const LogSinkSelection selection =
+      resolve_log_sinks(destination, !log_file.empty());
+  return selection.file ? spdlog::level::trace : spdlog::level::warn;
+}
+
+}  // namespace
+
+/// Initialize GUI logging system
+/// @param level Log level string
+/// @param pattern Log pattern
+/// @param log_file Optional log file path
+/// @param destination Which sinks to install (console, file, or both)
+void init_gui_logging(const std::string& level, const std::string& pattern,
+                      const std::string& log_file, LogDestination destination) {
+  // Reset existing logger
+  if (g_gui_logger) {
+    spdlog::drop(g_gui_logger->name());
+  }
+  g_gui_logger.reset();
+
+  // Startup always replaces the log file, so a log collected for a bug report
+  // only ever holds the run it was collected from.
+  g_gui_dist_sink =
+      std::make_shared<spdlog::sinks::dist_sink_mt>(make_gui_sinks(
+          pattern, log_file, destination, /*truncate_log_file=*/true, nullptr));
+
+  // Create logger
+  g_gui_logger = std::make_shared<spdlog::logger>("gui", g_gui_dist_sink);
+  g_gui_logger->set_pattern(pattern);
+  g_gui_logger->set_level(parse_gui_level(level));
+  g_gui_logger->flush_on(flush_level_for(destination, log_file));
 
   // Register with spdlog
   spdlog::register_logger(g_gui_logger);
+}
+
+bool reconfigure_gui_logging(const std::string& level,
+                             const std::string& pattern,
+                             const std::string& log_file,
+                             LogDestination destination, bool truncate_log_file,
+                             std::string* error_message) {
+  if (!g_gui_logger || !g_gui_dist_sink) {
+    init_gui_logging(level, pattern, log_file, destination);
+    return true;
+  }
+
+  std::string sink_error;
+  g_gui_dist_sink->set_sinks(make_gui_sinks(pattern, log_file, destination,
+                                            truncate_log_file, &sink_error));
+  g_gui_logger->set_pattern(pattern);
+  g_gui_logger->set_level(parse_gui_level(level));
+  g_gui_logger->flush_on(flush_level_for(destination, log_file));
+
+  if (!sink_error.empty()) {
+    if (error_message != nullptr) {
+      *error_message = sink_error;
+    }
+    return false;
+  }
+  return true;
 }
 
 std::shared_ptr<spdlog::logger> get_gui_logger() {
@@ -246,17 +328,53 @@ int main(int argc, char* argv[]) {
                 << "' (expected console, file or both)" << std::endl;
       return 1;
     }
-    const orc::LogDestination logDestination = *parsedLogOut;
+    orc::LogDestination logDestination = *parsedLogOut;
+
+    // The logging switches, when given, configure this run; otherwise the
+    // configuration saved in Tools > Logging applies. Startup never writes the
+    // saved settings back, so a one-off --log-file run leaves the user's
+    // choice alone.
+    const bool loggingSetFromCommandLine = parser.isSet(logLevelOption) ||
+                                           parser.isSet(sharedLogFileOption) ||
+                                           parser.isSet(logOutOption);
+    orc::LoggingSettings loggingSettings;
+    if (loggingSetFromCommandLine) {
+      loggingSettings.level = logLevel;
+      loggingSettings.file_path = sharedLogFile;
+      loggingSettings.file_logging_enabled =
+          !sharedLogFile.isEmpty() &&
+          logDestination != orc::LogDestination::kConsole;
+    } else {
+      loggingSettings = orc::LoggingController::loadPersistedSettings();
+      logLevel = loggingSettings.level;
+      sharedLogFile = orc::LoggingSettingsModel::resolveLogFile(
+          loggingSettings, orc::LoggingController::defaultLogFilePath());
+      logDestination =
+          orc::LoggingSettingsModel::destinationFor(loggingSettings);
+      if (!sharedLogFile.isEmpty()) {
+        // The saved path may name a folder that no longer exists.
+        const QString logDirectory = QFileInfo(sharedLogFile).absolutePath();
+        if (!logDirectory.isEmpty()) {
+          QDir().mkpath(logDirectory);
+        }
+      }
+    }
+
+    const std::string logPattern =
+        orc::LoggingController::logPattern().toStdString();
 
     // Initialize GUI logging
-    orc::init_gui_logging(logLevel.toStdString(),
-                          "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
+    orc::init_gui_logging(logLevel.toStdString(), logPattern,
                           sharedLogFile.toStdString(), logDestination);
 
     // Initialize core logging (same file) through presenters layer
-    orc::presenters::initCoreLogging(
-        logLevel.toStdString(), "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
-        sharedLogFile.toStdString(), logDestination);
+    orc::presenters::initCoreLogging(logLevel.toStdString(), logPattern,
+                                     sharedLogFile.toStdString(),
+                                     logDestination);
+
+    // Owns the live logging configuration for the run so Tools > Logging can
+    // change it without a restart.
+    orc::LoggingController loggingController(loggingSettings);
 
     // Only warn when the destination was asked for explicitly: the default
     // ("both" with no log file) is plain console logging, which is not

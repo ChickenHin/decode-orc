@@ -188,6 +188,24 @@ The teletext page carrying the subtitles: a magazine digit (1–8) followed by t
 ### subtitle_format (string)
 Subtitle output format. Currently only `SRT` (SubRip) is offered — the least lossy portable target for teletext subtitle text; colour and positioning are dropped at this level. Default: `SRT`.
 
+## Page numbers the recording named but the service never sent
+
+A damaged recording does not only lose pages — it invents them, and the invention is convincing.
+
+The magazine and packet number (ETSI EN 300 706 §7.1.2), the page number (§9.3.1.1) and the sub-code (§9.3.1.2) each arrive in their own Hamming 8/4 byte. That code has minimum distance 4 (§8.2), so it corrects one bit error and detects two, but a burst of **three** lands inside a neighbouring codeword's correction sphere and is resolved there silently, with nothing to say a guess was made. On a band-limited recording that is the ordinary error rather than the exotic one: the MLSE detector's characteristic failure is a run of alternating bit inversions, and the codeword for digit 0 is itself an alternating pattern, so digit 0 is carried onto digit 7 over and over.
+
+The damage that does is not to the page. The page still decodes; it is simply catalogued at a number the service never transmitted, where it sits beside the real one holding the same content.
+
+So the run counts, per sub-page, how often its number arrived **as transmitted** rather than corrected into shape, and prunes the catalogue on it:
+
+* a page no appearance ever named as transmitted is not a page. Where exactly one attested page number differs from it in a single hexadecimal digit, it is a misreading of that one, and its appearances are added to it. Its rows are not: rows are combined by the squasher under the misread number long before the catalogue sees them, so there is nothing left to merge.
+* where several attested numbers are a single digit away, the misreading has two explanations and neither is evidence. A magazine carrying both 1/03 and 1/07 is ordinary. The entry is removed rather than attributed.
+* where none is, it was a false lock on noise. Removed.
+
+The run's report says how many page numbers were folded and how many dropped, so a shorter list than an earlier run gave is explained rather than mysterious.
+
+On an undamaged source every byte arrives as transmitted, the pass finds nothing, and nothing changes. The one case it declines outright is a recording where *no* page number was ever attested: there is then no baseline to judge the rest against, and the catalogue is left exactly as recovered.
+
 ## Notes
 
 * PAL, NTSC and PAL-M sources are accepted; any other video system is reported as an error.

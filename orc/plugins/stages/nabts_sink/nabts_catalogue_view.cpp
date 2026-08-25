@@ -570,6 +570,25 @@ std::string run_headline(const NabtsRecoverySummary& summary,
         "; the list stops at the catalogue limit, so the recording carried "
         "more than is shown";
   }
+
+  // Records the list no longer holds. A reader who saw a longer list before —
+  // or who is comparing this against a transfer of the same tape — is owed the
+  // reason it is shorter, and "the address was never received as transmitted"
+  // is a reason rather than an apology.
+  const VbiIdentityReconciliation& identities = summary.identity_reconciliation;
+  const uint64_t misread =
+      identities.identities_folded + identities.identities_dropped;
+  if (misread == 1) {
+    out +=
+        "; one address was never received as transmitted and has been read as "
+        "a misreading of the records above rather than listed as a record of "
+        "its own";
+  } else if (misread > 1) {
+    out += "; " + std::to_string(misread) +
+           " addresses were never received as transmitted and have been read "
+           "as misreadings of the records above rather than listed as records "
+           "of their own";
+  }
   return out;
 }
 

@@ -101,6 +101,42 @@ TEST(OrcGraphModelTest, ConnectionRoundTrip_DelegatesToPresenter) {
   EXPECT_FALSE(model.connectionExists(cid));
 }
 
+// A stage can judge its configuration by the nodes wired to it (Source Join
+// orders its inputs by node ID), so a connection change has to drop the cached
+// status of both ends — otherwise the dot keeps the colour it had before the
+// wiring changed until something else resets the model.
+TEST(OrcGraphModelTest, ConnectionChange_RefreshesCachedConfigurationStatus) {
+  NiceMock<orc::presenters::test::MockProjectPresenter> presenter;
+
+  EXPECT_CALL(presenter, getNodes())
+      .Times(1)
+      .WillOnce(Return(std::vector<orc::presenters::NodeInfo>{
+          makeNodeInfo(41, "PALYCSource", "Src", 0.0, 0.0),
+          makeNodeInfo(42, "source_join", "Join", 50.0, 10.0)}));
+  EXPECT_CALL(presenter, getEdges())
+      .Times(1)
+      .WillOnce(Return(std::vector<orc::presenters::EdgeInfo>{}));
+
+  OrcGraphModel model(presenter);
+
+  // Unwired the join has no order to satisfy; wired it does.
+  EXPECT_CALL(presenter, getNodeConfigurationStatus(orc::NodeID(42)))
+      .WillOnce(Return(orc::ConfigurationStatus::Green))
+      .WillOnce(Return(orc::ConfigurationStatus::Yellow))
+      .WillOnce(Return(orc::ConfigurationStatus::Green));
+
+  EXPECT_EQ(model.getConfigurationStatus(1), orc::ConfigurationStatus::Green);
+  // Cached: a second read must not reach the presenter again.
+  EXPECT_EQ(model.getConfigurationStatus(1), orc::ConfigurationStatus::Green);
+
+  const QtNodes::ConnectionId cid{0, 0, 1, 0};
+  model.addConnection(cid);
+  EXPECT_EQ(model.getConfigurationStatus(1), orc::ConfigurationStatus::Yellow);
+
+  EXPECT_TRUE(model.deleteConnection(cid));
+  EXPECT_EQ(model.getConfigurationStatus(1), orc::ConfigurationStatus::Green);
+}
+
 TEST(OrcGraphModelTest,
      ConnectionPossible_RejectsInvalidAndDuplicateConnections) {
   NiceMock<orc::presenters::test::MockProjectPresenter> presenter;

@@ -306,6 +306,13 @@ history:
       `orc/stage/cvbs_signal_constants.h` naming the two stages allowed to use
       the ld-decode ×64 scale constants was updated when `ld_sink` was renamed
       `tbc_sink`. Comment only; no constant value or layout changed.
+      Also ABI-neutral while abi 15 is current:
+      `orc/stage/params/parameter_types.h` gains the
+      `orc::kInputNodeIdsParameter` name constant, which documents the reserved
+      `input_node_ids` parameter the host fills in with the source node IDs of a
+      node's incoming connections. A namespace-scope constant only; no type
+      gains, loses or moves a member, and a plugin that ignores the parameter is
+      unaffected.
     summary: >-
       `CatalogueDisplayList` gains `display_aspect_height`, `nominal_width`,
       `nominal_height` and `pixel_aligned`. A display list is geometry rather

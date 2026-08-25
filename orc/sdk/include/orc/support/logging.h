@@ -34,6 +34,32 @@ void init_logging(
     const std::string& log_file = "",
     LogDestination destination = LogDestination::kBoth);
 
+/// Reconfigure the already-initialised logger's sinks and level at runtime.
+///
+/// Unlike init_logging(), the logger object itself is preserved: only the set
+/// of sinks behind it is swapped. Modules that cached the shared_ptr returned
+/// by get_logger() (the host, and every dlopen'd plugin, share one "core"
+/// logger object) therefore follow the change without being re-initialised.
+///
+/// Thread-safe: sinks are swapped under the same mutex that serialises writes,
+/// so records already in flight are never lost or torn.
+///
+/// @param level Log level (trace, debug, info, warn, error, critical, off)
+/// @param pattern Log pattern applied to every installed sink
+/// @param log_file File to write to; ignored when empty
+/// @param destination Which sinks to install (console, file, or both)
+/// @param truncate_log_file True to replace the log file's contents, false to
+///        append to it. init_logging() always replaces, so each run of the
+///        application starts a fresh log; pass false here to keep adding to a
+///        file this run already opened
+/// @param error_message Optional; set to the reason a requested file sink
+///        could not be opened (the console sink is kept in that case)
+/// @return True when the requested destination was installed in full
+bool reconfigure_logging(const std::string& level, const std::string& pattern,
+                         const std::string& log_file,
+                         LogDestination destination, bool truncate_log_file,
+                         std::string* error_message = nullptr);
+
 /// Get the default logger
 std::shared_ptr<spdlog::logger> get_logger();
 

@@ -262,6 +262,16 @@ std::string TeletextSinkDeps::build_report(
         result.dataset.summary.lost_packets_estimate);
   }
 
+  // The page numbers the recording named but the service never transmitted.
+  // Reported whenever the pass had anything to say, including when it stood
+  // aside: a reader comparing this run's page count with an earlier one's needs
+  // to know which of the two is looking at a pruned catalogue.
+  const std::string reconciliation =
+      result.dataset.summary.identity_reconciliation.summary("page");
+  if (!reconciliation.empty()) {
+    report += "\n  Identities:    " + reconciliation;
+  }
+
   // What the pass learned about the recording, and what that saved. Both are
   // reported whether or not they were enabled, because the interesting case is
   // the one where the reader is wondering why a run took as long as it did.
@@ -514,6 +524,16 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // Data levels come from the source inside the frame slicer; the geometry
   // here is only what the loop needs to report progress.
   const auto finish_dataset = [&](TeletextSinkResult& partial) {
+    // Before pages(): a page number the recording never once received as
+    // transmitted is a mis-corrected copy of one it did, not a page of its own.
+    const VbiIdentityReconciliation reconciliation =
+        catalogue.reconcile_identities();
+    if (reconciliation.acted() || reconciliation.withheld) {
+      ORC_LOG_INFO("TeletextSinkDeps: Identity attestation: {}",
+                   reconciliation.summary("page"));
+    }
+    partial.dataset.summary.identity_reconciliation = reconciliation;
+
     partial.dataset.pages = catalogue.pages();
     // Per-page loss, which only the row copies can give: see
     // teletext_subpage_lost_packets(). Without the squasher there are no

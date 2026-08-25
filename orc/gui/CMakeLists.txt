@@ -220,6 +220,14 @@ set(ORC_GUI_LIB_SOURCES
     stage_help_dialog.cpp
     stage_help_dialog.h
 
+    # Diagnostic logging configuration (Tools > Logging)
+    logging_settings.cpp
+    logging_settings.h
+    logging_controller.cpp
+    logging_controller.h
+    logging_settings_dialog.cpp
+    logging_settings_dialog.h
+
     # Resources
     orc_gui_resources.qrc
 )

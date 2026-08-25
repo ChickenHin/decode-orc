@@ -328,6 +328,22 @@ bool hamming84_uncorrected(uint8_t byte, int decoded) {
   return teletext_hamming84_encode(static_cast<uint8_t>(decoded)) == byte;
 }
 
+// Whether the header packet's addressing arrived as transmitted: the two MRAG
+// bytes (§7.1.2) and the two page-number bytes (§9.3.1.1), which between them
+// are the whole of a page's identity.
+//
+// A mis-corrected MRAG or page number does not damage a page — it invents one,
+// at a number the service never transmitted, holding a copy of whatever page
+// was really being sent. The catalogue cannot tell that from a real page by
+// looking at it, so the evidence has to travel with the snapshot.
+bool header_identity_attested(
+    const std::array<uint8_t, kTeletextPacketBytes>& packet) {
+  return teletext_hamming84_clean(packet[0]) &&
+         teletext_hamming84_clean(packet[1]) &&
+         teletext_hamming84_clean(packet[2]) &&
+         teletext_hamming84_clean(packet[3]);
+}
+
 // Whether a packet addressed to the last display row may be believed.
 //
 // Row 24 is the one display address a corrected MRAG must not be trusted for.
@@ -856,6 +872,7 @@ void TeletextPageDecoder::handle_header_packet(
   // appearance of the page look like a series of new ones.
   if (!same_page_continues) {
     state.header_field_index = field_index;
+    state.identity_attested = header_identity_attested(packet);
   }
   state.last_field_index = field_index;
 
@@ -1092,6 +1109,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   snapshot.second_g0_set = state.second_g0_set;
   snapshot.header_field_index = state.header_field_index;
   snapshot.last_field_index = state.last_field_index;
+  snapshot.identity_attested = state.identity_attested;
   snapshot.columns = columns_;
   // A short packet is the 525-line service, whose graphics use the codes a
   // 625-line one would blast alphanumerics through (see the field's comment).

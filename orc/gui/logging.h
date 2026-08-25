@@ -33,6 +33,29 @@ void init_gui_logging(
     const std::string& log_file = "",
     LogDestination destination = LogDestination::kBoth);
 
+/// Reconfigure the GUI logger's sinks and level while the application runs.
+///
+/// The logger object is preserved and only its sinks are swapped, so the
+/// change is picked up by everything already logging through it. Sinks are
+/// swapped under the mutex that serialises writes, making this safe to call
+/// while worker threads log.
+///
+/// @param level Log level (trace, debug, info, warn, error, critical, off)
+/// @param pattern Log pattern applied to every installed sink
+/// @param log_file File to write to; ignored when empty
+/// @param destination Which sinks to install (console, file, or both)
+/// @param truncate_log_file True to replace the log file's contents, false to
+///        append to a file this run already opened. init_gui_logging() always
+///        replaces, so each run starts a fresh log
+/// @param error_message Optional; receives the reason a requested log file
+///        could not be opened (the console sink is kept in that case)
+/// @return True when the requested destination was installed in full
+bool reconfigure_gui_logging(const std::string& level,
+                             const std::string& pattern,
+                             const std::string& log_file,
+                             LogDestination destination, bool truncate_log_file,
+                             std::string* error_message = nullptr);
+
 }  // namespace orc
 
 // GUI-specific logging macros that use the GUI logger

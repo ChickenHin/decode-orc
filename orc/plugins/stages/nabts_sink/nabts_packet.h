@@ -114,6 +114,18 @@ struct NabtsPacket {
   /// Packet address P, which §3.2.3 makes identical to the data channel number.
   uint16_t channel = 0;
 
+  /// All three packet-address bytes arrived as Hamming 8/4 codewords rather
+  /// than being corrected into them (see teletext_hamming84_clean()).
+  ///
+  /// §8.2's minimum distance of 4 means a three-bit burst resolves silently to
+  /// a neighbouring codeword, and on a band-limited recording that is the
+  /// ordinary error rather than the exotic one. A mis-corrected address does
+  /// not damage the packet: it files it under a data channel the service never
+  /// used, where it opens a group of its own and becomes a record no receiver
+  /// ever saw. Nothing downstream can tell that from a real channel by looking
+  /// at it, so the evidence travels with the packet.
+  bool address_attested = false;
+
   /// Continuity index (§3.2.4), 0-15. Incremented per packet of a channel
   /// except on a synchronizing packet, where it need not follow.
   uint8_t continuity = 0;

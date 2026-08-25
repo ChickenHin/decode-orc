@@ -1139,6 +1139,15 @@ int teletext_hamming84_decode(uint8_t byte) {
   return kTable[byte];
 }
 
+bool teletext_hamming84_clean(uint8_t byte) {
+  // A codeword decodes to itself, so re-encoding what came out is the whole
+  // test. An uncorrectable byte re-encodes to something else and reports false,
+  // which is the right answer: nothing was received cleanly there either.
+  const int value = teletext_hamming84_decode(byte);
+  return value >= 0 &&
+         teletext_hamming84_encode(static_cast<uint8_t>(value)) == byte;
+}
+
 namespace {
 
 // Transmission-order bit positions (1-based, as ETSI EN 300 706 §8.3 numbers

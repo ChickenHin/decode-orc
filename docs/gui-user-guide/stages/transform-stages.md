@@ -66,6 +66,60 @@ Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`
 
 ---
 
+## Source Join
+
+| | |
+|-|-|
+| **Stage id** | `source_join` |
+| **Stage name** | Source Join |
+| **Connections** | 1–16 inputs → 1 output (fan-out supported) |
+| **Purpose** | Join several sources end to end into a single output sequence, in a specified order |
+
+**Use this stage when:**
+
+* The material you want as one output is spread across several decodes of the same physical medium — most commonly a tape recorded at more than one speed (SP/LP/EP), where each region has to be decoded separately so the correct filter profile is applied.
+* A tape carries recordings made on different machines that need different decode parameters.
+* You want a single export step instead of exporting each decode and cutting the results together in a video editor.
+
+**What it does**
+
+Source Join concatenates the connected inputs into one continuous sequence and renumbers the output frames from zero, so the result behaves like a single long capture. No sample data is copied — the stage builds a lookup table from output frame to (input, input frame) — so joining is cheap however long the inputs are.
+
+The order is given as a list of **source node IDs**: the numbers the graph editor draws in the corner of each node. Input order cannot be read off the connections themselves (a multi-input stage has one input port, and the artifacts arrive in whatever order the connections were made), so the node ID is the handle you have on each source. Decode-Orc tells the stage which nodes are connected to it, which is also how the stage notices when the graph has changed under a stored order.
+
+Cutting each source to the frames it contributes is done upstream with a **Frame Map** stage per source; Source Join then only has to put the pieces in order.
+
+Everything a frame carries travels with it: dropout hints (renumbered to the output frame), audio channel pairs, EFM and AC3 RF data all come from the input that supplied the frame. The joined output takes its channel-pair layout from the first joined input; an input carrying fewer channel pairs contributes silence for the ones it lacks. For NTSC and PAL-M the audio window of an output frame is trimmed or silence-padded by at most one stereo pair where the join moves a frame to a different position in the five-frame audio sequence (SMPTE 272M-1994 §14.3); PAL is constant-cadence and always sample-exact.
+
+All joined inputs must share one signal geometry — same video system, nominal frame width and frame height — and must all be composite or all be Y/C. The stage fails with an explanatory error rather than producing an output whose geometry changes part way through. With a single input it is a passthrough.
+
+**Example** — a tape whose first half is SP and second half is LP:
+
+* Node 12: SP decode → Frame Map (`1-4500`)
+* Node 14: LP decode → Frame Map (`4501-9000`)
+* Source Join with `input_order` = `12,14` → one 9000-frame output to export
+
+**Parameters**
+
+* `input_order` (string)
+    - Comma-separated source node IDs giving the join order, e.g. `16,2,4`. These are the IDs of the stages connected to this stage's input; the parameter dialog lists them, with their names, above the field.
+    - Each ID may appear only once. An ID that is not connected is ignored; a connected source that is not named contributes no frames. Both are logged, and the node's status dot turns yellow.
+    - If the list names no connected node at all, the stage fails rather than guessing.
+    - Default: `""` (empty) meaning the sources are joined in the order their connections were made.
+
+Source Join has a second parameter, `input_node_ids`, which is filled in by Decode-Orc from the node's incoming connections. It is host-owned: it does not appear in the parameter dialog or in the project file, and there is nothing to set.
+
+**Status indicator**
+
+Yellow means either that `input_order` is empty (the sources will be joined in connection order) or that the order no longer names exactly the sources connected to the stage — which is what you will see after adding, removing or rewiring an input. Re-open the parameters and update the order to clear it.
+
+**Stage tools**
+
+* This stage has no interactive tools.
+* Supports standard GUI previews (via `PreviewableStage`).
+
+---
+
 ## Source Align
 
 | | |

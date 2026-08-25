@@ -113,6 +113,7 @@ class MainWindow : public QMainWindow {
   void onSaveProject();
   void onSaveProjectAs();
   void onEditProject();
+  void onReloadAllSources();
   void onPreviewIndexChanged(int index);
   void onNavigatePreview(int delta);
   void onPreviewModeChanged(int index);
@@ -216,6 +217,10 @@ class MainWindow : public QMainWindow {
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
   void onCoordinatorError(uint64_t request_id, QString message);
   void onAbout();
+
+  // Tools > Logging...: edits the diagnostic logging configuration and applies
+  // it to the running application through LoggingController.
+  void onConfigureLogging();
 
  signals:
 
@@ -417,7 +422,9 @@ class MainWindow : public QMainWindow {
   QAction* save_project_action_;
   QAction* save_project_as_action_;
   QAction* edit_project_action_;
+  QAction* reload_sources_action_ = nullptr;  // shared by File menu + toolbar
   QAction* plugin_manager_action_ = nullptr;
+  QAction* logging_action_ = nullptr;
   QAction* show_preview_action_;
   QAction* auto_show_preview_action_;
 

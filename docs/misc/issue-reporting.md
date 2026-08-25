@@ -138,9 +138,12 @@ For bugs that don't cause crashes, please provide:
 2. **Expected behavior** vs actual behavior
 3. **Application version** and platform
 4. **Screenshots or videos** if helpful
-5. **Log files** if available (use the `--log-file` option; add
-   `--log-out file` to keep the console clear and capture everything in the
-   file)
+5. **Log files** if available. In Orc-GUI, open **Tools → Logging…**, tick
+   **Write log messages to a file**, set **Detail** to `debug`, click **OK**,
+   then reproduce the problem and attach the file — **Open Log Folder** in the
+   same dialog takes you to it. From the command line, use the `--log-file`
+   option; add `--log-out file` to keep the console clear and capture
+   everything in the file.
 
 ## Feature Requests
 

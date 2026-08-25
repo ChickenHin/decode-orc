@@ -22,6 +22,7 @@
 #include "naplps_interpreter.h"
 #include "naplps_lint.h"
 #include "vbi-services/vbi_analysis_results.h"
+#include "vbi-services/vbi_identity_attestation.h"
 
 namespace orc {
 
@@ -324,6 +325,44 @@ class NabtsRecordCatalogue {
    */
   void merge(const NabtsMessage& message, uint64_t frame_id);
 
+  /**
+   * @brief Remove the record identities the recording never actually named
+   *
+   * CEA-516 §5.2.1 identifies a record by its data channel, its record address
+   * and its version, and every digit of all three is carried by its own Hamming
+   * 8/4 byte. ETSI EN 300 706 §8.2 gives that code minimum distance 4, so a
+   * burst of three bit errors — the ordinary error on a band-limited recording,
+   * not the exotic one — resolves silently to a neighbouring codeword. The
+   * damage that does is not to the record: it is a *copy* of the record, filed
+   * under a channel, address or version the service never transmitted, which
+   * this catalogue then holds beside the original with no way to tell them
+   * apart.
+   *
+   * So the catalogue counts, per entry, how often the identity arrived as
+   * transmitted (NabtsCataloguedRecord::times_attested), and this pass acts on
+   * it. An entry no arrival ever attested is not a record:
+   *
+   *  - where exactly one attested identity differs from it in a single
+   *    hexadecimal digit, it is a misreading of that one. Its copies join that
+   *    record's vote — which is the point of folding rather than discarding:
+   *    the bytes were received and they are that record's — and its appearances
+   *    and frame extent are added to it.
+   *  - otherwise it is removed. Several attested neighbours make the misreading
+   *    ambiguous, and none at all is a false lock on noise; neither can be
+   *    attributed to anything.
+   *
+   * Withheld entirely on a catalogue where nothing was ever attested, which
+   * offers no baseline to judge the rest against (see
+   * vbi_identity_reconciliation_applies()). On an undamaged source every byte
+   * arrives as transmitted, so the pass finds nothing and costs one walk of the
+   * catalogue.
+   *
+   * Call once, after the last merge() and before records(): the fold has to
+   * happen while the copies are still held, since records() is where the vote
+   * across them is taken.
+   */
+  VbiIdentityReconciliation reconcile_identities();
+
   /// Records catalogued so far — what the cap bounds.
   std::size_t size() const { return records_.size(); }
 
@@ -375,6 +414,11 @@ class NabtsRecordCatalogue {
 
   /// Retain |message|'s data for the vote, if it can take part in one.
   void add_copy(Entry& entry, const NabtsMessage& message) const;
+
+  /// Move what |misread| knows into |target|, the record it was a misreading
+  /// of: its appearances, its frame extent and its copies. |misread| is left
+  /// gutted, and its caller erases it.
+  void fold_into(Entry& target, Entry& misread) const;
 
   void enforce_bounds();
 

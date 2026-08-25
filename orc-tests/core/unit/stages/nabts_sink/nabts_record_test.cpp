@@ -216,6 +216,65 @@ TEST(NabtsRecordHeader, WalksASecondPointerByteAndCountsItsReservedFlags) {
   EXPECT_EQ(header.header_bytes, orc::kNabtsRecordHeaderMinBytes + 6u);
 }
 
+// The address a mis-corrected digit invents is indistinguishable from a real
+// one further down, so the header has to carry whether §5.2.1's identity was
+// received or inferred (issue #267).
+TEST(NabtsRecordHeader, AttestsAnIdentityThatArrivedAsCodewords) {
+  const auto clean = minimal_header(0, 0x123) + record_data({0x41});
+  ASSERT_TRUE(decode(clean).valid);
+  EXPECT_TRUE(decode(clean).identity_attested);
+
+  // RT, RD and the three address bytes all bear on which record this is: RD
+  // decides how long the address is, so a corrected one is as much a doubt
+  // about the identity as a corrected digit.
+  for (size_t byte = 0; byte < orc::kNabtsRecordHeaderMinBytes; ++byte) {
+    auto damaged = clean;
+    damaged[byte] = static_cast<uint8_t>(damaged[byte] ^ 0x01);
+    const auto header = decode(damaged);
+    ASSERT_TRUE(header.valid) << "byte " << byte;
+    EXPECT_FALSE(header.identity_attested) << "byte " << byte;
+  }
+}
+
+// The version is part of §5.2.1's identity, so the classification sequence
+// carrying it is inside what has to have arrived cleanly.
+TEST(NabtsRecordHeader, AttestationCoversTheClassificationSequence) {
+  const auto clean =
+      std::vector<uint8_t>{
+          hamming(0), hamming(record_designator(false, false, true, false))} +
+      make_short_address(0x001) +
+      make_classification(0, 0, 0, 0, 0, /*y16=*/6) + record_data({0x41});
+  ASSERT_TRUE(decode(clean).valid);
+  EXPECT_TRUE(decode(clean).identity_attested);
+
+  // The Y16 byte, which is the version.
+  auto damaged = clean;
+  const size_t y16 = orc::kNabtsRecordHeaderMinBytes + 6;
+  damaged[y16] = static_cast<uint8_t>(damaged[y16] ^ 0x01);
+  const auto header = decode(damaged);
+  ASSERT_TRUE(header.valid);
+  EXPECT_EQ(header.classification.version, 6u);
+  EXPECT_FALSE(header.identity_attested);
+}
+
+// A header extension says where the record's data starts, not which record it
+// is, so a corrected byte in one is not a doubt about the identity.
+TEST(NabtsRecordHeader, AttestationIgnoresTheHeaderExtension) {
+  auto packet =
+      std::vector<uint8_t>{
+          hamming(0), hamming(record_designator(false, false, false, true))} +
+      make_short_address(0x001) +
+      make_header_extension(/*meaning=*/2, {0x1, 0x2, 0x3}, /*more=*/false) +
+      record_data({0x41});
+  // The extension introducer is the first byte past the fixed five.
+  packet[orc::kNabtsRecordHeaderMinBytes] =
+      static_cast<uint8_t>(packet[orc::kNabtsRecordHeaderMinBytes] ^ 0x01);
+
+  const auto header = decode(packet);
+  ASSERT_TRUE(header.valid);
+  EXPECT_TRUE(header.identity_attested);
+}
+
 // §5.2.8: each field is an introducer, a size, and that many data bytes; the
 // introducer's b8 says whether another field follows.
 TEST(NabtsRecordHeader, ReadsChainedHeaderExtensionFields) {

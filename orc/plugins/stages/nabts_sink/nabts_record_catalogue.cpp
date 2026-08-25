@@ -504,6 +504,9 @@ void NabtsRecordCatalogue::merge(const NabtsMessage& message,
   if (message.complete && message.intact) {
     ++entry.record.times_intact;
   }
+  if (message.identity_attested) {
+    ++entry.record.times_attested;
+  }
   entry.last_touched = touch_counter_;
 
   enforce_bounds();
@@ -520,6 +523,111 @@ void NabtsRecordCatalogue::enforce_bounds() {
     }
     records_.erase(oldest);
     truncated_ = true;
+  }
+}
+
+namespace {
+
+// §5.2.1's identity written out digit by digit, in transmission order: the
+// three packet-address digits (§3.2.3), the nine record-address digits of the
+// long form §5.2.5 makes every address equivalent to, and the version (§5.2.7.2
+// Y16). Thirteen digits, each of which arrived in its own Hamming 8/4 byte and
+// so can be moved on its own.
+VbiIdentityDigits identity_digits(const NabtsCataloguedRecord& record) {
+  VbiIdentityDigits digits;
+  digits.reserve(13);
+  for (int shift = 8; shift >= 0; shift -= 4) {
+    digits.push_back(static_cast<uint8_t>((record.channel >> shift) & 0xF));
+  }
+  for (int shift = 32; shift >= 0; shift -= 4) {
+    digits.push_back(static_cast<uint8_t>((record.address >> shift) & 0xF));
+  }
+  digits.push_back(static_cast<uint8_t>(record.version & 0xF));
+  return digits;
+}
+
+}  // namespace
+
+VbiIdentityReconciliation NabtsRecordCatalogue::reconcile_identities() {
+  VbiIdentityReconciliation out;
+  out.identities_seen = static_cast<uint32_t>(records_.size());
+
+  std::vector<Key> attested_keys;
+  std::vector<VbiIdentityDigits> attested_digits;
+  std::vector<Key> unattested_keys;
+  for (const auto& [key, entry] : records_) {
+    if (entry.record.times_attested > 0) {
+      attested_keys.push_back(key);
+      attested_digits.push_back(identity_digits(entry.record));
+    } else {
+      unattested_keys.push_back(key);
+    }
+  }
+  out.identities_unattested = static_cast<uint32_t>(unattested_keys.size());
+
+  if (!vbi_identity_reconciliation_applies(attested_keys.size())) {
+    // Nothing arrived as transmitted, so there is no baseline and the rule has
+    // nothing to say. Leaving the catalogue as recovered is the honest answer;
+    // emptying it would be the confident one.
+    out.withheld = out.identities_unattested > 0;
+    return out;
+  }
+
+  for (const Key& key : unattested_keys) {
+    auto it = records_.find(key);
+    if (it == records_.end()) {
+      continue;
+    }
+    Entry& entry = it->second;
+    const auto neighbour = vbi_single_digit_neighbour(
+        identity_digits(entry.record), attested_digits);
+    if (neighbour.has_value()) {
+      auto target = records_.find(attested_keys[*neighbour]);
+      if (target != records_.end()) {
+        fold_into(target->second, entry);  // |entry| is erased just below
+        ++out.identities_folded;
+        out.appearances_folded += entry.record.times_seen;
+      } else {
+        ++out.identities_dropped;
+        out.appearances_dropped += entry.record.times_seen;
+      }
+    } else {
+      ++out.identities_dropped;
+      out.appearances_dropped += entry.record.times_seen;
+    }
+    records_.erase(it);
+  }
+  return out;
+}
+
+void NabtsRecordCatalogue::fold_into(Entry& target, Entry& misread) const {
+  // The appearances were appearances of the target: the service brought that
+  // record round and this recording misread its name on the way past. Counting
+  // them there is what keeps times_seen a property of the service rather than
+  // of the damage.
+  target.record.times_seen += misread.record.times_seen;
+  target.record.times_intact += misread.record.times_intact;
+  target.record.first_seen_frame =
+      std::min(target.record.first_seen_frame, misread.record.first_seen_frame);
+  target.record.last_seen_frame =
+      std::max(target.record.last_seen_frame, misread.record.last_seen_frame);
+
+  // The copies are the reason to fold rather than discard: they are bytes of
+  // the target record that were received, and the vote in records() is where
+  // they pay for themselves. A target that already holds an undamaged copy has
+  // nothing for them to improve on, which is add_copy()'s rule as well.
+  if (target.kept_copy_intact) {
+    return;
+  }
+  // Only into the room that is left. The target's own copies came in under an
+  // identity the recording did name as transmitted, which is better evidence
+  // than anything folded in here — so a misreading fills the vote out rather
+  // than displacing what is already in it.
+  for (NabtsRecordCopy& copy : misread.copies) {
+    if (target.copies.size() >= max_copies_) {
+      break;
+    }
+    target.copies.push_back(std::move(copy));
   }
 }
 

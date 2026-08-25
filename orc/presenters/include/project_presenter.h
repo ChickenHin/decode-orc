@@ -51,6 +51,28 @@ void initCoreLogging(
     LogDestination destination = LogDestination::kBoth);
 
 /**
+ * @brief Reconfigure core logging while the application is running
+ * @param level Log level (trace, debug, info, warn, error, critical, off)
+ * @param pattern Log pattern applied to every installed sink
+ * @param log_file File to write to; ignored when empty
+ * @param destination Which sinks to install (console, file, or both)
+ * @param truncate_log_file True to replace the log file's contents, false to
+ *        append to a file this run already opened
+ * @param error_message Optional; receives the reason a requested log file
+ *        could not be opened
+ * @return True when the requested destination was installed in full
+ *
+ * The core logger object is preserved, so loaded stage plugins - which share
+ * that logger - follow the change without being reloaded. Used by the GUI's
+ * logging dialogue to turn debug logging on and off at runtime.
+ */
+bool reconfigureCoreLogging(const std::string& level,
+                            const std::string& pattern,
+                            const std::string& log_file,
+                            LogDestination destination, bool truncate_log_file,
+                            std::string* error_message = nullptr);
+
+/**
  * @brief Set the background observation worker-pool size.
  *
  * @param count Number of worker threads; 0 (the default) means "auto" — half

@@ -137,6 +137,22 @@ uint8_t teletext_hamming84_encode(uint8_t value);
 // -1 when the byte is uncorrectable (double-bit error).
 int teletext_hamming84_decode(uint8_t byte);
 
+// Whether a Hamming 8/4 byte arrived as a codeword rather than being corrected
+// into one.
+//
+// ETSI EN 300 706 §8.2 gives the code minimum distance 4, so a byte one error
+// from a codeword is corrected and a byte two errors away is detected — but a
+// byte three errors away lands in a *neighbouring* codeword's correction sphere
+// and is silently resolved to the wrong value. This is what separates a value
+// that was received from one that was inferred, and it is the only warning a
+// caller ever gets that a mis-correction was possible.
+//
+// It matters most where the value names something rather than describing it: a
+// mis-corrected display byte damages one character, where a mis-corrected
+// address invents a page. A false here does not mean the byte is wrong — most
+// corrections are right — only that the code was asked to guess.
+bool teletext_hamming84_clean(uint8_t byte);
+
 // Encode 18 data bits as a Hamming 24/18 protected triplet.
 // ETSI EN 300 706 §8.3: over three consecutive bytes, transmission-order bits
 // 1, 2, 4, 8, 16 and 24 are the protection bits P1-P6 and the remaining

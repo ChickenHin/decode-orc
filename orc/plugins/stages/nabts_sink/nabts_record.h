@@ -140,6 +140,19 @@ struct NabtsRecordHeader {
   uint8_t type = 0;
   NabtsRecordAddress address;
 
+  /// Whether every Hamming 8/4 byte the record's identity rests on — RT, RD,
+  /// the address nibbles and the classification sequence carrying Y16 — arrived
+  /// as a codeword rather than being corrected into one (see
+  /// teletext_hamming84_clean()).
+  ///
+  /// §8.2's minimum distance of 4 leaves a three-bit burst resolving silently
+  /// to a neighbouring codeword. In an address that does not damage a record:
+  /// it copies it to an address the service never used, and a catalogue keyed
+  /// on §5.2.1's identity has no way to tell the copy from the original. The
+  /// header extension is excluded, since it bears on where the record's data
+  /// starts rather than on which record this is.
+  bool identity_attested = false;
+
   /// RD b4 (§5.2.3): the record link was transmitted.
   bool linked = false;
   /// L1 b8 (§5.2.6): further linked records follow this one.
@@ -222,6 +235,11 @@ struct NabtsRecord {
   std::vector<uint8_t> confidence;
   /// Whether the group this came from arrived whole and undamaged.
   bool intact = true;
+  /// Whether this arrival named its record as transmitted: the header's own
+  /// NabtsRecordHeader::identity_attested and the channel the synchronizing
+  /// packet was addressed to (NabtsDataGroup::channel_attested), which together
+  /// are the whole of §5.2.1's identity.
+  bool identity_attested = false;
 };
 
 /**
@@ -261,6 +279,11 @@ struct NabtsMessage {
   bool complete = false;
   /// Every contributing group arrived whole and undamaged.
   bool intact = true;
+  /// At least one contributing record named the message's identity as
+  /// transmitted (NabtsRecord::identity_attested). One arrival that did is
+  /// enough: the identity is either one the service used or one it did not, and
+  /// a single uncorrected reading of it settles that.
+  bool identity_attested = false;
   /// No link of the series is missing, so @ref data starts where the record
   /// starts and every byte of it is at the offset the record gave it. A missing
   /// link takes a whole record out of the middle of the concatenation, and

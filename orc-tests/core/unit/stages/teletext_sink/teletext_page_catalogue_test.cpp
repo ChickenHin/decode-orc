@@ -404,4 +404,162 @@ TEST(TeletextSubPageLostPackets, IgnoreTheHeaderRow) {
   EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
 }
 
+// ---------------------------------------------------------------------------
+// Identity attestation (issue #267)
+// ---------------------------------------------------------------------------
+//
+// ETSI EN 300 706 §8.2 gives Hamming 8/4 minimum distance 4, so a three-bit
+// burst in a page-number byte resolves silently to a neighbouring codeword. The
+// page it happens to is not damaged — it is duplicated, at a number the service
+// never sent — and only whether the identity arrived as transmitted tells the
+// copy from the original.
+
+namespace {
+
+// A snapshot whose header named the page as transmitted, or did not.
+orc::TeletextPageSnapshot attested_snapshot(int magazine, int page_number,
+                                            int64_t header_field, bool attested,
+                                            int subcode = 0) {
+  auto snapshot = make_snapshot(magazine, page_number, header_field, subcode);
+  snapshot.identity_attested = attested;
+  return snapshot;
+}
+
+// |appearances| appearances of one page, each with its own header field.
+void carousel(orc::TeletextPageCatalogue& catalogue, int magazine,
+              int page_number, int appearances, bool attested, int subcode = 0,
+              int64_t first_field = 0) {
+  for (int index = 0; index < appearances; ++index) {
+    catalogue.merge(
+        attested_snapshot(magazine, page_number, first_field + index * 10,
+                          attested, subcode),
+        static_cast<uint64_t>(first_field + index * 10));
+  }
+}
+
+}  // namespace
+
+TEST(TeletextPageCatalogueIdentities, AttestedAppearancesAreCounted) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x20, /*appearances=*/3, /*attested=*/true);
+  catalogue.merge(attested_snapshot(1, 0x20, 400, /*attested=*/false), 400);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].times_seen, 4u);
+  EXPECT_EQ(pages[0].times_attested, 3u);
+}
+
+// The shape of the reported bug: one page seen many times with its number
+// received as transmitted, and a copy of it at a number one digit away that
+// was never once received cleanly.
+TEST(TeletextPageCatalogueIdentities, FoldUnattestedPageIntoItsOneNeighbour) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x09, /*appearances=*/40, /*attested=*/true);
+  carousel(catalogue, 1, 0x79, /*appearances=*/2, /*attested=*/false,
+           /*subcode=*/0, /*first_field=*/5000);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_seen, 2u);
+  EXPECT_EQ(reconciliation.identities_unattested, 1u);
+  EXPECT_EQ(reconciliation.identities_folded, 1u);
+  EXPECT_EQ(reconciliation.identities_dropped, 0u);
+  EXPECT_EQ(reconciliation.appearances_folded, 2u);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].page_number, 0x09);
+  // The appearances were appearances of 1/09: the carousel brought it round
+  // and the recording misread its number on the way past.
+  EXPECT_EQ(pages[0].times_seen, 42u);
+  EXPECT_EQ(pages[0].last_seen_frame, 5010u);
+}
+
+// A service numbering its pages densely offers two equally good explanations
+// for a misreading, and neither is evidence of anything.
+TEST(TeletextPageCatalogueIdentities, LeaveAnAmbiguousMisreadingUnfolded) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x03, /*appearances=*/20, /*attested=*/true);
+  carousel(catalogue, 1, 0x07, /*appearances=*/20, /*attested=*/true,
+           /*subcode=*/0, /*first_field=*/1000);
+  // 1/05 is one digit from both.
+  carousel(catalogue, 1, 0x05, /*appearances=*/2, /*attested=*/false,
+           /*subcode=*/0, /*first_field=*/5000);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_folded, 0u);
+  EXPECT_EQ(reconciliation.identities_dropped, 1u);
+  EXPECT_EQ(reconciliation.appearances_dropped, 2u);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[0].times_seen, 20u);
+  EXPECT_EQ(pages[1].times_seen, 20u);
+}
+
+// A false lock on noise names a page nothing else in the service is near.
+TEST(TeletextPageCatalogueIdentities, DropAMisreadingWithNoNeighbour) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x20, /*appearances=*/20, /*attested=*/true);
+  carousel(catalogue, 7, 0xFE, /*appearances=*/1, /*attested=*/false,
+           /*subcode=*/0, /*first_field=*/5000);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_dropped, 1u);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(pages[0].magazine, 1);
+  EXPECT_EQ(pages[0].page_number, 0x20);
+}
+
+// A misread sub-code duplicates a sub-page inside a page number that is itself
+// perfectly attested, so the identity has to carry the sub-code too.
+TEST(TeletextPageCatalogueIdentities, FoldAMisreadSubCode) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x20, /*appearances=*/20, /*attested=*/true,
+           /*subcode=*/0x0001);
+  carousel(catalogue, 1, 0x20, /*appearances=*/1, /*attested=*/false,
+           /*subcode=*/0x0009, /*first_field=*/5000);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_folded, 1u);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  ASSERT_EQ(pages[0].subpages.size(), 1u);
+  EXPECT_EQ(pages[0].subpages[0].subcode, 0x0001);
+  EXPECT_EQ(pages[0].subpages[0].times_seen, 21u);
+}
+
+// On an undamaged recording every page number arrives as transmitted, so the
+// pass has nothing to do and must not disturb the catalogue.
+TEST(TeletextPageCatalogueIdentities, LeaveAnUndamagedCatalogueAlone) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x03, /*appearances=*/5, /*attested=*/true);
+  carousel(catalogue, 1, 0x07, /*appearances=*/5, /*attested=*/true,
+           /*subcode=*/0, /*first_field=*/1000);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_FALSE(reconciliation.acted());
+  EXPECT_FALSE(reconciliation.withheld);
+  EXPECT_TRUE(reconciliation.summary("page").empty());
+  EXPECT_EQ(catalogue.pages().size(), 2u);
+}
+
+// A recording so damaged that nothing at all was received as transmitted
+// offers no baseline to judge the rest against. Emptying the catalogue would be
+// the confident answer rather than the honest one.
+TEST(TeletextPageCatalogueIdentities, WithholdWhenNothingWasAttested) {
+  orc::TeletextPageCatalogue catalogue;
+  carousel(catalogue, 1, 0x03, /*appearances=*/5, /*attested=*/false);
+  carousel(catalogue, 1, 0x07, /*appearances=*/5, /*attested=*/false,
+           /*subcode=*/0, /*first_field=*/1000);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_TRUE(reconciliation.withheld);
+  EXPECT_FALSE(reconciliation.acted());
+  EXPECT_EQ(catalogue.pages().size(), 2u);
+}
+
 }  // namespace orc_unit_test

@@ -90,6 +90,39 @@ TEST(TeletextHamming84, DoubleBitErrorsAreRejected) {
   EXPECT_EQ(teletext_hamming84_decode(code ^ 0b10000001), -1);
 }
 
+TEST(TeletextHamming84, CleanAcceptsCodewordsOnly) {
+  for (int value = 0; value < 16; ++value) {
+    const uint8_t code = teletext_hamming84_encode(static_cast<uint8_t>(value));
+    EXPECT_TRUE(teletext_hamming84_clean(code)) << "value=" << value;
+    for (int bit = 0; bit < 8; ++bit) {
+      // Corrected, and correctly — but corrected, which is what this reports.
+      const auto damaged = static_cast<uint8_t>(code ^ (1u << bit));
+      EXPECT_EQ(teletext_hamming84_decode(damaged), value);
+      EXPECT_FALSE(teletext_hamming84_clean(damaged))
+          << "value=" << value << " flipped bit=" << bit;
+    }
+  }
+}
+
+TEST(TeletextHamming84, CleanRejectsAnUncorrectableByte) {
+  // Nothing was received cleanly in a byte the code cannot even resolve.
+  const uint8_t code = teletext_hamming84_encode(0x5);
+  ASSERT_EQ(teletext_hamming84_decode(code ^ 0b00000011), -1);
+  EXPECT_FALSE(teletext_hamming84_clean(code ^ 0b00000011));
+}
+
+TEST(TeletextHamming84, CleanFlagsTheMisCorrectionThatInventsAnIdentity) {
+  // The failure issue #267 is about: §8.2 gives the code minimum distance 4, so
+  // three bit errors land inside a *neighbouring* codeword's correction sphere
+  // and are resolved there silently. The measured case is codeword 0 — which is
+  // an alternating bit pattern, and so exactly what an MLSE detector's
+  // alternating error runs move — arriving as the neighbour of codeword 7.
+  const uint8_t zero = teletext_hamming84_encode(0x0);
+  const auto misread = static_cast<uint8_t>(zero ^ 0b00111000);
+  ASSERT_EQ(teletext_hamming84_decode(misread), 0x7);
+  EXPECT_FALSE(teletext_hamming84_clean(misread));
+}
+
 TEST(TeletextHamming2418, EncodeDecodeRoundTrip) {
   // The 18 data bits go out and come back unchanged, at the extremes and over
   // a spread of patterns that exercises every bit in both states.

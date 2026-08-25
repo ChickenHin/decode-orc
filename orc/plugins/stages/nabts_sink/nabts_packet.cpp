@@ -153,6 +153,9 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
   // §3.2.3: P1 is the most significant of the three hexadecimal digits.
   out.channel =
       static_cast<uint16_t>((prefix[0] << 8) | (prefix[1] << 4) | prefix[2]);
+  out.address_attested = teletext_hamming84_clean(packet[0]) &&
+                         teletext_hamming84_clean(packet[1]) &&
+                         teletext_hamming84_clean(packet[2]);
   out.continuity = static_cast<uint8_t>(prefix[3]);
 
   const int ps = prefix[4];

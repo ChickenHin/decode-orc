@@ -100,6 +100,93 @@ TEST(GUIProjectTest, LoadFromFile_DelegatesToPresenterBuildsDagAndStoresPath) {
   EXPECT_EQ(project.projectPath(), QString("/tmp/test-load.orcprj"));
 }
 
+namespace {
+
+// A node/stage pair the presenter can report; `is_source` decides whether
+// reloadSources() counts it.
+orc::presenters::NodeInfo makeNode(int id, const std::string& stage_name) {
+  orc::presenters::NodeInfo node;
+  node.node_id = orc::NodeID(id);
+  node.stage_name = stage_name;
+  return node;
+}
+
+orc::presenters::StageInfo makeStage(const std::string& name, bool is_source) {
+  orc::presenters::StageInfo stage;
+  stage.name = name;
+  stage.node_type = orc::NodeType::SOURCE;
+  stage.is_source = is_source;
+  stage.is_sink = false;
+  return stage;
+}
+
+}  // namespace
+
+TEST(GUIProjectTest, ReloadSources_RebuildsDagAndCountsEverySource) {
+  auto mock = std::make_unique<
+      StrictMock<orc::presenters::test::MockProjectPresenter>>();
+  auto* mock_presenter = mock.get();
+  GUIProject project(std::move(mock));
+
+  EXPECT_CALL(*mock_presenter, getNodes())
+      .WillRepeatedly(Return(std::vector<orc::presenters::NodeInfo>{
+          makeNode(1, "tbc_source"), makeNode(2, "dropout_correct"),
+          makeNode(3, "cvbs_source")}));
+  EXPECT_CALL(*mock_presenter, listAllStages())
+      .WillRepeatedly(Return(std::vector<orc::presenters::StageInfo>{
+          makeStage("tbc_source", true), makeStage("dropout_correct", false),
+          makeStage("cvbs_source", true)}));
+  EXPECT_CALL(*mock_presenter, buildDAG())
+      .WillOnce(Return(std::make_shared<int>(7)));
+
+  const auto result = project.reloadSources();
+
+  EXPECT_EQ(result.source_count, 2);
+  EXPECT_TRUE(result.rebuilt);
+}
+
+TEST(GUIProjectTest, ReloadSources_ReportsFailureWhenDagCannotBeBuilt) {
+  auto mock = std::make_unique<
+      StrictMock<orc::presenters::test::MockProjectPresenter>>();
+  auto* mock_presenter = mock.get();
+  GUIProject project(std::move(mock));
+
+  EXPECT_CALL(*mock_presenter, getNodes())
+      .WillRepeatedly(Return(
+          std::vector<orc::presenters::NodeInfo>{makeNode(1, "tbc_source")}));
+  EXPECT_CALL(*mock_presenter, listAllStages())
+      .WillRepeatedly(Return(std::vector<orc::presenters::StageInfo>{
+          makeStage("tbc_source", true)}));
+  // A source file that has been moved or truncated makes the rebuild fail.
+  EXPECT_CALL(*mock_presenter, buildDAG())
+      .WillOnce(Return(std::shared_ptr<void>{}));
+
+  const auto result = project.reloadSources();
+
+  EXPECT_EQ(result.source_count, 1);
+  EXPECT_FALSE(result.rebuilt);
+}
+
+TEST(GUIProjectTest, ReloadSources_SourcelessProjectIsLeftAlone) {
+  auto mock = std::make_unique<
+      StrictMock<orc::presenters::test::MockProjectPresenter>>();
+  auto* mock_presenter = mock.get();
+  GUIProject project(std::move(mock));
+
+  EXPECT_CALL(*mock_presenter, getNodes())
+      .WillRepeatedly(Return(
+          std::vector<orc::presenters::NodeInfo>{makeNode(1, "video_sink")}));
+  EXPECT_CALL(*mock_presenter, listAllStages())
+      .WillRepeatedly(Return(std::vector<orc::presenters::StageInfo>{
+          makeStage("video_sink", false)}));
+  // StrictMock: no buildDAG() expectation, so rebuilding would fail the test.
+
+  const auto result = project.reloadSources();
+
+  EXPECT_EQ(result.source_count, 0);
+  EXPECT_FALSE(result.rebuilt);
+}
+
 TEST(GUIProjectTest, Clear_ResetsPathAndDelegatesProjectReset) {
   auto mock = std::make_unique<
       StrictMock<orc::presenters::test::MockProjectPresenter>>();

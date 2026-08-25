@@ -19,6 +19,7 @@ Directly beneath the menu bar is a toolbar with buttons for the most common acti
 |--------|------------------|-------|
 | Arrange to grid | **View → Arrange DAG to Grid** | Tidies the graph into a left-to-right grid. |
 | Show preview | **View → Show Preview** | Opens the Preview window, or brings it to the front if it is already open. Disabled until a project is loaded. |
+| Reload all sources | **File → Reload All Sources** | Re-reads every source in the project from disk. Disabled until the project contains a source stage. |
 | Theme | **Tools → Themes** | A single button that cycles the theme in the order **Auto → Light → Dark**. Its icon shows the current mode — a half-disc for Auto, a sun for Light, and a crescent moon for Dark — and stays in sync with the Tools → Themes submenu. |
 
 You can hide or show the toolbar with **View → Show Toolbar**.
@@ -101,6 +102,18 @@ Saves the current project under a new filename.
 
 Edits project-level details (such as name/description). This is enabled only when a project is loaded.
 
+#### Reload All Sources
+
+Re-reads every source stage in the project from disk (**Ctrl+R**).
+
+Use this when the capture behind the project has changed since you opened it — for example when it is still being written by a decoder, or when you have re-run a decode over the same file. Reloading rebuilds the pipeline from the project, so every source stage reopens its media and re-reads its metadata, and the preview picks up the new frame count.
+
+Nothing in the project is changed: the graph, the stage parameters and the modified flag are all left as they are. This is the same refresh a stage parameter dialogue's **Update** button performs, applied to every source at once instead of one at a time.
+
+The action works while any non-modal Orc-GUI window has focus, including the Preview window, and is greyed out until the project contains at least one source stage. It is also available as the circular-arrow button on the toolbar.
+
+Because the rebuild replaces every stage object, open analysis and catalogue result windows are closed and preview playback is stopped — trigger the stage again to refill them.
+
 #### Quit
 
 Exits the application.
@@ -166,7 +179,7 @@ A **selector** is how both front ends name one entry: the plugin's id when it ha
 
 The collapsible **Diagnostics** section at the bottom lists what the plugin runtime recorded while loading plugins at startup, each line prefixed **Info**, **Warning** or **Error**. These are the same messages `orc-cli process` and `orc-cli filter` print for a run; CLI: `orc-cli plugins doctor`, which also reports the plugin search paths.
 
-Registry changes take effect on the next application launch; the dialog offers a restart when you close it after making changes.
+Registry changes take effect on the next application launch; when you close the dialog after making changes it offers to quit Decode-Orc so you can start it again.
 
 ##### Browse Plugins
 
@@ -179,6 +192,41 @@ Reached from the Plugin Manager's **Browse Plugins…** button. It lists the **a
 * **Install…** downloads the selected plugin's latest release and registers it. It is enabled only for a compatible entry you do not already have. Installing is your consent for it to run, so it asks you to confirm trust first. CLI: `orc-cli plugins install <id>`.
 
 The id the details pane shows is exactly what `orc-cli plugins info` and `orc-cli plugins install` accept, and once the plugin is installed it is also its registry selector.
+
+#### Logging…
+
+Records what the application is doing to a file. Turn it on before reproducing a
+problem, then attach the file to your bug report — see
+[Reporting issues](../../misc/issue-reporting.md). CLI: `orc-cli --log-level`,
+`--log-file` and `--log-out`.
+
+* **Write log messages to a file** turns file logging on and off. Anything the application prints to the console when it is started from a terminal keeps going there either way.
+* **Detail** chooses how much is recorded, from `trace` (everything, including per-frame detail) down through `debug`, `info`, `warn`, `error` and `critical` to `off`. **debug** is the level to send with a bug report; `info` is the default. A line beneath the box says what the selected level records.
+* **Log file** is where the file goes. Leave it blank to use the location shown greyed out in the field — a `decode-orc-logs` folder in your documents directory, beside where crash bundles are written. **Browse…** picks a different one; the folder is created if it does not exist.
+* **Open Log Folder** opens the folder holding the log file in your file manager, ready for you to attach it to a report.
+
+The summary line at the bottom of the dialog says what will be captured and
+where. Clicking **OK** applies the change straight away: there is no need to
+restart, and stage plugins that are already loaded start writing to the new file
+too.
+
+The log file is replaced rather than appended to, so it only ever holds one
+capture and can never mix two sessions together. It starts again from empty
+every time the application is run, and whenever you turn logging on or point it
+at a different file. Raising or lowering **Detail** part-way through a capture
+keeps what has already been recorded.
+
+A detailed log grows quickly, so turn logging off again once you have captured
+the problem.
+
+Release builds have trace records compiled out of them, so on a released
+version `trace` records no more than `debug` does. The dialog says so when that
+applies to the build you are running.
+
+Your choice is remembered for the next run. The `--log-level`, `--log-file` and
+`--log-out` command-line options configure a single run instead and leave the
+remembered settings alone; when any of them is given, the dialog opens showing
+what that run is using.
 
 #### Themes
 

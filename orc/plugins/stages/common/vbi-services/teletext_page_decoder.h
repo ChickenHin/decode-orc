@@ -322,6 +322,24 @@ struct TeletextPageSnapshot {
   // so only this flag distinguishes them.
   bool transmission_complete = true;
 
+  // Whether the header that opened this transmission named the page as
+  // transmitted: the two MRAG bytes (§7.1.2) and the two page-number bytes
+  // (§9.3.1.1) all arrived as Hamming 8/4 codewords rather than being corrected
+  // into them (see teletext_hamming84_clean()).
+  //
+  // False does not mean the page number is wrong — most corrections are right.
+  // It means the code was asked to guess, and §8.2's distance of 4 makes a
+  // three-bit burst resolve silently to a neighbouring codeword: on a damaged
+  // recording that does not corrupt the page, it *duplicates* it at a number
+  // the service never sent. A catalogue cannot tell such a page from a real one
+  // by looking at it, which is why this travels with the snapshot rather than
+  // being recomputed later.
+  //
+  // Restamped only by a header that opens a transmission, alongside
+  // |header_field_index|, so a rolling header does not overwrite what the
+  // opening one said.
+  bool identity_attested = false;
+
   std::array<std::array<TeletextPageCell, kColumns>, kRows> cells{};
 };
 
@@ -617,6 +635,9 @@ class TeletextPageDecoder {
     bool magazine_g0_from_designation_zero = false;
     int64_t header_field_index = 0;
     int64_t last_field_index = 0;
+    // Whether the header that opened this transmission arrived as codewords
+    // throughout its addressing (see TeletextPageSnapshot::identity_attested).
+    bool identity_attested = false;
     std::array<RowData, TeletextPageSnapshot::kRows> rows{};
   };
 

@@ -1007,4 +1007,12 @@ void cleanup_crash_handler() {
   g_crash_handler_initialized = false;
 }
 
+void set_crash_log_file(const std::string& log_file) {
+  // Written from the GUI thread and read when a bundle is collected. The
+  // configuration has always been a mutable global read by the collector, so
+  // this adds no synchronisation the collector did not already need; a bundle
+  // taken during the swap simply names one path or the other.
+  g_crash_config.primary_log_file = log_file;
+}
+
 }  // namespace orc
