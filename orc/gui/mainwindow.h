@@ -113,6 +113,7 @@ class MainWindow : public QMainWindow {
   void onSaveProject();
   void onSaveProjectAs();
   void onEditProject();
+  void onReloadAllSources();
   void onPreviewIndexChanged(int index);
   void onNavigatePreview(int delta);
   void onPreviewModeChanged(int index);
@@ -421,6 +422,7 @@ class MainWindow : public QMainWindow {
   QAction* save_project_action_;
   QAction* save_project_as_action_;
   QAction* edit_project_action_;
+  QAction* reload_sources_action_ = nullptr;  // shared by File menu + toolbar
   QAction* plugin_manager_action_ = nullptr;
   QAction* logging_action_ = nullptr;
   QAction* show_preview_action_;

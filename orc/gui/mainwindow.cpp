@@ -183,6 +183,47 @@ QIcon makePreviewIcon(const QColor& color) {
   return QIcon(pm);
 }
 
+// Circular arrow — "reload all sources".
+QIcon makeReloadIcon(const QColor& color) {
+  QPixmap pm(kIconPx, kIconPx);
+  pm.fill(Qt::transparent);
+  QPainter p(&pm);
+  p.setRenderHint(QPainter::Antialiasing, true);
+  const qreal cx = kIconPx / 2.0;
+  const qreal cy = kIconPx / 2.0;
+  const qreal r = 13.0;
+
+  // Qt arc angles are sixteenths of a degree measured anticlockwise from three
+  // o'clock; a negative span sweeps clockwise. Starting at 60 degrees and
+  // sweeping 300 degrees clockwise leaves a gap across the top of the ring for
+  // the arrowhead.
+  constexpr qreal kArcStartDeg = 60.0;
+  constexpr qreal kArcSpanDeg = 300.0;
+  QPen pen(color, 3.5);
+  pen.setCapStyle(Qt::FlatCap);
+  p.setPen(pen);
+  p.setBrush(Qt::NoBrush);
+  p.drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r),
+            static_cast<int>(kArcStartDeg * 16),
+            static_cast<int>(-kArcSpanDeg * 16));
+
+  // Arrowhead at the clockwise end of the arc, aligned with the tangent there
+  // so the ring reads as turning rather than as a broken circle.
+  const qreal end_rad = (kArcStartDeg - kArcSpanDeg) * kPi / 180.0;
+  p.translate(cx + std::cos(end_rad) * r, cy - std::sin(end_rad) * r);
+  p.rotate(std::atan2(std::cos(end_rad), std::sin(end_rad)) * 180.0 / kPi);
+  const qreal head = 7.0;
+  QPainterPath tri;
+  tri.moveTo(head, 0.0);
+  tri.lineTo(-head * 0.25, -head * 0.8);
+  tri.lineTo(-head * 0.25, head * 0.8);
+  tri.closeSubpath();
+  p.setPen(Qt::NoPen);
+  p.setBrush(color);
+  p.drawPath(tri);
+  return QIcon(pm);
+}
+
 // Sun / moon / half-disc depending on mode — the cycling theme button.
 QIcon makeThemeIcon(const QColor& color, ThemeManager::Mode mode) {
   QPixmap pm(kIconPx, kIconPx);
@@ -913,6 +954,16 @@ void MainWindow::setupMenus() {
   connect(edit_project_action_, &QAction::triggered, this,
           &MainWindow::onEditProject);
 
+  reload_sources_action_ = file_menu->addAction("&Reload All Sources");
+  reload_sources_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+  // Application scope so the shortcut works while the Preview window (or any
+  // other non-modal window) holds focus; Qt still suppresses it while a modal
+  // dialog blocks the main window.
+  reload_sources_action_->setShortcutContext(Qt::ApplicationShortcut);
+  reload_sources_action_->setEnabled(false);
+  connect(reload_sources_action_, &QAction::triggered, this,
+          &MainWindow::onReloadAllSources);
+
   file_menu->addSeparator();
 
   auto* quit_action = file_menu->addAction("&Quit");
@@ -1053,6 +1104,7 @@ void MainWindow::setupToolbar() {
   // syncThemeUi() so they track the active theme.
   main_toolbar_->addAction(arrange_dag_action_);
   main_toolbar_->addAction(show_preview_action_);
+  main_toolbar_->addAction(reload_sources_action_);
   main_toolbar_->addSeparator();
 
   // Single button that cycles Auto -> Light -> Dark. The Tools > Themes
@@ -1127,6 +1179,10 @@ void MainWindow::syncThemeUi() {
   if (show_preview_action_) {
     show_preview_action_->setIcon(makePreviewIcon(fg));
     show_preview_action_->setToolTip("Show preview");
+  }
+  if (reload_sources_action_) {
+    reload_sources_action_->setIcon(makeReloadIcon(fg));
+    reload_sources_action_->setToolTip("Reload all sources (Ctrl+R)");
   }
   if (theme_cycle_action_) {
     theme_cycle_action_->setIcon(makeThemeIcon(fg, mode));
@@ -1244,6 +1300,42 @@ void MainWindow::onEditProject() {
 
     statusBar()->showMessage("Project properties updated", 3000);
   }
+}
+
+void MainWindow::onReloadAllSources() {
+  const auto result = project_.reloadSources();
+
+  if (result.source_count == 0) {
+    statusBar()->showMessage("No sources to reload", 3000);
+    return;
+  }
+
+  ORC_LOG_INFO("Reloaded {} source(s) from disk", result.source_count);
+
+  // The rebuild replaced every stage object, so the renderer, the node view
+  // and the preview are all holding output from stages that no longer exist.
+  // This is the same refresh the stage parameter dialogue's Update button
+  // performs, minus the parameter write.
+  updatePreviewRenderer();
+  dag_model_->refresh();
+  updatePreview();
+
+  if (!result.rebuilt) {
+    // rebuildDAG() swallows the reason and logs it; the common cause is a
+    // source file that has been moved, deleted or truncated since the project
+    // was opened, so say so rather than leaving an empty preview unexplained.
+    QMessageBox::warning(
+        this, "Reload All Sources",
+        "The sources could not be reloaded.\n\nCheck that every source file "
+        "is still present and readable.");
+    return;
+  }
+
+  statusBar()->showMessage(
+      result.source_count == 1
+          ? QString("Reloaded 1 source")
+          : QString("Reloaded %1 sources").arg(result.source_count),
+      3000);
 }
 
 void MainWindow::onQuickProject() {
@@ -2208,6 +2300,10 @@ void MainWindow::updateUIState() {
   }
   if (edit_project_action_) {
     edit_project_action_->setEnabled(has_project);
+  }
+  if (reload_sources_action_) {
+    // Nothing to re-read until the project holds at least one source stage.
+    reload_sources_action_->setEnabled(has_project && project_.hasSource());
   }
   if (plugin_manager_action_) {
     plugin_manager_action_->setEnabled(!has_project);

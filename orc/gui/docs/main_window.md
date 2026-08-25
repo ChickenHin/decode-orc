@@ -16,6 +16,7 @@ common menu actions:
 |--------|------------------------|-------------|
 | Arrange to grid | View → Arrange DAG to Grid | Automatically arrange all nodes in an ordered grid layout. |
 | Show preview | View → Show Preview | Open the Preview Window, or bring it to the front if it is already open. Disabled until a project is loaded. |
+| Reload all sources | File → Reload All Sources | Re-read every source in the project from disk. Disabled until the project has a source stage. |
 | Theme | Tools → Themes | Cycles the UI theme in the order Auto → Light → Dark. The icon shows the current mode (half-disc for Auto, sun for Light, crescent moon for Dark), and stays in sync with the Tools → Themes submenu. |
 
 The toolbar can be hidden or shown from **View → Show Toolbar**.
@@ -30,6 +31,7 @@ The toolbar can be hidden or shown from **View → Show Toolbar**.
 | Save Project | Ctrl+S | Save the current project to its current file. |
 | Save Project As... | Ctrl+Shift+S | Save the current project under a different file name. |
 | Edit Project... | — | Edit top-level project settings such as video format, source type, media path, and signal units (10-bit, mV, or IRE). |
+| Reload All Sources | Ctrl+R | Re-read every source stage in the project from disk, picking up a capture that has changed or grown since the project was opened. The pipeline itself is left exactly as it is. Works from any window, including the Preview Window. |
 | Quit | Ctrl+Q | Exit the application. |
 
 ## View Menu

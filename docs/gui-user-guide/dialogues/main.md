@@ -19,6 +19,7 @@ Directly beneath the menu bar is a toolbar with buttons for the most common acti
 |--------|------------------|-------|
 | Arrange to grid | **View → Arrange DAG to Grid** | Tidies the graph into a left-to-right grid. |
 | Show preview | **View → Show Preview** | Opens the Preview window, or brings it to the front if it is already open. Disabled until a project is loaded. |
+| Reload all sources | **File → Reload All Sources** | Re-reads every source in the project from disk. Disabled until the project contains a source stage. |
 | Theme | **Tools → Themes** | A single button that cycles the theme in the order **Auto → Light → Dark**. Its icon shows the current mode — a half-disc for Auto, a sun for Light, and a crescent moon for Dark — and stays in sync with the Tools → Themes submenu. |
 
 You can hide or show the toolbar with **View → Show Toolbar**.
@@ -100,6 +101,18 @@ Saves the current project under a new filename.
 #### Edit Project…
 
 Edits project-level details (such as name/description). This is enabled only when a project is loaded.
+
+#### Reload All Sources
+
+Re-reads every source stage in the project from disk (**Ctrl+R**).
+
+Use this when the capture behind the project has changed since you opened it — for example when it is still being written by a decoder, or when you have re-run a decode over the same file. Reloading rebuilds the pipeline from the project, so every source stage reopens its media and re-reads its metadata, and the preview picks up the new frame count.
+
+Nothing in the project is changed: the graph, the stage parameters and the modified flag are all left as they are. This is the same refresh a stage parameter dialogue's **Update** button performs, applied to every source at once instead of one at a time.
+
+The action works while any non-modal Orc-GUI window has focus, including the Preview window, and is greyed out until the project contains at least one source stage. It is also available as the circular-arrow button on the toolbar.
+
+Because the rebuild replaces every stage object, open analysis and catalogue result windows are closed and preview playback is stopped — trigger the stage again to refill them.
 
 #### Quit
 
