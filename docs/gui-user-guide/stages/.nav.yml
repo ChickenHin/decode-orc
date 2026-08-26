@@ -3,4 +3,5 @@ nav:
   - source-stages.md
   - transform-stages.md
   - sink-core-stages.md
+  - chroma-decoder-guide.md
   - sink-analysis-stages.md
