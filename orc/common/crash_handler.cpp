@@ -643,7 +643,7 @@ static std::string create_bundle_zip(const std::string& crash_info_content,
     readme << "     (gdb) list      # Show source code around that frame\n\n";
     readme << "TO REPORT THIS ISSUE:\n";
     readme << "---------------------\n";
-    readme << "1. Go to https://github.com/simoninns/decode-orc/issues\n";
+    readme << "1. Go to https://github.com/decode-orc/decode-orc/issues\n";
     readme << "2. Click 'New Issue'\n";
     readme
         << "3. Attach this ZIP file or upload it to a file sharing service\n";
@@ -883,7 +883,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* context) {
     const char* msg3 =
         "\n==================================================\n\n";
     const char* msg4 = "Please report this issue at:\n";
-    const char* msg5 = "https://github.com/simoninns/decode-orc/issues\n\n";
+    const char* msg5 = "https://github.com/decode-orc/decode-orc/issues\n\n";
 
     if (write(STDERR_FILENO, msg1, strlen(msg1)) < 0) {
     }
@@ -1005,6 +1005,14 @@ void cleanup_crash_handler() {
 #endif
 
   g_crash_handler_initialized = false;
+}
+
+void set_crash_log_file(const std::string& log_file) {
+  // Written from the GUI thread and read when a bundle is collected. The
+  // configuration has always been a mutable global read by the collector, so
+  // this adds no synchronisation the collector did not already need; a bundle
+  // taken during the swap simply names one path or the other.
+  g_crash_config.primary_log_file = log_file;
 }
 
 }  // namespace orc

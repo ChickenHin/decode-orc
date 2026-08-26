@@ -67,12 +67,6 @@ class OutputBackend {
     bool embed_closed_captions =
         false;  ///< Embed closed captions as mov_text subtitle (MP4 only)
 
-    // Teletext subtitle settings (PAL WST, MP4/MOV only, decoded to mov_text)
-    bool embed_teletext_subtitles =
-        false;  ///< Embed teletext subtitles as mov_text subtitle (MP4/MOV)
-    std::string teletext_subtitle_page =
-        "888";  ///< Teletext page carrying the subtitles (magazine + 2 hex)
-
     // Chapter metadata settings (MKV/MP4/MOV only)
     bool embed_chapter_metadata =
         false;  ///< Write chapter markers from VBI data (MKV/MP4/MOV only)

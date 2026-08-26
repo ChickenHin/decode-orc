@@ -49,7 +49,9 @@ frame_number,white_snr_db,black_psnr_db
 ## Tools
 
 ### SNR Analysis
-Displays white SNR and black SNR metrics over time in a chart window. This tool is automatically invoked after the stage is triggered. It can also be opened manually from the Stage Tools menu once results are available.
+Displays white SNR and black SNR metrics over time in a chart window. This tool is automatically invoked after the stage is triggered.
+
+The dataset stays with the stage afterwards, so closing the window and picking **SNR Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without measuring again. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 
 ## Notes
 

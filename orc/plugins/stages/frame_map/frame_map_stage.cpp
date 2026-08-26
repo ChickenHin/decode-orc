@@ -14,7 +14,9 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
+#include <algorithm>
 #include <sstream>
+#include <variant>
 
 namespace orc {
 
@@ -348,6 +350,12 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
   FrameIDRange src_range = source.frame_range();
   uint64_t src_end = src_range.last;
 
+  // Frames past the end of the source are counted and reported once. A spec
+  // that overshoots by a million frames is one fact about the spec, not a
+  // million facts, and this runs on every execute() of the node.
+  uint64_t skipped = 0;
+  uint64_t first_skipped = 0;
+
   for (const auto& [s, e] : ranges) {
     if (s == UINT64_MAX) {
       // PAD_N: insert e padding slots
@@ -356,17 +364,29 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
       }
       continue;
     }
-    for (uint64_t id = s; id <= e; ++id) {
-      if (id > src_end) {
-        ORC_LOG_WARN("FrameMapStage: frame {} out of source range, skipping",
-                     id);
-        continue;
+    // Nothing past the source's last frame can map, so the walk stops there
+    // rather than counting its way to the end of a spec that overshoots.
+    const uint64_t last = std::min(e, src_end);
+    if (e > src_end) {
+      const uint64_t range_first_skipped = std::max(s, src_end + 1);
+      if (skipped == 0) {
+        first_skipped = range_first_skipped;
       }
+      skipped += e - range_first_skipped + 1;
+    }
+    for (uint64_t id = s; id <= last; ++id) {
       FrameID fid{id};
       if (source.has_frame(fid)) {
         mapping.push_back(fid);
       }
     }
+  }
+
+  if (skipped > 0) {
+    ORC_LOG_WARN(
+        "FrameMapStage: {} frame(s) of the range specification are past the "
+        "end of the source (first {}, source ends at {}); skipped",
+        skipped, first_skipped, src_end);
   }
   return mapping;
 }
@@ -533,6 +553,44 @@ size_t FrameMapStage::apply_pad_gaps(
   return total_inserted;
 }
 
+std::optional<FrameMapStage::RunConfig> FrameMapStage::config_for(
+    const std::map<std::string, ParameterValue>& parameters) const {
+  RunConfig config;
+  config.range_spec = range_spec_;
+  config.ranges = cached_ranges_;
+  config.remove_duplicates = remove_duplicates_;
+  config.pad_gaps = pad_gaps_;
+
+  const auto ranges_it = parameters.find("ranges");
+  if (ranges_it != parameters.end()) {
+    if (const auto* v = std::get_if<std::string>(&ranges_it->second)) {
+      config.range_spec = *v;
+      config.ranges = config.range_spec.empty()
+                          ? std::vector<std::pair<uint64_t, uint64_t>>{}
+                          : parse_ranges(config.range_spec);
+      if (!config.range_spec.empty() && config.ranges.empty()) {
+        ORC_LOG_ERROR("FrameMapStage: invalid range spec '{}'",
+                      config.range_spec);
+        return std::nullopt;
+      }
+    }
+  }
+  const auto dedup_it = parameters.find("remove_duplicates");
+  if (dedup_it != parameters.end()) {
+    if (const auto* v = std::get_if<bool>(&dedup_it->second)) {
+      config.remove_duplicates = *v;
+    }
+  }
+  const auto pad_it = parameters.find("pad_gaps");
+  if (pad_it != parameters.end()) {
+    if (const auto* v = std::get_if<bool>(&pad_it->second)) {
+      config.pad_gaps = *v;
+    }
+  }
+  // pad_strategy has one accepted value, so it cannot change the run.
+  return config;
+}
+
 std::vector<ArtifactPtr> FrameMapStage::execute(
     const std::vector<ArtifactPtr>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
@@ -548,21 +606,26 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
         "FrameMapStage: input must be a VideoFrameRepresentation");
   }
 
-  // Apply any runtime parameter overrides
-  if (!parameters.empty()) {
-    set_parameters(parameters);
+  // Resolve the run's parameters onto the stack. The stage's own members are
+  // left alone: execute() is not the configuration path, and writing them here
+  // is what made two workers sharing this instance corrupt each other.
+  const auto config_opt = config_for(parameters);
+  if (!config_opt) {
+    throw DAGExecutionError("FrameMapStage: invalid range specification");
   }
+  const RunConfig& config = *config_opt;
 
   // Pass-through when no ranges and no processing requested
-  if (range_spec_.empty() && !remove_duplicates_ && !pad_gaps_) {
+  if (config.range_spec.empty() && !config.remove_duplicates &&
+      !config.pad_gaps) {
     cached_output_ = source;
     return {inputs[0]};
   }
 
   // Build initial frame mapping from range specification
   std::vector<FrameID> mapping;
-  if (!range_spec_.empty() && !cached_ranges_.empty()) {
-    mapping = build_frame_mapping(cached_ranges_, *source);
+  if (!config.range_spec.empty() && !config.ranges.empty()) {
+    mapping = build_frame_mapping(config.ranges, *source);
     if (mapping.empty()) {
       ORC_LOG_WARN("FrameMapStage: range spec produced empty mapping");
       cached_output_ = source;
@@ -580,7 +643,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
 
   // Duplicate frame removal
   size_t removed_count = 0;
-  if (remove_duplicates_) {
+  if (config.remove_duplicates) {
     removed_count = apply_remove_duplicates(mapping, *source);
     ORC_LOG_DEBUG("FrameMapStage: removed {} duplicate frame(s)",
                   removed_count);
@@ -590,7 +653,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   std::vector<FrameMappedRepresentation::PaddingDescriptor> pads;
   size_t padded_count = 0;
   std::string gap_positions;
-  if (pad_gaps_) {
+  if (config.pad_gaps) {
     padded_count = apply_pad_gaps(mapping, pads, *source, gap_positions);
     ORC_LOG_DEBUG("FrameMapStage: inserted {} padding frame(s) into {} gap(s)",
                   padded_count, gap_positions.empty() ? 0 : 1);
@@ -611,8 +674,9 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
     }
   }
 
-  std::string tag = range_spec_ + "_rd" + std::to_string(remove_duplicates_) +
-                    "_pg" + std::to_string(pad_gaps_);
+  std::string tag = config.range_spec + "_rd" +
+                    std::to_string(config.remove_duplicates) + "_pg" +
+                    std::to_string(config.pad_gaps);
 
   auto result = std::make_shared<FrameMappedRepresentation>(
       source, std::move(mapping), std::move(pads), tag);

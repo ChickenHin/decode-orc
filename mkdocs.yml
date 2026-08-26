@@ -1,7 +1,7 @@
 site_name: decode-orc Documentation
-site_url: https://simoninns.github.io/decode-orc
-repo_url: https://github.com/simoninns/decode-orc
-repo_name: simoninns/decode-orc
+site_url: https://decode-orc.github.io/decode-orc
+repo_url: https://github.com/decode-orc/decode-orc
+repo_name: decode-orc/decode-orc
 
 theme:
   name: material

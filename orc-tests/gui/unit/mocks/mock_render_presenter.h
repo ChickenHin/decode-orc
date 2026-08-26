@@ -149,8 +149,7 @@ class MockRenderPresenter : public IRenderPresenter {
   }
 
   // Test helper: the ObservationContext handed to delivery callbacks. Seed it
-  // with observations to exercise the coordinator's extraction paths (e.g.
-  // the "teletext" namespace behind teletextDataReady).
+  // with observations to exercise the coordinator's extraction paths.
   orc::ObservationContext& deliveredContext() { return delivered_context_; }
 
   // --- Workload progress (Phase 5, Task 5.4) -------------------------------
@@ -201,6 +200,10 @@ class MockRenderPresenter : public IRenderPresenter {
               getSNRAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD((std::optional<orc::presenters::BurstLevelDisplaySeries>),
               getBurstLevelAnalysisData, (NodeID node_id), (override));
+  MOCK_METHOD((std::optional<orc::CatalogueDataset>), getCatalogueData,
+              (NodeID node_id, const std::string& view_option,
+               (const std::optional<std::vector<std::string>>&)active_toggles),
+              (override));
   MOCK_METHOD((std::vector<orc::PreviewOutputInfo>), getAvailableOutputs,
               (NodeID node_id), (override));
 

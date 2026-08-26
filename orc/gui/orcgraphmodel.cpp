@@ -119,6 +119,22 @@ orc::ConfigurationStatus OrcGraphModel::getConfigurationStatus(
   return status;
 }
 
+void OrcGraphModel::invalidateConfigurationStatus(NodeId nodeId) {
+  config_status_cache_.erase(nodeId);
+  Q_EMIT nodeUpdated(nodeId);
+}
+
+void OrcGraphModel::invalidateConnectedConfigurationStatus(NodeId nodeId) {
+  invalidateConfigurationStatus(nodeId);
+  for (const auto& conn : connectivity_) {
+    if (conn.outNodeId == nodeId) {
+      invalidateConfigurationStatus(conn.inNodeId);
+    } else if (conn.inNodeId == nodeId) {
+      invalidateConfigurationStatus(conn.outNodeId);
+    }
+  }
+}
+
 std::unordered_set<NodeId> OrcGraphModel::allNodeIds() const {
   std::unordered_set<NodeId> ids;
   for (const auto& [qt_id, orc_id] : qt_to_orc_nodes_) {
@@ -219,6 +235,11 @@ void OrcGraphModel::addConnection(ConnectionId const connectionId) {
 
     // Add to local connectivity
     connectivity_.insert(connectionId);
+
+    // Both ends have a different set of neighbours now, and a stage can judge
+    // its configuration by them.
+    invalidateConfigurationStatus(connectionId.inNodeId);
+    invalidateConfigurationStatus(connectionId.outNodeId);
 
     Q_EMIT connectionCreated(connectionId);
   } catch (const std::exception& e) {  // NOLINT(bugprone-empty-catch)
@@ -403,6 +424,9 @@ bool OrcGraphModel::deleteConnection(ConnectionId const connectionId) {
     // Remove from local connectivity
     connectivity_.erase(connectionId);
 
+    invalidateConfigurationStatus(connectionId.inNodeId);
+    invalidateConfigurationStatus(connectionId.outNodeId);
+
     Q_EMIT connectionDeleted(connectionId);
 
     return true;
@@ -419,6 +443,10 @@ bool OrcGraphModel::deleteNode(NodeId const nodeId) {
   }
 
   const NodeID& orc_node_id = it->second;
+
+  // Everything this node was wired to loses an input or an output, so their
+  // cached status has to go before the connections do.
+  invalidateConnectedConfigurationStatus(nodeId);
 
   // Remove all connections involving this node from GUI state
   std::vector<ConnectionId> to_remove;

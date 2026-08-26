@@ -57,10 +57,10 @@ const char* kReleaseJson = R"json({
 
 TEST(PluginUpdateChecker_ApiUrl, DerivesLatestReleaseUrlFromRepoUrl) {
   const auto url = PluginUpdateChecker::github_latest_release_api_url(
-      "https://github.com/simoninns/orc-plugin_skeleton");
+      "https://github.com/decode-orc/orc-plugin_skeleton");
   ASSERT_TRUE(url.has_value());
   EXPECT_EQ(*url,
-            "https://api.github.com/repos/simoninns/orc-plugin_skeleton/"
+            "https://api.github.com/repos/decode-orc/orc-plugin_skeleton/"
             "releases/latest");
 }
 

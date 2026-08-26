@@ -72,7 +72,7 @@ a separate per-application registry.
 Every plugin and stage action is available from both front ends, in the same
 words, and both derive an entry's state from one presenter-computed value
 rather than re-deriving it. The capability set is recorded in
-[`orc/plugin_ux_capabilities.yaml`](https://github.com/simoninns/decode-orc/blob/main/orc/plugin_ux_capabilities.yaml){target="_blank"},
+[`orc/plugin_ux_capabilities.yaml`](https://github.com/decode-orc/decode-orc/blob/main/orc/plugin_ux_capabilities.yaml){target="_blank"},
 which names the command and the control for each capability; the
 `CLI.PluginUxCapabilityParity` CTest (label `unit;cli`) fails when a recorded
 command disappears from `orc-cli plugins --help` / `orc-cli stages --help`, or
@@ -164,14 +164,13 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `11` (`FrameDescriptor` dropped the `colour_frame_index`,
-`frame_number`, and `timecode` fields — colour-sequence phase is measured via
-the host `colour_frame_phase` observer through
-`<orc/stage/observation/colour_frame_phase_query.h>`, and VBI picture numbers /
-timecodes come from the `biphase` observer's interpreted `vbi.*` keys; the
-analysis-sink result types in `<orc/stage/common_types.h>` also became canonical
-per-frame records with the aggregated per-bucket fields removed). The
-authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
+**Current value:** `15` (`<orc/stage/tooling/catalogue_results.h>`: a display
+list can state the pixel grid it was resolved against and the shape it is drawn
+at, and say that its operations are that grid's pixels rather than shapes on it;
+and a schema can offer the reader several ways of presenting the same items and
+presentation choices that are on or off, which `ICatalogueResults` gains
+virtuals to be re-asked under).
+The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
 Bumped when any of the following change:
@@ -404,7 +403,7 @@ release publishes an asset following the plugin naming convention), and a
 maintainer's merge is the curation decision. **The merge endorses the
 repository, not a reviewed binary**: every future release the repository
 publishes becomes installable immediately. See
-[`orc-plugin-registry/README.md`](https://github.com/simoninns/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}.
+[`orc-plugin-registry/README.md`](https://github.com/decode-orc/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}.
 
 ### Distribution integrity
 
@@ -599,7 +598,7 @@ Enforcement happens at two levels:
 ## Third-Party Plugin Repositories
 
 An official skeleton template lives at
-[simoninns/orc-plugin_skeleton](https://github.com/simoninns/orc-plugin_skeleton).
+[decode-orc/orc-plugin_skeleton](https://github.com/decode-orc/orc-plugin_skeleton).
 It provides:
 
 - Minimal buildable plugin scaffold (CMake + SDK-only includes + sample stage)

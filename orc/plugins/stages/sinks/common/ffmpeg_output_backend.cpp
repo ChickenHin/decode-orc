@@ -32,7 +32,6 @@
 #include "av1_rate_control.h"
 #include "componentframe.h"
 #include "subtitle_embed_policy.h"
-#include "teletext_subtitle_feed.h"
 
 namespace orc {
 
@@ -291,8 +290,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   // Store audio/subtitle/chapter configuration
   embed_audio_ = config.embed_audio;
   embed_closed_captions_ = config.embed_closed_captions;
-  embed_teletext_subtitles_ = config.embed_teletext_subtitles;
-  teletext_subtitle_page_ = config.teletext_subtitle_page;
   embed_chapter_metadata_ = config.embed_chapter_metadata;
   vfr_ = config.vfr;
   start_field_index_ = config.start_field_index;
@@ -448,25 +445,18 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     embed_audio_ = false;  // Disable audio
   }
 
-  // Select the subtitle source for the single mov_text stream. Both sources
-  // read their data from the observation context alone, so neither depends on
-  // vfr_ (supplied only for audio embedding).
-  const SubtitleEmbedDecision subtitle_decision = select_subtitle_embed_source(
-      {embed_closed_captions_, embed_teletext_subtitles_, container_format_,
-       video_system_ == VideoSystem::PAL,
-       config.observation_context != nullptr});
+  // Select the subtitle source for the single mov_text stream. It reads its
+  // data from the observation context alone, so it does not depend on vfr_
+  // (supplied only for audio embedding).
+  const SubtitleEmbedDecision subtitle_decision =
+      select_subtitle_embed_source({embed_closed_captions_, container_format_,
+                                    config.observation_context != nullptr});
   if (!subtitle_decision.closed_caption_reason.empty()) {
     ORC_LOG_WARN("FFmpegOutputBackend: {}, disabling closed captions",
                  subtitle_decision.closed_caption_reason);
   }
-  if (!subtitle_decision.teletext_reason.empty()) {
-    ORC_LOG_WARN("FFmpegOutputBackend: {}, disabling teletext subtitles",
-                 subtitle_decision.teletext_reason);
-  }
   embed_closed_captions_ =
       (subtitle_decision.source == SubtitleEmbedSource::kClosedCaptions);
-  embed_teletext_subtitles_ =
-      (subtitle_decision.source == SubtitleEmbedSource::kTeletext);
 
   if (embed_closed_captions_) {
     ORC_LOG_DEBUG(
@@ -487,20 +477,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     extractClosedCaptionsFromObservations(*config.observation_context,
                                           config.start_field_index,
                                           config.num_fields);
-  } else if (embed_teletext_subtitles_) {
-    // Teletext cues reuse the CC mov_text stream and muxing path unchanged —
-    // cues in, tx3g samples out.
-    if (!setupSubtitleEncoder()) {
-      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to setup subtitle encoder");
-      cleanup();
-      return false;
-    }
-    pending_cues_ = collect_teletext_subtitle_cues(
-        *config.observation_context, config.start_field_index,
-        config.num_fields, teletext_subtitle_page_);
-    ORC_LOG_INFO(
-        "FFmpegOutputBackend: Extracted {} teletext subtitle cues from page {}",
-        pending_cues_.size(), teletext_subtitle_page_);
   }
 
   // Setup chapter metadata from VBI observations if requested
@@ -1643,7 +1619,6 @@ std::string FFmpegOutputBackend::getFormatInfo() const {
   std::string info = container_format_ + " (" + codec_name_;
   if (embed_audio_) info += " + audio";
   if (embed_closed_captions_) info += " + CC";
-  if (embed_teletext_subtitles_) info += " + TTX";
   if (embed_chapter_metadata_) info += " + chapters";
   info += ")";
   return info;
@@ -2136,8 +2111,8 @@ bool FFmpegOutputBackend::setupSubtitleEncoder() {
 }
 
 bool FFmpegOutputBackend::encodeClosedCaptionsForFrame() {
-  if ((!embed_closed_captions_ && !embed_teletext_subtitles_) ||
-      !subtitle_codec_ctx_ || pending_cues_.empty()) {
+  if (!embed_closed_captions_ || !subtitle_codec_ctx_ ||
+      pending_cues_.empty()) {
     return true;  // No captions to encode
   }
 

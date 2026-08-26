@@ -31,7 +31,7 @@ All stage plugins (core-supplied and third-party) must use only the public plugi
   ctest --test-dir build -R "StagePluginLoader" --output-on-failure
   ```
 
-For new plugins, use the canonical skeleton template as a reference: https://github.com/simoninns/orc-plugin_skeleton
+For new plugins, use the canonical skeleton template as a reference: https://github.com/decode-orc/orc-plugin_skeleton
 
 For third-party plugins, the plugin must build against the installed SDK only (no in-tree private headers). Shared helper dependencies must be either packaged or vendored locally.
 

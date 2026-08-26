@@ -41,7 +41,7 @@ class PreviewDialog;
 class VBIDialog;
 class VideoParameterObserverDialog;
 class NtscObserverDialog;
-class TeletextDialog;
+class CatalogueDialog;
 class ClosedCaptionDialog;
 class DropoutAnalysisDialog;
 class SNRAnalysisDialog;
@@ -113,6 +113,7 @@ class MainWindow : public QMainWindow {
   void onSaveProject();
   void onSaveProjectAs();
   void onEditProject();
+  void onReloadAllSources();
   void onPreviewIndexChanged(int index);
   void onNavigatePreview(int delta);
   void onPreviewModeChanged(int index);
@@ -129,12 +130,6 @@ class MainWindow : public QMainWindow {
   void updateVideoParameterObserverDialog();
   void onShowNtscObserverDialog();
   void updateNtscObserverDialog();
-  void onShowTeletextDialog();
-  void updateTeletextDialog();
-  /// Issue the next batch of teletext observation requests for the dialog's
-  /// window. Called on every frame change and again as each delivery lands,
-  /// because the dialog paces the frames it asks for.
-  void issueTeletextRequests();
   void onShowClosedCaptionDialog();
   void updateClosedCaptionDialog();
   /// Issue the next batch of closed caption observation requests for the
@@ -168,11 +163,6 @@ class MainWindow : public QMainWindow {
       uint64_t request_id, bool available, qulonglong field_id_value,
       orc::presenters::VideoParameterObservationView video_params,
       orc::presenters::NtscFieldObservationsView ntsc);
-  void onTeletextDataReady(uint64_t request_id, bool available,
-                           qulonglong field1_id_value,
-                           orc::presenters::TeletextFieldPacketsView field1,
-                           qulonglong field2_id_value,
-                           orc::presenters::TeletextFieldPacketsView field2);
   void onClosedCaptionDataReady(
       uint64_t request_id, bool available, qulonglong field1_id_value,
       orc::presenters::ClosedCaptionFieldDataView field1,
@@ -217,17 +207,20 @@ class MainWindow : public QMainWindow {
                                   orc::FrameLineNavigationResult result);
   void onDropoutDataReady(uint64_t request_id,
                           orc::presenters::DropoutDisplaySeries series);
-  void onDropoutProgress(size_t current, size_t total, QString message);
   void onSNRDataReady(uint64_t request_id,
                       orc::presenters::SNRDisplaySeries series);
-  void onSNRProgress(size_t current, size_t total, QString message);
   void onBurstLevelDataReady(uint64_t request_id,
                              orc::presenters::BurstLevelDisplaySeries series);
-  void onBurstLevelProgress(size_t current, size_t total, QString message);
+  void onCatalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
+  void onResultsNotAvailable(uint64_t request_id);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
   void onCoordinatorError(uint64_t request_id, QString message);
   void onAbout();
+
+  // Tools > Logging...: edits the diagnostic logging configuration and applies
+  // it to the running application through LoggingController.
+  void onConfigureLogging();
 
  signals:
 
@@ -288,8 +281,26 @@ class MainWindow : public QMainWindow {
   void updateProjectLoadProgressLabel();
   void endProjectLoadProgress();
   void closeAllDialogs();  ///< Close all open dialogs when switching projects
+
+  /// Close every analysis and catalogue viewer, and drop the reads in flight
+  ///
+  /// Called whenever the DAG is rebuilt: the results these windows display
+  /// belong to stage objects the rebuild has replaced.
+  void closeResultViewers();
   void createAndShowAnalysisDialog(const orc::NodeID& node_id,
                                    const std::string& stage_name);
+
+  /// Tell a failed results read's viewer why nothing arrived
+  ///
+  /// Returns true when |request_id| was one of the four results reads, so the
+  /// caller knows the failure has been reported.
+  bool reportFailedResultsRead(uint64_t request_id, const QString& message);
+
+  /// Drop |request_id| from whichever results-read map holds it
+  ///
+  /// Returns the node it was issued for, or nullopt when the id is not a
+  /// results read (a stale response, or some other request's).
+  std::optional<orc::NodeID> takePendingResultsRead(uint64_t request_id);
 
   // Line scope helpers
   void requestLineSamplesForNavigation(uint64_t field_index, int line_number,
@@ -354,12 +365,6 @@ class MainWindow : public QMainWindow {
   orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field1_;
   orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field2_;
 
-  // Teletext dialog: one request per window frame still lacking packet data
-  // (request_id -> frame index); unknown ids in responses are stale.
-  std::unordered_map<uint64_t, uint64_t> pending_teletext_requests_;
-  // View node the teletext packet cache was filled from; a change clears it.
-  orc::NodeID teletext_cache_node_id_;
-
   // Closed caption dialog: one request per window frame still lacking caption
   // data (request_id -> frame index); unknown ids in responses are stale.
   std::unordered_map<uint64_t, uint64_t> pending_closed_caption_requests_;
@@ -383,6 +388,8 @@ class MainWindow : public QMainWindow {
       pending_snr_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>
       pending_burst_level_requests_;  // request_id -> node_id
+  std::unordered_map<uint64_t, orc::NodeID>
+      pending_catalogue_requests_;  // request_id -> node_id
 
   // Dropout analysis state tracking
   orc::NodeID last_dropout_node_id_;
@@ -401,20 +408,23 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;
   // Note: project_presenter_ removed - use project_.presenter() instead
   NtscObserverDialog* ntsc_observer_dialog_;
-  TeletextDialog* teletext_dialog_;
   ClosedCaptionDialog* closed_caption_dialog_;
   std::unordered_map<orc::NodeID, DropoutAnalysisDialog*>
       dropout_analysis_dialogs_;
   std::unordered_map<orc::NodeID, SNRAnalysisDialog*> snr_analysis_dialogs_;
   std::unordered_map<orc::NodeID, BurstLevelAnalysisDialog*>
       burst_level_analysis_dialogs_;
+  // Catalogue browsers, one per node whose stage offers one (stage tool)
+  std::unordered_map<orc::NodeID, CatalogueDialog*> catalogue_dialogs_;
   OrcGraphModel* dag_model_;
   OrcGraphicsView* dag_view_;
   OrcGraphicsScene* dag_scene_;
   QAction* save_project_action_;
   QAction* save_project_as_action_;
   QAction* edit_project_action_;
+  QAction* reload_sources_action_ = nullptr;  // shared by File menu + toolbar
   QAction* plugin_manager_action_ = nullptr;
+  QAction* logging_action_ = nullptr;
   QAction* show_preview_action_;
   QAction* auto_show_preview_action_;
 
@@ -474,14 +484,6 @@ class MainWindow : public QMainWindow {
   QString project_load_stage_label_;  ///< Stage the worker last reported
   qulonglong project_load_current_{0};
   qulonglong project_load_total_{0};
-
-  // Analysis progress dialogs per node (QPointer auto-nulls when deleted)
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      dropout_progress_dialogs_;
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      snr_progress_dialogs_;
-  std::unordered_map<orc::NodeID, QPointer<QProgressDialog>>
-      burst_level_progress_dialogs_;
 };
 
 #endif  // MAINWINDOW_H

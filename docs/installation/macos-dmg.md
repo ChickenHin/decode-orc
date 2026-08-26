@@ -2,7 +2,7 @@
 
 ## Download the latest release
 
-1. Open the GitHub releases page: [Decode-Orc Releases](https://github.com/simoninns/decode-orc/releases){target="_blank"}
+1. Open the GitHub releases page: [Decode-Orc Releases](https://github.com/decode-orc/decode-orc/releases){target="_blank"}
 2. In the latest release, download the DMG named like `Decode-Orc-<version>-macos.dmg`.
 
 ## Install the app from the DMG

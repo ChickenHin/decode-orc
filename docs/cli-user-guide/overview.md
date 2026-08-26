@@ -701,6 +701,6 @@ Linux, macOS and Windows alike:
 crash_bundle_YYYYMMDD_HHMMSS.zip
 ```
 
-When reporting issues, attach this bundle to your bug report on [GitHub Issues](https://github.com/simoninns/decode-orc/issues).
+When reporting issues, attach this bundle to your bug report on [GitHub Issues](https://github.com/decode-orc/decode-orc/issues).
 See [Issue Reporting](../misc/issue-reporting.md) for full details of the bundle
 contents and the locations used by `orc-gui`.

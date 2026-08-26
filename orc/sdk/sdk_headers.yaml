@@ -437,6 +437,12 @@ headers:
     deprecated: true
     since_abi: ""
     notes: "Deprecated include-path shim — forwards to the tiered SDK layout"
+  - path: orc/stage/tooling/catalogue_results.h
+    tier: stage
+    domain: "tooling"
+    deprecated: false
+    since_abi: 13
+    notes: "Host-agnostic browsable result set for stages that catalogue items"
   - path: orc/stage/triggerable_stage.h
     tier: stage
     domain: "foundation"
@@ -509,30 +515,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Runtime loader for a stage's instructions.md (platform file I/O)"
-  - path: orc/support/teletext_page_decoder.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues"
-  - path: orc/support/teletext_recovery_stats.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "Accumulates teletext recovery outcomes into a diagnostic profile of a run"
-  - path: orc/support/teletext_row_squasher.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "Combines repeated copies of a teletext page row into one best-estimate row"
-  - path: orc/support/teletext_slicer.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "PAL WST teletext data-line slicer producing T42 packets"
   - path: orc/support/vbi_types.h
     tier: support
     domain: ""

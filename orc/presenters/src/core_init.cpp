@@ -21,6 +21,15 @@ void initCoreLogging(const std::string& level, const std::string& pattern,
   orc::init_logging(level, pattern, log_file, destination);
 }
 
+bool reconfigureCoreLogging(const std::string& level,
+                            const std::string& pattern,
+                            const std::string& log_file,
+                            LogDestination destination, bool truncate_log_file,
+                            std::string* error_message) {
+  return orc::reconfigure_logging(level, pattern, log_file, destination,
+                                  truncate_log_file, error_message);
+}
+
 namespace {
 // 0 == "auto" (half the hardware concurrency). Written once at startup before
 // any project is opened, read on each scheduler build; an atomic keeps that

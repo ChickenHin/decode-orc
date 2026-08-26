@@ -18,11 +18,16 @@
 
 namespace orc {
 
-// On macOS, dynamic_cast to a concrete plugin class fails when that class is
-// defined in a dylib that is also included in the host binary (duplicate
-// type_info pointers across DSOs). Casting to these interfaces — defined in
-// orc-core, which is always a single shared symbol source — works reliably on
-// all platforms.
+// The host reaches an analysis sink's results by dynamic_cast on the stage
+// pointer it holds. Cast to one of these interfaces, never to a concrete
+// plugin class: plugins are loaded RTLD_LOCAL, so a class defined in both the
+// plugin and the host ends up with two distinct type_info objects and the cast
+// fails (observed on macOS first, but the arrangement is what is fragile, not
+// the platform).
+//
+// Keep these pure abstract interfaces — no data members, no non-virtual
+// members, declared here and nowhere else — so that both sides agree on the
+// vtable layout and the cast has only the type name to reconcile.
 
 class IDropoutAnalysisResults {
  public:

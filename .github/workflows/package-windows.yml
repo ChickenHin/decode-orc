@@ -286,6 +286,86 @@ jobs:
             Write-Warning "vcpkg bin directory not found at $vcpkgBin"
           }
 
+      - name: Smoke test non-ASCII paths
+        shell: pwsh
+        run: |
+          # Regression guard for the UTF-8 application manifest (see
+          # cmake/windows/orc-utf8.manifest): without it the process ANSI code
+          # page mangles the UTF-8 paths the code hands to the CRT and
+          # std::filesystem, and any path holding a non-ASCII character is
+          # reported as missing. Runs against the staged tree, so it exercises
+          # the same layout the MSI ships.
+          #
+          # The run deliberately ends in a non-zero exit (the synthetic capture
+          # is not decodable), so native exit codes must not decide the step:
+          # every check reports itself and the step ends with an explicit exit.
+          $ErrorActionPreference = "Continue"
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          function Fail($message) {
+            Write-Host "::error::$message"
+            exit 1
+          }
+
+          $cliExe = Get-ChildItem -Path "package-root" -Recurse -Filter "orc-cli.exe" | Select-Object -First 1
+          if (-not $cliExe) {
+            Fail "orc-cli.exe not found in package-root"
+          }
+          $cli = $cliExe.FullName
+
+          # Names are built from code points so the test does not depend on the
+          # encoding of this file. The Latin-1 characters are representable in
+          # CP1252 (a mis-decode still resolves to a different, absent name)
+          # and the CJK pair is not representable at all.
+          $uu = [char]0x00FC
+          $oo = [char]0x00F8
+          $cjk = [string][char]0x65E5 + [char]0x672C
+          $dir = Join-Path $PWD ("smoke-" + $uu + "nic" + $oo + "de-" + $cjk)
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          $project = Join-Path $dir ("pr" + $oo + "jekt-" + $cjk + ".orcprj")
+          $capture = Join-Path $dir ("capture-" + $cjk + ".vbi")
+          $output = Join-Path $dir ($oo + "utput-" + $cjk + ".mkv")
+
+          # Three bt8x8 frames of nothing: enough for the source to accept the
+          # capture and read records out of it (it gives up later, at clock
+          # run-in calibration, which is not what is under test).
+          [System.IO.File]::WriteAllBytes($capture, (New-Object byte[] 196608))
+
+          # Forward slashes: a backslash is an escape in a filtergraph value.
+          $captureArg = $capture -replace '\\', '/'
+          $outputArg = $output -replace '\\', '/'
+
+          # Write side: export a project carrying non-ASCII path parameters
+          # into a non-ASCII directory (std::ofstream + std::filesystem).
+          & $cli --source "vbi_source=input_path='$captureArg':format='bt8x8 card dump, 8-bit (WST)'" `
+                 --sink "video_sink=output_path='$outputArg'" `
+                 --video-format PAL --source-type composite `
+                 --export-project $project
+          if ($LASTEXITCODE -ne 0) {
+            Fail "orc-cli could not export a project to a non-ASCII path"
+          }
+          if (-not (Test-Path -LiteralPath $project)) {
+            Fail "Exported project is not at the requested non-ASCII path"
+          }
+
+          # Read side: load it back and run it. Processing fails on the blank
+          # capture, which is expected; what is under test is that both the
+          # project file and the capture it names were found and read.
+          $log = & $cli $project --process 2>&1 | Out-String
+          Write-Host $log
+          if ($log -match "Project file not found") {
+            Fail "orc-cli could not open a project stored on a non-ASCII path"
+          }
+          if ($log -notmatch "Project loaded") {
+            Fail "orc-cli did not load the project stored on a non-ASCII path"
+          }
+          if ($log -match "does not exist") {
+            Fail "orc-cli could not open a capture stored on a non-ASCII path"
+          }
+          Write-Host "Non-ASCII path smoke test passed"
+          exit 0
+
       - name: Convert PNG icon to ICO for WiX
         shell: pwsh
         run: |

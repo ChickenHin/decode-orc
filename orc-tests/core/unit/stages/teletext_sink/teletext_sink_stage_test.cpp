@@ -29,7 +29,7 @@
 
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
-#include "teletext_sink_stage_deps_interface_mock.h"
+#include "teletext_sink_deps_interface_mock.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Ref;
@@ -94,11 +94,10 @@ class TeletextSinkStage : public ::testing::Test {
                      orc::TeletextSinkOptions& captured_options) {
     instance_->set_deps_override(pMockDeps_);
     EXPECT_CALL(*pMockDeps_, init(_, _)).Times(1);
-    EXPECT_CALL(*pMockDeps_, export_t42(pMockRepresentation_.get(),
-                                        Ref(mockObservationContext_), _))
+    EXPECT_CALL(*pMockDeps_, analyse(pMockRepresentation_.get(), _))
         .Times(1)
         .WillOnce(
-            testing::DoAll(SaveArg<2>(&captured_options), Return(result)));
+            testing::DoAll(SaveArg<1>(&captured_options), Return(result)));
   }
 
   std::shared_ptr<StrictMock<MockTeletextSinkStageDeps>> pMockDeps_;
@@ -114,25 +113,66 @@ class TeletextSinkStage : public ::testing::Test {
 TEST_F(TeletextSinkStage, NodeTypeInfo_MatchesDesign) {
   const auto info = instance_->get_node_type_info();
 
+  // A sink rather than an analysis sink: the packet stream is the product,
+  // and the page catalogue rides along on a batch-analysis stage tool.
   EXPECT_EQ(info.type, orc::NodeType::SINK);
+  EXPECT_EQ(orc::stage_category_for(info.type), orc::StageCategory::SINK);
   EXPECT_EQ(info.stage_name, "teletext_sink");
   EXPECT_EQ(info.display_name, "Teletext Sink");
-  EXPECT_EQ(info.description,
-            "Extracts teletext from the VBI and exports a T42 packet stream");
   EXPECT_EQ(info.min_inputs, 1u);
   EXPECT_EQ(info.max_inputs, 1u);
   EXPECT_EQ(info.min_outputs, 0u);
   EXPECT_EQ(info.max_outputs, 0u);
-  EXPECT_EQ(info.compatible_formats, orc::VideoFormatCompatibility::PAL_ONLY);
+  // ITU-R BT.653 System B is defined on 625- and 525-line systems alike, which
+  // between them are every system the project models.
+  EXPECT_EQ(info.compatible_formats, orc::VideoFormatCompatibility::ALL);
+}
+
+// The host routes the viewer on the tool kind and the contract string alone —
+// it knows nothing about teletext — so both must name the generic catalogue
+// browser.
+TEST_F(TeletextSinkStage, StageTools_AdvertiseTheCatalogueContract) {
+  const auto tools = instance_->get_stage_tools();
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools[0].tool_id, "teletext_analysis");
+  EXPECT_EQ(tools[0].kind, orc::StageToolKind::CatalogueBrowser);
+  EXPECT_EQ(tools[0].contract_id, orc::kCatalogueBrowserContractId);
+}
+
+// The host discovers the viewer through StageToolProvider and reads it through
+// ICatalogueResults; AnalysisToolProvider is the other, unrelated seam and must
+// not resolve.
+TEST_F(TeletextSinkStage, Mixins_ExposeStageToolProviderOnly) {
+  EXPECT_NE(dynamic_cast<orc::StageToolProvider*>(instance_.get()), nullptr);
+  EXPECT_NE(dynamic_cast<orc::ICatalogueResults*>(instance_.get()), nullptr);
+  EXPECT_EQ(dynamic_cast<orc::AnalysisToolProvider*>(instance_.get()), nullptr);
+}
+
+// An untriggered stage has an empty catalogue rather than no catalogue: the
+// host asks for one whenever a viewer opens, and a null would be a crash.
+TEST_F(TeletextSinkStage, Catalogue_IsEmptyUntilTriggered) {
+  const auto& catalogue = instance_->catalogue();
+  EXPECT_TRUE(catalogue.items.empty());
+  EXPECT_TRUE(catalogue.consistent());
+  // The schema is a property of the stage, not of the run, so it is filled in
+  // even with nothing to show — that is what labels the empty viewer.
+  EXPECT_FALSE(catalogue.schema.columns.empty());
+  EXPECT_EQ(catalogue.schema.item_noun, "Page");
+}
+
+TEST_F(TeletextSinkStage, Results_AreEmptyUntilTriggered) {
+  EXPECT_FALSE(instance_->has_results());
+  EXPECT_TRUE(instance_->dataset().pages.empty());
 }
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 13u);
+  ASSERT_EQ(descriptors.size(), 18u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
-  EXPECT_TRUE(descriptors[0].constraints.required);
+  // Optional: an empty path is the browse-only run (see the trigger tests).
+  EXPECT_FALSE(descriptors[0].constraints.required);
   EXPECT_EQ(descriptors[0].file_extension_hint, ".t42");
 
   EXPECT_EQ(descriptors[1].name, "first_vbi_line");
@@ -158,62 +198,107 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   EXPECT_EQ(std::get<std::string>(*descriptors[4].constraints.default_value),
             "Automatic");
 
-  EXPECT_EQ(descriptors[5].name, "tolerant_framing");
-  EXPECT_EQ(descriptors[5].type, orc::ParameterType::BOOL);
+  EXPECT_EQ(descriptors[5].name, "character_set");
+  EXPECT_EQ(descriptors[5].type, orc::ParameterType::STRING);
+  // Latin first because it is the default and the overwhelmingly common case,
+  // then the Cyrillic sets in the order material for them is likely to turn up.
+  EXPECT_EQ(descriptors[5].constraints.allowed_strings,
+            (std::vector<std::string>{"Latin", "Cyrillic (Russian/Bulgarian)",
+                                      "Cyrillic (Ukrainian)",
+                                      "Cyrillic (Serbian/Croatian)"}));
   ASSERT_TRUE(descriptors[5].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[5].constraints.default_value), false);
+  EXPECT_EQ(std::get<std::string>(*descriptors[5].constraints.default_value),
+            "Latin");
 
-  EXPECT_EQ(descriptors[6].name, "require_valid_mrag");
-  EXPECT_EQ(descriptors[6].type, orc::ParameterType::BOOL);
+  // The set the ESC control character switches into, offered in the same order
+  // behind the "None" that keeps a page in one alphabet — the default, and the
+  // only value that leaves ESC doing nothing.
+  EXPECT_EQ(descriptors[6].name, "second_character_set");
+  EXPECT_EQ(descriptors[6].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[6].constraints.allowed_strings,
+            (std::vector<std::string>{
+                "None", "Latin", "Cyrillic (Russian/Bulgarian)",
+                "Cyrillic (Ukrainian)", "Cyrillic (Serbian/Croatian)"}));
   ASSERT_TRUE(descriptors[6].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[6].constraints.default_value), true);
+  EXPECT_EQ(std::get<std::string>(*descriptors[6].constraints.default_value),
+            "None");
 
-  EXPECT_EQ(descriptors[7].name, "repair_damaged_bytes");
+  EXPECT_EQ(descriptors[7].name, "tolerant_framing");
   EXPECT_EQ(descriptors[7].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[7].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[7].constraints.default_value), true);
-  ASSERT_TRUE(descriptors[7].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[7].constraints.depends_on->parameter_name, "detector");
+  EXPECT_EQ(std::get<bool>(*descriptors[7].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[8].name, "squash_repeated_rows");
+  EXPECT_EQ(descriptors[8].name, "require_valid_mrag");
   EXPECT_EQ(descriptors[8].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[8].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[8].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[9].name, "write_report");
+  EXPECT_EQ(descriptors[9].name, "repair_damaged_bytes");
   EXPECT_EQ(descriptors[9].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[9].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[9].constraints.default_value), false);
+  EXPECT_EQ(std::get<bool>(*descriptors[9].constraints.default_value), true);
+  ASSERT_TRUE(descriptors[9].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[9].constraints.depends_on->parameter_name, "detector");
 
-  EXPECT_EQ(descriptors[10].name, "export_subtitles");
+  EXPECT_EQ(descriptors[10].name, "pin_data_phase");
   EXPECT_EQ(descriptors[10].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[10].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[10].constraints.default_value), false);
+  EXPECT_EQ(std::get<bool>(*descriptors[10].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[11].name, "subtitle_page");
-  EXPECT_EQ(descriptors[11].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[11].name, "learn_active_lines");
+  EXPECT_EQ(descriptors[11].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[11].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[11].constraints.default_value),
+  EXPECT_EQ(std::get<bool>(*descriptors[11].constraints.default_value), true);
+
+  EXPECT_EQ(descriptors[12].name, "decode_threads");
+  EXPECT_EQ(descriptors[12].type, orc::ParameterType::INT32);
+  ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
+  // 0 is "one per processor"; the recovered stream does not depend on it.
+  EXPECT_EQ(std::get<int32_t>(*descriptors[12].constraints.default_value), 0);
+  ASSERT_TRUE(descriptors[12].constraints.min_value.has_value());
+  EXPECT_EQ(std::get<int32_t>(*descriptors[12].constraints.min_value), 0);
+
+  EXPECT_EQ(descriptors[13].name, "squash_repeated_rows");
+  EXPECT_EQ(descriptors[13].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[13].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[13].constraints.default_value), true);
+
+  EXPECT_EQ(descriptors[14].name, "write_report");
+  EXPECT_EQ(descriptors[14].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[14].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[14].constraints.default_value), false);
+
+  EXPECT_EQ(descriptors[15].name, "export_subtitles");
+  EXPECT_EQ(descriptors[15].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[15].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[15].constraints.default_value), false);
+
+  EXPECT_EQ(descriptors[16].name, "subtitle_page");
+  EXPECT_EQ(descriptors[16].type, orc::ParameterType::STRING);
+  ASSERT_TRUE(descriptors[16].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[16].constraints.default_value),
             "888");
-  ASSERT_TRUE(descriptors[11].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[11].constraints.depends_on->parameter_name,
+  ASSERT_TRUE(descriptors[16].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[16].constraints.depends_on->parameter_name,
             "export_subtitles");
 
-  EXPECT_EQ(descriptors[12].name, "subtitle_format");
-  EXPECT_EQ(descriptors[12].type, orc::ParameterType::STRING);
-  ASSERT_EQ(descriptors[12].constraints.allowed_strings.size(), 1u);
-  EXPECT_EQ(descriptors[12].constraints.allowed_strings[0], "SRT");
-  ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[12].constraints.default_value),
+  EXPECT_EQ(descriptors[17].name, "subtitle_format");
+  EXPECT_EQ(descriptors[17].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[17].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[17].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[17].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[17].constraints.default_value),
             "SRT");
-  ASSERT_TRUE(descriptors[12].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[12].constraints.depends_on->parameter_name,
+  ASSERT_TRUE(descriptors[17].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[17].constraints.depends_on->parameter_name,
             "export_subtitles");
 }
 
-TEST_F(TeletextSinkStage, ConfigurationStatus_RedUntilOutputPathSet) {
+// Without a path the stage still runs and still fills the viewer, so it is the
+// reduced behaviour Yellow stands for rather than Red's missing requirement.
+TEST_F(TeletextSinkStage, ConfigurationStatus_YellowWithoutOutputPath) {
   EXPECT_EQ(instance_->get_configuration_status(),
-            orc::ConfigurationStatus::Red);
+            orc::ConfigurationStatus::Yellow);
 
   EXPECT_TRUE(
       instance_->set_parameters({{"output_path", std::string("out.t42")}}));
@@ -222,7 +307,7 @@ TEST_F(TeletextSinkStage, ConfigurationStatus_RedUntilOutputPathSet) {
 
   EXPECT_TRUE(instance_->set_parameters({{"output_path", std::string("")}}));
   EXPECT_EQ(instance_->get_configuration_status(),
-            orc::ConfigurationStatus::Red);
+            orc::ConfigurationStatus::Yellow);
 }
 
 TEST_F(TeletextSinkStage, SetParameters_RoundTripsValues) {
@@ -262,21 +347,55 @@ TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenInputNotRepresentation) {
             "Error: Input is not a video frame representation");
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenOutputPathMissing) {
-  const bool result =
-      instance_->trigger(make_valid_input(), {}, mockObservationContext_);
+// Browsing the pages is a reason to trigger the stage on its own, so no output
+// path means "decode, catalogue, write nothing" rather than a failed run.
+TEST_F(TeletextSinkStage, Trigger_RunsBrowseOnlyWhenOutputPathMissing) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.packets_written = 84;
+  deps_result.fields_with_data = 2;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
 
-  EXPECT_FALSE(result);
-  EXPECT_EQ(instance_->get_trigger_status(), "Error: No output path specified");
+  EXPECT_TRUE(
+      instance_->trigger(make_valid_input(), {}, mockObservationContext_));
+
+  EXPECT_TRUE(captured.output_path.empty());
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Recovered 84 teletext packets (2 fields with data); no packet "
+            "stream written (no output file set); 0 pages");
 }
 
-TEST_F(TeletextSinkStage, Trigger_ReturnsFalseWhenOutputPathEmpty) {
-  const bool result =
-      instance_->trigger(make_valid_input(), {{"output_path", std::string("")}},
-                         mockObservationContext_);
+TEST_F(TeletextSinkStage, Trigger_RunsBrowseOnlyWhenOutputPathEmpty) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
 
-  EXPECT_FALSE(result);
-  EXPECT_EQ(instance_->get_trigger_status(), "Error: Output path is empty");
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("")}},
+                                 mockObservationContext_));
+
+  EXPECT_TRUE(captured.output_path.empty());
+}
+
+// The report and the subtitle document are both named after the packet stream
+// and written beside it, so neither can be honoured without one. Refused up
+// front rather than silently dropped.
+TEST_F(TeletextSinkStage, Trigger_RejectsFileExportsWithoutOutputPath) {
+  EXPECT_FALSE(instance_->trigger(
+      make_valid_input(),
+      {{"output_path", std::string("")}, {"export_subtitles", true}},
+      mockObservationContext_));
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Error: Subtitle export needs an output file (the cues are "
+            "written beside the packet stream)");
+
+  EXPECT_FALSE(instance_->trigger(make_valid_input(), {{"write_report", true}},
+                                  mockObservationContext_));
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Error: The report file needs an output file (it is written "
+            "beside the packet stream)");
 }
 
 TEST_F(TeletextSinkStage, Trigger_RejectsInvalidLineWindows) {
@@ -355,8 +474,6 @@ TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
   EXPECT_FALSE(captured.tolerant_framing);
   EXPECT_TRUE(captured.require_valid_mrag);
   EXPECT_TRUE(captured.parity_repair);
-  // The default has to match the host observer's fixed configuration, or a
-  // default run cannot consume its cached observations.
   EXPECT_EQ(captured.detector, orc::TeletextDetector::kAuto);
 }
 
@@ -404,7 +521,8 @@ TEST_F(TeletextSinkStage, Trigger_ReportsCountsFromDepsResult) {
                                  mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages");
   EXPECT_FALSE(instance_->is_trigger_in_progress());
 }
 
@@ -424,8 +542,8 @@ TEST_F(TeletextSinkStage, Trigger_ReportsRepairedBytesFromDepsResult) {
       mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "repaired 17 damaged bytes");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; repaired 17 damaged bytes");
 }
 
 TEST_F(TeletextSinkStage, Trigger_PassesSubtitleOptionsToDeps) {
@@ -505,8 +623,8 @@ TEST_F(TeletextSinkStage, Trigger_ReportsSubtitleCountsFromDepsResult) {
       instance_->trigger(make_valid_input(), params, mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "3 subtitle cues to out.srt");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; 3 subtitle cues to out.srt");
 }
 
 TEST_F(TeletextSinkStage, Trigger_EmitsTheReportFromDeps) {
@@ -565,8 +683,8 @@ TEST_F(TeletextSinkStage, Trigger_ReportsTheSquashAndReportPathInTheStatus) {
       mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "combined repeated rows corrected 31 packets; report to "
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; combined repeated rows corrected 31 packets; report to "
             "out.t42.txt");
   EXPECT_TRUE(captured.write_report);
 }
@@ -589,8 +707,8 @@ TEST_F(TeletextSinkStage, Trigger_ReportsDataLossInTheStatus) {
                                  mockObservationContext_));
 
   EXPECT_EQ(instance_->get_trigger_status(),
-            "Exported 84 teletext packets (2 fields with data) to out.t42; "
-            "data loss 1.08% (111 of 10234 characters damaged)");
+            "Recovered 84 teletext packets (2 fields with data) to out.t42; "
+            "0 pages; data loss 1.08% (111 of 10234 characters damaged)");
 }
 
 // A run that wrote no display row has no denominator, so it claims no figure
@@ -614,7 +732,7 @@ TEST_F(TeletextSinkStage, Trigger_OmitsDataLossWhenNoCharactersWereWritten) {
 TEST_F(TeletextSinkStage, Trigger_ReportsDepsFailure) {
   orc::TeletextSinkResult deps_result;
   deps_result.success = false;
-  deps_result.message = "Input is not PAL (teletext sink is PAL WST only)";
+  deps_result.message = "Input has no frames";
   orc::TeletextSinkOptions captured;
   expect_export(deps_result, captured);
 
@@ -622,9 +740,193 @@ TEST_F(TeletextSinkStage, Trigger_ReportsDepsFailure) {
                                   {{"output_path", std::string("out")}},
                                   mockObservationContext_));
 
-  EXPECT_EQ(instance_->get_trigger_status(),
-            "Error: Input is not PAL (teletext sink is PAL WST only)");
+  EXPECT_EQ(instance_->get_trigger_status(), "Error: Input has no frames");
   EXPECT_FALSE(instance_->is_trigger_in_progress());
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// A 525-line project carries the 34-byte service, whose stream is named .t34,
+// on the window ITU-R BT.653 §2 defines. Subtitle export is not offered: the
+// cue timing assumes 50 fields per second.
+TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
+  for (const auto system : {orc::VideoSystem::NTSC, orc::VideoSystem::PAL_M}) {
+    const auto descriptors =
+        instance_->get_parameter_descriptors(system, orc::SourceType::Unknown);
+    ASSERT_EQ(descriptors.size(), 15u) << static_cast<int>(system);
+
+    EXPECT_EQ(descriptors[0].name, "output_path");
+    EXPECT_EQ(descriptors[0].file_extension_hint, ".t34");
+
+    EXPECT_EQ(descriptors[1].name, "first_vbi_line");
+    ASSERT_TRUE(descriptors[1].constraints.default_value.has_value());
+    EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 10);
+
+    EXPECT_EQ(descriptors[2].name, "last_vbi_line");
+    ASSERT_TRUE(descriptors[2].constraints.default_value.has_value());
+    EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 21);
+
+    for (const auto& descriptor : descriptors) {
+      EXPECT_EQ(descriptor.name.find("subtitle"), std::string::npos)
+          << descriptor.name;
+    }
+  }
+}
+
+TEST_F(TeletextSinkStage, ParameterDescriptors_DefaultToThe625Service) {
+  const auto descriptors = instance_->get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Unknown);
+  ASSERT_EQ(descriptors.size(), 18u);
+  EXPECT_EQ(descriptors[0].file_extension_hint, ".t42");
+  EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 6);
+  EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 22);
+}
+
+// The last two links of the character-set chain, which nothing else covers:
+// the parameter reaching the options the pass is given, and the pass's pages
+// reaching the grid the viewer draws.
+TEST_F(TeletextSinkStage, Trigger_PassesTheCharacterSetToThePass) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"character_set", std::string("Cyrillic (Russian/Bulgarian)")}},
+      mockObservationContext_));
+
+  EXPECT_EQ(captured.character_set, orc::TeletextG0Set::Cyrillic2);
+  // Left unset, so nothing the ESC control character could switch into: the
+  // parameter's default and the behaviour of every page before it existed.
+  EXPECT_FALSE(captured.second_character_set.has_value());
+}
+
+TEST_F(TeletextSinkStage, Trigger_PassesTheSecondCharacterSetToThePass) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"character_set", std::string("Cyrillic (Russian/Bulgarian)")},
+       {"second_character_set", std::string("Latin")}},
+      mockObservationContext_));
+
+  EXPECT_EQ(captured.character_set, orc::TeletextG0Set::Cyrillic2);
+  ASSERT_TRUE(captured.second_character_set.has_value());
+  EXPECT_EQ(captured.second_character_set->g0_set, orc::TeletextG0Set::Latin);
+  // ETSI EN 300 706 §15.3: the second set's national option sub-set is
+  // designated with the set and never taken from the page header, and with no
+  // designation to read there is nothing but English to use.
+  EXPECT_EQ(captured.second_character_set->national_option_subset, 0);
+}
+
+TEST_F(TeletextSinkStage, Trigger_RejectsAnUnknownSecondCharacterSet) {
+  EXPECT_FALSE(
+      instance_->trigger(make_valid_input(),
+                         {{"output_path", std::string("out")},
+                          {"second_character_set", std::string("Klingon")}},
+                         mockObservationContext_));
+  EXPECT_EQ(instance_->get_trigger_status(),
+            "Error: Unknown second character set: Klingon");
+}
+
+TEST_F(TeletextSinkStage, Catalogue_DrawsThePagesInTheirOwnCharacterSet) {
+  orc::TeletextPageSnapshot snapshot;
+  snapshot.magazine = 1;
+  snapshot.page_number = 0x00;
+  snapshot.g0_set = orc::TeletextG0Set::Cyrillic2;
+  snapshot.row_received[1] = true;
+  const std::string codes = "Wtornik";
+  for (size_t column = 0; column < codes.size(); ++column) {
+    snapshot.cells[1][column].character = static_cast<uint8_t>(codes[column]);
+    // Cells carry their own set so an ESC-switched run keeps its alphabet; the
+    // decoder stamps them and a hand-built snapshot must too.
+    snapshot.cells[1][column].g0_set = snapshot.g0_set;
+  }
+
+  orc::TeletextCataloguedSubPage subpage;
+  subpage.page = snapshot;
+  orc::TeletextCataloguedPage page;
+  page.magazine = snapshot.magazine;
+  page.page_number = snapshot.page_number;
+  page.times_seen = 1;
+  page.subpages.push_back(std::move(subpage));
+
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.dataset.pages.push_back(std::move(page));
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(
+      make_valid_input(),
+      {{"character_set", std::string("Cyrillic (Russian/Bulgarian)")}},
+      mockObservationContext_));
+
+  const orc::CatalogueDataset& catalogue = instance_->catalogue();
+  const orc::CatalogueCellGrid* grid = nullptr;
+  for (const orc::CataloguePayload& payload : catalogue.payloads) {
+    if (payload.kind == orc::CataloguePayload::Kind::kCellGrid) {
+      grid = &payload.grid;
+      break;
+    }
+  }
+  ASSERT_NE(grid, nullptr);
+  // "Вторник" — the first letter is enough to tell the alphabets apart, and
+  // char32_t comparison keeps the assertion free of encoding questions.
+  EXPECT_EQ(grid->at(1, 0).character, U'В');
+  EXPECT_EQ(grid->at(1, 1).character, U'т');
+}
+
+// The viewer reads the catalogue off the stage after the trigger, so a
+// successful run has to leave it there.
+TEST_F(TeletextSinkStage, Trigger_CachesTheDatasetForTheViewer) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  deps_result.output_path = "out.t42";
+  orc::TeletextCataloguedPage page;
+  page.magazine = 1;
+  page.page_number = 0x00;
+  page.times_seen = 4;
+  page.first_seen_frame = 12;
+  page.last_seen_frame = 900;
+  deps_result.dataset.pages.push_back(page);
+  deps_result.dataset.summary.packets_recovered = 84;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_TRUE(instance_->trigger(make_valid_input(),
+                                 {{"output_path", std::string("out")}},
+                                 mockObservationContext_));
+
+  EXPECT_TRUE(instance_->has_results());
+  ASSERT_EQ(instance_->dataset().pages.size(), 1u);
+  EXPECT_EQ(instance_->dataset().pages[0].magazine, 1);
+  EXPECT_EQ(instance_->dataset().pages[0].times_seen, 4u);
+  EXPECT_EQ(instance_->dataset().summary.packets_recovered, 84u);
+  EXPECT_NE(instance_->get_trigger_status().find("; 1 page"), std::string::npos)
+      << instance_->get_trigger_status();
+}
+
+// A failed run has no results to show, but what it did recover is still worth
+// keeping: the pages are why the user triggered it.
+TEST_F(TeletextSinkStage, Trigger_KeepsThePartialDatasetOnFailure) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = false;
+  deps_result.message = "Cancelled after 10 of 100 frames";
+  deps_result.dataset.pages.emplace_back();
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  EXPECT_FALSE(instance_->trigger(make_valid_input(),
+                                  {{"output_path", std::string("out")}},
+                                  mockObservationContext_));
+
+  EXPECT_FALSE(instance_->has_results());
+  EXPECT_EQ(instance_->dataset().pages.size(), 1u);
 }
 
 }  // namespace orc_unit_test

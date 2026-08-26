@@ -357,15 +357,9 @@ void OrcGraphicsScene::onNodeContextMenu(QtNodes::NodeId nodeId,
         graph_model_.presenter().getCoreProjectHandle());
     auto tool_infos = analysis_presenter.getToolsForStage(node_info.stage_name);
 
-    // Exclude batch_analysis tools: those are launched automatically after a
-    // stage trigger and must not appear as standalone menu entries.
-    tool_infos.erase(std::remove_if(tool_infos.begin(), tool_infos.end(),
-                                    [](const orc::AnalysisToolInfo& t) {
-                                      return t.stage_tool_kind ==
-                                             "batch_analysis";
-                                    }),
-                     tool_infos.end());
-
+    // Every tool the stage advertises is listed, result viewers included: a
+    // viewer entry re-opens the last trigger's results without re-running the
+    // stage, which is the one thing Trigger Stage above cannot do.
     if (tool_infos.empty()) {
       analysis_menu->setEnabled(false);
     } else {

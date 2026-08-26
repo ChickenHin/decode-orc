@@ -86,21 +86,22 @@ orc_add_gui_unit_tests(
         OFFSCREEN
         SOURCES
             audio_channel_pair_notice_test.cpp
+            source_join_notice_test.cpp
             field_frame_presentation_test.cpp
             frame_view_geometry_test.cpp
             framescopedialog_test.cpp
             frametimingdialog_test.cpp
             line_navigation_mapper_test.cpp
+            logging_settings_test.cpp
             theme_manager_test.cpp
             node_type_helper_port_test.cpp
             observation_status_formatter_test.cpp
             preview_audio_chase_test.cpp
             project_load_status_formatter_test.cpp
             quick_project_planner_test.cpp
+            teletext_font_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
-            teletext_observation_presenter_test.cpp
-            teletext_page_assembler_test.cpp
             vectorscope_geometry_test.cpp
 )
 
@@ -110,6 +111,7 @@ orc_add_gui_unit_tests(
     "gui-model"
     SOURCES
         gui_project_test.cpp
+        logging_controller_test.cpp
         orc_graph_model_test.cpp
         preview_audio_controller_test.cpp
         render_coordinator_test.cpp
@@ -137,9 +139,10 @@ orc_add_gui_unit_tests(
         preview_dialog_audio_test.cpp
         preview_dialog_observer_availability_test.cpp
         preview_dialog_subwindow_lifecycle_test.cpp
+        logging_settings_dialog_test.cpp
         theme_controller_test.cpp
         plugin_browse_dialog_test.cpp
         plugin_manager_dialog_test.cpp
         closed_caption_dialog_test.cpp
-        teletext_dialog_test.cpp
+        catalogue_dialog_test.cpp
 )

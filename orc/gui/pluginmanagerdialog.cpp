@@ -105,27 +105,26 @@ void PluginManagerDialog::accept() {
     return;
   }
 
-  QMessageBox restart_box(this);
-  restart_box.setWindowTitle("Restart Required");
-  restart_box.setIcon(QMessageBox::Question);
-  restart_box.setText(
-      "Plugin changes require an application restart to take effect.\n\n"
-      "Restart now?");
-  restart_box.setStandardButtons(QMessageBox::NoButton);
-  QPushButton* restart_btn =
-      restart_box.addButton("Restart", QMessageBox::AcceptRole);
+  // The application can only quit itself, not relaunch itself, so the prompt
+  // offers the quit and names the restart as the user's own step.
+  QMessageBox quit_box(this);
+  quit_box.setWindowTitle("Restart Required");
+  quit_box.setIcon(QMessageBox::Question);
+  quit_box.setText(QString::fromUtf8(plugin_ux::kQuitToApplyPrompt));
+  quit_box.setStandardButtons(QMessageBox::NoButton);
+  QPushButton* quit_btn = quit_box.addButton("Quit", QMessageBox::AcceptRole);
   QPushButton* cancel_btn =
-      restart_box.addButton("Cancel", QMessageBox::RejectRole);
-  restart_box.setDefaultButton(restart_btn);
-  restart_box.exec();
+      quit_box.addButton("Cancel", QMessageBox::RejectRole);
+  quit_box.setDefaultButton(quit_btn);
+  quit_box.exec();
 
-  if (restart_box.clickedButton() == restart_btn) {
+  if (quit_box.clickedButton() == quit_btn) {
     QDialog::accept();
     QCoreApplication::quit();
     return;
   }
 
-  if (restart_box.clickedButton() == cancel_btn) {
+  if (quit_box.clickedButton() == cancel_btn) {
     // Keep dialog open so user can continue editing or choose Cancel.
     return;
   }
@@ -791,7 +790,7 @@ void PluginManagerDialog::onAddPlugin() {
   url_dialog.setInputMode(QInputDialog::TextInput);
   url_dialog.setTextEchoMode(QLineEdit::Normal);
   url_dialog.setTextValue(
-      "https://github.com/simoninns/orc-plugin_skeleton/releases");
+      "https://github.com/decode-orc/orc-plugin_skeleton/releases");
   url_dialog.resize(900, url_dialog.sizeHint().height());
   url_dialog.setMinimumWidth(900);
 

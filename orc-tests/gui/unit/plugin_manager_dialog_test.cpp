@@ -14,6 +14,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDeadlineTimer>
+#include <QDialogButtonBox>
 #include <QGroupBox>
 #include <QLabel>
 #include <QMessageBox>
@@ -335,6 +336,97 @@ TEST(PluginManagerDialogTest, RemovePassesTheSelectedRowsSelectorThrough) {
   accepter->start(25);
   remove_button->click();
   accepter->stop();
+
+  dialog.reset();
+}
+
+// Closing the dialog after a registry change offers a quit, not a restart: the
+// application cannot relaunch itself, and the prompt must not promise it.
+TEST(PluginManagerDialogTest, AcceptAfterAChangeOffersToQuitRatherThanRestart) {
+  ensureApplication();
+  NiceMock<orc::presenters::test::MockProjectPresenter> mock;
+
+  orc::presenters::PluginRegistryInfo registry;
+  orc::presenters::PluginRegistryEntryInfo entry;
+  entry.selector = "com.example.plugin";
+  entry.plugin_id = "com.example.plugin";
+  entry.path = "/plugins/example.so";
+  entry.path_exists = true;
+  entry.load_state = orc::presenters::PluginLoadState::WillLoad;
+  registry.entries = {entry};
+  ON_CALL(mock, getPluginRegistry()).WillByDefault(Return(registry));
+
+  orc::presenters::PluginRegistryMutationResult removed;
+  removed.success = true;
+  ON_CALL(mock, removePluginEntry("com.example.plugin"))
+      .WillByDefault(Return(removed));
+
+  auto dialog = std::make_unique<orc::PluginManagerDialog>(mock);
+  drainEvents(500);
+
+  auto* table = dialog->findChild<QTableWidget*>();
+  ASSERT_NE(table, nullptr);
+  ASSERT_EQ(table->rowCount(), 1);
+  table->selectRow(0);
+
+  QPushButton* remove_button = nullptr;
+  for (auto* button : dialog->findChildren<QPushButton*>()) {
+    if (button->text() == "Remove") {
+      remove_button = button;
+      break;
+    }
+  }
+  ASSERT_NE(remove_button, nullptr);
+
+  // Confirm the removal so the dialog records that the registry changed.
+  auto* confirmer = new QTimer(dialog.get());
+  QObject::connect(confirmer, &QTimer::timeout, [] {
+    if (auto* box =
+            qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+      if (auto* yes = box->button(QMessageBox::Yes)) {
+        yes->click();
+      }
+    }
+  });
+  confirmer->start(25);
+  remove_button->click();
+  confirmer->stop();
+
+  // Answer the close prompt with Cancel, recording what it said on the way.
+  QString prompt_text;
+  QStringList button_labels;
+  auto* answerer = new QTimer(dialog.get());
+  QObject::connect(answerer, &QTimer::timeout, [&] {
+    auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+    if (box == nullptr) {
+      return;
+    }
+    prompt_text = box->text();
+    QPushButton* cancel = nullptr;
+    for (auto* button : box->buttons()) {
+      button_labels << button->text();
+      if (button->text() == "Cancel") {
+        cancel = qobject_cast<QPushButton*>(button);
+      }
+    }
+    ASSERT_NE(cancel, nullptr);
+    cancel->click();
+  });
+  answerer->start(25);
+  auto* button_box = dialog->findChild<QDialogButtonBox*>();
+  ASSERT_NE(button_box, nullptr);
+  auto* ok_button = button_box->button(QDialogButtonBox::Ok);
+  ASSERT_NE(ok_button, nullptr);
+  ok_button->click();
+  answerer->stop();
+
+  EXPECT_EQ(prompt_text, QString::fromUtf8(orc::plugin_ux::kQuitToApplyPrompt));
+  EXPECT_TRUE(button_labels.contains("Quit"))
+      << "offered buttons: " << button_labels.join(", ").toStdString();
+  EXPECT_FALSE(button_labels.contains("Restart"))
+      << "the application cannot restart itself";
+  // Cancel keeps the dialog open rather than closing it.
+  EXPECT_FALSE(dialog->isHidden() && dialog->result() == QDialog::Accepted);
 
   dialog.reset();
 }

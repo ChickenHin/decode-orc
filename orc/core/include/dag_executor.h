@@ -87,6 +87,28 @@ class DAG {
 };
 
 /**
+ * @brief Copy @p dag with a fresh stage instance behind every node.
+ *
+ * Stages are stateful: most keep their configuration in members and several
+ * re-apply the parameter map from execute(), so one instance cannot be
+ * executed from two threads at once. A DAG is otherwise shared freely — the
+ * background observation pool hands the same one to every worker — so a
+ * consumer that executes on its own thread takes a clone and owns the stages
+ * behind it outright.
+ *
+ * Each node is rebuilt from the registry by its stage name and configured
+ * from the node's parameter map, which is the whole of a stage's configured
+ * state (project_to_dag builds a node the same way). State a stage acquired
+ * after that — a trigger's cached results, a source's loaded representation —
+ * is not carried over: the clone is for executing, not for reading results
+ * back out of.
+ *
+ * Returns nullptr if any stage cannot be recreated, which leaves the caller
+ * to fall back to the shared DAG rather than silently losing nodes.
+ */
+std::shared_ptr<DAG> clone_dag_with_fresh_stages(const DAG& dag);
+
+/**
  * @brief Executes a DAG, producing output artifacts
  *
  * Handles:

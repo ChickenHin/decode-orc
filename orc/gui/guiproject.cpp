@@ -184,22 +184,7 @@ void GUIProject::clear() {
   project_path_.clear();
 }
 
-bool GUIProject::hasSource() const {
-  if (!presenter_) return false;
-
-  auto nodes = presenter_->getNodes();
-  auto all_stages = presenter_->listAllStages();
-
-  return std::any_of(
-      nodes.begin(), nodes.end(), [&all_stages](const auto& node) {
-        auto stage_it =
-            std::find_if(all_stages.begin(), all_stages.end(),
-                         [&node](const orc::presenters::StageInfo& s) {
-                           return s.name == node.stage_name;
-                         });
-        return stage_it != all_stages.end() && stage_it->is_source;
-      });
-}
+bool GUIProject::hasSource() const { return sourceNodeCount() > 0; }
 
 QString GUIProject::getSourceName() const {
   if (!presenter_) return QString();
@@ -218,6 +203,37 @@ QString GUIProject::getSourceName() const {
     }
   }
   return QString();
+}
+
+int GUIProject::sourceNodeCount() const {
+  if (!presenter_) return 0;
+
+  auto nodes = presenter_->getNodes();
+  auto all_stages = presenter_->listAllStages();
+
+  return static_cast<int>(std::count_if(
+      nodes.begin(), nodes.end(), [&all_stages](const auto& node) {
+        auto stage_it =
+            std::find_if(all_stages.begin(), all_stages.end(),
+                         [&node](const orc::presenters::StageInfo& s) {
+                           return s.name == node.stage_name;
+                         });
+        return stage_it != all_stages.end() && stage_it->is_source;
+      }));
+}
+
+GUIProject::SourceReloadResult GUIProject::reloadSources() {
+  SourceReloadResult result;
+  result.source_count = sourceNodeCount();
+  if (result.source_count == 0) {
+    // Nothing to re-read; leave the existing DAG (if any) in place rather
+    // than discarding it for no gain.
+    return result;
+  }
+
+  rebuildDAG();
+  result.rebuilt = dag_cache_ != nullptr;
+  return result;
 }
 
 std::shared_ptr<void> GUIProject::getDAG() const {

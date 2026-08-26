@@ -75,6 +75,49 @@ class ProjectConversionError : public std::runtime_error {
 std::shared_ptr<DAG> project_to_dag(const Project& project);
 
 /**
+ * @brief Resolve the file-path parameters of a node against the project root
+ *
+ * Project files store paths as the user gave them: absolute, relative to the
+ * project directory, or written with ${PROJECT_ROOT}. A stage only ever sees
+ * resolved paths, so every consumer of a node's stored parameters has to run
+ * them through this before handing them to a stage — otherwise a stage that
+ * checks its input file (every source stage does, for its status dot) is told
+ * a path that does not resolve from the process working directory and reports
+ * itself unconfigured.
+ *
+ * Parameters whose name does not look like a path are left untouched.
+ *
+ * @param parameters  Parameter map, modified in place
+ * @param project_root Directory the project file lives in; no-op when empty
+ */
+void resolve_path_parameters(std::map<std::string, ParameterValue>& parameters,
+                             const std::string& project_root);
+
+/**
+ * @brief Fill in the reserved input-identity parameter for a node
+ *
+ * A stage that has to know which upstream node feeds each entry of execute()'s
+ * inputs vector declares a STRING parameter named orc::kInputNodeIdsParameter;
+ * the host is the only thing that can answer that, because artifacts carry no
+ * node identity. This writes the source node IDs of the node's incoming
+ * connections into that parameter, comma-separated, in input order.
+ *
+ * Stages that do not declare the parameter are left untouched, so callers can
+ * apply this unconditionally to every node.
+ *
+ * @param stage           Stage instance for the node (its descriptors are read)
+ * @param project_format  Project video format, for descriptor lookup
+ * @param source_type     Project source type, for descriptor lookup
+ * @param input_node_ids  Source node IDs of the incoming connections, in input
+ *                        order
+ * @param parameters      Parameter map, modified in place
+ */
+void apply_input_node_ids_parameter(
+    const DAGStage& stage, VideoSystem project_format, SourceType source_type,
+    const std::vector<NodeID>& input_node_ids,
+    std::map<std::string, ParameterValue>& parameters);
+
+/**
  * @brief Validate that all source nodes in a DAG can be accessed
  *
  * This function attempts to execute each source node in the DAG to verify

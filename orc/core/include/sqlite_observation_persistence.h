@@ -20,15 +20,19 @@
     "CLI code cannot include core/include/sqlite_observation_persistence.h. Use a presenter instead."
 #endif
 
+#include <condition_variable>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "observation_persistence.h"
 
 // Forward-declared so the SQLite headers stay confined to the .cpp and never
 // leak into the presenter layer that includes this file.
 struct sqlite3;
+struct sqlite3_stmt;
 
 namespace orc {
 
@@ -62,9 +66,22 @@ namespace orc {
  * and rebuilt (a warning is logged; construction never throws for a recoverable
  * on-disk problem), so opening a project can never fail on the sidecar.
  *
- * Thread-safety (coding standards §5.3.3): every public method is guarded by an
- * internal mutex, so all database access is serialised and the instance is safe
- * to share across the store's writer thread and the caller's thread.
+ * Thread-safety (coding standards §5.3.3): the instance is safe to share across
+ * the store's write-behind thread and any number of reading threads. Writes and
+ * maintenance are serialised on one connection behind @c mutex_; reads run on a
+ * pool of separate connections and take no part in that lock (see
+ * @ref acquire_reader). That separation is not an optimisation detail — it is
+ * what stops a coverage probe from waiting out a whole write batch. With one
+ * shared connection, a trigger's observation probes spent most of their time
+ * blocked behind the write-behind thread's transactions: an indexed point query
+ * that costs ~4 us on an idle database measured ~157 us during a sweep, and the
+ * observation pool stopped scaling past ~3x however many workers it was given.
+ *
+ * Readers never see a write batch mid-flight — WAL gives each reader the last
+ * committed snapshot — which is the same guarantee the shared-connection design
+ * offered, since a caller could never observe a partial transaction either.
+ * Records written but not yet committed are still visible to callers through
+ * the ObservationStore's in-memory LRU, which is consulted before persistence.
  */
 class SqliteObservationPersistence : public IObservationPersistence {
  public:
@@ -93,6 +110,10 @@ class SqliteObservationPersistence : public IObservationPersistence {
   std::optional<ObservationRecord> load_one(
       const ObservationRecordKey& key) override;
   bool exists(const ObservationRecordKey& key) override;
+  bool load_stored_keys(
+      const NodeFingerprint& fingerprint,
+      const std::function<bool(FieldID, const std::string&,
+                               const std::string&)>& sink) override;
 
   // Maintenance stamps, stored in the schema_meta table under an "app:" key
   // prefix (the bare "version" key is reserved for the schema version).
@@ -123,6 +144,66 @@ class SqliteObservationPersistence : public IObservationPersistence {
   std::size_t record_count();
 
  private:
+  // One pooled read connection: its own sqlite handle plus the two point-query
+  // statements the read-through path runs per observation record, prepared once
+  // and reused. Preparing them per call re-parses and re-plans the same two
+  // statements millions of times over a sweep.
+  struct ReadConnection {
+    sqlite3* db = nullptr;
+    sqlite3_stmt* exists_stmt = nullptr;
+    sqlite3_stmt* load_one_stmt = nullptr;
+    ~ReadConnection();
+
+    ReadConnection() = default;
+    ReadConnection(const ReadConnection&) = delete;
+    ReadConnection& operator=(const ReadConnection&) = delete;
+  };
+
+  // RAII lease on a pooled read connection, returned to the pool on scope exit.
+  // Contextually false when no connection could be opened, in which case the
+  // caller falls back to the writer connection under mutex_.
+  class ReaderLease {
+   public:
+    ReaderLease(SqliteObservationPersistence* owner,
+                std::unique_ptr<ReadConnection> connection);
+    ~ReaderLease();
+
+    ReaderLease(const ReaderLease&) = delete;
+    ReaderLease& operator=(const ReaderLease&) = delete;
+
+    explicit operator bool() const { return connection_ != nullptr; }
+    ReadConnection* operator->() const { return connection_.get(); }
+
+   private:
+    SqliteObservationPersistence* owner_;
+    std::unique_ptr<ReadConnection> connection_;
+  };
+
+  friend class ReaderLease;
+
+  // Lease a read connection: an idle one if the pool holds any, a freshly
+  // opened one while the pool is below its cap, otherwise a wait until another
+  // reader returns one. Returns an empty lease when the database cannot be
+  // opened for reading at all (a caller then falls back to the writer
+  // connection, which is exactly the pre-pool behaviour).
+  //
+  // A thread must not hold one lease while taking another — the streaming
+  // reads hold theirs across a caller-supplied sink, so a sink that probed the
+  // store would nest. The cap sits above the worker count so nesting could not
+  // deadlock today, but the rule is what keeps that true.
+  ReaderLease acquire_reader();
+
+  // Return @p connection to the idle pool and wake one waiter.
+  void release_reader(std::unique_ptr<ReadConnection> connection);
+
+  // Open one further read connection on db_path_. Returns nullptr on failure.
+  std::unique_ptr<ReadConnection> open_read_connection();
+
+  // Drop every pooled read connection. Called when the underlying file is
+  // replaced (rebuild) and at destruction, where the caller guarantees no read
+  // is in flight.
+  void close_readers();
+
   // Open the database and ensure the schema is present and current. Returns
   // false if the file is unusable (corrupt / not a database / wrong schema),
   // in which case the caller rebuilds from scratch. Caller holds mutex_.
@@ -148,8 +229,20 @@ class SqliteObservationPersistence : public IObservationPersistence {
   std::size_t distinct_record_count_locked();
 
   std::string db_path_;
+
+  // Write/maintenance connection. Guarded by mutex_.
   std::mutex mutex_;
   sqlite3* db_ = nullptr;
+
+  // Read-connection pool. Guarded by read_mutex_. Lock ordering, where both
+  // are held: mutex_ then read_mutex_ (only rebuild() does so). No read path
+  // ever takes mutex_ while holding read_mutex_, so the two cannot deadlock.
+  std::mutex read_mutex_;
+  std::condition_variable read_cv_;
+  std::vector<std::unique_ptr<ReadConnection>> idle_readers_;
+  std::size_t open_readers_ = 0;
+  std::size_t max_readers_ = 0;
+  bool readers_unavailable_ = false;  ///< An open failed; stop retrying.
 };
 
 }  // namespace orc

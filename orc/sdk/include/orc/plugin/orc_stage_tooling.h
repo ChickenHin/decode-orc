@@ -28,7 +28,13 @@ enum class StageToolKind {
   NonModalEditor,
   BatchAnalysis,
   PreviewUtility,
-  Custom
+  Custom,
+  // A run of the stage produces a browsable set of items — pages, records,
+  // cues — that the host presents with its generic catalogue browser. The
+  // stage implements orc::ICatalogueResults (<orc/stage/tooling/
+  // catalogue_results.h>) and carries kCatalogueBrowserContractId. Appended
+  // rather than inserted: the values above are what released plugins encode.
+  CatalogueBrowser
 };
 
 struct StageToolDescriptor {

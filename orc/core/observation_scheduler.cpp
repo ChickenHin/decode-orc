@@ -681,13 +681,42 @@ bool ObservationScheduler::process_one_for_testing() {
 // RendererObservationTaskRunner
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// The DAG this runner will render against, privately owned.
+//
+// Every runner in the pool is handed the same DAG, and a DAG's stages are
+// stateful: several re-apply the parameter map from execute(), so two workers
+// inside one stage at once is a data race — one that has been observed to
+// corrupt a stage's parsed configuration mid-execute. Each runner therefore
+// clones the DAG and owns the stages behind it; the store they all write into
+// stays the single point of contact between workers.
+//
+// Falls back to the shared DAG if the clone fails (an unregistered stage), so
+// observation still runs where it used to. Logged loudly because that path is
+// the racy one.
+std::shared_ptr<const DAG> private_dag(std::shared_ptr<const DAG> dag) {
+  if (!dag) {
+    return dag;
+  }
+  if (auto clone = clone_dag_with_fresh_stages(*dag)) {
+    return clone;
+  }
+  ORC_LOG_WARN(
+      "ObservationTaskRunner: could not clone the DAG; sharing stage instances "
+      "with the other workers, which is not thread-safe");
+  return dag;
+}
+
+}  // namespace
+
 RendererObservationTaskRunner::RendererObservationTaskRunner(
     std::shared_ptr<const DAG> dag,
     std::shared_ptr<const NodeFingerprintMap> fingerprints,
     std::shared_ptr<ObservationStore> store,
     std::shared_ptr<IObservationService> service)
     : store_(std::move(store)), service_(std::move(service)) {
-  renderer_ = std::make_unique<DAGFrameRenderer>(std::move(dag));
+  renderer_ = std::make_unique<DAGFrameRenderer>(private_dag(std::move(dag)));
   if (service_) {
     renderer_->set_observation_service(service_);
   }
@@ -773,7 +802,7 @@ RendererObservationTaskRunner::observer_keys_for(NodeID node_id) {
 void RendererObservationTaskRunner::update_dag(
     std::shared_ptr<const DAG> dag,
     std::shared_ptr<const NodeFingerprintMap> fingerprints) {
-  renderer_->update_dag(std::move(dag));
+  renderer_->update_dag(private_dag(std::move(dag)));
   renderer_->set_observation_store(store_, std::move(fingerprints));
   node_observer_keys_.clear();
 }
@@ -824,7 +853,7 @@ void DefaultObservationSchedulingPolicy::emit_node_items(
 std::vector<ObservationWorkItem> DefaultObservationSchedulingPolicy::plan_sweep(
     const ObservationSchedulingContext& context) {
   std::vector<ObservationWorkItem> out;
-  if (context.total_frames == 0) {
+  if (context.total_frames == 0 || context.total_frames > kMaxWholeNodeFrames) {
     return out;
   }
   const FrameIDRange whole{0, context.total_frames - 1};
@@ -886,7 +915,9 @@ std::vector<ObservationWorkItem>
 DefaultObservationSchedulingPolicy::plan_invalidation(
     const ObservationSchedulingContext& context) {
   std::vector<ObservationWorkItem> out;
-  if (context.total_frames == 0) {
+  // Re-observing a changed node covers its whole range, so it is bounded by
+  // the same limit as the sweep that first observed it.
+  if (context.total_frames == 0 || context.total_frames > kMaxWholeNodeFrames) {
     return out;
   }
   const FrameIDRange whole{0, context.total_frames - 1};

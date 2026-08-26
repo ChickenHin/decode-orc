@@ -15,6 +15,7 @@
 
 #include <algorithm>
 
+#include "../../include/video_frame_representation_artifact_mock.h"
 #include "../../mocks/mock_video_frame_representation.h"
 
 namespace orc_unit_test {
@@ -346,6 +347,109 @@ TEST(FrameMapStageTest, Audio_OutOfRangePairReturnsEmpty) {
   EXPECT_TRUE(rep.get_audio_samples(1, orc::FrameID{0}).empty());
   // Padding frames also honour the pair range.
   EXPECT_TRUE(rep.get_audio_samples(1, orc::FrameID{1}).empty());
+}
+
+// ── Range specs that overshoot the source ───────────────────────────────────
+
+namespace {
+
+// A source of |count| frames, ids 0..count-1, with nothing but navigation
+// answered — enough for the mapping walk. Artifact-backed, so it can be fed
+// to execute() as a DAG input.
+std::shared_ptr<::testing::NiceMock<MockVideoFrameRepresentationArtifact>>
+make_navigable_source(uint64_t count) {
+  auto source = std::make_shared<
+      ::testing::NiceMock<MockVideoFrameRepresentationArtifact>>();
+  ON_CALL(*source, frame_range())
+      .WillByDefault(::testing::Return(orc::FrameIDRange{0, count - 1}));
+  ON_CALL(*source, frame_count()).WillByDefault(::testing::Return(count));
+  ON_CALL(*source, has_frame(::testing::_))
+      .WillByDefault(
+          ::testing::Invoke([count](orc::FrameID id) { return id < count; }));
+  return source;
+}
+
+// The stage's execute() takes artifacts; the mock is one by inheritance.
+orc::ArtifactPtr as_artifact(
+    const std::shared_ptr<
+        ::testing::NiceMock<MockVideoFrameRepresentationArtifact>>& source) {
+  return std::static_pointer_cast<orc::Artifact>(source);
+}
+
+}  // namespace
+
+// A spec reaching past the end of the source keeps the frames that exist and
+// drops the rest. The walk must not iterate the overshoot: this runs on every
+// execute() of the node, and a spec overshooting by millions once turned it
+// into millions of log lines per execution.
+TEST(FrameMapStageTest, Execute_SpecPastEndOfSourceKeepsOnlyRealFrames) {
+  auto source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+
+  // has_frame() is asked once per frame that could exist; a walk that counted
+  // its way to 9,999,999 would blow far past that.
+  EXPECT_CALL(*source, has_frame(::testing::_)).Times(::testing::AtMost(64));
+
+  const auto outputs = stage.execute(
+      {as_artifact(source)}, {{"ranges", std::string("0-9999999")}}, ctx);
+
+  ASSERT_EQ(outputs.size(), 1u);
+  auto mapped = std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+      outputs[0]);
+  ASSERT_NE(mapped, nullptr);
+  EXPECT_EQ(mapped->frame_count(), 10u);
+}
+
+// A range entirely past the end yields nothing to map, which is the
+// empty-mapping pass-through rather than a crash or a stall.
+TEST(FrameMapStageTest, Execute_SpecEntirelyPastEndOfSourcePassesThrough) {
+  auto source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+
+  const auto outputs = stage.execute({as_artifact(source)},
+                                     {{"ranges", std::string("100-200")}}, ctx);
+
+  ASSERT_EQ(outputs.size(), 1u);
+  EXPECT_EQ(outputs[0], as_artifact(source));
+}
+
+// ── execute() must not write the stage's configuration ──────────────────────
+
+// A DAG's stages are shared: reconfiguring the object from execute() let one
+// thread reparse the ranges while another walked them. The parameter map is
+// resolved onto the stack instead, so the stage's own configuration — what the
+// host reads back and shows in the parameter dialog — is untouched by a run.
+TEST(FrameMapStageTest, Execute_LeavesConfiguredParametersAlone) {
+  auto source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+
+  ASSERT_TRUE(stage.set_parameters({{"ranges", std::string("0-4")},
+                                    {"remove_duplicates", false},
+                                    {"pad_gaps", false}}));
+  const auto configured = stage.get_parameters();
+
+  stage.execute({as_artifact(source)}, {{"ranges", std::string("5-9")}}, ctx);
+
+  EXPECT_EQ(stage.get_parameters(), configured);
+}
+
+// The run still honours the parameters it was handed, configuration or not.
+TEST(FrameMapStageTest, Execute_UsesTheParametersItWasHanded) {
+  auto source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+
+  const auto outputs = stage.execute({as_artifact(source)},
+                                     {{"ranges", std::string("2-4")}}, ctx);
+
+  ASSERT_EQ(outputs.size(), 1u);
+  auto mapped = std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+      outputs[0]);
+  ASSERT_NE(mapped, nullptr);
+  EXPECT_EQ(mapped->frame_count(), 3u);
 }
 
 }  // namespace orc_unit_test

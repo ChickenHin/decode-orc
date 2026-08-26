@@ -26,11 +26,11 @@
  * @brief Modeless preview of the closed captions the previewer has passed
  *
  * An observer dialog (owned by MainWindow, raised from the preview window's
- * Observers menu) that follows the frame previewer. Like its teletext sibling
- * it is stateful: EIA-608 carries two bytes per frame and builds a caption out
- * of them over a second or more, so what is on screen at any one frame is the
- * result of a run of frames before it, not of that frame's own data (see
- * ClosedCaptionAssembler).
+ * Observers menu) that follows the frame previewer. It is stateful, unlike the
+ * other observer dialogs: EIA-608 carries two bytes per frame and builds a
+ * caption out of them over a second or more, so what is on screen at any one
+ * frame is the result of a run of frames before it, not of that frame's own
+ * data (see ClosedCaptionAssembler).
  *
  * What it shows is a transcript of the captions decoded so far, each with the
  * frame it appeared at, so a caption can be found again in the recording. The

@@ -6,7 +6,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     qtnodes = {
-      # Pinned commit; keep in sync with io.github.simoninns.decode-orc.yml
+      # Pinned commit; keep in sync with io.github.decode_orc.decode-orc.yml
       # and the QtNodes fetch steps in .github/workflows/package-{macos,windows}.yml.
       url = "github:paceholder/nodeeditor/1b173f885b52e4fd9616f663ea288435ccf1d0d8";
       flake = false;
@@ -334,7 +334,7 @@
 
           meta = with pkgs.lib; {
             description = "Decode-Orc - LaserDisc and tape decoding orchestration framework";
-            homepage = "https://github.com/simoninns/decode-orc";
+            homepage = "https://github.com/decode-orc/decode-orc";
             license = licenses.gpl3Plus;
             platforms = platforms.linux ++ platforms.darwin;
             maintainers = [ ];
@@ -366,7 +366,7 @@
 
           meta = with pkgs.lib; {
             description = "Decode-Orc documentation site";
-            homepage = "https://github.com/simoninns/decode-orc";
+            homepage = "https://github.com/decode-orc/decode-orc";
             license = licenses.gpl3Plus;
             platforms = platforms.all;
             maintainers = [ ];
@@ -466,9 +466,17 @@
           packages = with pkgs; [
             cmake-format
             clang-tools
+            # Object cache for the CI build; the workflow persists $CCACHE_DIR
+            # between runs and sets CMAKE_CXX_COMPILER_LAUNCHER.
+            ccache
             ninja
             zip
             git
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # The root CMakeLists sets CMAKE_LINKER_TYPE=MOLD when it finds mold
+            # on PATH; without it here CI linked the debug test binaries with
+            # BFD ld. Matches the default dev shell.
+            mold
           ];
 
           shellHook = ''
@@ -482,6 +490,12 @@
           '';
 
           CMAKE_EXPORT_COMPILE_COMMANDS = 1;
+          # Without this CI configured with the Unix Makefiles generator, whose
+          # per-directory recursion also gives every translation unit a
+          # different working directory -- which ccache folds into its hash when
+          # debug info is on, so the two generators cannot share a cache.
+          # Matches the default dev shell.
+          CMAKE_GENERATOR = "Ninja";
           QT_QPA_PLATFORM = pkgs.lib.optionalString pkgs.stdenv.isLinux "xcb";
         };
 

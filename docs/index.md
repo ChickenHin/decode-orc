@@ -20,7 +20,7 @@ decode-orc is a new replacement for the ld-decode-tools, so it is relatively new
 
 This documentation aims to provide both user-level and technical-level documentation. If you spot a mistake and would like to report a documentation issue or contribute documentation updates, please use the main decode-orc repository:
 
-[decode-orc GitHub repository](https://github.com/simoninns/decode-orc){target="_blank"}
+[decode-orc GitHub repository](https://github.com/decode-orc/decode-orc){target="_blank"}
 
 decode-orc is not a standalone application - it is designed to be used with ld-decode and the (ever expanding) decoder variations such as VHS Decode.  You can find information about ld-decode from the project's documentation site:
 

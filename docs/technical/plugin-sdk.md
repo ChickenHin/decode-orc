@@ -25,7 +25,7 @@ tests and CI workflows (note: the skeleton repository may lag the SDK — the
 in-repo fixture above is always in sync with the installed package):
 
 ```bash
-git clone https://github.com/simoninns/orc-plugin_skeleton my-orc-plugin
+git clone https://github.com/decode-orc/orc-plugin_skeleton my-orc-plugin
 ```
 
 ## SDK Headers
@@ -49,7 +49,8 @@ The SDK surface is split into three tiers with distinct stability promises:
   ABI surface until they are relocated under a tier.)
 - **`orc/stage/`** — the stage contract: interfaces and data types that cross
   the plugin boundary, grouped by **domain** (`preview/`, `observation/`,
-  `dropout/`, `audio/`, `params/`) with the foundation types at the tier root.
+  `dropout/`, `audio/`, `params/`, `tooling/`) with the foundation types at the
+  tier root.
   A layout change here bumps the host ABI.
 - **`orc/support/`** — compiled-into-plugin utilities. Explicitly **not** ABI:
   changes never require a bump, only a plugin recompile at the author's
@@ -172,10 +173,6 @@ plugin at the author's convenience.
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
-| `<orc/support/teletext_page_decoder.h>` | PAL WST teletext page decoder producing Level 1 snapshots and subtitle cues |
-| `<orc/support/teletext_recovery_stats.h>` | Accumulates teletext recovery outcomes into a diagnostic profile of a run |
-| `<orc/support/teletext_row_squasher.h>` | Combines repeated copies of a teletext page row into one best-estimate row |
-| `<orc/support/teletext_slicer.h>` | PAL WST teletext data-line slicer producing T42 packets |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
 
@@ -547,6 +544,29 @@ This contract is verified by
 additionally distinguishes `FILE_PATH` (a string for which the GUI shows a
 file browser).
 
+#### Reserved parameter: `input_node_ids`
+
+A multi-input stage receives its inputs as an unnamed vector whose order
+follows the order the connections were made, and artifacts carry no node
+identity — so a stage that has to distinguish one input from another cannot do
+it on its own.
+
+Declare a `STRING` parameter named `orc::kInputNodeIdsParameter`
+(`"input_node_ids"`, from `<orc/stage/params/parameter_types.h>`) and the host
+fills it in when it builds the execution graph: the source node IDs of the
+node's incoming connections, comma-separated, in the same order as the
+`inputs` vector handed to `execute()` — for example `"2,4,16"`. Node IDs are
+drawn on the nodes in the graph editor, so they are also what a user can put
+in a parameter of their own to name an input (the core `source_join` stage
+does exactly this).
+
+The value is host-owned: the parameter is filtered out of the GUI and CLI
+parameter surfaces, is never editable, and is never written to the project
+file. A stage that declares it must still behave sensibly when handed an empty
+value — no host support, or nothing connected yet — by falling back to
+positional handling of its inputs. Stages that do not declare the parameter
+are never handed it.
+
 ### Configuration status
 
 Stages can report their readiness to the host UI via `set_configuration_status()`,
@@ -725,6 +745,35 @@ from `get_stage_tools()`. The host discovers these descriptors through the
 presenter layer and routes them to the GUI without any hardcoded stage-name
 dispatch.
 
+#### Catalogue browsers
+
+A stage whose triggered results are a list of things to browse advertises
+`StageToolKind::CatalogueBrowser` with the contract id
+`kCatalogueBrowserContractId` and implements `ICatalogueResults`
+(`<orc/stage/tooling/catalogue_results.h>`). The host routes it to a generic
+browser that knows nothing about the service being catalogued: the schema says
+what the columns are called, what one item is called, and whether there is a
+find box.
+
+Two of the schema's fields let the reader change how the same items are
+presented, and the host re-asks the stage each time one changes:
+
+| Field | Control | Use for |
+|-------|---------|---------|
+| `view_options` | A dropdown | A choice between three or more presentations — which receiver a page is resolved against, say |
+| `toggles` | Checkboxes beside it | A two-state choice independent of the rest — whether damaged data is presented as recovered or as transmitted |
+
+Both are round-tripped as opaque ids through
+`catalogue(view_option, active_toggles)`; ids the stage does not recognise mean
+its own settings, so a host need not police what it hands back. Each carries the
+state the catalogue was built under, so the host shows what it is looking at
+without remembering what it asked for.
+
+Keep the two apart. A two-state choice folded into the dropdown multiplies the
+options out instead of adding to them, and every further such choice doubles the
+list again. A stage that offers neither gets the plain browser and needs to
+implement only the no-argument `catalogue()`.
+
 ## Testing
 
 Unit-test your stage implementation in isolation. Inject a mock `IStageServices`
@@ -816,7 +865,7 @@ exactly what is and is not verified.
 ### Curated index and discovery
 
 To reach users without hand-written YAML, list your plugin in the curated
-index ([`orc-plugin-registry/`](https://github.com/simoninns/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}). Open a
+index ([`orc-plugin-registry/`](https://github.com/decode-orc/decode-orc/blob/main/orc-plugin-registry/README.md){target="_blank"}). Open a
 pull request adding an entry naming your repository; a maintainer's merge
 publishes it immediately, and every release you publish afterwards is
 installable without a further index change. Users then discover and install it
@@ -891,6 +940,9 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 10 | 2 | The concrete observer classes (the nine `<orc/stage/observation/*_observer.h>` headers — `BiphaseObserver`, `WhiteSNRObserver`, …) and the `Observer` base (`<orc/stage/observation/observer.h>`) are removed from the plugin SDK: observers are now host-internal and reached exclusively through the `IObservationService` added in ABI 9, selected by stable string id. `orc-sdk-support` no longer ships observer object code, and the deprecated pre-tier observation include-path shims (`<orc/stage/observers/...>` and the flat `<orc/stage/observation_*.h>` paths) are removed. `observation_schema.h`, `observation_context*.h`, and `observation_service_interface.h` remain the contract. Source-breaking for any plugin still including the observer classes — migrate to `IObservationService::create_observer(id)` |
 | 11 | 3 | `FrameDescriptor` drops the `colour_frame_index`, `frame_number`, and `timecode` fields. Signal-measured facts are no longer baked in by source stages: colour-sequence phase is measured uniformly for TBC and CVBS sources via the host `colour_frame_phase` observer, reached through the new contract header `<orc/stage/observation/colour_frame_phase_query.h>` (`orc::observation::measure_frame_phase()` / `measure_colour_frame_index()`), and VBI picture numbers / timecodes come from the host `biphase` observer's interpreted `vbi.*` keys (the dropped `frame_number`/`timecode` fields were never populated by any source). The analysis-sink result types in `<orc/stage/common_types.h>` also become canonical per-frame records: the aggregated-per-bucket fields are removed (`FrameDropoutStats` now carries integer `dropout_count` and `dropout_length_samples` in place of the double `dropout_count`/`total_dropout_length`; `FrameSNRStats` drops `field_count`/`white_snr_count`/`black_psnr_count`; `FrameBurstLevelStats` drops `field_count`), each record now representing exactly one analysed frame with display bucketing moved to a host-side decimation utility. `ObserverInfo` in `<orc/stage/observation/observation_service_interface.h>` also gains an appended `bool stateless` field classifying whether an observer's per-frame result is order-independent (stateless) or models a cross-frame stream (stateful, e.g. `closed_caption`, `colour_frame_phase`); it drives background-scheduler frame ordering and never changes a per-frame result. `VideoFrameRepresentation` in `<orc/stage/video_frame_representation.h>` gains an appended virtual `video_passthrough_source(FrameID)` (default nullptr) letting a transform declare, from metadata alone, that a frame's CVBS video content is byte-identical to its upstream input; the host uses it to share frame-content-keyed stored observations across stages instead of re-analysing identical frames. Layout- and source-breaking for any plugin reading the removed fields or these result structs. |
 | 12 | 4 | `NodeTypeInfo` drops the free-text `menu_category` field and the unused `SinkCategory` enum/`sink_category` field. The Add Stage menu category is no longer plugin-declared: it is derived from the stage's `NodeType` via the new `StageCategory` enum and `stage_category_for()` helper (SOURCE → Source, TRANSFORM/MERGER/COMPLEX → Transform, ANALYSIS_SINK → Analysis, SINK → Sink), so a plugin can never place a stage under an invented category. Layout- and source-breaking: the `NodeTypeInfo` constructor loses its trailing `SinkCategory` and `menu_category` parameters. |
+| 13 | 4 | Format-specific results contracts out, a generic one in. The new `<orc/stage/tooling/catalogue_results.h>` carries `CatalogueDataset` and the `ICatalogueResults` interface a stage implements to hand the host a browsable set of items with something drawable for each — a character-cell grid, a 2D display list, a text document or a table — and `StageToolKind` gains `CatalogueBrowser`, appended so the values released plugins encode do not move. `<orc/stage/analysis_sink_results.h>` in exchange loses every teletext and NABTS type it carried (`TeletextCataloguedPage`, `TeletextAnalysisDataset`, `ITeletextAnalysisResults`, `NabtsCataloguedRecord`, `NabtsAnalysisDataset`, `INabtsAnalysisResults`, `nabts_caption_cues()` and their neighbours), along with its includes of the format decoders; it keeps only `IDropoutAnalysisResults`, `ISNRAnalysisResults` and `IBurstLevelAnalysisResults`. Those types were never generic plugin contract, and while they sat in the ABI-frozen stage tier a teletext catalogue change bumped the host ABI for every plugin in the ecosystem; they now live privately with their sink plugins. The five `orc/support/{teletext_*,nabts_page}.h` decoder headers leave the SDK in the same breath. Layout- and source-breaking for anything that included that header for the removed types, which nothing outside this repository could have done. |
+| 14 | 4 | `CatalogueDrawOp` gains a `blink_to` colour. A blink process is defined by ANSI X3.110 §5.3.2.7.2 over a colour map *entry*, alternating it with a blink-to entry the service names (§5.3.2.7.3) — so a blinking figure need not appear and disappear, it can twinkle between two colours, and a renderer given only `blinking` cannot tell which was meant. The member is inserted beside `blinking` rather than appended, so the struct's layout moves; it is meaningful only where `blinking` is set and defaults to black, which is the ground the C1 BLINK START of §6.2.8.1 blinks to in colour modes 0 and 1. |
+| 15 | 4 | `CatalogueDisplayList` gains `display_aspect_height`, `nominal_width`, `nominal_height` and `pixel_aligned`. A display list is geometry rather than pixels, but a source authored for a receiver of a particular resolution has geometry that only resolves against that resolution: ANSI X3.110 §5.3.2.2.6 defines the logical pel over "all of those pixels that lie under any portion of the logical pel as it is mapped to the display screen" and guarantees it "will always map to at least one and possibly many display pixels", so a stroke of no stated width is one *pixel* wide. A renderer given no resolution can only fall back on a device pixel, which makes stroke width depend on how large the list happens to be drawn. `nominal_width` and `nominal_height` state the grid; both default to 0, which is the previous behaviour. `display_aspect_height` separates the shape the drawable area is drawn at from `aspect_height`, which keeps its meaning as the extent of unit y the list covers — the two differ wherever the authoring receiver's pixels were not square, as §4.2.2's 4:3 display area over a 256 by 200 grid makes them. It defaults to 0, meaning square pixels and so the previous shape. `pixel_aligned` says the operations tile that grid — one per pixel of it, or per run of pixels along a row — rather than describing shapes drawn on it, which is a different thing to draw: the edges are the source's own pixels rather than an artefact of drawing them, so a renderer lays them down hard and aligned to whole device pixels. Smoothing them blurs pixels a receiver had sharp, and antialiasing both sides of the boundary where two runs abut leaves a seam along a join that should be invisible; it defaults to false, which is the previous behaviour for every list that does not say otherwise. The four members are appended, so no existing member moves, but the struct grows and `CatalogueDisplayList` is embedded by value in `CataloguePayload`; layout-breaking for anything built against abi 14. `CatalogueSchema` gains `view_label`, `view_options` and `view_option`, and `ICatalogueResults` gains a virtual `catalogue(view_option)`, so a stage can offer the reader several ways of presenting the same items and be re-asked for the one picked. Which receiver a page is resolved against is exactly such a property — it changes nothing the decode found and everything about how it looks — and carrying it only as a stage parameter puts it where changing it rebuilds the graph and discards the results being looked at. The new virtual has a default that ignores the option and returns `catalogue()`, so a stage offering none needs no change, but it takes a vtable slot: the interface's layout moves and every plugin implementing it must be rebuilt. `CatalogueSchema` further gains `toggles`, and `ICatalogueResults` a virtual `catalogue(view_option, active_toggles)`, so a browser can offer presentation choices that are on or off as well as the several it chooses between. The two are separate controls because they are independent axes: folding a two-state choice into the view dropdown multiplies the options out rather than adding to them, and every further such choice doubles the list again. The new `CatalogueViewToggle` carries the state the catalogue was built under, so the host shows what it is looking at without remembering what it asked for, and a stage offering no toggles leaves the browser exactly as it was. This virtual likewise defaults to forwarding to `catalogue(view_option)` and likewise takes a vtable slot. |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 

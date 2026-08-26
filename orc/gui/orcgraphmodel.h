@@ -143,13 +143,23 @@ class OrcGraphModel : public QtNodes::AbstractGraphModel {
   // Store all connections
   std::unordered_set<ConnectionId> connectivity_;
 
-  // Per-node configuration status cache; populated lazily, cleared by refresh()
-  // and invalidated per-node by setNodeData().
+  // Per-node configuration status cache; populated lazily, cleared by
+  // refresh() and invalidated per-node by invalidateConfigurationStatus().
   mutable std::unordered_map<NodeId, orc::ConfigurationStatus>
       config_status_cache_;
 
   // Helper functions
   NodeId getOrCreateQtNodeId(const NodeID& orc_node_id);
+
+  // Drop |nodeId|'s cached status and ask the view to repaint it. A stage can
+  // judge its configuration against the nodes wired to it (Source Join orders
+  // its inputs by node ID), so connecting or disconnecting an edge can change
+  // a status the cache would otherwise keep serving from before the change.
+  void invalidateConfigurationStatus(NodeId nodeId);
+
+  // Invalidate every node joined to |nodeId| by a connection, plus |nodeId|
+  // itself.
+  void invalidateConnectedConfigurationStatus(NodeId nodeId);
 
   void buildMappings();
 };

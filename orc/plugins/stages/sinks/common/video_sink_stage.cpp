@@ -17,7 +17,6 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
-#include <orc/support/teletext_page_decoder.h>
 
 #include "decoders/comb.h"
 #include "decoders/componentframe.h"
@@ -217,8 +216,6 @@ VideoSinkStage::VideoSinkStage()
       audio_channel_pairs_("all"),
       audio_gain_db_(0.0),
       embed_closed_captions_(false),
-      embed_teletext_subtitles_(false),
-      teletext_subtitle_page_("888"),
       embed_chapter_metadata_(false),
       encoder_preset_("medium"),
       encoder_crf_(18),
@@ -624,33 +621,6 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                "ffmpeg_format",
                {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264", "mov-hevc"}}}},
       ParameterDescriptor{
-          "embed_teletext_subtitles",
-          "Embed Teletext Subtitles",
-          "Embed decoded teletext subtitles as mov_text subtitles (PAL WST "
-          "sources only, MP4/MOV only; mutually exclusive with closed "
-          "captions)",
-          ParameterType::BOOL,
-          {{},
-           {},
-           false,
-           {},
-           false,
-           ParameterDependency{
-               "ffmpeg_format",
-               {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264", "mov-hevc"}}}},
-      ParameterDescriptor{
-          "teletext_subtitle_page",
-          "Teletext Subtitle Page",
-          "Teletext page carrying the subtitles: magazine digit (1-8) "
-          "followed by two hexadecimal page digits, e.g. 888",
-          ParameterType::STRING,
-          {{},
-           {},
-           std::string("888"),
-           {},
-           false,
-           ParameterDependency{"embed_teletext_subtitles", {"true"}}}},
-      ParameterDescriptor{
           "embed_chapter_metadata",
           "Embed Chapter Metadata",
           "Write chapter markers from VBI data to output file (MKV/MP4/MOV "
@@ -808,8 +778,6 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["audio_channel_pairs"] = audio_channel_pairs_;
   params["audio_gain_db"] = audio_gain_db_;
   params["embed_closed_captions"] = embed_closed_captions_;
-  params["embed_teletext_subtitles"] = embed_teletext_subtitles_;
-  params["teletext_subtitle_page"] = teletext_subtitle_page_;
   params["embed_chapter_metadata"] = embed_chapter_metadata_;
   params["hardware_encoder"] = hardware_encoder_;
   params["prores_profile"] = prores_profile_;
@@ -1100,20 +1068,6 @@ bool VideoSinkStage::set_parameters(
         embed_closed_captions_ =
             (str_val == "true" || str_val == "1" || str_val == "yes");
       }
-    } else if (key == "embed_teletext_subtitles") {
-      if (std::holds_alternative<bool>(value)) {
-        embed_teletext_subtitles_ = std::get<bool>(value);
-      } else if (std::holds_alternative<std::string>(value)) {
-        auto str_val = std::get<std::string>(value);
-        embed_teletext_subtitles_ =
-            (str_val == "true" || str_val == "1" || str_val == "yes");
-      }
-    } else if (key == "teletext_subtitle_page") {
-      if (std::holds_alternative<std::string>(value)) {
-        // Validated at trigger time via TeletextPageDecoder; an invalid page
-        // fails the export with a clear status message.
-        teletext_subtitle_page_ = std::get<std::string>(value);
-      }
     } else if (key == "embed_chapter_metadata") {
       if (std::holds_alternative<bool>(value)) {
         embed_chapter_metadata_ = std::get<bool>(value);
@@ -1260,71 +1214,6 @@ bool VideoSinkStage::trigger(
 
         ORC_LOG_DEBUG("VideoSink: CC observations extracted for {} frames",
                       total_cc_frames);
-      }
-    }
-  }
-
-  // If teletext subtitle embedding is enabled, run the host "teletext"
-  // observer to populate the observation context before running the export —
-  // the same collection pass as closed captions. The observer is PAL-only
-  // and produces nothing for other systems; the FFmpeg backend gates the
-  // actual embedding.
-  if (embed_teletext_subtitles_ && ffmpeg_output) {
-    if (!TeletextPageDecoder::parse_page_number(teletext_subtitle_page_)
-             .has_value()) {
-      trigger_status_ = "Error: Invalid teletext subtitle page \"" +
-                        teletext_subtitle_page_ +
-                        "\" (expected magazine digit 1-8 plus two hex "
-                        "digits, e.g. 888)";
-      ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
-      return false;
-    }
-
-    ORC_LOG_DEBUG(
-        "VideoSink: Teletext subtitle embedding enabled, extracting teletext "
-        "observations");
-
-    if (!inputs.empty()) {
-      auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
-      if (vfr) {
-        IObservationService* obs_service =
-            orc::plugin::get_observation_service();
-        std::unique_ptr<IObserverHandle> teletext_observer =
-            obs_service ? obs_service->create_observer("teletext") : nullptr;
-        if (!teletext_observer) {
-          ORC_LOG_WARN(
-              "VideoSink: observation service unavailable; teletext data not "
-              "collected");
-        }
-
-        auto frame_range = vfr->frame_range();
-        const size_t total_frames = frame_range.count();
-
-        if (progress_callback_) {
-          progress_callback_(0, total_frames, "Collecting teletext data...");
-        }
-
-        size_t frames_processed = 0;
-        for (FrameID frame_id = frame_range.first; frame_id <= frame_range.last;
-             ++frame_id) {
-          if (teletext_observer && vfr->has_frame(frame_id)) {
-            teletext_observer->process_frame(*vfr, frame_id,
-                                             observation_context);
-          }
-          ++frames_processed;
-          if (progress_callback_) {
-            progress_callback_(frames_processed, total_frames,
-                               "Collecting teletext data...");
-          }
-          if (cancel_requested_.load()) {
-            ORC_LOG_WARN("VideoSink: Cancelled during teletext collection");
-            return false;
-          }
-        }
-
-        ORC_LOG_DEBUG(
-            "VideoSink: Teletext observations extracted for {} frames",
-            total_frames);
       }
     }
   }
@@ -1695,8 +1584,6 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.encoder_bitrate = encoder_bitrate_;
   backendConfig.embed_audio = embed_audio_;
   backendConfig.embed_closed_captions = embed_closed_captions_;
-  backendConfig.embed_teletext_subtitles = embed_teletext_subtitles_;
-  backendConfig.teletext_subtitle_page = teletext_subtitle_page_;
   backendConfig.embed_chapter_metadata = embed_chapter_metadata_;
   backendConfig.options["hardware_encoder"] = hardware_encoder_;
   backendConfig.options["prores_profile"] = prores_profile_;
@@ -1719,7 +1606,7 @@ bool VideoSinkStage::run_export_trigger(
   // metadata extraction. The ffmpeg backend uses field-based indexing
   // internally; convert frame range to field units (1 frame = 2 fields).
   if ((embed_audio_ && vfr && vfr->has_audio()) || embed_closed_captions_ ||
-      embed_teletext_subtitles_ || embed_chapter_metadata_) {
+      embed_chapter_metadata_) {
     backendConfig.start_field_index = frame_range.first * 2;
     backendConfig.num_fields = (frame_range.last - frame_range.first + 1) * 2;
 

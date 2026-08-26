@@ -9,7 +9,7 @@
   <key>CFBundleIconFile</key>
   <string>orc-gui</string>
   <key>CFBundleIdentifier</key>
-  <string>io.github.simoninns.decode-orc</string>
+  <string>io.github.decode_orc.decode-orc</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

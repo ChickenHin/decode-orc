@@ -163,7 +163,7 @@ constexpr int32_t kPalMFirstActiveLine = kNtscFirstActiveLine;
 // ---------------------------------------------------------------------------
 // The ld-decode .tbc format stores samples as uint16_t using a ×64 scale
 // factor applied to the CVBS_U10_4FSC signal levels.  These constants are
-// ONLY for use in tbc_source and ld_sink when converting CVBS_U10_4FSC ↔
+// ONLY for use in tbc_source and tbc_sink when converting CVBS_U10_4FSC ↔
 // ld-decode 16-bit.  All other pipeline code must use the system-specific
 // CVBS_U10_4FSC constants above (kPalBlanking/kPalWhite, kNtscBlanking/
 // kNtscWhite) or the 10-bit values from SourceParameters.

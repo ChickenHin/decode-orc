@@ -19,10 +19,12 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/audio_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/common
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/daphne_vbi_sink
-                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ld_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/raw_efm_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
                 ${CMAKE_SOURCE_DIR}/orc/sdk/include
         )
     target_link_libraries(
@@ -33,6 +35,17 @@ function(orc_add_core_unit_tests target labels)
 
         if(TARGET orc-audio-resample)
                 target_link_libraries(${target} orc-audio-resample)
+        endif()
+
+        # WST/NABTS decoding chain. Formerly resolved through orc-core (which
+        # linked orc-sdk-support); now a shared plugin-side library, so the
+        # test binaries link it directly.
+        if(TARGET orc-vbi-services)
+                target_link_libraries(${target} orc-vbi-services)
+        endif()
+
+        if(TARGET orc-vbi-source)
+                target_link_libraries(${target} orc-vbi-source)
         endif()
 
     target_compile_definitions(${target} PRIVATE
@@ -52,8 +65,10 @@ function(orc_add_core_unit_tests target labels)
         foreach(_orc_stage_plugin_target
                         orc-stage-plugin-tbc-source
                         orc-stage-plugin-cvbs-source
+                        orc-stage-plugin-vbi-source
                         orc-stage-plugin-stacker
                         orc-stage-plugin-frame-map
+                        orc-stage-plugin-source-join
                         orc-stage-plugin-video-params
                         orc-stage-plugin-dropout-correct
                         orc-stage-plugin-dropout-map
@@ -63,7 +78,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-daphne-vbi-sink
                         orc-stage-plugin-audio-sink
                         orc-stage-plugin-cc-sink
-                        orc-stage-plugin-ld-sink
+                        orc-stage-plugin-tbc-sink
                         orc-stage-plugin-efm-sink
                         orc-stage-plugin-efm-audio-decode
                         orc-stage-plugin-audio-import
@@ -75,7 +90,8 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-snr-analysis-sink
                         orc-stage-plugin-burst-level-analysis-sink
                         orc-stage-plugin-cvbs-sink
-                        orc-stage-plugin-teletext-sink)
+                        orc-stage-plugin-teletext-sink
+                        orc-stage-plugin-nabts-sink)
                 if(TARGET ${_orc_stage_plugin_target})
                         target_link_libraries(${target} ${_orc_stage_plugin_target})
                 endif()
@@ -101,6 +117,21 @@ orc_add_core_unit_tests(
         stages/tbc_source/pal_tbc_converter_test.cpp
         stages/tbc_source/ntsc_tbc_converter_test.cpp
         stages/cvbs_source/cvbs_source_stage_test.cpp
+        stages/vbi_source/vbi_source_format_test.cpp
+        stages/vbi_source/vbi_line_reader_test.cpp
+        stages/vbi_source/vbi_source_validation_test.cpp
+        stages/vbi_source/vbi_transport_test.cpp
+        stages/vbi_source/vbi_line_mapping_test.cpp
+        stages/vbi_source/vbi_output_frame_test.cpp
+        stages/vbi_source/vbi_level_mapper_test.cpp
+        stages/vbi_source/vbi_resampler_test.cpp
+        stages/vbi_source/vbi_line_placement_test.cpp
+        stages/vbi_source/vbi_cri_template_test.cpp
+        stages/vbi_source/vbi_cri_correlator_test.cpp
+        stages/vbi_source/vbi_offset_calibration_test.cpp
+        stages/vbi_source/vbi_frame_builder_test.cpp
+        stages/vbi_source/vbi_frame_index_test.cpp
+        stages/vbi_source/vbi_source_stage_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
 
@@ -110,6 +141,7 @@ orc_add_core_unit_tests(
 
         stages/stacker/stacker_stage_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
+        stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp
         stages/video_params/video_params_stage_test.cpp
         stages/dropout_correct/dropout_correct_stage_test.cpp
@@ -135,7 +167,6 @@ orc_add_core_unit_tests(
         stages/video_sink/video_sink_stage_test.cpp
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
-        stages/video_sink/teletext_subtitle_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
@@ -148,8 +179,9 @@ orc_add_core_unit_tests(
         stages/audio_sink/audio_sink_stage_deps_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
-        stages/ld_sink/ld_sink_stage_test.cpp
-        stages/ld_sink/ld_sink_stage_deps_test.cpp
+        stages/tbc_sink/tbc_sink_stage_test.cpp
+        stages/tbc_sink/tbc_sink_stage_deps_test.cpp
+        stages/tbc_sink/tbc_sink_levels_test.cpp
         stages/efm_sink/efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp
@@ -162,8 +194,28 @@ orc_add_core_unit_tests(
         stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
+        stages/nabts_sink/nabts_sink_stage_test.cpp
+        stages/nabts_sink/nabts_frame_slicer_test.cpp
+        stages/nabts_sink/nabts_packet_test.cpp
+        stages/nabts_sink/nabts_data_group_test.cpp
+        stages/nabts_sink/nabts_record_test.cpp
+        stages/nabts_sink/nabts_record_catalogue_test.cpp
+        stages/nabts_sink/nabts_caption_publication_test.cpp
+        stages/nabts_sink/nabts_catalogue_view_test.cpp
+        stages/nabts_sink/naplps_code_env_test.cpp
+        stages/nabts_sink/naplps_font_test.cpp
+        stages/nabts_sink/naplps_lint_test.cpp
+        stages/nabts_sink/naplps_lint_repair_test.cpp
+        stages/nabts_sink/naplps_interpreter_test.cpp
+        stages/nabts_sink/naplps_raster_test.cpp
+        stages/nabts_sink/naplps_render_grid_test.cpp
+        stages/nabts_sink/nabts_scan_state_test.cpp
         stages/teletext_sink/teletext_sink_stage_test.cpp
-        stages/teletext_sink/teletext_sink_stage_deps_test.cpp
+        stages/teletext_sink/teletext_sink_deps_test.cpp
+        stages/teletext_sink/teletext_frame_slicer_test.cpp
+        stages/teletext_sink/teletext_scan_state_test.cpp
+        stages/teletext_sink/teletext_page_catalogue_test.cpp
+        stages/teletext_sink/teletext_catalogue_view_test.cpp
         stages/teletext_sink/teletext_squash_stats_test.cpp
 )
 
@@ -414,7 +466,6 @@ orc_add_core_unit_tests(
 
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
-        observers/teletext_observer_test.cpp
 )
 
 # SDK support-tier algorithm helpers (synthesis-based, no I/O).
@@ -423,10 +474,22 @@ orc_add_core_unit_tests(
         "unit"
 
         support/log_destination_test.cpp
-        support/teletext_slicer_test.cpp
-        support/teletext_page_decoder_test.cpp
-        support/teletext_recovery_stats_test.cpp
-        support/teletext_row_squasher_test.cpp
+)
+
+# orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink
+# and nabts_sink plugins. Plugin-side rather than SDK, so these live under
+# common/ to mirror orc/plugins/stages/common/vbi-services.
+orc_add_core_unit_tests(
+        orc-core-unit-tests-vbi-services
+        "unit"
+
+        common/vbi-services/nabts_page_test.cpp
+        common/vbi-services/nabts_repertoire_test.cpp
+        common/vbi-services/teletext_slicer_test.cpp
+        common/vbi-services/teletext_page_decoder_test.cpp
+        common/vbi-services/teletext_recovery_stats_test.cpp
+        common/vbi-services/teletext_row_squasher_test.cpp
+        common/vbi-services/vbi_identity_attestation_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -447,6 +510,7 @@ orc_add_core_unit_tests(
         observation/observer_pass_test.cpp
         observation/observation_scheduler_test.cpp
         observation/sink_fallback_output_index_test.cpp
+        observation/observation_cache_retention_test.cpp
 )
 
         orc_add_core_unit_tests(

@@ -18,8 +18,63 @@
 
 #include "include/frame_provenance.h"
 #include "include/pipeline_validator.h"
+#include "include/stage_registry.h"
 
 namespace orc {
+
+// ============================================================================
+// DAG cloning
+// ============================================================================
+
+std::shared_ptr<DAG> clone_dag_with_fresh_stages(const DAG& dag) {
+  auto& registry = StageRegistry::instance();
+  auto clone = std::make_shared<DAG>();
+
+  for (const auto& node : dag.nodes()) {
+    if (!node.stage) {
+      ORC_LOG_ERROR("clone_dag: node '{}' has no stage", node.node_id);
+      return nullptr;
+    }
+    const std::string stage_name = node.stage->get_node_type_info().stage_name;
+    if (!registry.has_stage(stage_name)) {
+      ORC_LOG_ERROR("clone_dag: stage '{}' of node '{}' is not registered",
+                    stage_name, node.node_id);
+      return nullptr;
+    }
+
+    DAGNode copy;
+    copy.node_id = node.node_id;
+    copy.parameters = node.parameters;
+    copy.input_node_ids = node.input_node_ids;
+    copy.input_indices = node.input_indices;
+    copy.stage = registry.create_stage(stage_name);
+    if (!copy.stage) {
+      ORC_LOG_ERROR("clone_dag: could not create stage '{}' for node '{}'",
+                    stage_name, node.node_id);
+      return nullptr;
+    }
+
+    // The parameter map is already the effective one — descriptor defaults
+    // overlaid with the project's stored values, paths resolved — so the fresh
+    // stage is configured exactly as the original was.
+    auto* parameterized = dynamic_cast<ParameterizedStage*>(copy.stage.get());
+    if (parameterized && !copy.parameters.empty() &&
+        !parameterized->set_parameters(copy.parameters)) {
+      ORC_LOG_ERROR(
+          "clone_dag: stage '{}' of node '{}' rejected its own "
+          "parameters",
+          stage_name, node.node_id);
+      return nullptr;
+    }
+
+    clone->add_node(std::move(copy));
+  }
+
+  // root_inputs_ is never populated by any DAG builder, so there is nothing to
+  // carry across (and no setter to carry it with).
+  clone->set_output_nodes(dag.output_nodes());
+  return clone;
+}
 
 // ============================================================================
 // DAGExecutor Implementation

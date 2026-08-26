@@ -10,9 +10,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <map>
 #include <optional>
 #include <string>
 
+#include "../../../orc/core/include/dag_executor.h"
 #include "../../../orc/core/include/project.h"
 #include "../../../orc/core/include/project_to_dag.h"
 #include "../include/public_stage_inventory.h"
@@ -158,6 +160,169 @@ TEST(ProjectToDagContractTest, UnknownStageInProject_FailsCleanly) {
   orc::project_io::update_project_dag(project, nodes, {});
 
   EXPECT_THROW(orc::project_to_dag(project), orc::ProjectConversionError);
+}
+
+// ── DAG cloning for per-thread execution ─────────────────────────────────
+//
+// Stages are stateful and several re-apply their parameter map from
+// execute(), so a consumer that executes a shared DAG on its own thread
+// (every background observation worker) takes a clone first. The clone must
+// be the same pipeline, configured identically, with nothing shared behind
+// it — anything less puts two threads back inside one stage object.
+
+TEST(DagCloneContractTest, Clone_ReproducesTheDagWithItsOwnStages) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+
+  auto project = orc::project_io::create_empty_project(
+      "clone-test-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto source_id =
+      orc::project_io::add_node(project, chain->source, 0.0, 0.0);
+  const auto middle_id =
+      orc::project_io::add_node(project, chain->middle, 100.0, 0.0);
+  const auto sink_id =
+      orc::project_io::add_node(project, chain->sink, 200.0, 0.0);
+  orc::project_io::add_edge(project, source_id, middle_id);
+  orc::project_io::add_edge(project, middle_id, sink_id);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+
+  const auto clone = orc::clone_dag_with_fresh_stages(*dag);
+  ASSERT_NE(clone, nullptr);
+
+  EXPECT_TRUE(clone->validate());
+  ASSERT_EQ(clone->nodes().size(), dag->nodes().size());
+  EXPECT_EQ(clone->output_nodes(), dag->output_nodes());
+
+  for (size_t i = 0; i < clone->nodes().size(); ++i) {
+    const auto& original = dag->nodes()[i];
+    const auto& copy = clone->nodes()[i];
+
+    EXPECT_EQ(copy.node_id, original.node_id);
+    EXPECT_EQ(copy.input_node_ids, original.input_node_ids);
+    EXPECT_EQ(copy.input_indices, original.input_indices);
+    EXPECT_EQ(copy.parameters, original.parameters);
+
+    ASSERT_NE(copy.stage, nullptr);
+    // The point of the exercise: a different object of the same stage.
+    EXPECT_NE(copy.stage.get(), original.stage.get());
+    EXPECT_EQ(copy.stage->get_node_type_info().stage_name,
+              original.stage->get_node_type_info().stage_name);
+  }
+}
+
+// A clone that came up with default parameters would quietly render something
+// other than the pipeline the user configured.
+TEST(DagCloneContractTest, Clone_CarriesTheConfiguredParameters) {
+  auto project = orc::project_io::create_empty_project(
+      "clone-params-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto node_id =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  orc::project_io::set_node_parameters(
+      project, node_id, {{"ranges", orc::ParameterValue{std::string("3-7")}}});
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+  const auto clone = orc::clone_dag_with_fresh_stages(*dag);
+  ASSERT_NE(clone, nullptr);
+  ASSERT_EQ(clone->nodes().size(), 1u);
+
+  auto* parameterized =
+      dynamic_cast<orc::ParameterizedStage*>(clone->nodes()[0].stage.get());
+  ASSERT_NE(parameterized, nullptr);
+  const auto params = parameterized->get_parameters();
+  const auto it = params.find("ranges");
+  ASSERT_NE(it, params.end());
+  EXPECT_EQ(std::get<std::string>(it->second), "3-7");
+}
+
+// ── Reserved input-identity parameter ────────────────────────────────────
+//
+// A stage that orders its inputs by node ID (source_join does) can only learn
+// which node feeds each entry of execute()'s inputs vector from the host:
+// artifacts carry no node identity. project_to_dag() fills the reserved
+// parameter in for the stages that declare it, and leaves every other stage
+// alone.
+
+namespace {
+std::optional<std::string> parameter_of(const orc::DAG& dag,
+                                        orc::NodeID node_id,
+                                        const std::string& name) {
+  for (const auto& node : dag.nodes()) {
+    if (node.node_id != node_id) continue;
+    const auto it = node.parameters.find(name);
+    if (it == node.parameters.end()) return std::nullopt;
+    return std::get<std::string>(it->second);
+  }
+  return std::nullopt;
+}
+}  // namespace
+
+TEST(ProjectToDagInputIdentityTest, FillsReservedParameterInConnectionOrder) {
+  auto project = orc::project_io::create_empty_project(
+      "join-identity-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto first = orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto second = orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto join = orc::project_io::add_node(project, "source_join", 0.0, 0.0);
+  orc::project_io::add_edge(project, first, join);
+  orc::project_io::add_edge(project, second, join);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+
+  const auto value = parameter_of(*dag, join, orc::kInputNodeIdsParameter);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(*value, std::to_string(first.value()) + "," +
+                        std::to_string(second.value()));
+}
+
+// The value is host-owned, so it has to reach the stage instance the executor
+// runs — not just the node's parameter map.
+TEST(ProjectToDagInputIdentityTest, ReservedParameterReachesTheStageInstance) {
+  auto project = orc::project_io::create_empty_project(
+      "join-identity-stage-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto upstream =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto join = orc::project_io::add_node(project, "source_join", 0.0, 0.0);
+  orc::project_io::add_edge(project, upstream, join);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+
+  for (const auto& node : dag->nodes()) {
+    if (node.node_id != join) continue;
+    auto* parameterized =
+        dynamic_cast<orc::ParameterizedStage*>(node.stage.get());
+    ASSERT_NE(parameterized, nullptr);
+    const auto params = parameterized->get_parameters();
+    const auto it = params.find(orc::kInputNodeIdsParameter);
+    ASSERT_NE(it, params.end());
+    EXPECT_EQ(std::get<std::string>(it->second),
+              std::to_string(upstream.value()));
+    return;
+  }
+  FAIL() << "join node missing from the DAG";
+}
+
+TEST(ProjectToDagInputIdentityTest, LeavesStagesThatDoNotDeclareItAlone) {
+  auto project = orc::project_io::create_empty_project(
+      "no-identity-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto upstream =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  const auto downstream =
+      orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+  orc::project_io::add_edge(project, upstream, downstream);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+  EXPECT_FALSE(
+      parameter_of(*dag, downstream, orc::kInputNodeIdsParameter).has_value());
 }
 
 // ── Format-aware default parameter tests ─────────────────────────────────
@@ -308,4 +473,66 @@ TEST(ProjectToDagFormatDefaultsTest,
     }
   }
 }
+// ---------------------------------------------------------------------------
+// Path parameter resolution
+//
+// Project files store paths as the user gave them, so anything that hands a
+// node's stored parameters to a stage — execution and the status dot alike —
+// has to resolve them against the project root first.
+// ---------------------------------------------------------------------------
+
+TEST(ProjectPathParameterTest, ResolvesARelativePathAgainstTheProjectRoot) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"input_path", std::string("captures/take1.tbc")}};
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")),
+            "/projects/demo/captures/take1.tbc");
+}
+
+TEST(ProjectPathParameterTest, ExpandsTheProjectRootVariable) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"output_path", std::string("${PROJECT_ROOT}/out/frames.mkv")}};
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("output_path")),
+            "/projects/demo/out/frames.mkv");
+}
+
+TEST(ProjectPathParameterTest, LeavesAnAbsolutePathAlone) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"y_path", std::string("/captures/take1.tbcy")}};
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("y_path")),
+            "/captures/take1.tbcy");
+}
+
+TEST(ProjectPathParameterTest, LeavesNonPathAndEmptyParametersUntouched) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"format", std::string("bt8x8-pal")},
+      {"input_path", std::string("")},
+      {"first_field", uint32_t{1}},
+  };
+
+  orc::resolve_path_parameters(parameters, "/projects/demo");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("format")), "bt8x8-pal");
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")), "");
+  EXPECT_EQ(std::get<uint32_t>(parameters.at("first_field")), 1u);
+}
+
+TEST(ProjectPathParameterTest, IsANoOpWithoutAProjectRoot) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"input_path", std::string("captures/take1.tbc")}};
+
+  orc::resolve_path_parameters(parameters, "");
+
+  EXPECT_EQ(std::get<std::string>(parameters.at("input_path")),
+            "captures/take1.tbc");
+}
+
 }  // namespace orc_unit_test

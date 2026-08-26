@@ -32,5 +32,5 @@ plugins:
     description: Minimal external plugin stage that forwards one input artifact (development example).
     maintainer: Simon Inns
     license_spdx: GPL-3.0-or-later
-    source_repo_url: https://github.com/simoninns/orc-plugin_skeleton
+    source_repo_url: https://github.com/decode-orc/orc-plugin_skeleton
     tags: [transform, example]

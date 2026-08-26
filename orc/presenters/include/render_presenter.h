@@ -16,6 +16,7 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>   // Public API rendering types
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
+#include <orc/stage/tooling/catalogue_results.h>    // CatalogueDataset
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
 #include <orc_preview_views.h>
@@ -104,21 +105,13 @@ class RenderPresenter {
   // === DAG Management ===
 
   /**
-   * @brief Update the internal DAG from the current project state
+   * @brief Adopt a DAG and rebuild the renderers and observation pipeline.
    *
    * Call this whenever the project changes (nodes added/removed/modified).
-   * This rebuilds the internal DAG and rendering state.
+   * The DAG is built and owned elsewhere — ProjectPresenter::buildDAG() /
+   * getDAG() — so that one graph backs every presenter looking at the project.
    *
-   * @return true if DAG was built successfully
-   */
-  bool updateDAG();
-
-  /**
-   * @brief Set the DAG directly (for coordination with external DAG management)
    * @param dag_handle Opaque handle to DAG
-   *
-   * @note Used for coordination with external DAG management.
-   * The DAG is typically obtained from ProjectPresenter.
    */
   void setDAG(std::shared_ptr<void> dag_handle);
 
@@ -129,7 +122,7 @@ class RenderPresenter {
    *
    * The callback fires whenever a DAG rebuild changes one or more nodes'
    * provenance fingerprints (a parameter or topology edit). It is invoked
-   * synchronously on the thread that calls updateDAG()/setDAG(); subscribers
+   * synchronously on the thread that calls setDAG(); subscribers
    * must marshal to their own thread. The first DAG build does not notify (it
    * populates rather than invalidates).
    *
@@ -293,6 +286,30 @@ class RenderPresenter {
       NodeID node_id);
 
   /**
+   * @brief Get the browsable catalogue from a stage that offers one
+   *
+   * The dataset is bounded by whatever cap the stage applies rather than by
+   * the frame range, so unlike the graph series it needs no decimation, and it
+   * is handed over whole.
+   *
+   * @param node_id Node to get data from
+   * @param view_option One of orc::CatalogueSchema::view_options, or empty for
+   *        the view the stage's own settings give. Passed to the stage
+   *        verbatim; one it does not know means the same as empty
+   * @param active_toggles Ids of the orc::CatalogueSchema::toggles the reader
+   *        has on. Passed to the stage verbatim; one it offers and this does
+   *        not name is off. Absent is not the same as empty: an empty list is
+   *        a reader who has turned everything off, and std::nullopt is a
+   *        reader who has not been asked yet, which is answered with whatever
+   *        the stage has the toggles at by default
+   * @return The catalogue, or std::nullopt if the node's stage does not expose
+   *         orc::ICatalogueResults or has not been triggered
+   */
+  std::optional<orc::CatalogueDataset> getCatalogueData(
+      NodeID node_id, const std::string& view_option = {},
+      const std::optional<std::vector<std::string>>& active_toggles = {});
+
+  /**
    * @brief Request dropout analysis data from a sink node (deprecated - use
    * getDropoutAnalysisData)
    *
@@ -383,7 +400,7 @@ class RenderPresenter {
    * observation sidecar and starts the worker-pool scheduler with its
    * background sweeps. Auxiliary presenters that only render frames or read
    * parameters (the dropout editor's, and MainWindow's short-lived helper
-   * presenters) must disable this *before* the first setDAG()/updateDAG():
+   * presenters) must disable this *before* the first setDAG():
    * they then run with a small in-memory store only — no sidecar attach, no
    * version purge/GC against a potentially multi-GB database, no scheduler,
    * no sweeps — keeping construction cheap enough for the GUI thread and
@@ -402,7 +419,7 @@ class RenderPresenter {
    * function to stop observing.
    *
    * The callback survives DAG rebuilds — it is reinstalled on the renderer
-   * every setDAG()/updateDAG().
+   * every setDAG().
    *
    * Thread-safety: invoked synchronously on the thread driving the query; the
    * setter is expected to be called from that same thread (the render

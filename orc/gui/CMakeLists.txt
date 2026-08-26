@@ -120,13 +120,25 @@ set(ORC_GUI_LIB_SOURCES
     ntscobserverdialog.cpp
     ntscobserverdialog.h
 
-    # Teletext page preview dialog
-    teletext_page_assembler.cpp
-    teletext_page_assembler.h
-    teletextpagewidget.cpp
-    teletextpagewidget.h
-    teletextdialog.cpp
-    teletextdialog.h
+    # Generic catalogue browser: the viewer for any stage advertising
+    # StageToolKind::CatalogueBrowser, plus the two payload renderers it
+    # switches between and the flash phase they share.
+    catalogue_flash_clock.cpp
+    catalogue_flash_clock.h
+    cataloguecellgridwidget.cpp
+    cataloguecellgridwidget.h
+    cataloguedisplaylistwidget.cpp
+    cataloguedisplaylistwidget.h
+    cataloguedialog.cpp
+    cataloguedialog.h
+
+    # The teletext character generator's face, which the cell grid draws
+    # alphanumeric cells from. teletext_font.cpp is generated; see
+    # tools/generate_teletext_font.py.
+    teletext_font.cpp
+    teletext_font.h
+    teletext_glyph_painter.cpp
+    teletext_glyph_painter.h
 
     # Closed caption preview dialog
     closed_caption_assembler.cpp
@@ -207,6 +219,14 @@ set(ORC_GUI_LIB_SOURCES
     # Stage help dialog
     stage_help_dialog.cpp
     stage_help_dialog.h
+
+    # Diagnostic logging configuration (Tools > Logging)
+    logging_settings.cpp
+    logging_settings.h
+    logging_controller.cpp
+    logging_controller.h
+    logging_settings_dialog.cpp
+    logging_settings_dialog.h
 
     # Resources
     orc_gui_resources.qrc
@@ -346,7 +366,7 @@ if(APPLE)
     # Set bundle properties for macOS
     set_target_properties(orc-gui PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Decode Orc"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.simoninns.decode-orc"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.decode_orc.decode-orc"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_LONG_VERSION_STRING "${PROJECT_VERSION}"
@@ -420,6 +440,10 @@ if(WIN32)
         WIN32_EXECUTABLE TRUE
         OUTPUT_NAME "orc-gui"
     )
+
+    # Run with UTF-8 as the process code page so the UTF-8 std::string paths
+    # the GUI hands to the presenter layer survive the trip to the OS.
+    orc_apply_utf8_manifest(orc-gui)
 endif()
 
 # Install target
@@ -430,23 +454,23 @@ install(TARGETS orc-gui
 
 # Linux desktop integration files
 if(UNIX AND NOT APPLE)
-    install(FILES io.github.simoninns.decode-orc.desktop
+    install(FILES io.github.decode_orc.decode-orc.desktop
         DESTINATION share/applications
     )
 
     install(FILES ${CMAKE_SOURCE_DIR}/assets/orc-gui-icon-256.png
         DESTINATION share/icons/hicolor/256x256/apps
-        RENAME io.github.simoninns.decode-orc.png
+        RENAME io.github.decode_orc.decode-orc.png
     )
 
     if(EXISTS ${CMAKE_SOURCE_DIR}/assets/orc-gui-icon.svg)
         install(FILES ${CMAKE_SOURCE_DIR}/assets/orc-gui-icon.svg
             DESTINATION share/icons/hicolor/scalable/apps
-            RENAME io.github.simoninns.decode-orc.svg
+            RENAME io.github.decode_orc.decode-orc.svg
         )
     endif()
 
-    install(FILES io.github.simoninns.decode-orc.metainfo.xml
+    install(FILES io.github.decode_orc.decode-orc.metainfo.xml
         DESTINATION share/metainfo
     )
 endif()

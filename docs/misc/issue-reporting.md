@@ -37,7 +37,7 @@ The crash bundle is a ZIP file containing:
 
 ### How to Report a Crash
 
-1. Go to the [GitHub Issues page](https://github.com/simoninns/decode-orc/issues){target="_blank"}
+1. Go to the [GitHub Issues page](https://github.com/decode-orc/decode-orc/issues){target="_blank"}
 
 2. Click **"New Issue"** and select the bug report template
 
@@ -138,9 +138,12 @@ For bugs that don't cause crashes, please provide:
 2. **Expected behavior** vs actual behavior
 3. **Application version** and platform
 4. **Screenshots or videos** if helpful
-5. **Log files** if available (use the `--log-file` option; add
-   `--log-out file` to keep the console clear and capture everything in the
-   file)
+5. **Log files** if available. In Orc-GUI, open **Tools → Logging…**, tick
+   **Write log messages to a file**, set **Detail** to `debug`, click **OK**,
+   then reproduce the problem and attach the file — **Open Log Folder** in the
+   same dialog takes you to it. From the command line, use the `--log-file`
+   option; add `--log-out file` to keep the console clear and capture
+   everything in the file.
 
 ## Feature Requests
 
@@ -154,6 +157,6 @@ For new features or enhancements, please describe:
 
 For questions or help using Decode Orc (not bugs):
 
-- Check the [user documentation](https://simoninns.github.io/decode-orc/)
-- Review existing [GitHub Issues](https://github.com/simoninns/decode-orc/issues){target="_blank"} (someone may have had the same question)
+- Check the [user documentation](https://decode-orc.github.io/decode-orc/)
+- Review existing [GitHub Issues](https://github.com/decode-orc/decode-orc/issues){target="_blank"} (someone may have had the same question)
 - [The Domesday86 Discord Server](https://discord.com/invite/pVVrrxd){target="_blank"}

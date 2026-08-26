@@ -43,8 +43,7 @@ using ::testing::Return;
 const std::set<std::string> kExpectedObserverIds{
     "white_snr",      "black_psnr", "burst_level",
     "closed_caption", "biphase",    "colour_frame_phase",
-    "disc_quality",   "fm_code",    "white_flag",
-    "teletext"};
+    "disc_quality",   "fm_code",    "white_flag"};
 
 TEST(CoreObservationService, AvailableObservers_ExposesEveryStandardObserver) {
   CoreObservationService service;
@@ -72,7 +71,7 @@ const std::map<std::string, bool> kExpectedStateless{
     {"burst_level", true},  {"closed_caption", false},
     {"biphase", true},      {"colour_frame_phase", false},
     {"disc_quality", true}, {"fm_code", true},
-    {"white_flag", true},   {"teletext", true}};
+    {"white_flag", true}};
 
 TEST(CoreObservationService, AvailableObservers_ClassifiesStatefulness) {
   CoreObservationService service;
@@ -155,22 +154,20 @@ SourceParameters params_for(VideoSystem system) {
 }
 
 // Independent restatement of the applicability contract (Observer::applies_to
-// per observer): teletext is PAL-only, fm_code/white_flag are NTSC-only,
-// everything else applies to every system. A drift in either direction fails
-// this test.
+// per observer): fm_code/white_flag are NTSC-only, closed_caption is 525-line
+// only (NTSC + PAL_M), everything else applies to every system. A drift in
+// either direction fails this test.
 const std::map<std::string, std::set<VideoSystem>> kExpectedApplicability{
     {"white_snr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"black_psnr", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"burst_level", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
-    {"closed_caption",
-     {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
+    {"closed_caption", {VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"biphase", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"colour_frame_phase",
      {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"disc_quality", {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}},
     {"fm_code", {VideoSystem::NTSC}},
     {"white_flag", {VideoSystem::NTSC}},
-    {"teletext", {VideoSystem::PAL}},
 };
 
 TEST(StandardObserverApplies, MatchesApplicabilityContract) {
@@ -206,12 +203,12 @@ TEST(FilterApplicableObservers, DropsInapplicableObserversPerSystem) {
   auto pal_expected = kExpectedObserverIds;
   pal_expected.erase("fm_code");
   pal_expected.erase("white_flag");
+  pal_expected.erase("closed_caption");
   EXPECT_EQ(
       id_set(filter_applicable_observers(all, params_for(VideoSystem::PAL))),
       pal_expected);
 
-  auto ntsc_expected = kExpectedObserverIds;
-  ntsc_expected.erase("teletext");
+  const auto& ntsc_expected = kExpectedObserverIds;
   EXPECT_EQ(
       id_set(filter_applicable_observers(all, params_for(VideoSystem::NTSC))),
       ntsc_expected);

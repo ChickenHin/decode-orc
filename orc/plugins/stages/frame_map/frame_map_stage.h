@@ -188,6 +188,26 @@ class FrameMapStage : public DAGStage,
       const std::map<std::string, ParameterValue>& params) override;
 
  private:
+  // Everything one execute() needs, resolved from the parameter map it was
+  // handed over the configuration the stage holds.
+  //
+  // Held on the stack rather than read back off the members: a DAG's stages
+  // are shared, and re-applying the parameter map to the object on every
+  // execute() let one thread reparse the ranges while another was walking
+  // them — a use-after-free whose garbage bounds turned the mapping loop into
+  // an unbounded one.
+  struct RunConfig {
+    std::string range_spec;
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    bool remove_duplicates = false;
+    bool pad_gaps = false;
+  };
+
+  // Resolve @p parameters against the stage's configured values. Returns
+  // nullopt for a malformed range spec (already logged).
+  std::optional<RunConfig> config_for(
+      const std::map<std::string, ParameterValue>& parameters) const;
+
   // Parse "0-10,20-30,11-19" → vector of [start, end] inclusive pairs.
   // PAD_N tokens produce a pair with first == UINT64_MAX, second == N.
   static std::vector<std::pair<uint64_t, uint64_t>> parse_ranges(

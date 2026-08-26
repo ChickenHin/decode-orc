@@ -82,6 +82,26 @@ class GUIProject {
   /// @{
   bool hasSource() const;         ///< Check if project has a video source
   QString getSourceName() const;  ///< Get name of the first video source
+
+  /// Outcome of reloadSources().
+  struct SourceReloadResult {
+    int source_count = 0;  ///< Number of source nodes the project holds
+    bool rebuilt = false;  ///< Whether the DAG rebuild succeeded
+  };
+
+  /**
+   * @brief Re-read every source in the project from its media
+   *
+   * Reloading is a DAG rebuild: building the DAG constructs fresh stage
+   * objects, so every source stage reopens its media and re-reads its
+   * metadata and picks up a capture that has grown or changed on disk since
+   * the project was opened. The project structure and its parameters are not
+   * touched, so the modified flag is unaffected.
+   *
+   * @return The source node count and whether the rebuild succeeded. A
+   *         project with no source is left alone and reports a zero count.
+   */
+  SourceReloadResult reloadSources();
   /// @}
 
   /// @name Presenter Access
@@ -110,6 +130,9 @@ class GUIProject {
   /// @}
 
  private:
+  /// Number of nodes whose stage the registry marks as a source.
+  int sourceNodeCount() const;
+
   QString project_path_;  // Path to .orcprj file
   std::unique_ptr<orc::presenters::IProjectPresenter>
       presenter_;  // Presenter managing core project

@@ -102,9 +102,6 @@ class PreviewDialog : public QDialog {
   QAction* ntscObserverAction() {
     return show_ntsc_observer_action_;
   }  ///< Get NTSC observer menu action
-  QAction* teletextAction() {
-    return show_teletext_action_;
-  }  ///< Get teletext pages menu action
   QAction* closedCaptionAction() {
     return show_closed_caption_action_;
   }  ///< Get closed captions menu action
@@ -213,9 +210,8 @@ class PreviewDialog : public QDialog {
    * @param format Video format of the project being previewed
    *
    * The NTSC observers (FM code, white flag) and EIA-608 closed captions are
-   * 525-line NTSC features, while ETSI EN 300 706 System B teletext is only
-   * carried on 625-line PAL. Anything else (including PAL-M and an unknown
-   * format) leaves all three entries disabled.
+   * 525-line NTSC features. Anything else (including PAL, PAL-M and an unknown
+   * format) leaves those entries disabled.
    */
   void setObserverAvailabilityForFormat(orc::presenters::VideoFormat format);
 
@@ -468,8 +464,6 @@ class PreviewDialog : public QDialog {
                                                 // Observer menu item selected
   void showNtscObserverDialogRequested();   // Emitted when NTSC Observer menu
                                             // item selected
-  void showTeletextDialogRequested();       // Emitted when Teletext Pages menu
-                                            // item selected
   void showClosedCaptionDialogRequested();  // Emitted when Closed Captions menu
                                             // item selected
   void showDropoutsChanged(
@@ -568,7 +562,6 @@ class PreviewDialog : public QDialog {
   QAction* show_vbi_action_;
   QAction* show_video_parameter_observer_action_;
   QAction* show_ntsc_observer_action_;
-  QAction* show_teletext_action_;
   QAction* show_closed_caption_action_;
   QAction* show_frame_timing_action_;
   QAction* show_waveform_monitor_action_;

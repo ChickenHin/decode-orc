@@ -4,7 +4,7 @@
  * Purpose:     Shared TBC field metadata value types
  *
  * Defines the data structures that describe TBC field metadata — shared
- * between the tbc_source stage (reader) and the ld_sink stage (writer).
+ * between the tbc_source stage (reader) and the tbc_sink stage (writer).
  * Both stages include this header.  All other pipeline code should be
  * oblivious to these types.
  *
@@ -88,7 +88,7 @@ struct FieldMetadata {
   std::optional<bool> is_first_field;
   // Colour-sequence phase for one field.  NOT populated when reading a source
   // TBC (input phase metadata is ignored — phase is measured from the burst via
-  // the colour_frame_phase observer); the ld_sink writer sets it from that
+  // the colour_frame_phase observer); the tbc_sink writer sets it from that
   // observer measurement when exporting a TBC.
   std::optional<int32_t> field_phase_id;
   std::optional<double> median_burst_ire;
@@ -133,7 +133,7 @@ struct PcmAudioParameters {
 /**
  * @brief Signal levels in the ld-decode 16-bit domain.
  *
- * Only meaningful at the tbc_source stage (reading) and ld_sink stage
+ * Only meaningful at the tbc_source stage (reading) and tbc_sink stage
  * (writing).  All other pipeline code works in the CVBS_U10_4FSC 10-bit
  * domain via SourceParameters.
  */

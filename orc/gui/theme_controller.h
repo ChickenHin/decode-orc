@@ -42,6 +42,13 @@ class ThemeController : public QObject {
   // Returns the active controller, or nullptr if none has been constructed.
   static ThemeController* instance();
 
+  // Widget style that should be installed to render an `isDark` theme on a
+  // platform whose native style is `nativeStyleName`, with Qt reporting
+  // `osScheme` for the desktop. Returns the native style unless it cannot paint
+  // the requested theme, in which case the palette-driven fallback is used.
+  static QString styleNameForTheme(const QString& nativeStyleName, bool isDark,
+                                   Qt::ColorScheme osScheme);
+
   ThemeManager::Mode mode() const;
 
   // Changes the active theme mode, persists it, re-applies the theme, and
@@ -57,6 +64,9 @@ class ThemeController : public QObject {
   void applyResolution(const ThemeManager::Resolution& resolution);
   // Connects/disconnects OS colour-scheme tracking to match the current mode.
   void updateSystemTracking();
+  // Swaps in the palette-driven fallback style when the platform's native style
+  // cannot render the requested theme, and restores the native style otherwise.
+  void applyStyle(bool isDark);
 
   // Applies the light or dark palette and menu/message-box stylesheet.
   static void applyPalette(QApplication& app, bool isDark);
@@ -64,6 +74,10 @@ class ThemeController : public QObject {
   QApplication& app_;
   ThemeManager::Mode mode_;
   QMetaObject::Connection tracking_connection_;
+  // Style Qt selected for the platform, captured before any theme is applied.
+  QString native_style_name_;
+  // Style currently installed on the application (native or fallback).
+  QString applied_style_name_;
 
   static ThemeController* s_instance;
 };

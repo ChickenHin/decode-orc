@@ -15,6 +15,8 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QScreen>
+#include <QScrollBar>
 #include <QSettings>
 #include <QStringList>
 #include <QVBoxLayout>
@@ -27,6 +29,17 @@
 #include "logging.h"
 
 namespace {
+
+// Screen size assumed when the dialog cannot work out which screen it will
+// open on (never expected in practice; keeps the opening size sane if it
+// happens).
+constexpr int kFallbackScreenWidth = 1024;
+constexpr int kFallbackScreenHeight = 768;
+
+// Opening width, in average character widths, for a stage that has a file path
+// or free-form string parameter. Wide enough for a working path to be readable
+// without the user having to resize the dialog first.
+constexpr int kTextEntryWidthChars = 88;
 
 // Splits an allowed_strings entry "value\x1flabel" into (value, label). With no
 // separator the whole entry serves as both the stored value and the label.
@@ -73,6 +86,14 @@ StageParameterDialog::StageParameterDialog(
 
   auto* main_layout = new QVBoxLayout(this);
 
+  // The description and the parameter form live inside a scroll area: a stage
+  // with a long parameter list asks for more height than Qt is willing to give
+  // a dialog, and without somewhere for the overflow to go the layout takes
+  // the shortfall out of every row at once (see the opening-size block below).
+  auto* content = new QWidget();
+  auto* content_layout = new QVBoxLayout(content);
+  content_layout->setContentsMargins(0, 0, 0, 0);
+
   // Stage description label (shown at the top when non-empty)
   if (!stage_description.empty()) {
     auto* desc_label = new QLabel(QString::fromStdString(stage_description));
@@ -80,12 +101,23 @@ StageParameterDialog::StageParameterDialog(
     desc_label->setStyleSheet(
         "color: palette(window-text); font-style: italic;");
     desc_label->setContentsMargins(0, 0, 0, 6);
-    main_layout->addWidget(desc_label);
+    content_layout->addWidget(desc_label);
   }
 
   // Form layout for parameters
   form_layout_ = new QFormLayout();
-  main_layout->addLayout(form_layout_);
+  content_layout->addLayout(form_layout_);
+  content_layout->addStretch();
+
+  scroll_area_ = new QScrollArea();
+  scroll_area_->setObjectName("parameter_scroll_area");
+  scroll_area_->setWidgetResizable(true);
+  scroll_area_->setFrameShape(QFrame::NoFrame);
+  // Without AdjustToContents a scroll area reports a fixed placeholder hint,
+  // which would open every dialog at the same arbitrary height.
+  scroll_area_->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
+  scroll_area_->setWidget(content);
+  main_layout->addWidget(scroll_area_, 1);
 
   // Build UI based on descriptors
   build_ui(current_values);
@@ -117,6 +149,77 @@ StageParameterDialog::StageParameterDialog(
   button_layout->addWidget(button_box_);
 
   main_layout->addLayout(button_layout);
+}
+
+void StageParameterDialog::showEvent(QShowEvent* event) {
+  // Sized on first show rather than in the constructor: the widgets are
+  // polished by then, so the form reports the height it will really occupy.
+  // This runs before the window is mapped, so nothing is seen to resize.
+  if (!opening_size_applied_) {
+    opening_size_applied_ = true;
+    apply_opening_size();
+  }
+  QDialog::showEvent(event);
+}
+
+void StageParameterDialog::apply_opening_size() {
+  // Left to itself, Qt opens a dialog at its layout hint capped at two thirds
+  // of the screen, and that hint is only as wide as the widest widget asks
+  // for. Both defaults hurt here: the cap squashes long parameter lists (a
+  // sink with thirty parameters loses a pixel or two from every row), and the
+  // hint leaves file-path fields far too narrow to read a path in. Open at the
+  // size the form actually wants instead, widened for text entry and bounded
+  // by the screen rather than by two thirds of it.
+  const QScreen* dialog_screen =
+      parentWidget() != nullptr ? parentWidget()->screen() : screen();
+  const QRect available =
+      dialog_screen != nullptr
+          ? dialog_screen->availableGeometry()
+          : QRect(0, 0, kFallbackScreenWidth, kFallbackScreenHeight);
+
+  int width = sizeHint().width();
+  const bool has_text_entry =
+      std::any_of(descriptors_.begin(), descriptors_.end(),
+                  [](const orc::ParameterDescriptor& desc) {
+                    return desc.type == orc::ParameterType::FILE_PATH ||
+                           (desc.type == orc::ParameterType::STRING &&
+                            desc.constraints.allowed_strings.empty());
+                  });
+  if (has_text_entry) {
+    width = std::max(width,
+                     fontMetrics().averageCharWidth() * kTextEntryWidthChars);
+  }
+  width = std::min(width, available.width() * 9 / 10);
+
+  // Height comes from the scrolled content rather than from the dialog's own
+  // hint: a scroll area caps the height it asks for at 24 text lines, which
+  // would open every long parameter list part-scrolled for no reason. Ask the
+  // content how tall it is at the width the dialog will actually open at, so
+  // the word-wrapped description contributes the lines it really needs.
+  const QMargins margins = layout()->contentsMargins();
+  const int content_width = width - margins.left() - margins.right();
+  const int max_height = available.height() * 9 / 10;
+
+  auto* content_layout = scroll_area_->widget()->layout();
+  const int content_height =
+      content_layout->hasHeightForWidth()
+          ? content_layout->totalHeightForWidth(content_width)
+          : content_layout->sizeHint().height();
+
+  // The button row sits outside the scroll area and is always fully shown.
+  const int chrome = margins.top() + margins.bottom() + layout()->spacing() +
+                     std::max(button_box_->sizeHint().height(),
+                              reset_button_->sizeHint().height());
+
+  int height = content_height + chrome;
+  if (height > max_height) {
+    // The content will scroll, so the vertical scroll bar takes width from it.
+    height = max_height;
+    const int bar = scroll_area_->verticalScrollBar()->sizeHint().width();
+    width = std::min(width + bar, available.width() * 9 / 10);
+  }
+
+  resize(width, height);
 }
 
 void StageParameterDialog::build_ui(
@@ -323,19 +426,25 @@ void StageParameterDialog::build_ui(
 
                 for (const QString& e : extensions) {
                   QString trimmed = e.trimmed();
+                  if (trimmed.isEmpty()) continue;
                   if (!ext_patterns.isEmpty()) {
                     ext_patterns += " ";
                     ext_names += "/";
                   }
                   ext_patterns += "*" + trimmed;
-                  ext_names += trimmed.toUpper();
+                  // The name drops the leading dot of every extension, not
+                  // just the first: a hint listing several would otherwise
+                  // read "VBI/.FLAC/.U16".
+                  QString name = trimmed;
+                  if (name.startsWith('.')) name.remove(0, 1);
+                  ext_names += name.toUpper();
                 }
 
-                filter = ext_names.mid(1) + " Files (" + ext_patterns +
-                         ");;All Files (*)";
-                dialog_title =
-                    is_output ? "Select Output " + ext_names.mid(1) + " File"
-                              : "Select " + ext_names.mid(1) + " File";
+                filter =
+                    ext_names + " Files (" + ext_patterns + ");;All Files (*)";
+                dialog_title = is_output
+                                   ? "Select Output " + ext_names + " File"
+                                   : "Select " + ext_names + " File";
               }
 
               QString file;

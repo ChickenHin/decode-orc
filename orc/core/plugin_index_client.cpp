@@ -156,7 +156,7 @@ std::string PluginIndexClient::default_index_url() {
   // The curated index currently lives alongside the host in the decode-orc
   // repository; it is read from the default branch head so merges publish
   // immediately. This is expected to move to a dedicated repository later.
-  return "https://raw.githubusercontent.com/simoninns/decode-orc/main/"
+  return "https://raw.githubusercontent.com/decode-orc/decode-orc/main/"
          "orc-plugin-registry/index.yaml";
 }
 

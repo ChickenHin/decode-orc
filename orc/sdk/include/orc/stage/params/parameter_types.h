@@ -86,6 +86,22 @@ struct ParameterDescriptor {
   bool output_path = false;
 };
 
+/// Reserved parameter name carrying the host-supplied identity of a node's
+/// inputs.
+///
+/// A stage that must know which upstream node feeds each entry of execute()'s
+/// |inputs| vector declares a STRING parameter with this name. The host
+/// overwrites the value when it builds the execution graph with the source
+/// node IDs of the node's incoming connections, comma-separated, in the same
+/// order as |inputs| (for example "2,4,16"). Stages that do not declare the
+/// parameter are never handed it.
+///
+/// The value is host-owned: the parameter is hidden from the GUI and CLI
+/// parameter surfaces, is never edited by the user, and is not written to the
+/// project file. A stage handed an empty value (no host support, or no
+/// connections yet) must fall back to positional input handling.
+inline constexpr const char kInputNodeIdsParameter[] = "input_node_ids";
+
 /// Helper functions to work with parameter values
 namespace parameter_util {
 /// Convert ParameterValue to string for display

@@ -17,11 +17,14 @@
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QScreen>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <map>
 #include <string>
 #include <vector>
 
+#include "audio_channel_pair_notice.h"
 #include "stageparameterdialog.h"
 
 namespace gui_unit_test {
@@ -179,6 +182,39 @@ TEST(StageParameterDialogTest,
   EXPECT_FALSE(std::get<bool>(values.at("bool_param")));
   EXPECT_EQ(std::get<std::string>(values.at("string_param")), "updated-value");
   EXPECT_EQ(std::get<std::string>(values.at("enum_param")), "gamma");
+}
+
+// The TBC sink's pair picker uses the same value/label combo entries, so the
+// dialog shows "0: Analogue" while the project stores "0".
+TEST(StageParameterDialogTest, Combo_TbcSinkAudioChannelPairShowsPairNames) {
+  (void)ensureApplication();
+
+  const char sep = StageParameterDialog::kComboValueLabelSeparator;
+  std::vector<orc::ParameterDescriptor> descriptors;
+  descriptors.push_back(makeDescriptor(
+      "audio_channel_pair", "Audio Channel Pair", orc::ParameterType::STRING,
+      std::string("0"), std::nullopt, std::nullopt,
+      {orc::gui::audioChannelPairComboEntry(0, "Analogue", sep),
+       orc::gui::audioChannelPairComboEntry(1, "EFM digital audio", sep)}));
+
+  std::map<std::string, orc::ParameterValue> current_values;
+  current_values["audio_channel_pair"] = std::string("1");
+
+  StageParameterDialog dialog("tbc_sink", "TBC Sink", "desc", descriptors,
+                              current_values);
+
+  auto* combo = qobject_cast<QComboBox*>(
+      widgetForDisplayName(dialog, "Audio Channel Pair"));
+  ASSERT_NE(combo, nullptr);
+
+  EXPECT_EQ(combo->itemText(0).toStdString(), "0: Analogue");
+  EXPECT_EQ(combo->itemText(1).toStdString(), "1: EFM digital audio");
+  EXPECT_EQ(combo->currentText().toStdString(), "1: EFM digital audio");
+
+  auto values = dialog.get_values();
+  ASSERT_TRUE(
+      std::holds_alternative<std::string>(values.at("audio_channel_pair")));
+  EXPECT_EQ(std::get<std::string>(values.at("audio_channel_pair")), "1");
 }
 
 TEST(StageParameterDialogTest, Combo_ShowsLabelWhileStoringBareValue) {
@@ -445,6 +481,68 @@ TEST(StageParameterDialogTest,
 
   const auto values = dialog.get_values();
   EXPECT_EQ(std::get<std::string>(values.at("ranges")), "0-10");
+}
+
+TEST(StageParameterDialogTest,
+     OpeningSize_KeepsEveryRowAtFullHeight_WhenTheFormIsTallerThanTheScreen) {
+  (void)ensureApplication();
+
+  // Far more parameters than fit on any screen: the form has to be scrolled,
+  // and the rows must keep their natural height rather than being compressed
+  // to make the whole list fit.
+  std::vector<orc::ParameterDescriptor> descriptors;
+  for (int i = 0; i < 80; ++i) {
+    descriptors.push_back(makeDescriptor(
+        "param_" + std::to_string(i), "Parameter " + std::to_string(i),
+        orc::ParameterType::DOUBLE, 0.0, 0.0, 100.0));
+  }
+
+  StageParameterDialog dialog("test-stage", "Test Stage",
+                              "A stage with a very long parameter list.",
+                              descriptors, {});
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  ASSERT_NE(dialog.findChild<QScrollArea*>("parameter_scroll_area"), nullptr);
+
+  auto* form = dialog.findChild<QFormLayout*>();
+  ASSERT_NE(form, nullptr);
+  for (int row = 0; row < form->rowCount(); ++row) {
+    auto* field_item = form->itemAt(row, QFormLayout::FieldRole);
+    ASSERT_NE(field_item, nullptr);
+    auto* field = field_item->widget();
+    ASSERT_NE(field, nullptr);
+    EXPECT_GE(field->height(), field->sizeHint().height())
+        << "row " << row << " was squashed below its preferred height";
+  }
+
+  // ...and the dialog itself still fits on the screen it opened on.
+  const QRect available = QGuiApplication::primaryScreen()->availableGeometry();
+  EXPECT_LE(dialog.height(), available.height());
+  EXPECT_LE(dialog.width(), available.width());
+}
+
+TEST(StageParameterDialogTest,
+     OpeningSize_IsWideEnoughToReadAPath_WhenAParameterTakesAFilePath) {
+  (void)ensureApplication();
+
+  std::vector<orc::ParameterDescriptor> descriptors;
+  descriptors.push_back(makeDescriptor("output_path", "Output File",
+                                       orc::ParameterType::FILE_PATH,
+                                       std::string("")));
+
+  StageParameterDialog dialog("test-stage", "Test Stage", "", descriptors, {});
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  // A working path is far longer than the 400px floor the dialog used to open
+  // at, which left the field too narrow to read one in.
+  const int minimum_width = dialog.fontMetrics().averageCharWidth() * 80;
+  EXPECT_GE(dialog.width(), minimum_width);
+
+  auto* edit = dialog.findChild<QLineEdit*>("file_path_edit");
+  ASSERT_NE(edit, nullptr);
+  EXPECT_GT(edit->width(), dialog.width() / 3);
 }
 
 }  // namespace gui_unit_test

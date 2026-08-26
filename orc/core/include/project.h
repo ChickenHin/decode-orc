@@ -82,7 +82,7 @@ namespace project_io {
 Project load_project(const std::string& filename);
 Project load_project_from_yaml(const std::string& yaml_text,
                                const std::string& filename_hint);
-void save_project(const Project& project, const std::string& filename);
+void save_project(Project& project, const std::string& filename);
 std::string serialize_project_to_yaml(const Project& project,
                                       const std::string& filename_hint);
 Project create_empty_project(const std::string& project_name,
@@ -260,7 +260,7 @@ class Project {
   friend Project project_io::load_project(const std::string& filename);
   friend Project project_io::load_project_from_yaml(
       const std::string& yaml_text, const std::string& filename_hint);
-  friend void project_io::save_project(const Project& project,
+  friend void project_io::save_project(Project& project,
                                        const std::string& filename);
   friend std::string project_io::serialize_project_to_yaml(
       const Project& project, const std::string& filename_hint);
@@ -325,11 +325,16 @@ Project load_project(const std::string& filename);
 
 /**
  * Save a project to YAML file
+ *
+ * On success the project's root directory is updated to the directory the
+ * file was written to, so that relative file-path parameters resolve the same
+ * way in this session as they will when the saved file is reloaded.
+ *
  * @param project Project structure to save
  * @param filename Path to .orc-project file
  * @throws std::runtime_error on I/O errors
  */
-void save_project(const Project& project, const std::string& filename);
+void save_project(Project& project, const std::string& filename);
 
 /**
  * Create a new empty project with no sources

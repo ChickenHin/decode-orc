@@ -486,7 +486,7 @@ int main(int argc, char* argv[]) {
       if (!bundle_path.empty()) {
         std::cerr << "\nDiagnostic bundle created: " << bundle_path << "\n";
         std::cerr << "Please report this issue at: "
-                     "https://github.com/simoninns/decode-orc/issues\n";
+                     "https://github.com/decode-orc/decode-orc/issues\n";
       }
 
       cleanup_crash_handler();
@@ -499,7 +499,7 @@ int main(int argc, char* argv[]) {
       if (!bundle_path.empty()) {
         std::cerr << "\nDiagnostic bundle created: " << bundle_path << "\n";
         std::cerr << "Please report this issue at: "
-                     "https://github.com/simoninns/decode-orc/issues\n";
+                     "https://github.com/decode-orc/decode-orc/issues\n";
       }
 
       cleanup_crash_handler();

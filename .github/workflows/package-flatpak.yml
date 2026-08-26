@@ -45,20 +45,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .flatpak-builder
-          key: flatpak-builder-${{ hashFiles('io.github.simoninns.decode-orc.yml') }}
+          key: flatpak-builder-${{ hashFiles('io.github.decode_orc.decode-orc.yml') }}
           restore-keys: |
             flatpak-builder-
 
       - name: Validate Flatpak manifest
         shell: bash
         run: |
-          if [[ ! -f io.github.simoninns.decode-orc.yml ]]; then
+          if [[ ! -f io.github.decode_orc.decode-orc.yml ]]; then
             echo "Flatpak manifest not found" >&2
             exit 1
           fi
           
           # Basic YAML syntax check
-          python3 -c "import yaml; yaml.safe_load(open('io.github.simoninns.decode-orc.yml'))" || {
+          python3 -c "import yaml; yaml.safe_load(open('io.github.decode_orc.decode-orc.yml'))" || {
             echo "Flatpak manifest has invalid YAML syntax" >&2
             exit 1
           }
@@ -70,17 +70,17 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           DATE=$(date +%Y-%m-%d)
 
-          if [[ -f orc/gui/io.github.simoninns.decode-orc.metainfo.xml ]]; then
+          if [[ -f orc/gui/io.github.decode_orc.decode-orc.metainfo.xml ]]; then
             sed -i "s|<release version=\"[^\"]*\" date=\"[^\"]*\">|<release version=\"${VERSION}\" date=\"${DATE}\">|" \
-              orc/gui/io.github.simoninns.decode-orc.metainfo.xml
+              orc/gui/io.github.decode_orc.decode-orc.metainfo.xml
           fi
 
           # Inject the resolved version into the decode-orc module so the app
           # reports a real version (the dir: source may not carry .git, so the
           # CMake git-hash fallback is not reliable inside flatpak-builder).
           sed -i "s|^      - -DEZPWD_INCLUDE_DIR=/app/include$|&\n      - -DPROJECT_VERSION_OVERRIDE=${VERSION}|" \
-            io.github.simoninns.decode-orc.yml
-          grep -q "PROJECT_VERSION_OVERRIDE=${VERSION}" io.github.simoninns.decode-orc.yml || {
+            io.github.decode_orc.decode-orc.yml
+          grep -q "PROJECT_VERSION_OVERRIDE=${VERSION}" io.github.decode_orc.decode-orc.yml || {
             echo "Failed to inject PROJECT_VERSION_OVERRIDE into Flatpak manifest" >&2
             exit 1
           }
@@ -105,7 +105,7 @@ jobs:
               --install-deps-from=flathub \
               --default-branch=stable \
               flatpak-build \
-              io.github.simoninns.decode-orc.yml; then
+              io.github.decode_orc.decode-orc.yml; then
               exit 0
             fi
             if [[ "$attempt" -lt "$attempts" ]]; then
@@ -125,7 +125,7 @@ jobs:
           flatpak build-bundle \
             flatpak-repo \
             "dist/${BUNDLE_NAME}" \
-            io.github.simoninns.decode-orc \
+            io.github.decode_orc.decode-orc \
             stable
 
       - name: Verify Flatpak bundle
@@ -156,19 +156,19 @@ jobs:
           flatpak install --user -y "$BUNDLE_FILE"
           
           # Verify installation
-          flatpak list --user | grep -q io.github.simoninns.decode-orc || {
+          flatpak list --user | grep -q io.github.decode_orc.decode-orc || {
             echo "Flatpak installation verification failed" >&2
             exit 1
           }
           
           # Check that binaries are accessible
-          flatpak run --command=sh io.github.simoninns.decode-orc -c "which orc-gui && which orc-cli" || {
+          flatpak run --command=sh io.github.decode_orc.decode-orc -c "which orc-gui && which orc-cli" || {
             echo "Flatpak binaries not found in app" >&2
             exit 1
           }
           
           # Uninstall after test
-          flatpak uninstall --user -y io.github.simoninns.decode-orc
+          flatpak uninstall --user -y io.github.decode_orc.decode-orc
 
       - name: Collect Flatpak artifact
         shell: bash

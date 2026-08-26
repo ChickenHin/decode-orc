@@ -21,6 +21,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <map>
 #include <optional>
@@ -78,6 +79,9 @@ class StageParameterDialog : public QDialog {
    */
   std::map<std::string, orc::ParameterValue> get_values() const;
 
+ protected:
+  void showEvent(QShowEvent* event) override;
+
  signals:
   void update_requested();
 
@@ -88,6 +92,7 @@ class StageParameterDialog : public QDialog {
 
  private:
   QFormLayout* form_layout_;
+  QScrollArea* scroll_area_;
   QDialogButtonBox* button_box_;
   QPushButton* reset_button_;
 
@@ -110,6 +115,14 @@ class StageParameterDialog : public QDialog {
   // to pass unrecognised legacy values through untouched: validation only
   // rejects a spec the user has actually modified.
   std::map<std::string, std::string> spec_display_baseline_;
+
+  // Chooses the size the dialog opens at. Qt's own choice caps the height at
+  // two thirds of the screen and takes the width from the widest widget's
+  // hint, which squashes long parameter lists and leaves path fields too
+  // narrow to read; this opens at what the form asks for, widened for text
+  // entry and bounded by the screen.
+  void apply_opening_size();
+  bool opening_size_applied_ = false;
 
   // Build UI from descriptors
   void build_ui(

@@ -18,7 +18,6 @@
 #include "logging.h"
 #include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
-#include "teletext_observation_presenter.h"
 #include "vbi_presenter.h"
 #include "video_parameter_observation_presenter.h"
 
@@ -85,6 +84,12 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   std::optional<orc::presenters::BurstLevelDisplaySeries>
   getBurstLevelAnalysisData(orc::NodeID node_id) override {
     return presenter_.getBurstLevelAnalysisData(node_id);
+  }
+
+  std::optional<orc::CatalogueDataset> getCatalogueData(
+      orc::NodeID node_id, const std::string& view_option,
+      const std::optional<std::vector<std::string>>& active_toggles) override {
+    return presenter_.getCatalogueData(node_id, view_option, active_toggles);
   }
 
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
@@ -230,7 +235,7 @@ class Project;
 // "burst_level_analysis_sink_stage.h"
 
 // Phase 2.7: Trigger operations migrated to RenderPresenter
-// Removed: #include "ld_sink_stage.h"
+// Removed: #include "tbc_sink_stage.h"
 
 namespace {
 
@@ -381,14 +386,6 @@ uint64_t RenderCoordinator::requestVBIData(const orc::NodeID& node_id,
   return id;
 }
 
-uint64_t RenderCoordinator::requestTeletextData(const orc::NodeID& node_id,
-                                                orc::FieldID field_id) {
-  uint64_t id = nextRequestId();
-  auto req = std::make_unique<GetTeletextDataRequest>(id, node_id, field_id);
-  enqueueRequest(std::move(req));
-  return id;
-}
-
 uint64_t RenderCoordinator::requestClosedCaptionData(const orc::NodeID& node_id,
                                                      orc::FieldID field_id) {
   uint64_t id = nextRequestId();
@@ -425,6 +422,16 @@ uint64_t RenderCoordinator::requestSNRData(const orc::NodeID& node_id,
 uint64_t RenderCoordinator::requestBurstLevelData(const orc::NodeID& node_id) {
   uint64_t id = nextRequestId();
   auto req = std::make_unique<GetBurstLevelDataRequest>(id, node_id);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
+uint64_t RenderCoordinator::requestCatalogueData(
+    const orc::NodeID& node_id, const std::string& view_option,
+    const std::optional<std::vector<std::string>>& active_toggles) {
+  uint64_t id = nextRequestId();
+  auto req = std::make_unique<GetCatalogueDataRequest>(id, node_id, view_option,
+                                                       active_toggles);
   enqueueRequest(std::move(req));
   return id;
 }
@@ -661,11 +668,6 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
       handleGetVBIData(*static_cast<GetVBIDataRequest*>(request.get()));
       break;
 
-    case RenderRequestType::GetTeletextData:
-      handleGetTeletextData(
-          *static_cast<GetTeletextDataRequest*>(request.get()));
-      break;
-
     case RenderRequestType::GetClosedCaptionData:
       handleGetClosedCaptionData(
           *static_cast<GetClosedCaptionDataRequest*>(request.get()));
@@ -682,6 +684,11 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
     case RenderRequestType::GetBurstLevelData:
       handleGetBurstLevelData(
           *static_cast<GetBurstLevelDataRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetCatalogueData:
+      handleGetCatalogueData(
+          *static_cast<GetCatalogueDataRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetAvailableOutputs:
@@ -940,56 +947,6 @@ void RenderCoordinator::handleGetObservations(
       });
 }
 
-void RenderCoordinator::handleGetTeletextData(
-    const GetTeletextDataRequest& req) {
-  // One presenter request covers both fields of the field's parent frame
-  // (requestObservations() maps field -> frame), so extract both here and
-  // let the teletext dialog fill its trailing-frame-window cache at half the
-  // request rate. Temporal order is ascending derived field id.
-  const uint64_t frame_index = req.field_id.value() / 2;
-  const orc::FieldID field1_id(frame_index * 2);
-  const orc::FieldID field2_id(frame_index * 2 + 1);
-
-  if (!worker_render_presenter_) {
-    emit teletextDataReady(req.request_id, false,
-                           static_cast<qulonglong>(field1_id.value()),
-                           orc::presenters::TeletextFieldPacketsView{},
-                           static_cast<qulonglong>(field2_id.value()),
-                           orc::presenters::TeletextFieldPacketsView{});
-    return;
-  }
-
-  const uint64_t request_id = req.request_id;
-  worker_render_presenter_->requestObservations(
-      req.node_id, req.field_id,
-      [this, request_id, field1_id, field2_id](
-          uint64_t /*presenter_request_id*/, bool available,
-          const void* obs_context) noexcept {
-        // This callback may run on the scheduler's worker thread inside a
-        // completion callback that must never throw; contain everything.
-        try {
-          orc::presenters::TeletextFieldPacketsView field1_view;
-          orc::presenters::TeletextFieldPacketsView field2_view;
-          if (available && obs_context != nullptr) {
-            field1_view = orc::presenters::TeletextObservationPresenter::
-                extractFieldObservations(field1_id, obs_context);
-            field2_view = orc::presenters::TeletextObservationPresenter::
-                extractFieldObservations(field2_id, obs_context);
-          }
-          emit teletextDataReady(request_id, available,
-                                 static_cast<qulonglong>(field1_id.value()),
-                                 std::move(field1_view),
-                                 static_cast<qulonglong>(field2_id.value()),
-                                 std::move(field2_view));
-        } catch (const std::exception& e) {
-          ORC_LOG_ERROR("RenderCoordinator: teletext delivery failed: {}",
-                        e.what());
-        } catch (...) {
-          ORC_LOG_ERROR("RenderCoordinator: teletext delivery failed");
-        }
-      });
-}
-
 void RenderCoordinator::handleGetClosedCaptionData(
     const GetClosedCaptionDataRequest& req) {
   // One presenter request covers both fields of the field's parent frame
@@ -1094,27 +1051,12 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
     // Use the RenderPresenter abstraction instead of direct DAG access.
     auto series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
     if (!series) {
-      // Stage has not been triggered yet — trigger it now so the data is
-      // available.
+      // Reading results never runs the stage — see handleGetCatalogueData.
       ORC_LOG_DEBUG(
-          "RenderCoordinator: Dropout stage has no results, triggering now "
-          "(request {})",
+          "RenderCoordinator: Dropout stage has no results (request {})",
           req.request_id);
-      worker_render_presenter_->triggerStage(
-          req.node_id,
-          makePercentGatedProgress(
-              [this](int current, int total, const std::string& message) {
-                emit dropoutProgress(static_cast<size_t>(current),
-                                     static_cast<size_t>(total),
-                                     QString::fromStdString(message));
-              }));
-      series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
-      if (!series) {
-        emit error(req.request_id,
-                   "Failed to get dropout data - node may not be a "
-                   "DropoutAnalysisSinkStage or trigger failed");
-        return;
-      }
+      emit resultsNotAvailable(req.request_id);
+      return;
     }
 
     ORC_LOG_DEBUG(
@@ -1144,26 +1086,11 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
     // Use the RenderPresenter abstraction instead of direct DAG access.
     auto series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
     if (!series) {
-      // Stage has not been triggered yet — trigger it now so the data is
-      // available.
-      ORC_LOG_DEBUG(
-          "RenderCoordinator: SNR stage has no results, triggering now "
-          "(request {})",
-          req.request_id);
-      auto progress_cb = makePercentGatedProgress(
-          [this](int current, int total, const std::string& message) {
-            emit snrProgress(static_cast<size_t>(current),
-                             static_cast<size_t>(total),
-                             QString::fromStdString(message));
-          });
-      worker_render_presenter_->triggerStage(req.node_id, progress_cb);
-      series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
-      if (!series) {
-        emit error(req.request_id,
-                   "Failed to get SNR data - node may not be a "
-                   "SNRAnalysisSinkStage or trigger failed");
-        return;
-      }
+      // Reading results never runs the stage — see handleGetCatalogueData.
+      ORC_LOG_DEBUG("RenderCoordinator: SNR stage has no results (request {})",
+                    req.request_id);
+      emit resultsNotAvailable(req.request_id);
+      return;
     }
 
     ORC_LOG_DEBUG("RenderCoordinator: Served SNR dataset from sink ({} points)",
@@ -1193,26 +1120,12 @@ void RenderCoordinator::handleGetBurstLevelData(
     auto series =
         worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
     if (!series) {
-      // Stage has not been triggered yet — trigger it now so the data is
-      // available.
+      // Reading results never runs the stage — see handleGetCatalogueData.
       ORC_LOG_DEBUG(
-          "RenderCoordinator: Burst level stage has no results, triggering now "
-          "(request {})",
+          "RenderCoordinator: Burst level stage has no results (request {})",
           req.request_id);
-      auto progress_cb = makePercentGatedProgress(
-          [this](int current, int total, const std::string& message) {
-            emit burstLevelProgress(static_cast<size_t>(current),
-                                    static_cast<size_t>(total),
-                                    QString::fromStdString(message));
-          });
-      worker_render_presenter_->triggerStage(req.node_id, progress_cb);
-      series = worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
-      if (!series) {
-        emit error(req.request_id,
-                   "Failed to get burst data - node may not be a "
-                   "BurstLevelAnalysisSinkStage or trigger failed");
-        return;
-      }
+      emit resultsNotAvailable(req.request_id);
+      return;
     }
 
     ORC_LOG_DEBUG(
@@ -1223,6 +1136,44 @@ void RenderCoordinator::handleGetBurstLevelData(
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Burst level analysis failed: {}",
                   e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleGetCatalogueData(
+    const GetCatalogueDataRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Getting catalogue for node '{}' (request {})",
+      req.node_id.to_string(), req.request_id);
+
+  try {
+    if (!worker_render_presenter_) {
+      emit error(req.request_id, "Render presenter not initialized");
+      return;
+    }
+
+    auto data = worker_render_presenter_->getCatalogueData(
+        req.node_id, req.view_option, req.active_toggles);
+    if (!data) {
+      // Reading results never runs the stage. A viewer that decoded on demand
+      // would duplicate Trigger Stage — the same work behind a second name,
+      // and a menu pick that costs minutes on a long source. So the read is a
+      // read: it serves what the last trigger left behind, and says plainly
+      // when there is nothing there. Rebuilding the DAG (which any parameter
+      // edit does) replaces the stage objects, so results never outlive the
+      // parameters that produced them.
+      ORC_LOG_DEBUG("RenderCoordinator: Stage has no catalogue (request {})",
+                    req.request_id);
+      emit resultsNotAvailable(req.request_id);
+      return;
+    }
+
+    ORC_LOG_DEBUG("RenderCoordinator: Served catalogue ({} items)",
+                  data->items.size());
+    emit catalogueDataReady(req.request_id, std::move(*data));
+
+  } catch (const std::exception& e) {
+    ORC_LOG_ERROR("RenderCoordinator: Catalogue read failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
 }

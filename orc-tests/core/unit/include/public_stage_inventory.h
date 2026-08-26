@@ -59,10 +59,18 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
          return orc::StageRegistry::instance().create_stage(
              "PAL_M_CVBS_Source");
        }},
+      {"vbi_source", PublicStageFamily::Source, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage("vbi_source");
+       }},
       {"stacker", PublicStageFamily::Transform, true,
        [] { return orc::StageRegistry::instance().create_stage("stacker"); }},
       {"frame_map", PublicStageFamily::Transform, true,
        [] { return orc::StageRegistry::instance().create_stage("frame_map"); }},
+      {"source_join", PublicStageFamily::Transform, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage("source_join");
+       }},
       {"video_params", PublicStageFamily::Transform, true,
        [] {
          return orc::StageRegistry::instance().create_stage("video_params");
@@ -110,8 +118,8 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
        [] { return orc::StageRegistry::instance().create_stage("AudioSink"); }},
       {"CCSink", PublicStageFamily::Sink, true,
        [] { return orc::StageRegistry::instance().create_stage("CCSink"); }},
-      {"ld_sink", PublicStageFamily::Sink, true,
-       [] { return orc::StageRegistry::instance().create_stage("ld_sink"); }},
+      {"tbc_sink", PublicStageFamily::Sink, true,
+       [] { return orc::StageRegistry::instance().create_stage("tbc_sink"); }},
       {"CVBSSink", PublicStageFamily::Sink, true,
        [] { return orc::StageRegistry::instance().create_stage("CVBSSink"); }},
       {"EFMSink", PublicStageFamily::Sink, true,
@@ -140,6 +148,10 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
       {"teletext_sink", PublicStageFamily::Sink, true,
        [] {
          return orc::StageRegistry::instance().create_stage("teletext_sink");
+       }},
+      {"nabts_sink", PublicStageFamily::Sink, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage("nabts_sink");
        }},
   };
 

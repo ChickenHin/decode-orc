@@ -635,6 +635,26 @@ class DefaultObservationSchedulingPolicy final
   static constexpr FrameID kDefaultPrefetchRadius = 24;
 
   /**
+   * Longest source a whole-node plan (sweep or invalidation) is emitted for.
+   *
+   * A whole-node plan is unbounded background work: every frame of the node,
+   * through the full observer set. That is a fair trade for a disc — a
+   * LaserDisc side runs to some 80 000 frames, which the pool clears while the
+   * user is still looking at the first one. It is not a fair trade for a tape.
+   * A VBI capture of an E180 holds around 270 000 PAL frames, and each one is
+   * synthesised from its line records before an observer can look at it, so
+   * the plan runs for tens of hours and starves the interactive render for its
+   * whole duration.
+   *
+   * Beyond this, whole-node plans are empty and the node is left to the
+   * prefetch window: observations accumulate around wherever the user actually
+   * scrubs, at the cost of not having the whole source ready up front. The
+   * limit sits above every disc-length source, so nothing that swept before
+   * stops sweeping.
+   */
+  static constexpr FrameID kMaxWholeNodeFrames = 100000;
+
+  /**
    * @param observer_ids   Stable ids of every standard observer.
    * @param stateful_ids   Subset of @p observer_ids that are stateful. Retained
    *                       for the ObserverInfo contract, but no longer drives a
