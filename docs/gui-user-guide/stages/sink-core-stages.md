@@ -591,6 +591,8 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 
 Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode. In FFmpeg mode the video is encoded into the chosen container and codec, optionally embedding pipeline audio (up to 8 channel pairs, one output stream per pair), closed captions (as mov_text subtitles, MP4/MOV only), and chapter markers derived from VBI data. In raw mode the decoded frames are written to a file without compression; the raw format determines the pixel layout and whether a Y4M header is prepended.
 
+For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](chroma-decoder-guide.md).
+
 **Parameters**
 
 * `output_path` (string)
