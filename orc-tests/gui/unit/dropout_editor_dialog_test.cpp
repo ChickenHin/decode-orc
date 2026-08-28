@@ -198,6 +198,9 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
       orc::NodeID, orc::VideoDataType) override {
     return {};
   }
+  std::vector<orc::VideoDataType> getStageDataTypes(orc::NodeID) override {
+    return {};
+  }
   orc::PreviewViewDataResult requestPreviewViewData(
       orc::NodeID, const std::string&, orc::VideoDataType,
       const orc::PreviewCoordinate&) override {

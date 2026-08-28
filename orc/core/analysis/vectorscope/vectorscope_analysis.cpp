@@ -174,6 +174,10 @@ VectorscopeData VectorscopeAnalysisTool::extractFromColourFrameCarrier(
         uv.v = clamp_normalized(carrier.v_plane[sample_index] / uv_range) *
                32767.0;
         uv.field_id = field_id;
+        // The line a sample came from: the renderer joins consecutive
+        // samples into a trace and must break it at each line rather than
+        // striking a chord back across the plot.
+        uv.line_number = static_cast<uint16_t>(y);
         data.samples.push_back(uv);
       }
     }

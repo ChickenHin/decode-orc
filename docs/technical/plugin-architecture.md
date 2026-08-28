@@ -164,12 +164,13 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `15` (`<orc/stage/tooling/catalogue_results.h>`: a display
-list can state the pixel grid it was resolved against and the shape it is drawn
-at, and say that its operations are that grid's pixels rather than shapes on it;
-and a schema can offer the reader several ways of presenting the same items and
-presentation choices that are on or off, which `ICatalogueResults` gains
-virtuals to be re-asked under).
+**Current value:** `16` (`<orc/stage/preview/orc_vectorscope.h>` and
+`<orc/stage/preview/orc_preview_types.h>`: a vectorscope sample says which part
+of the line it came from, which line that was and that line's PAL V-switch
+state, so a composite acquisition can plot burst and both line phases without a
+decoder having flattened them; `VectorscopeData` says which acquisition
+produced it and carries the burst readouts, and `PreviewCoordinate` carries the
+sampling window and line range being asked for).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 

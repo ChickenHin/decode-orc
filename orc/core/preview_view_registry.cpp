@@ -17,6 +17,7 @@
 #include <fstream>
 #include <utility>
 
+#include "analysis/vectorscope/composite_vectorscope.h"
 #include "analysis/vectorscope/vectorscope_analysis.h"
 #include "orc_histogram.h"
 #include "preview_renderer.h"
@@ -134,19 +135,25 @@ class ImagePreviewView final : public IPreviewView {
 
 class VectorscopePreviewView final : public IPreviewView {
  public:
-  VectorscopePreviewView(const DAG* dag, NodeID node_id)
-      : dag_(dag), node_id_(node_id) {}
+  VectorscopePreviewView(const DAG* dag, NodeID node_id,
+                         PreviewRenderer* renderer)
+      : dag_(dag), node_id_(node_id), renderer_(renderer) {}
 
+  // The decoded (grading) acquisition needs a stage that produces colour
+  // carriers; the composite (measurement) acquisition needs only a CVBS or
+  // Y/C carrier, which every signal-domain stage has.  Both are offered on
+  // every type so the dialog's mode selector is reachable wherever either can
+  // be satisfied.
   std::vector<VideoDataType> supported_data_types() const override {
     return {
-        VideoDataType::ColourNTSC,
-        VideoDataType::ColourPAL,
+        VideoDataType::CompositeNTSC, VideoDataType::CompositePAL,
+        VideoDataType::YC_NTSC,       VideoDataType::YC_PAL,
+        VideoDataType::ColourNTSC,    VideoDataType::ColourPAL,
     };
   }
 
   PreviewViewDataResult request_data(
-      VideoDataType /*data_type*/,
-      const PreviewCoordinate& coordinate) override {
+      VideoDataType data_type, const PreviewCoordinate& coordinate) override {
     PreviewViewDataResult result{};
 
     if (!dag_) {
@@ -157,6 +164,14 @@ class VectorscopePreviewView final : public IPreviewView {
     if (!coordinate.is_valid()) {
       result.error_message = "Preview coordinate is invalid";
       return result;
+    }
+
+    // The acquisition follows the data type rather than a caller's choice:
+    // a colour-domain output has decoder planes to plot, a signal-domain one
+    // has a carrier to demodulate, and neither can stand in for the other.
+    if (data_type != VideoDataType::ColourNTSC &&
+        data_type != VideoDataType::ColourPAL) {
+      return request_composite_data(coordinate);
     }
 
     const DAGNode* node = find_node(*dag_, node_id_);
@@ -199,6 +214,8 @@ class VectorscopePreviewView final : public IPreviewView {
       return result;
     }
 
+    last_vectorscope_->acquisition_mode =
+        VectorscopeAcquisitionMode::DecodedComponent;
     last_vectorscope_->system = carrier_opt->system;
     last_vectorscope_->cvbs_white =
         static_cast<int32_t>(carrier_opt->cvbs_white);
@@ -232,10 +249,12 @@ class VectorscopePreviewView final : public IPreviewView {
       return result;
     }
 
-    out << "u,v,field_id\n";
+    out << "u,v,field_id,line,sample_class,line_phase\n";
     for (const auto& sample : last_vectorscope_->samples) {
       out << sample.u << ',' << sample.v << ','
-          << static_cast<int>(sample.field_id) << '\n';
+          << static_cast<int>(sample.field_id) << ',' << sample.line_number
+          << ',' << static_cast<int>(sample.sample_class) << ','
+          << static_cast<int>(sample.line_phase) << '\n';
     }
 
     out.flush();
@@ -249,8 +268,55 @@ class VectorscopePreviewView final : public IPreviewView {
   }
 
  private:
+  // Composite (measurement) acquisition: demodulate the CVBS (or Y/C chroma)
+  // carrier the stage produces, with no decoder in the path.  For a
+  // signal-domain data type PreviewCoordinate::field_index addresses the frame
+  // to acquire.
+  PreviewViewDataResult request_composite_data(
+      const PreviewCoordinate& coordinate) {
+    PreviewViewDataResult result{};
+
+    if (!renderer_) {
+      result.error_message = "Preview renderer is not initialized";
+      return result;
+    }
+
+    auto representation = renderer_->get_representation_at_node(node_id_);
+    if (!representation) {
+      result.error_message =
+          "Stage does not provide a composite carrier to measure";
+      return result;
+    }
+
+    const FrameID frame_id = static_cast<FrameID>(coordinate.field_index);
+    if (!representation->has_frame(frame_id)) {
+      result.error_message = "Requested frame is not available at this stage";
+      return result;
+    }
+
+    CompositeVectorscopeOptions options;
+    options.window = coordinate.vectorscope_window;
+    options.first_line = coordinate.vectorscope_first_line;
+    options.last_line = coordinate.vectorscope_last_line;
+
+    auto data =
+        extract_composite_vectorscope(*representation, frame_id, options);
+    if (!data.has_value() || data->samples.empty()) {
+      result.error_message =
+          "Composite vectorscope data is not available for requested frame";
+      return result;
+    }
+
+    last_vectorscope_ = std::move(data);
+    result.success = true;
+    result.payload_kind = PreviewViewPayloadKind::Vectorscope;
+    result.vectorscope = last_vectorscope_;
+    return result;
+  }
+
   const DAG* dag_{nullptr};
   NodeID node_id_;
+  PreviewRenderer* renderer_{nullptr};
   std::optional<VectorscopeData> last_vectorscope_;
 };
 
@@ -693,12 +759,17 @@ void PreviewViewRegistry::register_default_views(
           "preview.vectorscope",
           "Vectorscope",
           {
+              VideoDataType::CompositeNTSC,
+              VideoDataType::CompositePAL,
+              VideoDataType::YC_NTSC,
+              VideoDataType::YC_PAL,
               VideoDataType::ColourNTSC,
               VideoDataType::ColourPAL,
           },
       },
-      [dag](NodeID node_id) {
-        return std::make_unique<VectorscopePreviewView>(dag.get(), node_id);
+      [dag, renderer](NodeID node_id) {
+        return std::make_unique<VectorscopePreviewView>(dag.get(), node_id,
+                                                        renderer);
       });
 
   registry.register_view(

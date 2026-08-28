@@ -363,3 +363,36 @@ history:
       remembering what it asked for, and a stage offering no toggles leaves the
       browser exactly as it was. This virtual likewise defaults to forwarding to
       `catalogue(view_option)` and likewise takes a vtable slot.
+  - abi: 16
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/preview/orc_vectorscope.h
+      - orc/stage/preview/orc_preview_types.h
+    summary: >-
+      The vectorscope contract grows a second acquisition mode. `UVSample`
+      carried a field index and nothing else, which is all a grading scope
+      needs because the decoder has already thrown away everything a
+      measurement scope reads: a composite acquisition plots the burst as well
+      as the picture and does not undo the PAL V-switch, so a sample is only
+      interpretable alongside which part of the line it came from, which line
+      that was, and — ITU-R BT.470-6 Table 2 item 2.16 — the V-switch state of
+      that line. `UVSample` therefore gains `sample_class`, `line_phase`,
+      `reserved` and `line_number`; the struct grows and every sample of a
+      `VectorscopeData` moves. `VectorscopeData` gains `acquisition_mode`,
+      `sample_window`, `first_line`, `last_line`, `sample_stride` and an
+      embedded `VectorscopeMeasurements` so the renderer can pick the right
+      graticule and show burst readouts, and `VectorscopeData` is embedded by
+      value in `ColourFrameCarrier`, so that carrier's layout moves too. The
+      new `VectorscopeAcquisitionMode`, `VectorscopeSampleClass`,
+      `VectorscopeLinePhase` and `VectorscopeSampleWindow` enums are the
+      vocabulary those members are stated in. `PreviewCoordinate` gains
+      `vectorscope_window`, `vectorscope_first_line` and
+      `vectorscope_last_line`: a composite scope's line-select is part of the
+      request, not of the stage's configuration, and putting it in the shared
+      coordinate keeps it out of the graph. Which of the two acquisitions runs
+      is deliberately *not* among them — a colour-domain data type has decoder
+      planes to plot and a signal-domain one has a carrier to demodulate, so
+      the type already settles it and a second, independently settable mode
+      could only disagree with it. The three members are appended, so no
+      existing member moves, but the struct grows.

@@ -102,6 +102,7 @@ orc_add_gui_unit_tests(
             teletext_font_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
+            preview_data_type_resolution_test.cpp
             vectorscope_geometry_test.cpp
 )
 
@@ -145,4 +146,5 @@ orc_add_gui_unit_tests(
         plugin_manager_dialog_test.cpp
         closed_caption_dialog_test.cpp
         catalogue_dialog_test.cpp
+        vectorscope_dialog_test.cpp
 )

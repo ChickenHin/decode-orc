@@ -112,7 +112,7 @@ Signal analysis tools displayed as waveform or vector graphs in floating dialogs
 |--------|----------|-------------|
 | Frame Timing | Ctrl+Shift+T | Show the sync and timing waveform across all lines of the current frame. Useful for diagnosing sync pulse position and line structure. |
 | Waveform Monitor | Ctrl+Shift+W | Sample histogram across multiple lines with adjustable gain and range. Available for supported stages only. |
-| Vectorscope | Ctrl+Shift+S | U/V chroma vector plot with a standard vectorscope graticule. Available for stages with separate Y and C channels. |
+| Vectorscope | Ctrl+Shift+S | U/V chroma vector plot, available on every stage. Shows the decoded (grading) plot on a chroma-decoding stage's colour output and the composite (measurement) plot on a CVBS or Y/C output. |
 
 ### Waveform Monitor
 
@@ -127,15 +127,97 @@ Only available when the selected stage provides this view.
 
 ### Vectorscope
 
-Plots the chroma U and V components as a scatter on a standard vectorscope graticule.
+Plots chroma as a scatter on a vectorscope graticule. There are two
+acquisitions, and they answer different questions:
+
+| Acquisition | What it plots |
+|-------------|---------------|
+| **Decoded (grading)** | The U/V planes the chroma decoder produced — after demodulation, after comb/delay-line filtering, and after the PAL V-switch has been undone. This is a post-production colour-grading scope: it shows what the decoder output looks like, which is what to use when comparing decoder settings. |
+| **Composite (measurement)** | Chroma demodulated straight from the composite carrier (or the C channel of a Y/C source) against a burst-locked subcarrier reference, with no delay-line averaging, no V-switch correction and no active-area restriction. This is a technical measurement scope: it shows what the *signal* looks like. |
+
+**You do not choose between them.** The acquisition follows the output you are
+previewing: a colour-domain output has decoder planes to plot, a signal-domain
+one has a carrier to demodulate, so selecting the stage — and, on a decoding
+sink, the preview mode — already settles it. The scope opens on any stage, and
+the Acquisition box reports which of the two you are looking at. Switching
+stages re-acquires; the two are different data sets, not two renderings of one.
+
+The composite acquisition's display is not delay-line compensated, so a PAL
+graticule carries **two** sets of colour-bar targets — upper case for the +V
+line phase, lower case for the −V phase — and **two** burst boxes at 135° and
+225° (ITU-R BT.470-6 Table 2 item 2.16). NTSC has a single set of targets and a
+single burst box on the −U axis at 180° (SMPTE 170M-2004 §8.4).
+
+Controls that describe only one of the acquisitions are shown only for it.
 
 | Control | Description |
 |---------|-------------|
-| Field | Choose which field (top, bottom, or full frame) contributes to the plot. |
-| Blend | Persistence factor — higher values retain more signal history on screen. |
-| Defocus | Gaussian blur on the trace to aid reading at high dot density. |
+| Acquisition | Reports which acquisition is in force. Not a choice — see above. |
+| Sampling | Composite only. **Burst only** samples the colour-burst window on the back porch, **Active line** the active picture window, **Whole line** the entire line including sync and porches. |
+| All lines / First / Last | Composite only. Restrict the acquisition to a line or a range of lines, the way a real instrument's line-select works. Line numbers are 1-based and count through the frame in broadcast order (field 1 then field 2). |
+| Field Selection | Choose which field (both, first, or second) contributes to the plot. |
+| Graticule | Target set to overlay: none, 75 %, 100 %, or both. |
+| Colorize | Tint each plotted point by its chroma position. Turn it off for a single-colour trace, which is how an instrument's CRT reads. |
+| Defocus | Add Gaussian scatter to the trace to aid reading at high dot density. |
+| Draw Trace Lines | Join consecutive samples so the plot shows the beam path rather than isolated points. |
+| Gain | Trace intensity, like an instrument's intensity knob. On the composite plot brightness is proportional to how long the beam dwells on a point, as a phosphor's is: a colour-bar vector, where the beam rests for the width of the bar on every line, saturates, while the transit between two vectors is crossed once a line and stays faint. Raising Gain lifts the faint detail into view without moving the vectors. The decoded plot keeps its own brightness law. |
+| Active Picture Area Only | Decoded acquisition only; the composite acquisition states its window explicitly instead. |
 
-Only available for stages that output separate Y and C channels.
+#### Measurement readouts
+
+Shown in the composite acquisition, computed from the burst on every active
+line of the frame:
+
+| Readout | Meaning |
+|---------|---------|
+| Burst | Mean burst peak amplitude in IRE, and as a percentage of the nominal for the system (EBU Tech. 3280-E §1.2: PAL 300 mV p-p; SMPTE 170M-2004 §8.4: NTSC 40 IRE p-p). 100 % means the burst is at its specified amplitude. |
+| Jitter | RMS deviation of the per-line burst phase from the mean phase of its own V-switch group — subcarrier phase jitter. |
+| Lines | Number of lines that contributed to the burst reference. |
+| V-switch split err | PAL only. Departure of the two burst vectors from their nominal 90° separation. |
+| Chroma/burst | Mean active-picture chroma amplitude divided by the mean burst amplitude. |
+
+The subcarrier reference is measured from the burst rather than assumed from
+the nominal subcarrier frequency, which is how an instrument's burst-locked
+oscillator behaves. Each line's burst is that line's phase truth; a local
+straight-line fit over a few tens of lines acts as the oscillator's flywheel,
+so any drift in where a file places the subcarrier at the start of a line is
+followed rather than plotted, while per-line phase error stays visible as
+spread around the burst vectors and in the Jitter readout. This matters
+because the drift need not be small: a file whose lines sit on a plain
+integer-sample grid, rather than advancing by the nominal 283.7516 subcarrier
+cycles a line, walks about 0.58° a line — a full turn over a PAL frame, enough
+to smear a frame of colour bars into arcs at the bar radii.
+
+The composite trace is drawn in front of the graticule, as it is on a bench
+instrument, so a vector that lands exactly on its target is not hidden under
+the target's own crosshair, and the beam is given the finite spot a CRT has —
+without one, a vector that never moves lands on a single canvas pixel and is
+smaller than the mark it is meant to be read against.
+
+Full brightness is set from the trace itself rather than from a fixed number
+of hits, because how bright a vector looks depends on how tightly it lands. A
+clean source puts every line's colour bar on the same pixel; noise on a real
+capture spreads it over a disc and divides the dwell on any one pixel by the
+area of that disc. The reference follows that spreading, so the vectors read
+the same either way, and the transits between them are held faint
+independently — a frame of colour bars lays down several times as much ink
+joining its vectors as landing on them, and scaling the two together washes
+the plot out.
+
+Chroma is band-limited around the subcarrier before demodulation, using the
+same raised-cosine shape and 1.1 MHz sizing as the PAL decoder's chroma filter.
+Without it the whole luminance band folds into the plot and every sync edge and
+picture transition throws a full-amplitude rotating vector across the display.
+Sharp luminance edges still leave small spikes — that is what a wideband
+instrument shows, and it is the same effect that produces cross-colour.
+
+If the burst amplitude reading looks wrong, cross-check it against the **Burst
+Level** analysis sink, which measures the same thing independently over a whole
+recording.
+
+Whole-frame, whole-line acquisitions are subsampled when they would otherwise
+exceed the acquisition's sample ceiling; the info line reports the stride when
+one is in effect. Narrow the line range to sample every sample of a line.
 
 ### VBI Decoder
 

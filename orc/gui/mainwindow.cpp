@@ -38,6 +38,7 @@
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/video_parameter_observation_presenter.h"
+#include "preview/preview_data_type_resolution.h"
 #include "preview_audio_chase.h"
 #include "previewdialog.h"
 #include "project_load_status_formatter.h"
@@ -3441,20 +3442,29 @@ orc::VideoDataType MainWindow::inferCurrentVideoDataType() const {
   const bool is_pal = (infer_fmt == orc::presenters::VideoFormat::PAL ||
                        infer_fmt == orc::presenters::VideoFormat::PAL_M);
 
+  // The selected preview output type says which domain the user is looking at.
+  orc::VideoDataType candidate = is_pal ? orc::VideoDataType::CompositePAL
+                                        : orc::VideoDataType::CompositeNTSC;
+
   if (current_output_type_ == orc::PreviewOutputType::Frame_Field1_First ||
       current_output_type_ == orc::PreviewOutputType::Frame_Reversed ||
       current_output_type_ == orc::PreviewOutputType::Split) {
-    return is_pal ? orc::VideoDataType::ColourPAL
-                  : orc::VideoDataType::ColourNTSC;
+    candidate =
+        is_pal ? orc::VideoDataType::ColourPAL : orc::VideoDataType::ColourNTSC;
+  } else if (preview_dialog_ && preview_dialog_->signalCombo() &&
+             preview_dialog_->signalCombo()->isVisible()) {
+    candidate =
+        is_pal ? orc::VideoDataType::YC_PAL : orc::VideoDataType::YC_NTSC;
   }
 
-  if (preview_dialog_ && preview_dialog_->signalCombo() &&
-      preview_dialog_->signalCombo()->isVisible()) {
-    return is_pal ? orc::VideoDataType::YC_PAL : orc::VideoDataType::YC_NTSC;
+  // The output type alone is ambiguous, so reconcile it against what the stage
+  // actually declares (see resolvePreviewDataType).
+  if (!render_coordinator_ || !current_view_node_id_.is_valid()) {
+    return candidate;
   }
 
-  return is_pal ? orc::VideoDataType::CompositePAL
-                : orc::VideoDataType::CompositeNTSC;
+  return orc::gui::resolvePreviewDataType(
+      candidate, render_coordinator_->getStageDataTypes(current_view_node_id_));
 }
 
 orc::PreviewCoordinate MainWindow::buildCurrentPreviewCoordinate() const {
@@ -3480,9 +3490,18 @@ void MainWindow::refreshPreviewViewAvailability() {
     return;
   }
 
+  const orc::VideoDataType data_type = inferCurrentVideoDataType();
   const auto views = render_coordinator_->getAvailablePreviewViews(
-      current_view_node_id_, inferCurrentVideoDataType());
+      current_view_node_id_, data_type);
   preview_dialog_->setAvailablePreviewViews(views);
+
+  // The vectorscope acquisition follows the stage's output rather than a user
+  // choice: a colour-domain output has decoder planes to plot, a signal-domain
+  // one has a carrier to demodulate.
+  preview_dialog_->setVectorscopeAcquisitionMode(
+      orc::gui::isColourDomainDataType(data_type)
+          ? orc::VectorscopeAcquisitionMode::DecodedComponent
+          : orc::VectorscopeAcquisitionMode::CompositeCarrier);
 }
 
 void MainWindow::refreshVectorscopeForCurrentCoordinate() {
@@ -3521,6 +3540,19 @@ void MainWindow::refreshVectorscopeForCurrentCoordinate() {
   coordinate.field_index =
       static_cast<uint64_t>(preview_dialog_->currentIndex());
   coordinate.data_type_context = inferCurrentVideoDataType();
+  preview_dialog_->applyVectorscopeAcquisition(coordinate);
+
+  if (!orc::gui::isColourDomainDataType(coordinate.data_type_context)) {
+    // A composite acquisition addresses a frame of the carrier, so the
+    // preview item index has to be resolved against the preview mode: the
+    // flat field modes index sequential fields, every other mode indexes
+    // frames.
+    if (current_output_type_ == orc::PreviewOutputType::Frame_Field1 ||
+        current_output_type_ == orc::PreviewOutputType::Frame_Field2) {
+      coordinate.field_index /= 2;
+    }
+  }
+
   if (!coordinate.is_valid()) {
     return;
   }
