@@ -246,6 +246,18 @@ class RenderPresenter {
   /**
    * @brief Request preview-view data via the Phase 3 registry contract.
    */
+  /**
+   * @brief Video data types a node's stage declares it can preview.
+   *
+   * The stage's own declaration, not an inference from the preview output
+   * type: it is what decides which registry-driven views apply to the node.
+   * Empty when the node has no preview capability.
+   *
+   * @param node_id Node whose stage is inspected
+   * @return Declared data types, in the stage's own preference order
+   */
+  std::vector<orc::VideoDataType> getStageDataTypes(NodeID node_id);
+
   orc::PreviewViewDataResult requestPreviewViewData(
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate);

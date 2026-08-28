@@ -161,6 +161,62 @@ inline orc::UVSample vectorscopeDisplayTargetUv(int rgb, double percent,
       vectorscopeTargetUv(rgb, percent, ire_range, system), system);
 }
 
+// ============================================================================
+// Measurement (composite) graticule geometry
+// ============================================================================
+// A composite acquisition plots the signal rather than a decoded picture, so
+// its graticule carries the two things a grading graticule cannot: the colour
+// burst, and — for PAL — both V-switch line phases.
+
+// Nominal colour-burst peak amplitude as a fraction of the active video range
+// (blanking → white).
+// EBU Tech. 3280-E §1.2: PAL burst is 300 mV peak-to-peak against a 700 mV
+// luminance range, so its peak is 150/700 of that range.
+constexpr double kPalBurstAmplitudeFraction = 150.0 / 700.0;
+// SMPTE 170M-2004 §8.4: NTSC burst is 40 IRE peak-to-peak → 20 IRE peak, and
+// blanking → white is 100 IRE.  ITU-R BT.1700-1 Annex 1 Part B: PAL-M follows
+// the 525-line levels.
+constexpr double kNtscBurstAmplitudeFraction = 0.20;
+
+// Burst vector positions in standard vectorscope degrees (0 = right, CCW
+// positive).  ITU-R BT.470-6 Table 2 item 2.16: the PAL burst swings ±45°
+// about the −U axis with the V-switch.  SMPTE 170M-2004 §8.4: the NTSC burst
+// sits on the −U axis.
+constexpr double kPalBurstVPositiveDegrees = 135.0;
+constexpr double kPalBurstVNegativeDegrees = 225.0;
+constexpr double kNtscBurstDegrees = 180.0;
+
+// Peak burst magnitude in the display's signed full-scale units.
+inline double nominalBurstMagnitudeUv(orc::VideoSystem system,
+                                      double full_scale) {
+  const double fraction = (system == orc::VideoSystem::PAL)
+                              ? kPalBurstAmplitudeFraction
+                              : kNtscBurstAmplitudeFraction;
+  return fraction * full_scale;
+}
+
+// True when |system| swings the V component line by line, so a measurement
+// graticule needs two mirrored sets of colour-bar targets and two burst
+// vectors rather than one of each.
+inline bool hasSwitchedVAxis(orc::VideoSystem system) {
+  return system == orc::VideoSystem::PAL;
+}
+
+// Colour-bar target for one V-switch line phase.  A −V line inverts the V
+// component only, so its targets are the +V targets mirrored about the U axis
+// — which is exactly what an undelayed composite display shows.
+inline orc::UVSample measurementTargetUv(int rgb, double percent,
+                                         double ire_range,
+                                         orc::VideoSystem system,
+                                         orc::VectorscopeLinePhase phase) {
+  const orc::UVSample target =
+      vectorscopeTargetUv(rgb, percent, ire_range, system);
+  if (phase == orc::VectorscopeLinePhase::VNegative) {
+    return {target.u, -target.v};
+  }
+  return target;
+}
+
 }  // namespace orc::gui
 
 #endif  // ORC_GUI_PREVIEW_VECTORSCOPE_GEOMETRY_H

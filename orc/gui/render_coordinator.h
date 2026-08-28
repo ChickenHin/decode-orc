@@ -606,6 +606,8 @@ class IRenderPresenter {
   virtual std::vector<orc::PreviewViewDescriptor> getAvailablePreviewViews(
       NodeID node_id, orc::VideoDataType data_type) = 0;
 
+  virtual std::vector<orc::VideoDataType> getStageDataTypes(NodeID node_id) = 0;
+
   virtual orc::PreviewViewDataResult requestPreviewViewData(
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate) = 0;
@@ -957,6 +959,15 @@ class RenderCoordinator : public QObject {
    */
   std::vector<orc::PreviewViewDescriptor> getAvailablePreviewViews(
       const orc::NodeID& node_id, orc::VideoDataType data_type);
+
+  /**
+   * @brief Video data types the node's stage declares it can preview
+   * (synchronous).
+   *
+   * The stage's own declaration, which is what decides view applicability —
+   * as opposed to a data type inferred from the selected preview output type.
+   */
+  std::vector<orc::VideoDataType> getStageDataTypes(const orc::NodeID& node_id);
 
   /**
    * @brief Request preview-view data through presenter registry contract

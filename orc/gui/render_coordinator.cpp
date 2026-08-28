@@ -204,6 +204,11 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getAvailablePreviewViews(node_id, data_type);
   }
 
+  std::vector<orc::VideoDataType> getStageDataTypes(
+      orc::NodeID node_id) override {
+    return presenter_.getStageDataTypes(node_id);
+  }
+
   orc::PreviewViewDataResult requestPreviewViewData(
       orc::NodeID node_id, const std::string& view_id,
       orc::VideoDataType data_type,
@@ -557,6 +562,15 @@ RenderCoordinator::getAvailablePreviewViews(const orc::NodeID& node_id,
     return {};
   }
   return worker_render_presenter_->getAvailablePreviewViews(node_id, data_type);
+}
+
+std::vector<orc::VideoDataType> RenderCoordinator::getStageDataTypes(
+    const orc::NodeID& node_id) {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  if (!worker_render_presenter_) {
+    return {};
+  }
+  return worker_render_presenter_->getStageDataTypes(node_id);
 }
 
 orc::PreviewViewDataResult RenderCoordinator::requestPreviewViewData(

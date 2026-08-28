@@ -1097,8 +1097,7 @@ void PreviewDialog::setSharedPreviewCoordinate(
 
   shared_preview_coordinate_ = coordinate;
   if (vectorscope_dialog_) {
-    shared_preview_coordinate_->vectorscope_active_area_only =
-        vectorscope_dialog_->isActiveAreaOnly();
+    vectorscope_dialog_->applyAcquisitionTo(*shared_preview_coordinate_);
   }
   emit previewCoordinateChanged(*shared_preview_coordinate_);
 }
@@ -1126,8 +1125,7 @@ void PreviewDialog::showVectorscopeForNode(orc::NodeID node_id) {
                 coordinate.field_index = static_cast<uint64_t>(currentIndex());
               }
 
-              coordinate.vectorscope_active_area_only =
-                  vectorscope_dialog_->isActiveAreaOnly();
+              vectorscope_dialog_->applyAcquisitionTo(coordinate);
               emit vectorscopeRequested(coordinate);
             });
 
@@ -1138,6 +1136,7 @@ void PreviewDialog::showVectorscopeForNode(orc::NodeID node_id) {
   }
 
   vectorscope_dialog_->setScopeLabel(QStringLiteral("Vectorscope"));
+  vectorscope_dialog_->setAcquisitionMode(vectorscope_acquisition_mode_);
 
   vectorscope_node_id_ = node_id;
   vectorscope_dialog_->setStage(node_id);
@@ -1168,6 +1167,30 @@ void PreviewDialog::updateVectorscope(
 bool PreviewDialog::isVectorscopeVisibleForNode(orc::NodeID node_id) const {
   Q_UNUSED(node_id);
   return vectorscope_dialog_ && vectorscope_dialog_->isVisible();
+}
+
+void PreviewDialog::applyVectorscopeAcquisition(
+    orc::PreviewCoordinate& coordinate) const {
+  if (!vectorscope_dialog_) {
+    return;
+  }
+  vectorscope_dialog_->applyAcquisitionTo(coordinate);
+}
+
+void PreviewDialog::setVectorscopeAcquisitionMode(
+    orc::VectorscopeAcquisitionMode mode) {
+  vectorscope_acquisition_mode_ = mode;
+  if (vectorscope_dialog_) {
+    vectorscope_dialog_->setAcquisitionMode(mode);
+  }
+}
+
+orc::VectorscopeAcquisitionMode PreviewDialog::vectorscopeAcquisitionMode()
+    const {
+  if (!vectorscope_dialog_) {
+    return orc::VectorscopeAcquisitionMode::DecodedComponent;
+  }
+  return vectorscope_dialog_->acquisitionMode();
 }
 
 void PreviewDialog::onSampleMarkerMoved(int sample_x) {
@@ -1397,6 +1420,10 @@ void PreviewDialog::onComponentVectorscopeActionTriggered() {
     coordinate.field_index = static_cast<uint64_t>(currentIndex());
     coordinate.line_index = 0;
     coordinate.sample_offset = 0;
+  }
+
+  if (vectorscope_dialog_) {
+    vectorscope_dialog_->applyAcquisitionTo(coordinate);
   }
 
   emit vectorscopeRequested(coordinate);

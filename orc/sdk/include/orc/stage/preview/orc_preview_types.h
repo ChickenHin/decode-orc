@@ -18,6 +18,8 @@
 // SDK TIER: stage/preview — stage contract type crossing the plugin boundary.
 // A layout change here bumps the host ABI version.
 
+#include <orc/stage/preview/orc_vectorscope.h>
+
 #include <cstdint>
 
 namespace orc {
@@ -194,6 +196,20 @@ struct PreviewCoordinate {
       true};  ///< Vectorscope hint: true = active picture only, false = full
               ///< frame
 
+  /// Portion of each line a composite-carrier vectorscope acquisition samples.
+  ///
+  /// Which acquisition runs is not part of the request: it follows the data
+  /// type being previewed — a colour-domain type has decoder output to plot,
+  /// a signal-domain type has a carrier to demodulate — so there is nothing
+  /// for a caller to choose.
+  VectorscopeSampleWindow vectorscope_window{
+      VectorscopeSampleWindow::WholeLine};
+
+  /// Inclusive frame-flat line range for a CompositeCarrier acquisition.
+  /// vectorscope_last_line == 0 means "to the last line of the frame".
+  uint32_t vectorscope_first_line{0};
+  uint32_t vectorscope_last_line{0};
+
   /**
    * @brief Structural validity check.
    *
@@ -210,7 +226,10 @@ struct PreviewCoordinate {
     return field_index == other.field_index && line_index == other.line_index &&
            sample_offset == other.sample_offset &&
            data_type_context == other.data_type_context &&
-           vectorscope_active_area_only == other.vectorscope_active_area_only;
+           vectorscope_active_area_only == other.vectorscope_active_area_only &&
+           vectorscope_window == other.vectorscope_window &&
+           vectorscope_first_line == other.vectorscope_first_line &&
+           vectorscope_last_line == other.vectorscope_last_line;
   }
 
   bool operator!=(const PreviewCoordinate& other) const {

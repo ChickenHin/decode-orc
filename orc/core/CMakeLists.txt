@@ -42,6 +42,7 @@ add_library(orc-core SHARED
     analysis/analysis_series_decimator.cpp
 
     # Vectorscope analysis
+    analysis/vectorscope/composite_vectorscope.cpp
     analysis/vectorscope/vectorscope_analysis.cpp
     
     # Field/frame mapping analysis

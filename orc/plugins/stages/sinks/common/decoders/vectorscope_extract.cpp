@@ -122,6 +122,10 @@ VectorscopeData extract_vectorscope_from_component_frame(
         uv.u = clamp_normalized(uLine[x] / level_range) * 32767.0;
         uv.v = clamp_normalized(vLine[x] / level_range) * 32767.0;
         uv.field_id = field_id;  // Tag which field this sample came from
+        // The line a sample came from: the renderer joins consecutive samples
+        // into a trace and must break it at each line rather than striking a
+        // chord back across the plot.
+        uv.line_number = static_cast<uint16_t>(y);
         data.samples.push_back(uv);
       }
     }

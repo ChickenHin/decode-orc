@@ -299,6 +299,30 @@ class PreviewDialog : public QDialog {
   bool isVectorscopeVisibleForNode(orc::NodeID node_id) const;
 
   /**
+   * @brief Copy the vectorscope dialog's acquisition controls into a
+   *        preview coordinate.
+   *
+   * No-op when the vectorscope dialog has not been created, leaving the
+   * coordinate's defaults (decoded acquisition) in place.
+   */
+  void applyVectorscopeAcquisition(orc::PreviewCoordinate& coordinate) const;
+
+  /**
+   * @brief Acquisition the vectorscope dialog is currently set to.
+   *
+   * Returns DecodedComponent when the dialog has not been created.
+   */
+  orc::VectorscopeAcquisitionMode vectorscopeAcquisitionMode() const;
+
+  /**
+   * @brief State which vectorscope acquisition the current stage's output
+   *        calls for.
+   *
+   * Remembered so it also applies to a vectorscope dialog opened later.
+   */
+  void setVectorscopeAcquisitionMode(orc::VectorscopeAcquisitionMode mode);
+
+  /**
    * @brief Show frame scope dialog with sample data
    *
    * field_index is used as frame_id and line_number (1-based) is converted
@@ -572,6 +596,10 @@ class PreviewDialog : public QDialog {
   WaveformMonitorDialog* waveform_monitor_dialog_;
   VectorscopeDialog* vectorscope_dialog_{nullptr};
   orc::NodeID vectorscope_node_id_;
+  // Acquisition the current stage's output calls for.  Defaults to the
+  // decoded plot, which is what a colour stage gets.
+  orc::VectorscopeAcquisitionMode vectorscope_acquisition_mode_{
+      orc::VectorscopeAcquisitionMode::DecodedComponent};
   HistogramDialog* histogram_dialog_{nullptr};
   orc::NodeID histogram_node_id_;
   orc::NodeID current_node_id_;

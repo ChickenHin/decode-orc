@@ -11,11 +11,13 @@
 #define ORC_GUI_ANALYSIS_VECTORSCOPE_DIALOG_H
 
 #include <orc/stage/node_id.h>
-#include <orc/stage/preview/orc_vectorscope.h>  // Public API types
+#include <orc/stage/preview/orc_preview_types.h>  // PreviewCoordinate
+#include <orc/stage/preview/orc_vectorscope.h>    // Public API types
 
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QDialog>
+#include <QGroupBox>
 #include <QImage>
 #include <QLabel>
 #include <QPushButton>
@@ -67,6 +69,33 @@ class VectorscopeDialog : public QDialog {
   void setStage(orc::NodeID node_id);
   bool isActiveAreaOnly() const;
 
+  /// Acquisition in force: the decoded U/V planes (grading), or the composite
+  /// carrier demodulated directly (measurement).  Not a user choice — it
+  /// follows the data type the selected stage produces.
+  orc::VectorscopeAcquisitionMode acquisitionMode() const;
+
+  /**
+   * @brief State which acquisition the selected stage's output calls for.
+   *
+   * A colour-domain output has decoder planes to plot; a signal-domain one has
+   * a carrier to demodulate.  Switching re-acquires and re-lays the controls,
+   * since the sampling window and line select only exist for the composite
+   * acquisition.
+   */
+  void setAcquisitionMode(orc::VectorscopeAcquisitionMode mode);
+
+  /// Portion of each line a composite acquisition samples.
+  orc::VectorscopeSampleWindow sampleWindow() const;
+
+  /// Inclusive frame-flat line range for a composite acquisition, 0-based.
+  /// Returns {0, 0} when the whole frame is selected — 0 as the last line
+  /// means "to the last line of the frame" in PreviewCoordinate.
+  uint32_t firstLine() const;
+  uint32_t lastLine() const;
+
+  /// Copy the acquisition controls into a preview coordinate.
+  void applyAcquisitionTo(orc::PreviewCoordinate& coordinate) const;
+
   /**
    * @brief Update vectorscope with new data
    * @param data Vectorscope data from renderer
@@ -99,6 +128,8 @@ class VectorscopeDialog : public QDialog {
   void onDrawLinesToggled();
   void onPointSizeChanged();
   void onActiveAreaOnlyToggled();
+  void onSampleWindowChanged();
+  void onLineRangeChanged();
 
  private:
   friend class VectorscopeDialogPrivate;
@@ -107,6 +138,8 @@ class VectorscopeDialog : public QDialog {
   void connectSignals();
   int getGraticuleMode() const;
   void updateWindowTitle();
+  void updateAcquisitionControlState();
+  void updateMeasurementReadout();
 
   // Pimpl - hides core types from header
   std::unique_ptr<VectorscopeDialogPrivate> d_;
@@ -127,6 +160,26 @@ class VectorscopeDialog : public QDialog {
   QRadioButton* field_select_first_radio_;
   QRadioButton* field_select_second_radio_;
   QButtonGroup* field_select_group_;
+
+  // Acquisition in force, and the label that reports it.  Not a control: it
+  // follows the selected stage's output.
+  orc::VectorscopeAcquisitionMode acquisition_mode_{
+      orc::VectorscopeAcquisitionMode::DecodedComponent};
+  QLabel* acquisition_label_;
+
+  // Composite sampling options
+  QGroupBox* sampling_group_;
+  QRadioButton* window_burst_radio_;
+  QRadioButton* window_active_radio_;
+  QRadioButton* window_whole_radio_;
+  QButtonGroup* window_group_;
+  QCheckBox* all_lines_checkbox_;
+  QSpinBox* first_line_spinbox_;
+  QSpinBox* last_line_spinbox_;
+
+  // Measurement readouts (composite acquisition only)
+  QGroupBox* measurements_group_;
+  QLabel* measurements_label_;
 
   // Graticule options
   QRadioButton* graticule_none_radio_;

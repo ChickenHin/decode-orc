@@ -669,6 +669,78 @@ TEST(PreviewViewRegistryTest, Default_ViewsIncludeGenericVfrVisualizations) {
 // Vectorscope view — error paths with default views
 // =============================================================================
 
+TEST(PreviewViewRegistryTest, Vectorscope_IsOfferedOnSignalDomainStages) {
+  // A measurement acquisition reads the composite carrier, which a source or
+  // transform stage has; the scope is no longer confined to decoding sinks.
+  orc::PreviewViewRegistry registry;
+
+  auto stage = std::make_shared<TestPreviewStage>(
+      std::vector<orc::VideoDataType>{orc::VideoDataType::CompositePAL});
+  auto dag = std::make_shared<orc::DAG>(build_test_dag_with_stage(stage));
+
+  orc::PreviewViewRegistry::register_default_views(registry, dag, nullptr);
+
+  const auto views = registry.get_applicable_views(
+      *dag, orc::NodeID(1), orc::VideoDataType::CompositePAL);
+
+  std::unordered_set<std::string> ids;
+  for (const auto& view : views) {
+    ids.insert(view.id);
+  }
+
+  EXPECT_TRUE(ids.find("preview.vectorscope") != ids.end());
+}
+
+TEST(PreviewViewRegistryTest,
+     SignalDomainVectorscopeRequest_TakesTheCompositeAcquisition) {
+  // The acquisition follows the data type, not a caller's choice: asking a
+  // signal-domain stage for a vectorscope is a request to measure its carrier.
+  // With no preview renderer there is no carrier to reach, which is the error
+  // the composite path reports — proof the decoded path was not taken.
+  orc::PreviewViewRegistry registry;
+
+  auto stage = std::make_shared<TestPreviewStage>(
+      std::vector<orc::VideoDataType>{orc::VideoDataType::CompositePAL});
+  auto dag = std::make_shared<orc::DAG>(build_test_dag_with_stage(stage));
+
+  orc::PreviewViewRegistry::register_default_views(registry, dag, nullptr);
+
+  orc::PreviewCoordinate coordinate{};
+  coordinate.data_type_context = orc::VideoDataType::CompositePAL;
+  coordinate.vectorscope_window = orc::VectorscopeSampleWindow::WholeLine;
+
+  const auto result =
+      registry.request_data(*dag, orc::NodeID(1), "preview.vectorscope",
+                            orc::VideoDataType::CompositePAL, coordinate);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_EQ(result.error_message, "Preview renderer is not initialized");
+}
+
+TEST(PreviewViewRegistryTest,
+     ColourDomainVectorscopeRequest_TakesTheDecodedAcquisition) {
+  // The same view on a colour-domain output reads the decoder's planes; no
+  // preview renderer is needed for that path.
+  orc::PreviewViewRegistry registry;
+
+  auto stage = std::make_shared<TestColourPreviewStage>();
+  auto dag = std::make_shared<orc::DAG>(build_test_dag_with_stage(stage));
+
+  orc::PreviewViewRegistry::register_default_views(registry, dag, nullptr);
+
+  orc::PreviewCoordinate coordinate{};
+  coordinate.data_type_context = orc::VideoDataType::ColourNTSC;
+
+  const auto result =
+      registry.request_data(*dag, orc::NodeID(1), "preview.vectorscope",
+                            orc::VideoDataType::ColourNTSC, coordinate);
+
+  ASSERT_TRUE(result.success);
+  ASSERT_TRUE(result.vectorscope.has_value());
+  EXPECT_EQ(result.vectorscope->acquisition_mode,
+            orc::VectorscopeAcquisitionMode::DecodedComponent);
+}
+
 TEST(PreviewViewRegistryTest,
      VectorscopeRequest_FailsWhenStageIsNotColourProvider) {
   // Stage declares ColourNTSC capability but doesn't implement

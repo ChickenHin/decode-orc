@@ -1911,6 +1911,30 @@ RenderPresenter::getAvailablePreviewViews(NodeID node_id,
                                                             data_type);
 }
 
+std::vector<orc::VideoDataType> RenderPresenter::getStageDataTypes(
+    NodeID node_id) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return {};
+  }
+
+  const auto& nodes = dag->nodes();
+  auto it = std::find_if(
+      nodes.begin(), nodes.end(),
+      [node_id](const orc::DAGNode& node) { return node.node_id == node_id; });
+  if (it == nodes.end() || !it->stage) {
+    return {};
+  }
+
+  auto* capability_stage =
+      dynamic_cast<const orc::IStagePreviewCapability*>(it->stage.get());
+  if (!capability_stage) {
+    return {};
+  }
+
+  return capability_stage->get_preview_capability().supported_data_types;
+}
+
 orc::PreviewViewDataResult RenderPresenter::requestPreviewViewData(
     NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
     const orc::PreviewCoordinate& coordinate) {

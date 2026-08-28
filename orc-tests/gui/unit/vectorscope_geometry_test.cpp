@@ -157,4 +157,81 @@ TEST(VectorscopeGeometryTest, Ntsc_IAndQAxesAreAt123And33Degrees) {
   EXPECT_NEAR(q_angle_deg, 33.0, 0.5);
 }
 
+TEST(VectorscopeGeometryTest, MeasurementBurstMagnitude_MatchesSpecLevels) {
+  // EBU Tech. 3280-E §1.2: PAL burst is 300 mV peak-to-peak on a 700 mV
+  // luminance range, so its peak is 150/700 of the active video range.
+  EXPECT_DOUBLE_EQ(
+      orc::gui::nominalBurstMagnitudeUv(orc::VideoSystem::PAL, 1.0),
+      150.0 / 700.0);
+
+  // SMPTE 170M-2004 §8.4: NTSC burst is 40 IRE peak-to-peak → 20 IRE peak,
+  // against a 100 IRE blanking→white range.  PAL-M follows the 525-line
+  // levels (ITU-R BT.1700-1 Annex 1 Part B).
+  EXPECT_DOUBLE_EQ(
+      orc::gui::nominalBurstMagnitudeUv(orc::VideoSystem::NTSC, 1.0), 0.20);
+  EXPECT_DOUBLE_EQ(
+      orc::gui::nominalBurstMagnitudeUv(orc::VideoSystem::PAL_M, 1.0), 0.20);
+
+  // The magnitude scales with the display's full scale.
+  EXPECT_DOUBLE_EQ(
+      orc::gui::nominalBurstMagnitudeUv(orc::VideoSystem::NTSC,
+                                        orc::gui::kVectorscopeSignedFullScale),
+      0.20 * orc::gui::kVectorscopeSignedFullScale);
+}
+
+TEST(VectorscopeGeometryTest, OnlyPalNeedsTwoTargetSets) {
+  // ITU-R BT.470-6 Table 2 item 2.16: only PAL swings V line by line, so only
+  // a PAL measurement graticule carries mirrored target sets.
+  EXPECT_TRUE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::PAL));
+  EXPECT_FALSE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::NTSC));
+  EXPECT_FALSE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::PAL_M));
+}
+
+TEST(VectorscopeGeometryTest, MeasurementTargets_MirrorAboutTheUAxis) {
+  constexpr double kIreRange = orc::gui::kVectorscopeSignedFullScale;
+
+  for (int rgb = 1; rgb <= 6; ++rgb) {
+    const orc::UVSample positive = orc::gui::measurementTargetUv(
+        rgb, 0.75, kIreRange, orc::VideoSystem::PAL,
+        orc::VectorscopeLinePhase::VPositive);
+    const orc::UVSample negative = orc::gui::measurementTargetUv(
+        rgb, 0.75, kIreRange, orc::VideoSystem::PAL,
+        orc::VectorscopeLinePhase::VNegative);
+    const orc::UVSample reference = orc::gui::vectorscopeTargetUv(
+        rgb, 0.75, kIreRange, orc::VideoSystem::PAL);
+
+    // The +V phase is the ordinary target set.
+    EXPECT_DOUBLE_EQ(positive.u, reference.u);
+    EXPECT_DOUBLE_EQ(positive.v, reference.v);
+
+    // A −V line inverts V only, which is exactly what an undelayed composite
+    // display shows.
+    EXPECT_DOUBLE_EQ(negative.u, reference.u);
+    EXPECT_DOUBLE_EQ(negative.v, -reference.v);
+  }
+}
+
+TEST(VectorscopeGeometryTest, BurstAnglesFollowTheSwingingBurstConvention) {
+  // ITU-R BT.470-6 Table 2 item 2.16: PAL burst swings ±45° about the −U axis.
+  EXPECT_DOUBLE_EQ(orc::gui::kPalBurstVPositiveDegrees, 135.0);
+  EXPECT_DOUBLE_EQ(orc::gui::kPalBurstVNegativeDegrees, 225.0);
+  // SMPTE 170M-2004 §8.4: the NTSC burst sits on the −U axis.
+  EXPECT_DOUBLE_EQ(orc::gui::kNtscBurstDegrees, 180.0);
+
+  const orc::gui::VectorscopePlotGeometry geometry;
+  const double magnitude = orc::gui::nominalBurstMagnitudeUv(
+      orc::VideoSystem::PAL, orc::gui::kVectorscopeSignedFullScale);
+
+  // The two PAL burst vectors are mirror images about the U axis.
+  const QPointF positive = geometry.pointFromStandardDegrees(
+      orc::gui::kPalBurstVPositiveDegrees, magnitude);
+  const QPointF negative = geometry.pointFromStandardDegrees(
+      orc::gui::kPalBurstVNegativeDegrees, magnitude);
+  EXPECT_NEAR(positive.x(), negative.x(), 1e-9);
+  EXPECT_NEAR(positive.y() - geometry.centre_point.y(),
+              geometry.centre_point.y() - negative.y(), 1e-9);
+  EXPECT_LT(positive.x(), geometry.centre_point.x());
+  EXPECT_LT(positive.y(), geometry.centre_point.y());
+}
+
 }  // namespace gui_unit_test
