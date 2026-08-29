@@ -745,6 +745,49 @@ TEST_F(TeletextPageDecoderTest, RendersLevel1ColourAndMosaicAttributes) {
   EXPECT_FALSE(cells[8].mosaic);
 }
 
+TEST_F(TeletextPageDecoderTest, BlackColourCodesSetABlackForeground) {
+  // Mosaics Black (1/0) and Alpha Black (0/0) are colour codes like the other
+  // seven of each range: they set a black foreground and select their
+  // character set, and cancel conceal (EN 300 706 §12.2 Table 26).
+  std::string row;
+  row.push_back(0x11);  // Mosaic Red ("Set-After")
+  row.push_back(0x35);  // G1 mosaic glyph, red
+  row.push_back(0x10);  // Mosaics Black ("Set-After")
+  row.push_back(0x3A);  // G1 mosaic glyph, black
+  row.push_back(0x18);  // Conceal ("Set-At")
+  row.push_back(0x00);  // Alpha Black ("Set-After"): cancels conceal
+  row.push_back('Z');
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, row), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const auto& cells = snapshots_[0].cells[1];
+
+  // Column 1: red mosaic, as before the black code.
+  EXPECT_EQ(cells[1].character, 0x35);
+  EXPECT_TRUE(cells[1].mosaic);
+  EXPECT_EQ(cells[1].foreground, TeletextColour::Red);
+  // Column 2 is the Mosaics Black code itself: a space still in the previous
+  // colour, because the code is "Set-After".
+  EXPECT_EQ(cells[2].character, 0x20);
+  EXPECT_EQ(cells[2].foreground, TeletextColour::Red);
+  // Column 3: the same graphics, now black and still mosaics.
+  EXPECT_EQ(cells[3].character, 0x3A);
+  EXPECT_TRUE(cells[3].mosaic);
+  EXPECT_EQ(cells[3].foreground, TeletextColour::Black);
+  // Column 5 is the Alpha Black code, and is still concealed: like every
+  // colour code it cancels conceal from the following character-space.
+  EXPECT_TRUE(cells[5].conceal);
+  // Column 6: black alphanumeric — the alpha code returned the row to the G0
+  // set as well as setting the colour.
+  EXPECT_EQ(cells[6].character, 'Z');
+  EXPECT_FALSE(cells[6].mosaic);
+  EXPECT_FALSE(cells[6].conceal);
+  EXPECT_EQ(cells[6].foreground, TeletextColour::Black);
+}
+
 TEST_F(TeletextPageDecoderTest, DoubleHeight_ConsumesTheRowBelow) {
   std::string row;
   row.push_back(0x0D);  // Double Height ("Set-After")

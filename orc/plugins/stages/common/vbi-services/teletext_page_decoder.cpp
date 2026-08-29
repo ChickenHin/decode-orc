@@ -72,14 +72,14 @@ int extension_first_row(int packet_number) {
 constexpr int kTimeFillingPageNumber = 0xFF;
 
 // Spacing-attribute codes of ETSI EN 300 706 §12.2 Table 26 (7-bit values).
-constexpr uint8_t kAlphaColourBase = 0x00;   // 0/0-0/7 (0/0 no Level 1 action)
+constexpr uint8_t kAlphaColourBase = 0x00;   // 0/0-0/7 alpha colours
 constexpr uint8_t kFlash = 0x08;             // 0/8
 constexpr uint8_t kSteady = 0x09;            // 0/9
 constexpr uint8_t kEndBox = 0x0A;            // 0/A
 constexpr uint8_t kStartBox = 0x0B;          // 0/B
 constexpr uint8_t kNormalSize = 0x0C;        // 0/C
 constexpr uint8_t kDoubleHeight = 0x0D;      // 0/D
-constexpr uint8_t kMosaicColourBase = 0x10;  // 1/0-1/7 (1/0 no Level 1 action)
+constexpr uint8_t kMosaicColourBase = 0x10;  // 1/0-1/7 mosaic colours
 constexpr uint8_t kConceal = 0x18;           // 1/8
 constexpr uint8_t kContiguousMosaic = 0x19;  // 1/9
 constexpr uint8_t kSeparatedMosaic = 0x1A;   // 1/A
@@ -1284,24 +1284,31 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
         cell.parity_error = false;
         stamp_g0_set(cell);
 
-        // "Set-After" actions.
-        if (code >= kAlphaColourBase + 1 && code <= kAlphaColourBase + 7) {
-          // 0/1-0/7 alpha colours (0/0 has no Level 1 response). Colour
-          // codes cancel conceal (§12.2 1/8) and select the G0 set.
-          foreground = static_cast<TeletextColour>(code);
-          conceal = false;
-          if (mosaic) {
-            mosaic = false;
-            held_character = 0x20;  // mode change resets the held mosaic
-            held_separated = false;
-          }
-        } else if (code >= kMosaicColourBase + 1 &&
-                   code <= kMosaicColourBase + 7) {
-          // 1/1-1/7 mosaic colours (1/0 has no Level 1 response).
+        // "Set-After" actions. The mosaic colours are tested first only so
+        // that the alpha range, whose base is 0/0, needs no lower bound.
+        if (code >= kMosaicColourBase && code <= kMosaicColourBase + 7) {
+          // 1/0-1/7 mosaic colours, black included: Mosaics Black (1/0) is a
+          // colour code like the other seven, and a page that sends it means
+          // its graphics to be black. §12.2 Table 26 marks it a Level 2.5
+          // facility only because Level 1 receivers of the day disagreed over
+          // it, and its NOTE 10 is addressed to the broadcaster deciding
+          // whether to transmit it — a recording that carries the code carries
+          // an author's intent to honour.
           foreground = static_cast<TeletextColour>(code - kMosaicColourBase);
           conceal = false;
           if (!mosaic) {
             mosaic = true;
+            held_character = 0x20;  // mode change resets the held mosaic
+            held_separated = false;
+          }
+        } else if (code <= kAlphaColourBase + 7) {
+          // 0/0-0/7 alpha colours, Alpha Black (0/0) included on the same
+          // reading as Mosaics Black above. Colour codes cancel conceal
+          // (§12.2 1/8) and select the G0 set.
+          foreground = static_cast<TeletextColour>(code - kAlphaColourBase);
+          conceal = false;
+          if (mosaic) {
+            mosaic = false;
             held_character = 0x20;
             held_separated = false;
           }
