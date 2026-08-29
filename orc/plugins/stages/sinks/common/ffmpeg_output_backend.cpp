@@ -1925,7 +1925,16 @@ void FFmpegOutputBackend::extractClosedCaptionsFromObservations(
   }
 
   // Calculate frame rate for timestamp conversion
-  double fps = (video_system_ == VideoSystem::NTSC) ? 29.97 : 25.0;
+  double fps = (video_system_ == VideoSystem::NTSC) ? (30000.0 / 1001.0) : 25.0;
+
+  // Line 21 multiplexes four services onto one byte-pair stream, so the pairs
+  // have to be routed before they are decoded — fed the lot, the decoder lands
+  // a second caption service, or a text service's page of listings, in the
+  // middle of the subtitles. Only the primary caption service is embedded:
+  // the container carries one mov_text track, and CC1 is what a viewer
+  // expects to find on it.
+  EIA608ServiceDemux demux(EIA608Service::CC1,
+                           /*suppress_repeated_controls=*/true);
 
   // Iterate through the field range
   size_t cc_count = 0;
@@ -1964,6 +1973,10 @@ void FFmpegOutputBackend::extractClosedCaptionsFromObservations(
                                          0x7F);  // Remove parity bit
     uint8_t data1 = static_cast<uint8_t>(std::get<int32_t>(*data1_obs) &
                                          0x7F);  // Remove parity bit
+
+    if (!demux.accept(static_cast<int>(field_num % 2), data0, data1)) {
+      continue;  // Another service's byte pair, or padding
+    }
 
     // Convert field index to timestamp (seconds)
     // Divide by (2 * fps) because there are 2 fields per frame

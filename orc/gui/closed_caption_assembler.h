@@ -12,6 +12,7 @@
 #define CLOSED_CAPTION_ASSEMBLER_H
 
 #include <orc/support/eia608_decoder.h>
+#include <orc/support/eia608_service_demux.h>
 #include <orc_closed_caption.h>
 
 #include <array>
@@ -137,6 +138,19 @@ class ClosedCaptionAssembler {
 
   ClosedCaptionAssembler();
   ~ClosedCaptionAssembler();
+
+  /**
+   * @brief Choose which of line 21's services to decode
+   *
+   * Line 21 carries CC1, CC2, TEXT1 and TEXT2 multiplexed into one byte-pair
+   * stream; decoded together they interleave, so the preview follows one of
+   * them. Changing it discards everything decoded so far — the decode run
+   * would otherwise be half of one service and half of another — and the
+   * window is read again from the observations.
+   */
+  void setService(orc::EIA608Service service);
+
+  orc::EIA608Service service() const { return service_; }
 
   /**
    * @brief Advance the window so it ends at @p frame_index
@@ -275,6 +289,12 @@ class ClosedCaptionAssembler {
 
   // Fed strictly forwards and never rewound; recreated on a discontinuity.
   mutable std::unique_ptr<orc::EIA608Decoder> decoder_;
+
+  // Routes the multiplexed stream to service_ before the decoder sees it, and
+  // drops the duplicate copy of each control pair. Recreated with the decoder,
+  // whose state it has to stay in step with.
+  orc::EIA608Service service_ = orc::EIA608Service::CC1;
+  mutable std::unique_ptr<orc::EIA608ServiceDemux> demux_;
 
   // Screen state as of the frontier, so a frame that changes nothing records
   // nothing.

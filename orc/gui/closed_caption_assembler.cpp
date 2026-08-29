@@ -82,6 +82,18 @@ std::string ClosedCaptionAssembler::CaptionScreen::text() const {
 
 ClosedCaptionAssembler::ClosedCaptionAssembler() { restartDecodeAt(0); }
 
+void ClosedCaptionAssembler::setService(orc::EIA608Service service) {
+  if (service == service_) {
+    return;
+  }
+  service_ = service;
+  // Nothing decoded under the old selection describes the new one, and the
+  // bytes of frames already consumed have been released, so the window has to
+  // be read again from the start of the run.
+  discardAccumulated();
+  restartDecodeAt(anchorFor(current_frame_));
+}
+
 ClosedCaptionAssembler::~ClosedCaptionAssembler() = default;
 
 uint64_t ClosedCaptionAssembler::anchorFor(uint64_t frame_index) {
@@ -104,6 +116,8 @@ void ClosedCaptionAssembler::restartDecodeAt(uint64_t anchor_frame) {
   decode_anchor_ = anchor_frame;
   decode_frontier_ = anchor_frame;
   decoder_ = std::make_unique<orc::EIA608Decoder>();
+  demux_ = std::make_unique<orc::EIA608ServiceDemux>(
+      service_, /*suppress_repeated_controls=*/true);
 
   // History from the anchor on was produced by the run being replaced. The
   // re-read will produce it again, and keeping it in the meantime would show a
@@ -309,13 +323,20 @@ void ClosedCaptionAssembler::refresh() const {
       if (!field->parity0_valid && !field->parity1_valid) {
         continue;
       }
+      const int field_in_frame = (field == &data.field1) ? 0 : 1;
+      const uint8_t byte0 = sanitise_caption_byte(field->data0);
+      const uint8_t byte1 = sanitise_caption_byte(field->data1);
+
+      // Line 21 carries four services in one byte-pair stream. Only the
+      // selected one reaches the decoder; the rest would land another
+      // service's text in the middle of this one's screen.
+      if (!demux_->accept(field_in_frame, byte0, byte1)) {
+        continue;
+      }
+
       // Timestamps are frame indices rather than seconds: the dialog reports
-      // frames, and the decoder only compares them (its End of Caption
-      // de-duplication window is a tenth of a unit, which here suppresses the
-      // repeat a service sends on the frame's other field and nothing else).
-      decoder_->process_bytes(static_cast<double>(frame),
-                              sanitise_caption_byte(field->data0),
-                              sanitise_caption_byte(field->data1));
+      // frames, and the decoder only compares them.
+      decoder_->process_bytes(static_cast<double>(frame), byte0, byte1);
     }
 
     last_mode_ = decoder_->mode();

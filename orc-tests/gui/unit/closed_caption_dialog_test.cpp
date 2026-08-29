@@ -60,11 +60,25 @@ orc::presenters::ClosedCaptionFieldDataView fixtureField(uint64_t frame) {
   }
 }
 
+// The same window with a TEXT2 page spliced through the caption, which is what
+// line 21 really carries when a recording uses more than one service.
+orc::presenters::ClosedCaptionFieldDataView interleavedField(uint64_t frame) {
+  switch (frame) {
+    case 6:
+      return makeCaptionField(kCcControlByteChannel2, kCcTextRestart);
+    case 7:
+      return makeTextField('4', '2');
+    default:
+      return fixtureField(frame);
+  }
+}
+
 // Answer every frame the dialog asks for, as MainWindow's request loop does.
-void deliverWindow(ClosedCaptionDialog& dialog) {
+void deliverWindow(ClosedCaptionDialog& dialog,
+                   orc::presenters::ClosedCaptionFieldDataView (*source)(
+                       uint64_t) = &fixtureField) {
   for (const uint64_t frame : dialog.framesNeedingData()) {
-    dialog.deliverFrameData(true, frame * 2, fixtureField(frame),
-                            makeEmptyField());
+    dialog.deliverFrameData(true, frame * 2, source(frame), makeEmptyField());
   }
 }
 
@@ -170,6 +184,61 @@ TEST(ClosedCaptionDialogTest, ClearCacheEmptiesTheTranscript) {
 
   EXPECT_TRUE(dialog.listedCaptions().empty());
   EXPECT_TRUE(dialog.currentCaptionText().isEmpty());
+}
+
+// Issue #273: the four services multiplexed onto line 21 have to be read one
+// at a time, so the dialog offers a choice of which.
+TEST(ClosedCaptionDialogTest, DefaultsToTheCaptionServiceAndShowsOnlyIt) {
+  ensureApplication();
+  ClosedCaptionDialog dialog;
+  EXPECT_EQ(dialog.service(), orc::EIA608Service::CC1);
+
+  // Frame 7: the caption is on screen and the text page has arrived too.
+  dialog.setCurrentFrame(7);
+  deliverWindow(dialog, &interleavedField);
+
+  // "42" belongs to the text service and must not be in the caption.
+  EXPECT_EQ(dialog.currentCaptionText(), QStringLiteral("HELP"));
+}
+
+TEST(ClosedCaptionDialogTest, ChoosingATextServiceAsksForTheWindowAgain) {
+  ensureApplication();
+  ClosedCaptionDialog dialog;
+  dialog.setCurrentFrame(7);
+  deliverWindow(dialog, &interleavedField);
+  ASSERT_TRUE(dialog.framesNeedingData().empty());
+
+  int requests = 0;
+  QObject::connect(&dialog, &ClosedCaptionDialog::dataRequestNeeded,
+                   [&requests] { ++requests; });
+
+  dialog.selectService(orc::EIA608Service::T2);
+
+  EXPECT_EQ(dialog.service(), orc::EIA608Service::T2);
+  EXPECT_EQ(requests, 1);
+  // Nothing decoded under CC1 describes TEXT2, so the transcript is emptied
+  // and the frames are needed again.
+  EXPECT_TRUE(dialog.listedCaptions().empty());
+  EXPECT_FALSE(dialog.framesNeedingData().empty());
+
+  deliverWindow(dialog, &interleavedField);
+  EXPECT_EQ(dialog.currentCaptionText(), QStringLiteral("42"));
+}
+
+TEST(ClosedCaptionDialogTest, ReselectingTheSameServiceAsksForNothing) {
+  ensureApplication();
+  ClosedCaptionDialog dialog;
+  dialog.setCurrentFrame(7);
+  deliverWindow(dialog, &interleavedField);
+
+  int requests = 0;
+  QObject::connect(&dialog, &ClosedCaptionDialog::dataRequestNeeded,
+                   [&requests] { ++requests; });
+
+  dialog.selectService(orc::EIA608Service::CC1);
+
+  EXPECT_EQ(requests, 0);
+  EXPECT_EQ(dialog.currentCaptionText(), QStringLiteral("HELP"));
 }
 
 }  // namespace gui_unit_test

@@ -12,12 +12,15 @@
 
 #include <orc/stage/observation/observation_service_interface.h>
 #include <orc/support/eia608_decoder.h>
+#include <orc/support/eia608_service_demux.h>
 #include <orc/support/logging.h>
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "cc_sink_stage_deps_interface.h"
 
@@ -39,16 +42,41 @@ class CCSinkStageDeps : public ICCSinkStageDeps {
                            CCExportOptions options) override;
 
  private:
+  /// One recovered byte pair, with where in the stream it came from
+  struct CaptionPair {
+    /// Field within its frame: 0 for the first, 1 for the second
+    int field_in_frame = 0;
+    /// Field index across the whole run, as the observation is keyed
+    uint64_t field_index = 0;
+    uint8_t data0 = 0;
+    uint8_t data1 = 0;
+  };
+
+  /**
+   * @brief Drive the closed_caption observer over the run and hand back every
+   *        byte pair it recovers
+   *
+   * Shared by all four writers: they differ in what they do with the pairs,
+   * not in how the pairs are found. Returns false when the export was
+   * cancelled part-way.
+   */
+  bool for_each_caption_pair(const VideoFrameRepresentation* representation,
+                             IObservationContext& observation_context,
+                             IObserverHandle* cc_observer,
+                             const std::function<void(const CaptionPair&)>& fn);
+
   bool export_scc(const VideoFrameRepresentation* representation,
-                  const std::string& output_path, VideoFormat format,
+                  const CCExportOptions& options, VideoFormat format,
                   IObservationContext& observation_context,
                   IObserverHandle* cc_observer, int32_t& cc_frames_exported);
 
-  bool export_plain_text(const VideoFrameRepresentation* representation,
-                         const std::string& output_path, VideoFormat format,
-                         IObservationContext& observation_context,
-                         IObserverHandle* cc_observer,
-                         int32_t& cc_frames_exported);
+  /// Plain text, SubRip and HTML: all three are the decoded caption stream,
+  /// written out differently.
+  bool export_decoded(const VideoFrameRepresentation* representation,
+                      const CCExportOptions& options, VideoFormat format,
+                      IObservationContext& observation_context,
+                      IObserverHandle* cc_observer,
+                      int32_t& cc_frames_exported);
 
   std::string generate_timestamp(int32_t field_index, VideoFormat format) const;
   uint8_t apply_odd_parity(uint8_t byte) const;

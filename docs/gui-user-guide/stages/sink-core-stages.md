@@ -88,7 +88,7 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 | **Stage id** | `CCSink` |
 | **Stage name** | Closed Caption Sink |
 | **Connections** | 1 input → no outputs |
-| **Purpose** | Extract and write NTSC Line 21 closed-caption (CC) data |
+| **Purpose** | Extract and write one NTSC Line 21 closed-caption (CC) service |
 
 **Use this stage when:**
 
@@ -98,22 +98,32 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 
 **What it does**
 
-For each field the stage reads the two caption bytes embedded in VBI Line 21, accumulates the byte pairs across the full field sequence, and writes them in the chosen format: Scenarist SCC V1.0 (industry-standard, with HH:MM:SS:FF timestamps and hex byte pairs) or plain text (printable ASCII only, control codes stripped).
+Line 21 carries four services multiplexed into the same two bytes per field: **CC1** and **CC2** (captions) and **TEXT1** and **TEXT2** (pages of text such as schedules, scores or station information). Which service a byte pair belongs to is decided by the control codes before it, so a recording that used more than one produces garbled output if they are read together — a caption running through a page of listings.
+
+The stage reads the two caption bytes from each field's VBI Line 21, keeps the pairs belonging to the service you select, and writes them in the chosen format.
 
 **Parameters**
 
 * `output_path` (string)
-    - Path to the closed-caption output file. Use `.scc` for SCC format or `.txt` for plain text.
+    - Path to the closed-caption output file. Use `.scc`, `.srt`, `.txt` or `.html` to match the format.
     - Required.
+
+* `service` (string)
+    - Which of the services multiplexed onto Line 21 to export.
+    - Allowed values: `CC1` (the primary caption service), `CC2` (a second caption service, often a translation), `TEXT1`, `TEXT2`.
+    - Default: `CC1`.
 
 * `format` (string)
     - Export format.
-    - Allowed values: `Scenarist SCC`, `Plain Text`.
+    - Allowed values: `Scenarist SCC`, `SubRip SRT`, `Plain Text`, `HTML`.
     - Default: `Scenarist SCC`.
 
 **Notes**
 
 * Handles NTSC Line 21 only; PAL sources do not carry Line 21 CC data.
+* CC3, CC4, TEXT3 and TEXT4 are carried on Line 21 of the second field, which is not decoded, so they are not offered.
+* To export more than one service, add a second Closed Caption Sink with its own output path.
+* `Scenarist SCC` records the selected service's byte pairs exactly as transmitted, including the duplicate copy of each control code; the tools that read an SCC file de-duplicate for themselves. The decoded formats keep the caption display's rows on separate lines with their indent, so a text service's columns still line up.
 * CC data must be preserved upstream — masking Line 21 before this stage will destroy the caption payload.
 * If the source contains no CC data the output file will be empty but the stage will not abort.
 
@@ -673,6 +683,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 * `embed_closed_captions` (bool)
     - FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only. Default: `false`.
+    - The container carries one subtitle track, so this embeds the primary caption service, CC1. Use the Closed Caption Sink to export CC2 or a text service.
 
 * `embed_chapter_metadata` (bool)
     - FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.

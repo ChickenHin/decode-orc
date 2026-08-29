@@ -13,6 +13,7 @@
 #include <orc/stage/observation/observation_context_interface.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/eia608_service_demux.h>
 
 #include <atomic>
 #include <cstdint>
@@ -23,14 +24,17 @@ namespace orc {
  * @brief Closed Caption output format
  */
 enum class CCExportFormat {
-  SCC,        ///< Scenarist SCC V1.0 format (industry standard)
-  PLAIN_TEXT  ///< Plain text with control codes stripped
+  SCC,         ///< Scenarist SCC V1.0 format (industry standard)
+  PLAIN_TEXT,  ///< Plain text, one screen line per line, with timestamps
+  SRT,         ///< SubRip subtitles
+  HTML         ///< Monospaced HTML transcript (keeps the column layout)
 };
 
 struct CCExportOptions {
   std::string output_path;
   CCExportFormat export_format{CCExportFormat::SCC};
-  bool write_csv{false};
+  /// Which of the four services multiplexed onto line 21 to export
+  EIA608Service service{EIA608Service::CC1};
 };
 
 struct CCExportResult {

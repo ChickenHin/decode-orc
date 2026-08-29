@@ -479,6 +479,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "EIA-608 Closed Caption Decoder for timed text conversion"
+  - path: orc/support/eia608_service_demux.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "EIA-608 data-channel / caption-vs-text service demultiplexer"
   - path: orc/support/frame_line_util.h
     tier: support
     domain: ""
