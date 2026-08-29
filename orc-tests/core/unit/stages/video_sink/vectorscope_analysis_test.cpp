@@ -223,4 +223,79 @@ TEST(VectorscopeAnalysisTest, ExtractFromColourFrameCarrier_CanUseFullFrame) {
 
   EXPECT_TRUE(saw_full_frame_only_sample);
 }
+
+TEST(VectorscopeAnalysisTest, ExtractFromColourFrameCarrier_HonoursALineRange) {
+  // The decoded acquisition takes the same interlaced frame-line range the
+  // composite one does, so a range picked on either scope selects the same
+  // lines of the same frame.
+  orc::ColourFrameCarrier carrier;
+  carrier.system = orc::VideoSystem::NTSC;
+  carrier.width = 4;
+  carrier.height = 6;
+  carrier.active_x_start = 0;
+  carrier.active_x_end = 4;
+  carrier.active_y_start = 1;
+  carrier.active_y_end = 5;
+  carrier.cvbs_blanking = 0.0;
+  carrier.cvbs_white = 1000.0;
+
+  const size_t sample_count =
+      static_cast<size_t>(carrier.width) * static_cast<size_t>(carrier.height);
+  carrier.y_plane.assign(sample_count, 0.0);
+  carrier.u_plane.assign(sample_count, 0.0);
+  carrier.v_plane.assign(sample_count, 0.0);
+
+  const auto data = orc::VectorscopeAnalysisTool::extractFromColourFrameCarrier(
+      carrier, 3, 1, /*active_area_only=*/true, /*first_line=*/2,
+      /*last_line=*/3);
+
+  EXPECT_EQ(data.first_line, 2u);
+  EXPECT_EQ(data.last_line, 3u);
+  EXPECT_EQ(data.height, 2u);
+  ASSERT_EQ(data.samples.size(), 8u);
+
+  // Two lines, one from each field, and the field a line belongs to is its
+  // parity — the same relation the composite acquisition reports.
+  bool saw_first_field = false;
+  bool saw_second_field = false;
+  for (const auto& sample : data.samples) {
+    EXPECT_GE(sample.line_number, 2);
+    EXPECT_LE(sample.line_number, 3);
+    EXPECT_EQ(sample.field_id, sample.line_number & 1u);
+    if (sample.field_id == 0) saw_first_field = true;
+    if (sample.field_id == 1) saw_second_field = true;
+  }
+  EXPECT_TRUE(saw_first_field);
+  EXPECT_TRUE(saw_second_field);
+}
+
+TEST(VectorscopeAnalysisTest,
+     ExtractFromColourFrameCarrier_LineRangeIntersectsTheActivePicture) {
+  orc::ColourFrameCarrier carrier;
+  carrier.system = orc::VideoSystem::NTSC;
+  carrier.width = 4;
+  carrier.height = 6;
+  carrier.active_x_start = 0;
+  carrier.active_x_end = 4;
+  carrier.active_y_start = 2;
+  carrier.active_y_end = 5;
+  carrier.cvbs_blanking = 0.0;
+  carrier.cvbs_white = 1000.0;
+
+  const size_t sample_count =
+      static_cast<size_t>(carrier.width) * static_cast<size_t>(carrier.height);
+  carrier.y_plane.assign(sample_count, 0.0);
+  carrier.u_plane.assign(sample_count, 0.0);
+  carrier.v_plane.assign(sample_count, 0.0);
+
+  // Asks for lines 0..3; only 2..3 are in the active picture.
+  const auto data = orc::VectorscopeAnalysisTool::extractFromColourFrameCarrier(
+      carrier, 3, 1, /*active_area_only=*/true, /*first_line=*/0,
+      /*last_line=*/3);
+
+  EXPECT_EQ(data.first_line, 2u);
+  EXPECT_EQ(data.last_line, 3u);
+  EXPECT_EQ(data.height, 2u);
+}
+
 }  // namespace orc_unit_test

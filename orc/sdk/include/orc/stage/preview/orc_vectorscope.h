@@ -31,9 +31,9 @@ namespace orc {
  *   shows what the decoder output looks like.
  * - CompositeCarrier is a technical measurement scope.  It plots chroma
  *   demodulated straight from the composite carrier with no delay-line
- *   averaging, no V-switch correction and no active-area restriction, so the
- *   colour burst and both PAL line phases are present in the data set.  It
- *   shows what the signal looks like.
+ *   averaging and no V-switch correction, so the colour burst and both PAL
+ *   line phases can be present in the data set.  It shows what the signal
+ *   looks like.
  */
 enum class VectorscopeAcquisitionMode : uint8_t {
   DecodedComponent = 0,  ///< Decoded U/V planes (grading scope)
@@ -85,7 +85,11 @@ struct UVSample {
   VectorscopeSampleClass sample_class;  ///< Part of the line this came from
   VectorscopeLinePhase line_phase;      ///< PAL V-switch state of that line
   uint8_t reserved;                     ///< Padding; keeps line_number aligned
-  uint16_t line_number;  ///< Frame-flat line index (0-based) the sample is on
+  /// Interlaced frame-line index (0-based) the sample is on: line 0 is the
+  /// top line of the frame and consecutive numbers alternate fields.  Both
+  /// acquisitions number lines this way, so a line number means the same
+  /// thing whichever one produced the sample.
+  uint16_t line_number;
 
   UVSample()
       : u(0),
@@ -173,7 +177,7 @@ struct VectorscopeData {
   /// Portion of each line sampled (CompositeCarrier only).
   VectorscopeSampleWindow sample_window = VectorscopeSampleWindow::WholeLine;
 
-  /// Inclusive frame-flat line range actually sampled (CompositeCarrier only).
+  /// Inclusive interlaced frame-line range actually sampled.
   uint32_t first_line = 0;
   uint32_t last_line = 0;
 

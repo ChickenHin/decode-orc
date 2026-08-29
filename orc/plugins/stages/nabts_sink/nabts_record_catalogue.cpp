@@ -61,12 +61,22 @@ std::vector<NabtsRecordFunction> render_functions(
 /// The length most copies agree on; the longest of them where none has more
 /// support than another, since a copy is far likelier to have been cut short
 /// than to have grown.
-std::size_t voted_length(const std::vector<NabtsRecordCopy>& copies) {
+std::size_t voted_length(const std::vector<NabtsRecordCopy>& copies,
+                         const uint8_t* included) {
   std::size_t best = 0;
   std::size_t best_support = 0;
-  for (const auto& candidate : copies) {
+  for (std::size_t index = 0; index < copies.size(); ++index) {
+    if (included != nullptr && included[index] == 0) {
+      continue;
+    }
+    const NabtsRecordCopy& candidate = copies[index];
     std::size_t support = 0;
-    for (const auto& other : copies) {
+    for (std::size_t other_index = 0; other_index < copies.size();
+         ++other_index) {
+      if (included != nullptr && included[other_index] == 0) {
+        continue;
+      }
+      const NabtsRecordCopy& other = copies[other_index];
       support += (other.data.size() == candidate.data.size()) ? 1 : 0;
     }
     if (support > best_support ||
@@ -227,24 +237,13 @@ void adjudicate_contests(const std::vector<VoteContest>& contests,
   }
 }
 
-}  // namespace
-
-NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
-                                  const NabtsVoteOptions& options) {
+/// One pass of the vote. |included| is either null — every copy votes — or one
+/// flag per copy, zero for the copies the outlier pass ruled out.
+NabtsVoteResult vote_over(const std::vector<NabtsRecordCopy>& copies,
+                          const uint8_t* included,
+                          const NabtsVoteOptions& options) {
   NabtsVoteResult out;
-  if (copies.empty()) {
-    return out;
-  }
-  if (copies.size() == 1) {
-    // A vote of one is the copy itself, and what the recovery knew about that
-    // copy is what it knows about the record.
-    out.data = copies.front().data;
-    out.present = copies.front().present;
-    out.confidence = copies.front().confidence;
-    return out;
-  }
-
-  const std::size_t length = voted_length(copies);
+  const std::size_t length = voted_length(copies, included);
   out.data.assign(length, 0);
   out.present.assign(length, 0);
   out.confidence.assign(length, 0);
@@ -263,6 +262,9 @@ NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
     const std::size_t epoch = position + 1;
     std::size_t distinct_count = 0;
     for (std::size_t copy = 0; copy < copies.size(); ++copy) {
+      if (included != nullptr && included[copy] == 0) {
+        continue;  // not a copy of this record (see nabts_vote_record())
+      }
       const NabtsRecordCopy& candidate = copies[copy];
       if (position >= candidate.data.size()) {
         continue;  // a copy cut short votes only over the bytes it has
@@ -402,6 +404,68 @@ NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
     adjudicate_contests(contests, options, out);
   }
   return out;
+}
+
+}  // namespace
+
+NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
+                                  const NabtsVoteOptions& options) {
+  if (copies.empty()) {
+    return {};
+  }
+  if (copies.size() == 1) {
+    // A vote of one is the copy itself, and what the recovery knew about that
+    // copy is what it knows about the record.
+    NabtsVoteResult out;
+    out.data = copies.front().data;
+    out.present = copies.front().present;
+    out.confidence = copies.front().confidence;
+    return out;
+  }
+
+  // Not every copy filed under a record is a copy of that record. §3.2.2 codes
+  // the packet address in Hamming 8/4 and §8.2 of ETSI EN 300 706 gives that
+  // code minimum distance 4, so a burst resolves silently to a neighbouring
+  // codeword and a packet of some other record is assembled into this one; a
+  // record identity the recording never named can also be folded in here (see
+  // reconcile_identities()). Such a copy is a clean read of real data, only not
+  // of this record, so neither parity nor confidence can tell it apart — and
+  // voting it in makes the record a per-byte blend of both, which for a
+  // stateful opcode stream is worse than either alone and worse the more copies
+  // there are.
+  //
+  // What tells it apart is how much of the record it agrees with. Copies of one
+  // record differ only where they were damaged; a copy of something else
+  // disagrees nearly everywhere. So the vote is taken twice: once to find what
+  // the copies mostly say, and again without the copies that hardly say it.
+  // Only a minority may be dropped — where most of them disagree there is no
+  // record for the rest to be outliers of.
+  const NabtsVoteResult provisional = vote_over(copies, nullptr, {});
+  std::vector<uint8_t> included(copies.size(), 1);
+  std::size_t dropped = 0;
+  for (std::size_t index = 0; index < copies.size(); ++index) {
+    const NabtsRecordCopy& copy = copies[index];
+    std::size_t judged = 0;
+    std::size_t agreed = 0;
+    for (std::size_t position = 0; position < provisional.data.size();
+         ++position) {
+      if (provisional.present[position] == 0 || position >= copy.data.size() ||
+          (position < copy.present.size() && copy.present[position] == 0)) {
+        continue;
+      }
+      ++judged;
+      agreed += (copy.data[position] == provisional.data[position]) ? 1 : 0;
+    }
+    if (judged >= kNabtsOutlierMinJudgedPositions &&
+        agreed * 100 < judged * kNabtsOutlierAgreementPercent) {
+      included[index] = 0;
+      ++dropped;
+    }
+  }
+  if (dropped == 0 || dropped * 2 >= copies.size()) {
+    return vote_over(copies, nullptr, options);
+  }
+  return vote_over(copies, included.data(), options);
 }
 
 std::vector<uint8_t> nabts_vote_record_data(

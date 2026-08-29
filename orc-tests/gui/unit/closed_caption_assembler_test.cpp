@@ -63,6 +63,22 @@ uint64_t popOnDisplayFrame(uint64_t first_frame, const std::string& text) {
   return first_frame + 2 + (text.size() + 1) / 2;
 }
 
+// A window carrying two of line 21's services at once: a CC1 pop-on caption
+// reading "HI" with a TEXT2 page reading "42" spliced through the middle of
+// it. Read without demultiplexing, the two land in one buffer.
+//
+// One pair per frame, starting at frame 1; the caption is on screen from
+// frame 7.
+void storeInterleavedServices(ClosedCaptionAssembler& assembler) {
+  storePair(assembler, 1, kCcControlByte, kCcResumeCaptionLoading);  // CC1
+  storePair(assembler, 2, kCcControlByte, kCcPacRow15Col0);          // CC1
+  storePair(assembler, 3, kCcControlByteChannel2, kCcTextRestart);   // TEXT2
+  storePair(assembler, 4, '4', '2');                                 // TEXT2
+  storePair(assembler, 5, kCcControlByte, kCcPacRow15Col0);          // CC1
+  storePair(assembler, 6, 'H', 'I');                                 // CC1
+  storePair(assembler, 7, kCcControlByte, kCcEndOfCaption);          // CC1
+}
+
 }  // namespace
 
 TEST(ClosedCaptionAssemblerTest, WindowStartsAtZeroForEarlyFrames) {
@@ -303,6 +319,51 @@ TEST(ClosedCaptionAssemblerTest, RevisionOnlyMovesWhenTheScreenChanges) {
 }
 
 // A node or DAG change means different observations entirely.
+// Issue #273: line 21 multiplexes four services onto one byte-pair stream, and
+// decoding them together interleaves their text.
+TEST(ClosedCaptionAssemblerTest, OnlyTheSelectedServiceReachesTheScreen) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(40);
+  storeInterleavedServices(assembler);
+
+  const auto* shown = assembler.screenAt(7);
+  ASSERT_NE(shown, nullptr);
+  EXPECT_EQ(shown->screen.text(), "HI");
+}
+
+TEST(ClosedCaptionAssemblerTest, ChoosingATextServiceDecodesThatInstead) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(40);
+  storeInterleavedServices(assembler);
+  ASSERT_EQ(assembler.service(), orc::EIA608Service::CC1);
+
+  // Nothing decoded under CC1 describes TEXT2, so the run is laid out again
+  // and the window has to be delivered a second time.
+  assembler.setService(orc::EIA608Service::T2);
+  EXPECT_EQ(assembler.service(), orc::EIA608Service::T2);
+  EXPECT_EQ(assembler.screenAt(7), nullptr);
+
+  storeInterleavedServices(assembler);
+  const auto* shown = assembler.screenAt(7);
+  ASSERT_NE(shown, nullptr);
+  EXPECT_EQ(shown->screen.text(), "42");
+  EXPECT_EQ(shown->mode, orc::CaptionMode::TEXT);
+}
+
+TEST(ClosedCaptionAssemblerTest,
+     SelectingTheServiceAlreadyInUseChangesNothing) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(40);
+  storeInterleavedServices(assembler);
+  const uint64_t revision = assembler.historyRevision();
+
+  assembler.setService(orc::EIA608Service::CC1);
+
+  EXPECT_EQ(assembler.historyRevision(), revision);
+  ASSERT_NE(assembler.screenAt(7), nullptr);
+  EXPECT_EQ(assembler.screenAt(7)->screen.text(), "HI");
+}
+
 TEST(ClosedCaptionAssemblerTest, ClearDropsEverything) {
   ClosedCaptionAssembler assembler;
   assembler.setCurrentFrame(20);

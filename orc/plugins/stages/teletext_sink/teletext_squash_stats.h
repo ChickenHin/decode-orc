@@ -35,6 +35,11 @@ namespace orc {
  * are the only measure available without the original transmission, and they
  * move in the right direction for the right reason.
  *
+ * Read the parity figures beside the row packets that reached no page at all.
+ * Those are written as recovered — nothing could be voted over them — so their
+ * damage is in the total with no chance of ever having been mended, and a run
+ * that refuses more addresses shows a higher loss for having refused to guess.
+ *
  * The copies-per-row distribution is the other half. A row transmitted once
  * cannot be corrected however good the vote is, so a run whose rows are mostly
  * single-copy has not failed to squash — it had nothing to squash. The two

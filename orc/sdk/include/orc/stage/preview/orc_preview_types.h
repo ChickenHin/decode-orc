@@ -192,9 +192,10 @@ struct PreviewCoordinate {
   VideoDataType data_type_context{
       VideoDataType::CompositeNTSC};  ///< Data type from which this coordinate
                                       ///< was captured
-  bool vectorscope_active_area_only{
-      true};  ///< Vectorscope hint: true = active picture only, false = full
-              ///< frame
+  /// Vectorscope line select: true restricts the acquisition to the active
+  /// picture lines, false plots every line of the frame.  Applies to both
+  /// acquisitions, and intersects with the explicit range below.
+  bool vectorscope_active_area_only{true};
 
   /// Portion of each line a composite-carrier vectorscope acquisition samples.
   ///
@@ -205,8 +206,10 @@ struct PreviewCoordinate {
   VectorscopeSampleWindow vectorscope_window{
       VectorscopeSampleWindow::WholeLine};
 
-  /// Inclusive frame-flat line range for a CompositeCarrier acquisition.
-  /// vectorscope_last_line == 0 means "to the last line of the frame".
+  /// Inclusive interlaced frame-line range (0-based) for either acquisition:
+  /// line 0 is the top line of the frame and consecutive numbers alternate
+  /// fields.  vectorscope_last_line == 0 means "to the last line of the
+  /// frame".
   uint32_t vectorscope_first_line{0};
   uint32_t vectorscope_last_line{0};
 

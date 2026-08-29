@@ -152,7 +152,6 @@ class VectorscopeDialog : public QDialog {
   QCheckBox* blend_color_checkbox_;
   QCheckBox* defocus_checkbox_;
   QCheckBox* draw_lines_checkbox_;
-  QCheckBox* active_area_only_checkbox_;
   QSpinBox* point_size_spinbox_;
 
   // Field selection options
@@ -167,12 +166,15 @@ class VectorscopeDialog : public QDialog {
       orc::VectorscopeAcquisitionMode::DecodedComponent};
   QLabel* acquisition_label_;
 
-  // Composite sampling options
+  // Sampling options.  The line select applies to both acquisitions;
+  // window_options_ holds the radios that only a composite one can act on.
   QGroupBox* sampling_group_;
+  QWidget* window_options_;
   QRadioButton* window_burst_radio_;
   QRadioButton* window_active_radio_;
   QRadioButton* window_whole_radio_;
   QButtonGroup* window_group_;
+  QCheckBox* active_area_only_checkbox_;
   QCheckBox* all_lines_checkbox_;
   QSpinBox* first_line_spinbox_;
   QSpinBox* last_line_spinbox_;

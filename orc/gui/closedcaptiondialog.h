@@ -10,8 +10,10 @@
 #ifndef CLOSEDCAPTIONDIALOG_H
 #define CLOSEDCAPTIONDIALOG_H
 
+#include <orc/support/eia608_service_demux.h>
 #include <orc_closed_caption.h>
 
+#include <QComboBox>
 #include <QDialog>
 #include <QLabel>
 #include <QStatusBar>
@@ -120,6 +122,22 @@ class ClosedCaptionDialog : public QDialog {
   /// Caption status text shown at the left of the status bar (test seam)
   QString statusText() const;
 
+  /// Service currently being decoded
+  orc::EIA608Service service() const { return assembler_.service(); }
+
+  /// Choose the service to decode, as the selector does (test seam)
+  void selectService(orc::EIA608Service service);
+
+ signals:
+  /**
+   * @brief The dialog needs the window read again
+   *
+   * Emitted when the service selection changes: everything decoded under the
+   * old selection is discarded, so the frames of the window have to be
+   * re-requested even though the previewer has not moved.
+   */
+  void dataRequestNeeded();
+
  private:
   /// Transcript table columns
   enum CaptionColumn {
@@ -129,6 +147,8 @@ class ClosedCaptionDialog : public QDialog {
   };
 
   void setupUI();
+  /// Apply the selector's current choice to the assembler and ask for data
+  void onServiceChanged();
   /// Refresh the readouts and the transcript for the current frame
   void renderCurrentFrame();
   /// Merge the transcript into the table when it has changed
@@ -159,6 +179,7 @@ class ClosedCaptionDialog : public QDialog {
   QTableWidget* captions_table_ = nullptr;
   QStatusBar* status_bar_ = nullptr;
   // "Caption shown from frame N" / "No caption on screen".
+  QComboBox* service_selector_ = nullptr;
   QLabel* status_summary_ = nullptr;
   // "Pop-on" — the caption mode the stream last selected.
   QLabel* mode_label_ = nullptr;

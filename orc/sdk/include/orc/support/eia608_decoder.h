@@ -34,6 +34,8 @@ enum class EIA608ControlCode {
   RU3,  // Roll-Up 3 rows
   RU4,  // Roll-Up 4 rows
   RDC,  // Resume Direct Captioning (Paint-On)
+  TR,   // Text Restart (clear text memory, start the text service)
+  RTD,  // Resume Text Display (continue the text service)
   UNKNOWN
 };
 
@@ -41,9 +43,10 @@ enum class EIA608ControlCode {
  * @brief Caption display mode
  */
 enum class CaptionMode {
-  POP_ON,   // Pop-On captions (prepare in buffer, then display all at once)
-  ROLL_UP,  // Roll-Up captions (scroll up with new text)
-  PAINT_ON  // Paint-On captions (characters appear as received)
+  POP_ON,    // Pop-On captions (prepare in buffer, then display all at once)
+  ROLL_UP,   // Roll-Up captions (scroll up with new text)
+  PAINT_ON,  // Paint-On captions (characters appear as received)
+  TEXT       // Text service (T1-T4): a rolling page over the whole 15 rows
 };
 
 /**
@@ -72,7 +75,22 @@ class CaptionBuffer {
   void write_char(char c);
   void set_cursor(size_t row, size_t col);
   void next_row();  // Move to next row (for CR in Pop-On mode)
+
+  /**
+   * @brief The buffer as text, one line per row that carries anything
+   *
+   * Rows are joined with newlines, not spaces: EIA-608 positions text by row
+   * and column, and a caption or a text-service page whose rows are run
+   * together loses the layout that made it readable — two services sharing one
+   * row read as one sentence, and a table of scores collapses into its own
+   * caption. Trailing spaces go; *leading* spaces are kept, because they are
+   * the indent the transmission asked for.
+   */
   std::string render() const;
+
+  /// Text of one row, trailing spaces removed, leading indent kept.
+  std::string render_row(size_t row) const;
+
   void roll_up();
 
   /**
@@ -98,7 +116,13 @@ class CaptionBuffer {
  * @brief EIA-608 Closed Caption Decoder
  *
  * Converts raw EIA-608 byte pairs to timed text cues suitable for mov_text.
- * Handles Pop-On, Roll-Up, and Paint-On caption modes.
+ * Handles the three caption modes (Pop-On, Roll-Up, Paint-On) and the text
+ * services' rolling page.
+ *
+ * It decodes ONE service. Line 21 carries four of them multiplexed together,
+ * so unless the recording used only one, put an EIA608ServiceDemux
+ * (<orc/support/eia608_service_demux.h>) in front and feed this only the pairs
+ * it accepts — otherwise two services' text lands in one buffer.
  */
 class EIA608Decoder {
  public:
@@ -129,8 +153,8 @@ class EIA608Decoder {
    * @brief The caption that would be on screen right now
    *
    * In Pop-On mode this is the buffer the last End of Caption code swapped in;
-   * in Roll-Up and Paint-On modes it is the buffer being written to. Erase
-   * Displayed Memory empties it. Unlike the cue list, which only gains a
+   * in Roll-Up, Paint-On and Text modes it is the buffer being written to.
+   * Erase Displayed Memory empties it. Unlike the cue list, which only gains a
    * caption once that caption has been taken off screen, this is the decoder's
    * live display state — which is what a viewer following the stream needs.
    *
@@ -139,7 +163,7 @@ class EIA608Decoder {
    */
   const CaptionBuffer& displayed() const { return displayed_; }
 
-  /// Caption mode the stream last selected (RCL, RU2-RU4 or RDC)
+  /// Caption mode the stream last selected (RCL, RU2-RU4, RDC or TR/RTD)
   CaptionMode mode() const { return mode_; }
 
   /// Window height the stream last selected for Roll-Up mode (2, 3 or 4)
@@ -152,7 +176,6 @@ class EIA608Decoder {
   CaptionBuffer nondisplayed_;
   int rollup_rows_;
   double current_time_;
-  double last_eoc_time_;  // Track last EOC to deduplicate
 
   std::vector<std::shared_ptr<CaptionCue>> active_cues_;
   std::vector<CaptionCue> emitted_cues_;
@@ -170,6 +193,8 @@ class EIA608Decoder {
   void ensure_rollup_cue_started();
   void roll_up();
   void ensure_painton_cue_started(char c);
+  void ensure_text_cue_started();
+  void text_new_line();
 
   // Cue management
   void close_all_cues();

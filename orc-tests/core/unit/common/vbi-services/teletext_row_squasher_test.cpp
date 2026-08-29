@@ -391,6 +391,118 @@ TEST(TeletextRowSquasher, EvictionKeepsBothHalvesOfASplitRow) {
   EXPECT_EQ(squasher.copy_count(kPage, 1), 4u);
 }
 
+// Rows a service really transmits, forty columns wide, so a copy of one agrees
+// with a copy of another only by coincidence — five positions in forty here.
+const char kRowText[] = "REAGAN BUDGET DRAWS REPUBLICAN ANGER TODA";
+const char kOtherRowText[] = "FEEDER CATTLE PRICES FOR MONDAY OPENED AT";
+const char kThirdRowText[] = "RASPBERRY CHICKEN WITH NEW POTATOES TASTE";
+
+// A page whose header was lost leaves the one before it open, and the MRAG is
+// Hamming 8/4 and mis-corrects on a burst — either way a packet of some other
+// page is filed here. It cannot be told apart by parity or by confidence: it is
+// a clean read of a real row, only not of this one. What gives it away is that
+// it agrees with almost none of what the copies of this row say.
+//
+// The damage it does is at the positions where the copies of the row are split
+// — a byte one of them lost to parity is a byte the intruder can win — so that
+// is where the rule has to hold.
+TEST(TeletextRowSquasher, AnIntruderDoesNotDecideAContestedPosition) {
+  auto damaged = row_of(kRowText);
+  damaged[0] ^= 0x01;  // break odd parity on the leading byte (§8.1)
+  ASSERT_FALSE(teletext_odd_parity_valid(damaged[0]));
+
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of(kRowText), 0);
+  squasher.add_row(kPage, 1, damaged, 1);
+  // Its leading byte is parity-clean and it is the newest copy, so without the
+  // rule it takes the position the row's own copies could not agree on.
+  squasher.add_row(kPage, 1, row_of(kOtherRowText), 2);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed), std::string(kRowText).substr(0, 40))
+      << "the intruder broke a tie it should not have been in";
+}
+
+// Where most of the copies disagree with the provisional row there is no row
+// for the rest to be outliers of — the page is being assembled out of intruders
+// and no vote among them is worth more than another, so the vote is left as it
+// was rather than emptying the row of everything that reached it.
+TEST(TeletextRowSquasher, NothingIsDroppedWhenTheCopiesHaveNoMajority) {
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of(kRowText), 0);
+  squasher.add_row(kPage, 1, row_of(kOtherRowText), 1);
+  squasher.add_row(kPage, 1, row_of(kThirdRowText), 2);
+
+  TeletextRowCoverage covered{};
+  const auto squashed = squasher.squashed_row(kPage, 1, &covered);
+  ASSERT_TRUE(squashed.has_value());
+  for (size_t i = 0; i < kTeletextRowBytes; ++i) {
+    EXPECT_TRUE(covered[i]) << "position " << i << " lost every copy it had";
+  }
+  // Position 2 is one no two copies agree on, so it still falls to the newest,
+  // which is what a plain Level 1 decoder would be showing.
+  EXPECT_EQ((*squashed)[2], teletext_odd_parity_encode(kThirdRowText[2]));
+}
+
+// Two copies cannot tell which of them is the intruder, so neither is dropped.
+TEST(TeletextRowSquasher, TwoDisagreeingCopiesStillBothVote) {
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of(kRowText), 0);
+  squasher.add_row(kPage, 1, row_of(kOtherRowText), 1);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  // Ties go to the newest copy, as they did before outlier rejection existed.
+  EXPECT_EQ(text_of(*squashed), std::string(kOtherRowText).substr(0, 40));
+}
+
+// A copy of the row damaged in several places is still a copy of the row: the
+// rule is about copies that agree with almost none of it.
+TEST(TeletextRowSquasher, ABadlyDamagedCopyIsStillACopy) {
+  auto damaged = row_of(kRowText);
+  for (size_t i = 0; i < 16; ++i) {
+    damaged[i] ^= 0x01;  // break odd parity over the first sixteen bytes
+  }
+
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of(kRowText), 0);
+  squasher.add_row(kPage, 1, damaged, 1);
+  squasher.add_row(kPage, 1, damaged, 2);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed), std::string(kRowText).substr(0, 40))
+      << "a copy the tape damaged was mistaken for a copy of another row";
+}
+
+// Each half of a split row is judged among its own copies: an intruder across
+// the eight extension columns is neither weighed against the thirty-two the
+// display packet brought nor rescued by them.
+TEST(TeletextRowSquasher, EachHalfOfASplitRowJudgesItsOwnCopies) {
+  const auto head = row_of(std::string(kRowText).substr(0, 32));
+  TeletextRowBytes tail{};
+  TeletextRowBytes intruder{};
+  for (size_t i = 0; i < 8; ++i) {
+    tail[32 + i] =
+        teletext_odd_parity_encode(static_cast<uint8_t>(" IN 1984"[i]));
+    intruder[32 + i] =
+        teletext_odd_parity_encode(static_cast<uint8_t>("XKQZWJVG"[i]));
+  }
+
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, head, 0, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, head, 1, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, tail, 2, nullptr, 32, 8);
+  squasher.add_row(kPage, 1, tail, 3, nullptr, 32, 8);
+  squasher.add_row(kPage, 1, intruder, 4, nullptr, 32, 8);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  EXPECT_EQ(text_of(*squashed),
+            std::string(kRowText).substr(0, 32) + " IN 1984");
+}
+
 TEST(TeletextRowSquasher, ClearDropsEverything) {
   TeletextRowSquasher squasher;
   squasher.add_row(kPage, 1, row_of("TEXT"), 0);

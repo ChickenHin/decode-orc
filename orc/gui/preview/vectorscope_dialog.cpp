@@ -383,9 +383,7 @@ void VectorscopeDialog::setupUI() {
   blend_color_checkbox_->setChecked(true);
   defocus_checkbox_ = new QCheckBox("Defocus");
   draw_lines_checkbox_ = new QCheckBox("Draw Trace Lines");
-  active_area_only_checkbox_ = new QCheckBox("Active Picture Area Only");
   draw_lines_checkbox_->setChecked(true);
-  active_area_only_checkbox_->setChecked(true);
 
   // Point size spinbox
   QHBoxLayout* point_layout = new QHBoxLayout();
@@ -400,7 +398,6 @@ void VectorscopeDialog::setupUI() {
   display_layout->addWidget(blend_color_checkbox_);
   display_layout->addWidget(defocus_checkbox_);
   display_layout->addWidget(draw_lines_checkbox_);
-  display_layout->addWidget(active_area_only_checkbox_);
   display_layout->addLayout(point_layout);
 
   controls_layout->addWidget(display_group);
@@ -415,9 +412,18 @@ void VectorscopeDialog::setupUI() {
   acquisition_layout->addWidget(acquisition_label_);
   controls_layout->addWidget(acquisition_group_box);
 
-  // Sampling group — a measurement scope's line-select and window controls.
+  // Sampling group — what the acquisition takes off the frame.  The line
+  // select applies to both acquisitions, in the interlaced frame-line
+  // numbering both of them report, so the same range means the same lines
+  // whichever scope is in force.  The window radios pick a region of the
+  // line and only a composite acquisition has one: the decoded planes carry
+  // active picture, with no sync, porch or burst to choose between.
   sampling_group_ = new QGroupBox("Sampling");
   QVBoxLayout* sampling_layout = new QVBoxLayout(sampling_group_);
+
+  window_options_ = new QWidget(sampling_group_);
+  QVBoxLayout* window_layout = new QVBoxLayout(window_options_);
+  window_layout->setContentsMargins(0, 0, 0, 0);
 
   window_group_ = new QButtonGroup(this);
   window_burst_radio_ = new QRadioButton("Burst only");
@@ -435,9 +441,14 @@ void VectorscopeDialog::setupUI() {
       window_whole_radio_,
       static_cast<int>(orc::VectorscopeSampleWindow::WholeLine));
 
-  sampling_layout->addWidget(window_burst_radio_);
-  sampling_layout->addWidget(window_active_radio_);
-  sampling_layout->addWidget(window_whole_radio_);
+  window_layout->addWidget(window_burst_radio_);
+  window_layout->addWidget(window_active_radio_);
+  window_layout->addWidget(window_whole_radio_);
+  sampling_layout->addWidget(window_options_);
+
+  active_area_only_checkbox_ = new QCheckBox("Active picture only");
+  active_area_only_checkbox_->setChecked(true);
+  sampling_layout->addWidget(active_area_only_checkbox_);
 
   all_lines_checkbox_ = new QCheckBox("All lines");
   all_lines_checkbox_->setChecked(true);
@@ -657,22 +668,29 @@ void VectorscopeDialog::updateAcquisitionControlState() {
               "decoder output looks like.");
   }
 
-  // The sampling window and line select describe a composite acquisition;
-  // the active-area restriction describes a decoded one.  Only one set is
-  // meaningful at a time, so the other is not shown.
-  if (sampling_group_) {
-    sampling_group_->setVisible(composite);
+  // The line select applies to both acquisitions; only the window radios and
+  // the burst readouts describe a composite acquisition alone, so only those
+  // are hidden on the decoded plot.
+  if (window_options_) {
+    window_options_->setVisible(composite);
   }
   if (measurements_group_) {
     measurements_group_->setVisible(composite);
   }
   if (first_line_spinbox_ && last_line_spinbox_ && all_lines_checkbox_) {
-    const bool explicit_range = composite && !all_lines_checkbox_->isChecked();
+    const bool explicit_range = !all_lines_checkbox_->isChecked();
     first_line_spinbox_->setEnabled(explicit_range);
     last_line_spinbox_->setEnabled(explicit_range);
   }
   if (active_area_only_checkbox_) {
-    active_area_only_checkbox_->setVisible(!composite);
+    // The restriction is vertical on both, and horizontal only where nothing
+    // else governs the horizontal: a composite acquisition already picks its
+    // part of the line with the window radios.
+    active_area_only_checkbox_->setToolTip(
+        composite
+            ? "Plot only the active picture lines. Use the sampling window "
+              "above to restrict the acquisition along the line."
+            : "Plot only the active picture area of the decoded frame.");
   }
 }
 
@@ -700,7 +718,7 @@ void VectorscopeDialog::updateMeasurementReadout() {
                      .arg(m.burst_phase_jitter_degrees, 0, 'f', 2)
                      .arg(m.burst_line_count);
 
-  if (d_->last_data->system == orc::VideoSystem::PAL) {
+  if (orc::gui::hasSwitchedVAxis(d_->last_data->system)) {
     text += QString("\nV-switch split err: %1°")
                 .arg(m.burst_phase_split_error_degrees, 0, 'f', 2);
   }
@@ -1316,13 +1334,17 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
     const QString sample_area =
         isActiveAreaOnly() ? "active picture" : "full frame";
 
-    info_label_->setText(QString("Field %1 - %2 samples (%3x%4 %5) - %6")
-                             .arg(data.field_number + 1)
-                             .arg(data.samples.size())
-                             .arg(data.width)
-                             .arg(data.height)
-                             .arg(sample_area)
-                             .arg(field_info));
+    // Line numbers are presented 1-based throughout the GUI.
+    info_label_->setText(
+        QString("Field %1 - %2 samples (%3x%4 %5, lines %6-%7) - %8")
+            .arg(data.field_number + 1)
+            .arg(data.samples.size())
+            .arg(data.width)
+            .arg(data.height)
+            .arg(sample_area)
+            .arg(data.first_line + 1)
+            .arg(data.last_line + 1)
+            .arg(field_info));
   }
 
   updateMeasurementReadout();

@@ -670,6 +670,10 @@ void MainWindow::setupUI() {
 
   // Create closed caption preview dialog (initially hidden)
   closed_caption_dialog_ = new ClosedCaptionDialog(this);
+  // Changing the caption service throws away the decode run, so the window has
+  // to be read again even though the previewer has not moved.
+  connect(closed_caption_dialog_, &ClosedCaptionDialog::dataRequestNeeded, this,
+          &MainWindow::issueClosedCaptionRequests);
 
   // Note: Dropout, SNR, and Burst Level analysis dialogs are now created
   // per-stage in runAnalysisForNode() to allow each stage to have its own

@@ -1,7 +1,7 @@
 /*
  * File:        cc_sink_stage.cpp
  * Module:      orc-core
- * Purpose:     Closed Caption Sink Stage - exports CC data to SCC or plain text
+ * Purpose:     Closed Caption Sink Stage - exports one EIA-608 service
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -25,15 +25,17 @@ CCSinkStage::CCSinkStage() {
 }
 
 NodeTypeInfo CCSinkStage::get_node_type_info() const {
-  return NodeTypeInfo{NodeType::SINK,
-                      "CCSink",
-                      "Closed Caption Sink",
-                      "Exports closed caption data to SCC or plain text format",
-                      1,
-                      1,  // One input
-                      0,
-                      0,  // No outputs (sink)
-                      VideoFormatCompatibility::ALL};
+  return NodeTypeInfo{
+      NodeType::SINK,
+      "CCSink",
+      "Closed Caption Sink",
+      "Exports one EIA-608 caption or text service to SCC, SRT, "
+      "plain text or HTML",
+      1,
+      1,  // One input
+      0,
+      0,  // No outputs (sink)
+      VideoFormatCompatibility::ALL};
 }
 
 std::vector<ArtifactPtr> CCSinkStage::execute(
@@ -66,15 +68,36 @@ std::vector<ParameterDescriptor> CCSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  // service parameter
+  {
+    ParameterDescriptor desc;
+    desc.name = "service";
+    desc.display_name = "Caption Service";
+    desc.description =
+        "Which of the services multiplexed onto line 21 to export. CC1 is the "
+        "primary caption service; CC2 is a second caption service (often a "
+        "translation); TEXT1 and TEXT2 are text services carrying pages of "
+        "information rather than captions. Exporting without choosing one "
+        "interleaves them all.";
+    desc.type = ParameterType::STRING;
+    desc.constraints.required = true;
+    desc.constraints.allowed_strings = {"CC1", "CC2", "TEXT1", "TEXT2"};
+    desc.constraints.default_value = std::string("CC1");
+    descriptors.push_back(desc);
+  }
+
   // format parameter
   {
     ParameterDescriptor desc;
     desc.name = "format";
     desc.display_name = "Export Format";
-    desc.description = "Output format: Scenarist SCC V1.0 or plain text";
+    desc.description =
+        "Output format: Scenarist SCC V1.0 (raw byte pairs with timecodes), "
+        "SubRip subtitles, plain text, or a monospaced HTML transcript";
     desc.type = ParameterType::STRING;
     desc.constraints.required = true;
-    desc.constraints.allowed_strings = {"Scenarist SCC", "Plain Text"};
+    desc.constraints.allowed_strings = {"Scenarist SCC", "SubRip SRT",
+                                        "Plain Text", "HTML"};
     desc.constraints.default_value = std::string("Scenarist SCC");
     descriptors.push_back(desc);
   }
@@ -114,16 +137,32 @@ CCSinkStage::ParsedConfig CCSinkStage::parse_config(
   auto format_it = parameters.find("format");
   if (format_it != parameters.end() &&
       std::holds_alternative<std::string>(format_it->second)) {
-    std::string format_str = std::get<std::string>(format_it->second);
+    const std::string format_str = std::get<std::string>(format_it->second);
     if (format_str == "Plain Text") {
       cfg.format = CCExportFormat::PLAIN_TEXT;
+    } else if (format_str == "SubRip SRT") {
+      cfg.format = CCExportFormat::SRT;
+    } else if (format_str == "HTML") {
+      cfg.format = CCExportFormat::HTML;
     }
   }
 
-  auto write_csv_it = parameters.find("write_csv");
-  if (write_csv_it != parameters.end() &&
-      std::holds_alternative<bool>(write_csv_it->second)) {
-    cfg.write_csv = std::get<bool>(write_csv_it->second);
+  auto service_it = parameters.find("service");
+  if (service_it != parameters.end() &&
+      std::holds_alternative<std::string>(service_it->second)) {
+    const std::string service_str = std::get<std::string>(service_it->second);
+    const auto parsed = eia608_service_from_name(service_str);
+    if (!parsed.has_value()) {
+      throw std::runtime_error("Unknown caption service: " + service_str);
+    }
+    if (eia608_service_field(*parsed) != 0) {
+      // CC3/CC4/T3/T4 ride on line 21 of the second field, which the host's
+      // closed_caption observer does not decode.
+      throw std::runtime_error(
+          "Caption service " + service_str +
+          " is carried on the second field, which is not decoded");
+    }
+    cfg.service = *parsed;
   }
 
   return cfg;
@@ -161,7 +200,7 @@ bool CCSinkStage::trigger(
     CCExportOptions options;
     options.output_path = cfg.output_path;
     options.export_format = cfg.format;
-    options.write_csv = cfg.write_csv;
+    options.service = cfg.service;
 
     const CCExportResult export_result =
         deps->export_cc(vfr.get(), observation_context, options);

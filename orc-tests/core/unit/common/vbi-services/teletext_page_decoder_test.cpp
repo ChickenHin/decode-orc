@@ -348,16 +348,23 @@ TEST_F(TeletextPageDecoderTest, EraseControlBit_ClearsStoredRows) {
   EXPECT_EQ(row_text(snapshots_[1], 2), "");
 }
 
-TEST_F(TeletextPageDecoderTest, Hamming_SingleBitErrorInMragIsCorrected) {
-  auto row = make_row(1, 1, "CORRECTED");
-  row[0] ^= 0x10;  // single-bit error in the first MRAG byte (§8.2)
+// A header's own MRAG may be corrected: the identity it opens the page under
+// travels with the snapshot for the catalogue to reconcile afterwards (see
+// TeletextPageSnapshot::identity_attested), so a page opened at a mis-corrected
+// address is recoverable in a way a row filed against the wrong page is not.
+TEST_F(TeletextPageDecoderTest,
+       Hamming_SingleBitErrorInAHeaderMragIsCorrected) {
+  auto header = make_header(1, 0x00, 0, {});
+  header[0] ^= 0x10;  // single-bit error in the first MRAG byte (§8.2)
 
-  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
-  decoder_.process_packet(row, 1);
+  decoder_.process_packet(header, 0);
+  decoder_.process_packet(make_row(1, 1, "OPENED ANYWAY"), 1);
   decoder_.process_packet(make_time_filling_header(1), 2);
 
   ASSERT_EQ(snapshots_.size(), 1u);
-  EXPECT_EQ(row_text(snapshots_[0], 1), "CORRECTED");
+  EXPECT_EQ(snapshots_[0].page_number, 0x00);
+  EXPECT_EQ(row_text(snapshots_[0], 1), "OPENED ANYWAY");
+  EXPECT_FALSE(snapshots_[0].identity_attested);
 }
 
 TEST_F(TeletextPageDecoderTest, Hamming_DoubleBitErrorDropsPacket) {
@@ -422,20 +429,35 @@ TEST_F(TeletextPageDecoderTest, LastDisplayRow_KeepsAnUncorrectedAddress) {
   EXPECT_TRUE(snapshots_[0].row_received[24]);
 }
 
-// The rule is only for the last row: rows 1 to 23 are re-sent with every cycle
-// of the page, so a mis-correction among them is voted down by the copies that
-// follow, and refusing corrected addresses there would throw away a fifth of a
-// noisy recovery for nothing.
-TEST_F(TeletextPageDecoderTest, OrdinaryRows_StillTakeACorrectedAddress) {
+// The rule is not only for the last row. Combining repeated rows votes across
+// the copies of one row, and it cannot tell a copy of the row from a copy of
+// something a mis-corrected address moved here — enough of those and the page
+// is a blend of every page mis-addressed into it, which is worse the more
+// copies are combined. Over the 525-line reference capture, the magazines that
+// service never transmits a row on receive 531 display packets, 530 of them
+// with a corrected address.
+TEST_F(TeletextPageDecoderTest, OrdinaryRows_RejectACorrectedAddress) {
   auto row = make_row(1, 23, "CORRECTED");
   row[1] ^= 0x10;
 
   decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
-  decoder_.process_packet(row, 1);
+  decoder_.process_packet(make_row(1, 1, "REAL CONTENT"), 1);
+  decoder_.process_packet(row, 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_[0], 1), "REAL CONTENT");
+  EXPECT_EQ(row_text(snapshots_[0], 23), "");
+  EXPECT_FALSE(snapshots_[0].row_received[23]);
+}
+
+TEST_F(TeletextPageDecoderTest, OrdinaryRows_KeepAnUncorrectedAddress) {
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 23, "AS TRANSMITTED"), 1);
   decoder_.process_packet(make_time_filling_header(1), 2);
 
   ASSERT_EQ(snapshots_.size(), 1u);
-  EXPECT_EQ(row_text(snapshots_[0], 23), "CORRECTED");
+  EXPECT_EQ(row_text(snapshots_[0], 23), "AS TRANSMITTED");
 }
 
 TEST_F(TeletextPageDecoderTest, ParityError_FlagsCellWithoutCorruptingPage) {
@@ -743,6 +765,49 @@ TEST_F(TeletextPageDecoderTest, RendersLevel1ColourAndMosaicAttributes) {
   // Column 8: G1 column 4/5 codes stay alphanumeric in mosaics mode.
   EXPECT_EQ(cells[8].character, 0x45);
   EXPECT_FALSE(cells[8].mosaic);
+}
+
+TEST_F(TeletextPageDecoderTest, BlackColourCodesSetABlackForeground) {
+  // Mosaics Black (1/0) and Alpha Black (0/0) are colour codes like the other
+  // seven of each range: they set a black foreground and select their
+  // character set, and cancel conceal (EN 300 706 §12.2 Table 26).
+  std::string row;
+  row.push_back(0x11);  // Mosaic Red ("Set-After")
+  row.push_back(0x35);  // G1 mosaic glyph, red
+  row.push_back(0x10);  // Mosaics Black ("Set-After")
+  row.push_back(0x3A);  // G1 mosaic glyph, black
+  row.push_back(0x18);  // Conceal ("Set-At")
+  row.push_back(0x00);  // Alpha Black ("Set-After"): cancels conceal
+  row.push_back('Z');
+
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, row), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const auto& cells = snapshots_[0].cells[1];
+
+  // Column 1: red mosaic, as before the black code.
+  EXPECT_EQ(cells[1].character, 0x35);
+  EXPECT_TRUE(cells[1].mosaic);
+  EXPECT_EQ(cells[1].foreground, TeletextColour::Red);
+  // Column 2 is the Mosaics Black code itself: a space still in the previous
+  // colour, because the code is "Set-After".
+  EXPECT_EQ(cells[2].character, 0x20);
+  EXPECT_EQ(cells[2].foreground, TeletextColour::Red);
+  // Column 3: the same graphics, now black and still mosaics.
+  EXPECT_EQ(cells[3].character, 0x3A);
+  EXPECT_TRUE(cells[3].mosaic);
+  EXPECT_EQ(cells[3].foreground, TeletextColour::Black);
+  // Column 5 is the Alpha Black code, and is still concealed: like every
+  // colour code it cancels conceal from the following character-space.
+  EXPECT_TRUE(cells[5].conceal);
+  // Column 6: black alphanumeric — the alpha code returned the row to the G0
+  // set as well as setting the colour.
+  EXPECT_EQ(cells[6].character, 'Z');
+  EXPECT_FALSE(cells[6].mosaic);
+  EXPECT_FALSE(cells[6].conceal);
+  EXPECT_EQ(cells[6].foreground, TeletextColour::Black);
 }
 
 TEST_F(TeletextPageDecoderTest, DoubleHeight_ConsumesTheRowBelow) {
@@ -1424,6 +1489,24 @@ TEST_F(Teletext525PageDecoderTest, RowExtensionPacketsCompleteTheFortyColumns) {
   EXPECT_EQ(page.columns, TeletextPageSnapshot::kColumns);
   EXPECT_EQ(row_text(page, 4), "The San Francisco 49ers have won the");
   EXPECT_EQ(row_text(page, 5), "NFL title game 28-3 over the Chicago");
+}
+
+// An extension packet is addressed the same way a display row is, so it is
+// refused on the same terms: a mis-corrected address puts eight columns of some
+// other page across four rows of this one, and nothing downstream can tell.
+TEST_F(Teletext525PageDecoderTest, ARowExtensionRejectsACorrectedAddress) {
+  settle_extension_carrier(1);
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 4, "The San Francisco 49ers have won"), 1);
+  auto extension = make_525_extension(1, 4, {" the", "cago"});
+  extension[1] ^= 0x10;  // single-bit error in the packet-number MRAG byte
+  feed(extension, 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(row_text(page, 4), "The San Francisco 49ers have won");
 }
 
 TEST_F(Teletext525PageDecoderTest, TheFirstBlockIsNumberedOneAndServesRowZero) {

@@ -133,7 +133,7 @@ acquisitions, and they answer different questions:
 | Acquisition | What it plots |
 |-------------|---------------|
 | **Decoded (grading)** | The U/V planes the chroma decoder produced — after demodulation, after comb/delay-line filtering, and after the PAL V-switch has been undone. This is a post-production colour-grading scope: it shows what the decoder output looks like, which is what to use when comparing decoder settings. |
-| **Composite (measurement)** | Chroma demodulated straight from the composite carrier (or the C channel of a Y/C source) against a burst-locked subcarrier reference, with no delay-line averaging, no V-switch correction and no active-area restriction. This is a technical measurement scope: it shows what the *signal* looks like. |
+| **Composite (measurement)** | Chroma demodulated straight from the composite carrier (or the C channel of a Y/C source) against a burst-locked subcarrier reference, with no delay-line averaging and no V-switch correction, so the burst and both PAL line phases are in the data set. This is a technical measurement scope: it shows what the *signal* looks like. |
 
 **You do not choose between them.** The acquisition follows the output you are
 previewing: a colour-domain output has decoder planes to plot, a signal-domain
@@ -145,35 +145,45 @@ stages re-acquires; the two are different data sets, not two renderings of one.
 The composite acquisition's display is not delay-line compensated, so a PAL
 graticule carries **two** sets of colour-bar targets — upper case for the +V
 line phase, lower case for the −V phase — and **two** burst boxes at 135° and
-225° (ITU-R BT.470-6 Table 2 item 2.16). NTSC has a single set of targets and a
-single burst box on the −U axis at 180° (SMPTE 170M-2004 §8.4).
+225° (ITU-R BT.470-6 Table 2 item 2.16). PAL-M is drawn the same way: ITU-R
+BT.1700-1 Annex 1 Part B gives it PAL colour encoding, V-switch included, on
+the 525-line raster, so only its burst amplitude follows the NTSC levels. NTSC
+has a single set of targets and a single burst box on the −U axis at 180°
+(SMPTE 170M-2004 §8.4).
 
-Controls that describe only one of the acquisitions are shown only for it.
+Both acquisitions take the same **line select**, in the same numbering, so one
+can be pointed at exactly the lines the other is showing — which is what makes
+the two plots of a frame comparable. Line numbers count through the interlaced
+frame: line 1 is the top line and consecutive numbers alternate fields, the
+same numbering the active picture is stated in. Only the sampling *window*,
+which picks a region along the line, is composite-only: the decoded planes hold
+active picture, with no sync, porch or burst to choose between.
 
 | Control | Description |
 |---------|-------------|
 | Acquisition | Reports which acquisition is in force. Not a choice — see above. |
-| Sampling | Composite only. **Burst only** samples the colour-burst window on the back porch, **Active line** the active picture window, **Whole line** the entire line including sync and porches. |
-| All lines / First / Last | Composite only. Restrict the acquisition to a line or a range of lines, the way a real instrument's line-select works. Line numbers are 1-based and count through the frame in broadcast order (field 1 then field 2). |
+| Sampling window | Composite only. **Burst only** samples the colour-burst window on the back porch, **Active line** the active picture window, **Whole line** the entire line including sync and porches. |
+| Active picture only | Plot only the active picture lines, which is what the decoded acquisition shows. On the decoded plot it also restricts the acquisition along the line; on the composite plot the sampling window above does that instead. On by default: the two acquisitions then cover the same lines of the frame. |
+| All lines / First / Last | Restrict the acquisition to a line or a range of lines, the way a real instrument's line-select works. Clear **All lines** to enable the range. It narrows whatever **Active picture only** left rather than overriding it. |
 | Field Selection | Choose which field (both, first, or second) contributes to the plot. |
 | Graticule | Target set to overlay: none, 75 %, 100 %, or both. |
 | Colorize | Tint each plotted point by its chroma position. Turn it off for a single-colour trace, which is how an instrument's CRT reads. |
 | Defocus | Add Gaussian scatter to the trace to aid reading at high dot density. |
 | Draw Trace Lines | Join consecutive samples so the plot shows the beam path rather than isolated points. |
 | Gain | Trace intensity, like an instrument's intensity knob. On the composite plot brightness is proportional to how long the beam dwells on a point, as a phosphor's is: a colour-bar vector, where the beam rests for the width of the bar on every line, saturates, while the transit between two vectors is crossed once a line and stays faint. Raising Gain lifts the faint detail into view without moving the vectors. The decoded plot keeps its own brightness law. |
-| Active Picture Area Only | Decoded acquisition only; the composite acquisition states its window explicitly instead. |
 
 #### Measurement readouts
 
 Shown in the composite acquisition, computed from the burst on every active
-line of the frame:
+line of the frame — the line select changes what is plotted, not what is
+measured, so narrowing the range does not move the readings:
 
 | Readout | Meaning |
 |---------|---------|
 | Burst | Mean burst peak amplitude in IRE, and as a percentage of the nominal for the system (EBU Tech. 3280-E §1.2: PAL 300 mV p-p; SMPTE 170M-2004 §8.4: NTSC 40 IRE p-p). 100 % means the burst is at its specified amplitude. |
 | Jitter | RMS deviation of the per-line burst phase from the mean phase of its own V-switch group — subcarrier phase jitter. |
 | Lines | Number of lines that contributed to the burst reference. |
-| V-switch split err | PAL only. Departure of the two burst vectors from their nominal 90° separation. |
+| V-switch split err | PAL and PAL-M only. Departure of the two burst vectors from their nominal 90° separation. |
 | Chroma/burst | Mean active-picture chroma amplitude divided by the mean burst amplitude. |
 
 The subcarrier reference is measured from the burst rather than assumed from

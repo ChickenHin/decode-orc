@@ -1,7 +1,7 @@
 /*
  * File:        cc_sink_stage.h
  * Module:      orc-core
- * Purpose:     Closed Caption Sink Stage - exports CC data to SCC or plain text
+ * Purpose:     Closed Caption Sink Stage - exports one EIA-608 service
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -27,30 +27,35 @@ namespace orc {
 /**
  * @brief Closed Caption Sink Stage
  *
- * Extracts closed caption data from TBC metadata and exports it in either:
- * - Scenarist SCC V1.0 format: Industry standard subtitle format with timing
- * - Plain text format: Human-readable text with control codes stripped
+ * Extracts one EIA-608 service from line 21 of a 525-line recording and
+ * exports it as Scenarist SCC, SubRip, plain text or HTML.
  *
  * This is a SINK stage - it has inputs but no outputs.
  *
- * The closed caption data is extracted from line 21 (NTSC) or line 22 (PAL)
- * of the VBI area. Each caption consists of two bytes of data, which can be
- * either command bytes (0x10-0x1F) or character bytes (0x20-0x7E).
+ * Line 21 carries two bytes per field, and those two bytes are shared by four
+ * services: CC1 and CC2 (captions) and TEXT1 and TEXT2 (pages of text such as
+ * schedules or scores). Which of them a byte pair belongs to is set by the
+ * control codes that precede it, so an export that does not demultiplex them
+ * interleaves whichever the recording used — a caption spliced through a page
+ * of listings. The `service` parameter selects one; everything else is left
+ * out.
  *
  * SCC Format:
  * - Header: "Scenarist_SCC V1.0"
  * - Timestamps in format HH:MM:SS:FF (non-drop frame)
  * - Hex byte pairs (e.g., "1441" for bytes 0x14 and 0x41)
- * - Captions separated by blank lines
+ * - The selected service's byte pairs exactly as transmitted, control-code
+ *   duplicates and channel bits included
  *
- * Plain Text Format:
- * - Only printable ASCII characters (0x20-0x7E)
- * - Control codes (0x10-0x1F) are stripped out
- * - Preserves caption timing boundaries with blank lines
+ * SubRip / Plain Text / HTML:
+ * - The decoded caption stream, as timed text
+ * - Screen rows are kept as separate lines and keep their indent, so a text
+ *   service's columns still line up (HTML renders them in a monospaced grid)
  *
  * Parameters:
- * - output_path: Output file path (.scc or .txt)
- * - format: Export format (SCC or PLAIN_TEXT)
+ * - output_path: Output file path (.scc, .srt, .txt or .html)
+ * - service: Which service to export (CC1, CC2, TEXT1, TEXT2)
+ * - format: Export format
  */
 class CCSinkStage : public DAGStage,
                     public ParameterizedStage,
@@ -101,7 +106,7 @@ class CCSinkStage : public DAGStage,
   struct ParsedConfig {
     std::string output_path;
     CCExportFormat format{CCExportFormat::SCC};
-    bool write_csv{false};
+    EIA608Service service{EIA608Service::CC1};
   };
 
   ParsedConfig parse_config(

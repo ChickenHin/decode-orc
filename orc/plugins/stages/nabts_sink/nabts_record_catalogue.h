@@ -144,6 +144,23 @@ void nabts_interpret_records(std::vector<NabtsCataloguedRecord>& records,
 constexpr unsigned kNabtsVoteTiePercent = 90;
 
 /**
+ * @brief How much of a record a copy has to agree with to be a copy of it
+ *
+ * A percentage of the positions both it and the vote have a byte for. Copies of
+ * one record differ only where they were damaged, which on a recovered
+ * recording is a small fraction of a record; a copy of some other record —
+ * assembled here by a mis-corrected packet address (§3.2.2), or folded in under
+ * an identity the recording never named — agrees only by coincidence, which
+ * over a record's length is nowhere near half of it. Anywhere between the two
+ * settles the same copies either way.
+ */
+constexpr unsigned kNabtsOutlierAgreementPercent = 50;
+
+/// Fewest positions a copy must be judged over before it may be ruled out. A
+/// record of a handful of bytes can agree with another by chance.
+constexpr std::size_t kNabtsOutlierMinJudgedPositions = 16;
+
+/**
  * @brief Contested positions in one record the grammar is asked about
  *
  * Each one costs a lint pass per candidate, and a record whose copies disagree
@@ -233,6 +250,16 @@ struct NabtsVoteResult {
  * A copy abstains at the positions its own lost packets took from it, so a
  * recording that never received any one copy whole can still have every
  * position of the record decided by whichever copies did receive it.
+ *
+ * Not every copy held for a record is a copy of it: a mis-corrected packet
+ * address assembles a packet of some other record into this one, and
+ * reconcile_identities() folds in the copies of identities the recording never
+ * named. Such a copy is a clean read of real data and neither parity nor
+ * confidence can tell it apart, so the vote is taken twice — once to find what
+ * the copies mostly say, and again without the copies agreeing with less than
+ * @ref kNabtsOutlierAgreementPercent of it. Only a minority may be dropped that
+ * way, since where most copies disagree there is no record for the rest to be
+ * outliers of.
  *
  * |copies| must be alignable position for position, oldest first — see
  * NabtsMessage::aligned, which is what admits a copy to the vote. The result is

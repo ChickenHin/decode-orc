@@ -68,34 +68,34 @@ void CaptionBuffer::next_row() {
   current_col_ = 0;
 }
 
+std::string CaptionBuffer::render_row(size_t row) const {
+  if (row >= MAX_ROWS) {
+    return {};
+  }
+  std::string line = rows_[row];
+  while (!line.empty() && line.back() == ' ') {
+    line.pop_back();
+  }
+  return line;
+}
+
 std::string CaptionBuffer::render() const {
-  std::vector<std::string> lines;
-
-  for (size_t row_idx = 0; row_idx < rows_.size(); ++row_idx) {
-    const auto& row = rows_[row_idx];
-
-    // Trim leading and trailing spaces
-    std::string line = row;
-    while (!line.empty() && line.front() == ' ') {
-      line.erase(line.begin());
-    }
-    while (!line.empty() && line.back() == ' ') {
-      line.pop_back();
-    }
-
-    if (!line.empty()) {
-      lines.push_back(line);
-    }
-  }
-
-  // Join non-empty lines with space
-  // EIA-608 captions often span multiple rows and should be joined with spaces
+  // Rows are joined with newlines and keep their leading indent: EIA-608
+  // places text by row and column, and running the rows together loses the
+  // layout. Two services sharing one screen (the reason the caller should be
+  // demultiplexing at all) read as one run-on sentence when joined by spaces,
+  // and a text-service page of columns collapses into nonsense.
   std::string result;
-  for (size_t i = 0; i < lines.size(); ++i) {
-    if (i > 0) result += ' ';
-    result += lines[i];
+  for (size_t row_idx = 0; row_idx < rows_.size(); ++row_idx) {
+    const std::string line = render_row(row_idx);
+    if (line.empty()) {
+      continue;
+    }
+    if (!result.empty()) {
+      result += '\n';
+    }
+    result += line;
   }
-
   return result;
 }
 
@@ -114,19 +114,19 @@ void CaptionBuffer::roll_up() {
 // EIA608Decoder implementation
 
 EIA608Decoder::EIA608Decoder()
-    : mode_(CaptionMode::POP_ON),
-      rollup_rows_(2),
-      current_time_(0.0),
-      last_eoc_time_(-1.0) {}
+    : mode_(CaptionMode::POP_ON), rollup_rows_(2), current_time_(0.0) {}
 
 EIA608ControlCode EIA608Decoder::decode_control_code(uint8_t byte1,
                                                      uint8_t byte2) {
   // EIA-608 control codes are TWO-BYTE sequences
-  // Miscellaneous Control Codes (Table 52):
-  // Data Channel 1: 0x14 (field 1) or 0x1C (field 2), byte2 = 0x20-0x2F
-  // Data Channel 2: 0x1C (field 1) or 0x1C (field 2), byte2 = 0x20-0x2F
+  // Miscellaneous Control Codes (Table 52), byte2 = 0x20-0x2F:
+  //   Data channel 1: 0x14 (field 1), 0x15 (field 2)
+  //   Data channel 2: 0x1C (field 1), 0x1D (field 2)
+  // The decoder is fed one demultiplexed service, so which channel and field
+  // the pair named has already been acted on; all four spellings mean the same
+  // command here.
 
-  if (byte1 == 0x14 || byte1 == 0x1C) {
+  if (byte1 == 0x14 || byte1 == 0x15 || byte1 == 0x1C || byte1 == 0x1D) {
     // Miscellaneous control codes
     if (byte2 >= 0x20 && byte2 <= 0x2F) {
       switch (byte2) {
@@ -140,6 +140,10 @@ EIA608ControlCode EIA608Decoder::decode_control_code(uint8_t byte1,
           return EIA608ControlCode::RU4;  // Roll-Up 4 rows
         case 0x29:
           return EIA608ControlCode::RDC;  // Resume Direct Captioning
+        case 0x2A:
+          return EIA608ControlCode::TR;  // Text Restart
+        case 0x2B:
+          return EIA608ControlCode::RTD;  // Resume Text Display
         case 0x2C:
           return EIA608ControlCode::EDM;  // Erase Displayed Memory
         case 0x2D:
@@ -276,6 +280,11 @@ void EIA608Decoder::handle_printable_char(char c) {
       displayed_.write_char(c);
       ensure_painton_cue_started(c);
       break;
+
+    case CaptionMode::TEXT:
+      displayed_.write_char(c);
+      ensure_text_cue_started();
+      break;
   }
 }
 
@@ -291,12 +300,10 @@ void EIA608Decoder::handle_control_code(EIA608ControlCode code) {
 
     case EIA608ControlCode::EOC:
       if (mode_ == CaptionMode::POP_ON) {
-        // Deduplicate: EOC is often sent on both fields (Field 1 and Field 2)
-        // Ignore if we just processed an EOC within 0.1 seconds
-        if (current_time_ - last_eoc_time_ < 0.1) {
-          break;
-        }
-        last_eoc_time_ = current_time_;
+        // The duplicate copy an encoder sends of every control pair is
+        // suppressed upstream by EIA608ServiceDemux, which can tell a repeat
+        // from a second genuine End of Caption because it looks at adjacency
+        // within the service rather than at elapsed time.
 
         // EOC swaps buffers and displays the new content
         // First, close any existing displayed caption
@@ -329,6 +336,8 @@ void EIA608Decoder::handle_control_code(EIA608ControlCode code) {
     case EIA608ControlCode::CR:
       if (mode_ == CaptionMode::ROLL_UP) {
         roll_up();
+      } else if (mode_ == CaptionMode::TEXT) {
+        text_new_line();
       } else if (mode_ == CaptionMode::POP_ON) {
         // In Pop-On mode, CR moves to the next row for multi-line captions
         nondisplayed_.next_row();
@@ -350,6 +359,21 @@ void EIA608Decoder::handle_control_code(EIA608ControlCode code) {
     case EIA608ControlCode::RDC:
       close_all_cues();
       mode_ = CaptionMode::PAINT_ON;
+      break;
+
+    case EIA608ControlCode::TR:
+      // Text Restart: erase the text memory and write from the top of the page
+      // [CTA-608-E Table 52].
+      close_all_cues();
+      mode_ = CaptionMode::TEXT;
+      displayed_.clear();
+      displayed_.set_cursor(0, 0);
+      break;
+
+    case EIA608ControlCode::RTD:
+      // Resume Text Display: carry on where the text service left off.
+      close_all_cues();
+      mode_ = CaptionMode::TEXT;
       break;
 
     default:
@@ -408,6 +432,33 @@ void EIA608Decoder::ensure_painton_cue_started(char c) {
   active_cues_[0]->text += c;
 }
 
+void EIA608Decoder::text_new_line() {
+  // Close the line the carriage return ends, then move down the page. A text
+  // service fills its fifteen rows from the top and only scrolls once the
+  // bottom row is used, unlike a Roll-Up window which is always at the bottom.
+  close_all_cues();
+  if (displayed_.get_row() + 1 < CaptionBuffer::MAX_ROWS) {
+    displayed_.next_row();
+  } else {
+    displayed_.roll_up();
+  }
+}
+
+void EIA608Decoder::ensure_text_cue_started() {
+  // A text service delivers a line at a time, ended by the carriage return
+  // that scrolls the page. The cue is that line rather than the whole page:
+  // emitting the page on every roll would repeat all fifteen rows for each new
+  // one. Its leading indent is kept, so a page of columns still lines up when
+  // the cues are read one under the other.
+  const std::string line = displayed_.render_row(displayed_.get_row());
+  if (active_cues_.empty()) {
+    active_cues_.push_back(
+        std::make_shared<CaptionCue>(current_time_, -1.0, line));
+    return;
+  }
+  active_cues_[0]->text = line;
+}
+
 void EIA608Decoder::close_all_cues() {
   for (auto& cue : active_cues_) {
     cue->end_time = current_time_;
@@ -426,10 +477,12 @@ void EIA608Decoder::emit_cue(const CaptionCue& cue) {
     return;
   }
 
-  // Trim whitespace from text
+  // Drop leading and trailing blank lines, and any trailing whitespace, but
+  // leave the indent at the start of a line alone: it is the column the
+  // transmission placed the text at, and a text service's page only reads
+  // correctly while its columns still line up.
   std::string text = cue.text;
-  while (!text.empty() &&
-         std::isspace(static_cast<unsigned char>(text.front()))) {
+  while (!text.empty() && (text.front() == '\n' || text.front() == '\r')) {
     text.erase(text.begin());
   }
   while (!text.empty() &&
@@ -437,7 +490,7 @@ void EIA608Decoder::emit_cue(const CaptionCue& cue) {
     text.pop_back();
   }
 
-  if (text.empty()) {
+  if (text.find_first_not_of(" \t\n\r") == std::string::npos) {
     return;
   }
 

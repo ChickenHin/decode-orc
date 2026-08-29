@@ -11,6 +11,7 @@
 
 #include <QAbstractItemView>
 #include <QFont>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QStringList>
 #include <QTableWidgetItem>
@@ -65,6 +66,36 @@ void ClosedCaptionDialog::setupUI() {
 
   auto* content_layout = new QVBoxLayout();
   content_layout->setContentsMargins(9, 9, 9, 9);
+
+  // Line 21 carries four services in one byte-pair stream and they cannot be
+  // read together — decoded as one they interleave, a caption running through
+  // a page of listings. CC1 is what a captioned programme uses; the others are
+  // there when a recording turns out to carry more than one.
+  auto* service_layout = new QHBoxLayout();
+  auto* service_heading = new QLabel(tr("Service:"), this);
+  service_selector_ = new QComboBox(this);
+  service_selector_->setObjectName("closedCaptionServiceSelector");
+  service_selector_->addItem(
+      tr("CC1 — primary captions"),
+      QVariant::fromValue(static_cast<int>(orc::EIA608Service::CC1)));
+  service_selector_->addItem(
+      tr("CC2 — second caption service"),
+      QVariant::fromValue(static_cast<int>(orc::EIA608Service::CC2)));
+  service_selector_->addItem(
+      tr("TEXT1 — text service"),
+      QVariant::fromValue(static_cast<int>(orc::EIA608Service::T1)));
+  service_selector_->addItem(
+      tr("TEXT2 — text service"),
+      QVariant::fromValue(static_cast<int>(orc::EIA608Service::T2)));
+  service_selector_->setToolTip(
+      tr("Which of the services multiplexed onto line 21 to decode. CC1 is the "
+         "primary caption service; CC2 often carries a translation; the text "
+         "services carry pages of information rather than captions."));
+  service_layout->addWidget(service_heading);
+  service_layout->addWidget(service_selector_, /*stretch=*/1);
+  content_layout->addLayout(service_layout);
+  connect(service_selector_, &QComboBox::currentIndexChanged, this,
+          [this](int) { onServiceChanged(); });
 
   // The captions decoded so far. A caption is on screen for a few seconds and
   // then gone, so without a transcript the only way to read one is to be
@@ -131,6 +162,29 @@ void ClosedCaptionDialog::setupUI() {
   status_label_->setVisible(false);
 
   main_layout->addWidget(status_bar_);
+}
+
+void ClosedCaptionDialog::onServiceChanged() {
+  const auto selected =
+      static_cast<orc::EIA608Service>(service_selector_->currentData().toInt());
+  if (selected == assembler_.service()) {
+    return;
+  }
+  assembler_.setService(selected);
+  list_populated_ = false;
+  current_screen_ = ClosedCaptionAssembler::CaptionScreen{};
+  has_current_screen_ = false;
+  current_row_ = -1;
+  renderCurrentFrame();
+  emit dataRequestNeeded();
+}
+
+void ClosedCaptionDialog::selectService(orc::EIA608Service service) {
+  const int index = service_selector_->findData(
+      QVariant::fromValue(static_cast<int>(service)));
+  if (index >= 0) {
+    service_selector_->setCurrentIndex(index);
+  }
 }
 
 void ClosedCaptionDialog::showPending() { updatePendingStatus(); }
@@ -219,6 +273,8 @@ QString ClosedCaptionDialog::formatMode(
       return tr("Roll-up %n row(s)", nullptr, change.rollup_rows);
     case orc::CaptionMode::PAINT_ON:
       return tr("Paint-on");
+    case orc::CaptionMode::TEXT:
+      return tr("Text service");
     case orc::CaptionMode::POP_ON:
       break;
   }

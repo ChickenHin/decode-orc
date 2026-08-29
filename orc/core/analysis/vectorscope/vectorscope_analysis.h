@@ -51,12 +51,21 @@ class VectorscopeAnalysisTool : public AnalysisTool {
   /**
    * @brief Extract vectorscope data from a colour preview carrier.
    *
-   * Uses the decoded U/V planes already present in the carrier and can either
-   * limit sampling to the active picture window or include the entire frame.
+   * Uses the decoded U/V planes already present in the carrier.
+   *
+   * |active_area_only| limits sampling to the carrier's active picture window
+   * in both axes; cleared, the whole decoded frame is plotted.
+   *
+   * |first_line| / |last_line| are an inclusive interlaced frame-line range
+   * (0-based), the same numbering the composite acquisition selects and
+   * reports lines in, so a range means the same thing in either scope.
+   * |last_line| == 0 means "to the last line of the frame"; the range
+   * intersects with the active-picture restriction rather than overriding it.
    */
   static VectorscopeData extractFromColourFrameCarrier(
       const ColourFrameCarrier& carrier, uint64_t field_number,
-      uint32_t subsample = 1, bool active_area_only = true);
+      uint32_t subsample = 1, bool active_area_only = true,
+      uint32_t first_line = 0, uint32_t last_line = 0);
 };
 
 }  // namespace orc

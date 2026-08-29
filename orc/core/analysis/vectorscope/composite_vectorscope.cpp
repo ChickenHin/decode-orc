@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace orc {
@@ -414,6 +415,14 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
   // two states appear equally often.  NTSC has no swing and the burst angle is
   // the reference directly.
   //
+  // PAL_M swings with PAL, not with NTSC: ITU-R BT.1700-1 Annex 1 Part B
+  // gives it PAL colour encoding — V-axis switch and ±45° burst swing — on
+  // the 525-line raster whose signal levels it borrows from NTSC.  Left out
+  // of the swing, its two burst states are read as ±45° of phase noise: the
+  // fit is pulled about by the square wave, no line is classified +V or −V,
+  // and the jitter readout reports the swing itself (≈45° rms) instead of the
+  // timebase error it is there to measure.
+  //
   // The two fields are tracked independently, so a phase step at the field
   // boundary that the predictor does not model is absorbed rather than smeared
   // across the join.
@@ -427,7 +436,8 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
           ? static_cast<size_t>(parameters.last_active_frame_line / 2)
           : f1_lines;
 
-  const bool is_pal_switched = (system == VideoSystem::PAL);
+  const bool is_pal_switched =
+      (system == VideoSystem::PAL || system == VideoSystem::PAL_M);
   const double swing = is_pal_switched ? (M_PI / 4.0) : 0.0;
 
   // Per-line −U axis direction in the unrotated demodulated frame.  Left
@@ -565,14 +575,52 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
   // ------------------------------------------------------------------
   // Sample emission.
   // ------------------------------------------------------------------
-  const size_t first_line =
+  // Lines are selected and reported in interlaced frame-line numbering — the
+  // numbering the decoded acquisition already uses, and the one
+  // SourceParameters states the active picture in — rather than in the
+  // sequential-field order the flat buffer is laid out in.  A picture region
+  // is one contiguous range there and two disjoint ones here, so a single
+  // first/last range can only mean the same thing in both acquisitions if it
+  // means interlaced lines.
+  auto to_interlaced = [&](size_t flat) {
+    return (flat < f1_lines) ? (2 * flat) : ((2 * (flat - f1_lines)) + 1);
+  };
+
+  size_t line_begin =
       std::min(static_cast<size_t>(options.first_line), frame_lines - 1);
-  const size_t last_line =
+  size_t line_end =
       (options.last_line == 0)
           ? (frame_lines - 1)
           : std::min(static_cast<size_t>(options.last_line), frame_lines - 1);
-  const size_t line_begin = std::min(first_line, last_line);
-  const size_t line_end = std::max(first_line, last_line);
+  if (line_begin > line_end) std::swap(line_begin, line_end);
+
+  if (options.active_lines_only && parameters.first_active_frame_line >= 0 &&
+      parameters.last_active_frame_line > parameters.first_active_frame_line) {
+    line_begin = std::max(
+        line_begin, static_cast<size_t>(parameters.first_active_frame_line));
+    line_end = std::min(
+        line_end, static_cast<size_t>(parameters.last_active_frame_line) - 1);
+  }
+
+  // Flat lines whose interlaced index falls in the range, in buffer order so
+  // the samples stay grouped by line for the renderer's trace.
+  std::vector<size_t> emit_lines;
+  size_t emit_first_interlaced = frame_lines;
+  size_t emit_last_interlaced = 0;
+  if (line_begin <= line_end) {
+    emit_lines.reserve(line_end - line_begin + 1);
+    for (size_t line = 0; line < frame_lines; ++line) {
+      const size_t interlaced = to_interlaced(line);
+      if (interlaced < line_begin || interlaced > line_end) continue;
+      emit_lines.push_back(line);
+      emit_first_interlaced = std::min(emit_first_interlaced, interlaced);
+      emit_last_interlaced = std::max(emit_last_interlaced, interlaced);
+    }
+  }
+  if (emit_lines.empty()) {
+    emit_first_interlaced = 0;
+    emit_last_interlaced = 0;
+  }
 
   size_t window_start = 0;
   size_t window_end = spl;
@@ -593,7 +641,7 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
     window_end = spl;
   }
 
-  const size_t line_count = line_end - line_begin + 1;
+  const size_t line_count = emit_lines.size();
   const size_t window_width = window_end - window_start;
   const size_t estimated = line_count * window_width;
   size_t stride = 1;
@@ -608,8 +656,8 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
   data.cvbs_blanking = parameters.blanking_level;
   data.acquisition_mode = VectorscopeAcquisitionMode::CompositeCarrier;
   data.sample_window = options.window;
-  data.first_line = static_cast<uint32_t>(line_begin);
-  data.last_line = static_cast<uint32_t>(line_end);
+  data.first_line = static_cast<uint32_t>(emit_first_interlaced);
+  data.last_line = static_cast<uint32_t>(emit_last_interlaced);
   data.sample_stride = static_cast<uint32_t>(stride);
   data.width = static_cast<uint32_t>((window_width + stride - 1) / stride);
   data.height = static_cast<uint32_t>(line_count);
@@ -623,7 +671,7 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
   double picture_amplitude_sum = 0.0;
   size_t picture_sample_count = 0;
 
-  for (size_t line = line_begin; line <= line_end; ++line) {
+  for (size_t line : emit_lines) {
     size_t offset = 0;
     size_t length = 0;
     if (!line_span(line, offset, length)) continue;
@@ -634,6 +682,7 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
     demodulator.begin_line(frame + offset, length,
                            make_line_reference(cycles_per_line, line),
                            window_start, emit_end);
+    const size_t interlaced_line = to_interlaced(line);
     const uint8_t field_id = (line < f1_lines) ? 0 : 1;
     const VectorscopeLinePhase phase = line_phases[line];
     // The reference is a property of the line, so it is looked up once here
@@ -662,9 +711,10 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
         sample_class = VectorscopeSampleClass::Burst;
       }
 
-      data.samples.emplace_back(
-          clamp_display(u * display_scale), clamp_display(v * display_scale),
-          field_id, sample_class, phase, static_cast<uint16_t>(line));
+      data.samples.emplace_back(clamp_display(u * display_scale),
+                                clamp_display(v * display_scale), field_id,
+                                sample_class, phase,
+                                static_cast<uint16_t>(interlaced_line));
     }
   }
 

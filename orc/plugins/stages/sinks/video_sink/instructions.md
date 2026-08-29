@@ -107,6 +107,8 @@ FFmpeg mode only; available only when `embed_audio` is enabled. Gain applied uni
 ### embed_closed_captions (bool)
 FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only; converts EIA-608 captions from VBI. Default: `false`.
 
+The container carries one subtitle track, so this embeds the primary caption service, CC1. A recording that also used CC2 or one of the text services carries them on the same Line 21 byte stream; use the Closed Caption Sink to export those, which lets you choose the service.
+
 ### embed_chapter_metadata (bool)
 FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
 

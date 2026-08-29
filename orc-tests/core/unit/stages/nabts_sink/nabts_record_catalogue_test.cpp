@@ -335,6 +335,79 @@ TEST(NabtsRecordCatalogue, FallsBackToTheCommonestByteWhereEveryCopyIsDamaged) {
   EXPECT_EQ(records[0].data, (std::vector<uint8_t>{a}));
 }
 
+/// A record's worth of odd-parity data bytes from ASCII text.
+std::vector<uint8_t> odd_text(const char* text) {
+  std::vector<uint8_t> out;
+  for (const char* c = text; *c != '\0'; ++c) {
+    out.push_back(odd(static_cast<uint8_t>(*c)));
+  }
+  return out;
+}
+
+// Records long enough to be judged and unlike enough that a copy of one agrees
+// with a copy of another only by coincidence — four positions in twenty-nine.
+constexpr char kRecordText[] = "REAGAN BUDGET DRAWS GOP ANGER";
+constexpr char kOtherRecordText[] = "FEEDER CATTLE PRICES MONDAY U";
+constexpr char kThirdRecordText[] = "RASPBERRY CHICKEN AND POTATOS";
+
+// A mis-corrected packet address (§3.2.2) assembles a packet of some other
+// record into this one, and reconcile_identities() folds in copies filed under
+// an identity the recording never named. Either way the intruder is a clean
+// read of real data — only not of this record — so parity and confidence have
+// nothing to say about it, and the damage it does is at the positions where the
+// copies of the record are split.
+TEST(NabtsRecordCatalogue, AnIntruderDoesNotDecideAContestedPosition) {
+  auto split = odd_text(kRecordText);
+  split[0] = static_cast<uint8_t>(split[0] ^ 0x01);  // parity broken (§3.3)
+
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged(odd_text(kRecordText)), 0);
+  catalogue.merge(damaged(split), 1);
+  // Parity-clean at the contested position and the newest copy, so without the
+  // rule it takes a position the record's own copies could not agree on.
+  catalogue.merge(damaged(odd_text(kOtherRecordText)), 2);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, odd_text(kRecordText));
+}
+
+// Where most of the copies disagree with the provisional reading there is no
+// record for the rest to be outliers of, so the vote is left as it was rather
+// than emptied of everything that reached it.
+TEST(NabtsRecordCatalogue, NothingIsDroppedWhenTheCopiesHaveNoMajority) {
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged(odd_text(kRecordText)), 0);
+  catalogue.merge(damaged(odd_text(kOtherRecordText)), 1);
+  catalogue.merge(damaged(odd_text(kThirdRecordText)), 2);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  ASSERT_EQ(records[0].data.size(), odd_text(kRecordText).size());
+  // Position 2 is one no two copies agree on, so it still falls to the newest.
+  EXPECT_EQ(records[0].data[2], odd(kThirdRecordText[2]));
+}
+
+// A copy the tape damaged in many places is still a copy of the record: the
+// rule is about copies that agree with almost none of it.
+TEST(NabtsRecordCatalogue, ABadlyDamagedCopyStillVotes) {
+  auto battered = odd_text(kRecordText);
+  for (size_t i = 0; i < 10; ++i) {
+    battered[i] = static_cast<uint8_t>(battered[i] ^ 0x01);
+  }
+
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(damaged(odd_text(kRecordText)), 0);
+  catalogue.merge(damaged(battered), 1);
+  catalogue.merge(damaged(battered), 2);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, odd_text(kRecordText))
+      << "a copy the recording damaged was mistaken for a copy of another "
+         "record";
+}
+
 // A copy whose packets were lost has bytes missing from the middle of it
 // (§3.2.4), so it no longer lines up with the others and must not vote — one
 // admitted would corrupt every position after its hole.

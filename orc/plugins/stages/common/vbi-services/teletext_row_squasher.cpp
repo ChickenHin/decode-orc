@@ -107,33 +107,27 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
   copies.seq.push_back(copies.next_seq++);
 }
 
-std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
-    const TeletextPageKey& key, int row, TeletextRowCoverage* covered) const {
-  if (covered != nullptr) {
-    covered->fill(false);
-  }
-  const auto it = pages_.find(key);
-  if (it == pages_.end() || row < 0 ||
-      row >=
-          static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
-    return std::nullopt;
-  }
-  const RowCopies& copies = it->second.rows[static_cast<size_t>(row)];
-  if (copies.copies.empty()) {
-    return std::nullopt;
-  }
-  if (copies.copies.size() == 1) {
-    // A vote of one is the copy itself.
-    if (covered != nullptr) {
-      const size_t first = copies.first_column.front();
-      const size_t count = copies.column_count.front();
-      std::fill(covered->begin() + static_cast<std::ptrdiff_t>(first),
-                covered->begin() + static_cast<std::ptrdiff_t>(first + count),
-                true);
-    }
-    return copies.copies.front();
-  }
+namespace {
 
+// How much of a copy has to agree with the provisional row before the copy is
+// taken to be a copy of that row. A copy of the row differs from it only where
+// it was damaged, which on a recovered recording is a few bytes in forty; a
+// copy of something else agrees only by coincidence, which over 32 or 40
+// positions is nowhere near half of them. Anywhere between the two settles the
+// same copies either way, so the boundary is put in the middle of the gap.
+constexpr double kOutlierAgreementFraction = 0.5;
+
+// Fewest positions a copy must be judged over before it may be called an
+// outlier. A copy speaking for a handful of columns can agree on none of them
+// by chance, and a row extension is eight columns wide.
+constexpr size_t kOutlierMinJudgedPositions = 8;
+
+}  // namespace
+
+void TeletextRowSquasher::vote_row(const RowCopies& copies,
+                                   const uint8_t* included,
+                                   TeletextRowBytes& result,
+                                   TeletextRowCoverage& covered) {
   // Pick the winning value at each byte position across the copies.
   //
   // Odd parity (ETSI EN 300 706 §8.1) detects every single-bit error, so a
@@ -158,11 +152,17 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
   std::array<uint8_t, 256> seen_at{};  // epoch marks: position + 1, 0 = never
   std::array<uint8_t, 256> distinct;   // values seen at this position
 
-  TeletextRowBytes result{};
+  result.fill(0);
+  covered.fill(false);
   for (size_t position = 0; position < kTeletextRowBytes; ++position) {
     const uint8_t epoch = static_cast<uint8_t>(position + 1);
     size_t distinct_count = 0;
     for (size_t j = 0; j < copy_count; ++j) {
+      // A copy the outlier pass excluded is not a copy of this row (see
+      // squashed_row()), so it neither votes nor covers a position.
+      if (included != nullptr && included[j] == 0) {
+        continue;
+      }
       // A copy votes only within the columns it spoke for: the two halves of a
       // split row are combined independently.
       if (position < copies.first_column[j] ||
@@ -206,9 +206,111 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
       best_newest = newest_of[value];
     }
     result[position] = best;
+    covered[position] = found;
+  }
+}
+
+std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
+    const TeletextPageKey& key, int row, TeletextRowCoverage* covered) const {
+  if (covered != nullptr) {
+    covered->fill(false);
+  }
+  const auto it = pages_.find(key);
+  if (it == pages_.end() || row < 0 ||
+      row >=
+          static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
+    return std::nullopt;
+  }
+  const RowCopies& copies = it->second.rows[static_cast<size_t>(row)];
+  if (copies.copies.empty()) {
+    return std::nullopt;
+  }
+  if (copies.copies.size() == 1) {
+    // A vote of one is the copy itself.
     if (covered != nullptr) {
-      (*covered)[position] = found;
+      const size_t first = copies.first_column.front();
+      const size_t count = copies.column_count.front();
+      std::fill(covered->begin() + static_cast<std::ptrdiff_t>(first),
+                covered->begin() + static_cast<std::ptrdiff_t>(first + count),
+                true);
     }
+    return copies.copies.front();
+  }
+
+  TeletextRowBytes result{};
+  TeletextRowCoverage coverage{};
+  vote_row(copies, nullptr, result, coverage);
+
+  // Not every copy filed under a row is a copy of that row. The MRAG is
+  // Hamming 8/4 and mis-corrects on a burst, and a page whose header was lost
+  // leaves the one before it open — either way a packet of some other page
+  // arrives here looking like content, and the vote above has no way to tell
+  // it from the copies it belongs among. A page that collects enough of them
+  // becomes a per-character blend of every page mis-addressed into it, and the
+  // blend is worse the more copies are combined, which is the opposite of what
+  // combining them is for.
+  //
+  // What separates the two is how much of the row a copy agrees with. Copies of
+  // one row differ only where they were damaged; a copy of something else
+  // disagrees nearly everywhere. So the vote is taken twice: once to find what
+  // the copies mostly say, and again without the copies that hardly say it.
+  //
+  // Only a minority may be dropped, counted among the copies speaking for the
+  // same columns. Where most of them disagree with the provisional row there is
+  // no row for the rest to be outliers of — the page is being assembled out of
+  // intruders and no vote among them is worth more than another.
+  const size_t copy_count = copies.copies.size();
+  std::vector<uint8_t> included;
+  std::array<uint16_t, kTeletextRowBytes + 1> group_copies{};
+  std::array<uint16_t, kTeletextRowBytes + 1> group_outliers{};
+  for (size_t j = 0; j < copy_count; ++j) {
+    const size_t first = copies.first_column[j];
+    const size_t last =
+        std::min(first + copies.column_count[j], kTeletextRowBytes);
+    size_t judged = 0;
+    size_t agreed = 0;
+    for (size_t position = first; position < last; ++position) {
+      if (!coverage[position]) {
+        continue;
+      }
+      ++judged;
+      if (copies.copies[j][position] == result[position]) {
+        ++agreed;
+      }
+    }
+    ++group_copies[first];
+    if (judged >= kOutlierMinJudgedPositions &&
+        static_cast<double>(agreed) <
+            kOutlierAgreementFraction * static_cast<double>(judged)) {
+      if (included.empty()) {
+        included.assign(copy_count, 1);
+      }
+      included[j] = 0;
+      ++group_outliers[first];
+    }
+  }
+
+  if (!included.empty()) {
+    bool any = false;
+    for (size_t j = 0; j < copy_count; ++j) {
+      if (included[j] != 0) {
+        continue;
+      }
+      const size_t first = copies.first_column[j];
+      if (static_cast<size_t>(group_outliers[first]) * 2 <
+          static_cast<size_t>(group_copies[first])) {
+        any = true;
+      } else {
+        included[j] = 1;  // no majority to defend; the group votes as it was
+      }
+    }
+    if (any) {
+      vote_row(copies, included.data(), result, coverage);
+    }
+  }
+
+  if (covered != nullptr) {
+    *covered = coverage;
   }
   return result;
 }

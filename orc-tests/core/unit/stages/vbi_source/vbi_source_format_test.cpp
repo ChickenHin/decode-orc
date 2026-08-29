@@ -20,6 +20,14 @@
 namespace orc {
 namespace {
 
+// The two 525-line bt8x8 entries, spelled once each: their names are long
+// enough that writing them out at every use puts the closing bracket past the
+// column limit and splits the literal in half.
+constexpr const char* kBt8x8NTSCWSTPreset =
+    "bt8x8 card dump, 8-bit (WST, NTSC source)";
+constexpr const char* kBt8x8NTSCNABTSPreset =
+    "bt8x8 card dump, 8-bit (NABTS, NTSC source)";
+
 // The bt8x8 PAL preset must expand to the values in the design's known-format
 // table, field by field. These are the only numbers the reader ever sees, so
 // a wrong entry here is a silently wrong decode everywhere downstream.
@@ -167,6 +175,186 @@ TEST(VBISourceFormat, Bt8x8SECAMPresetExpectsFewerLinesToCarryTeletext) {
                    pal.calibration.maximum_drift_samples);
 }
 
+// The 525-line bt8x8 entry is the driver's NTSC television norm, field for
+// field: bttv_tvnorms[] gives it Fsc = 28 636 363, vbipack = 144 (so 1024 +
+// 144 x 4 = 1600 real samples of the 2048-byte record) and vbistart =
+// {10, 273}.  Every one of these was confirmed against the reference capture,
+// and getting any of them wrong is a silently wrong decode rather than a
+// refusal.
+TEST(VBISourceFormat, Bt8x8NTSCPresetExpandsToTheDriverContainer) {
+  VBISourceFormat format;
+  std::string error;
+
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCWSTPreset, format, error))
+      << error;
+  EXPECT_TRUE(error.empty());
+
+  EXPECT_DOUBLE_EQ(format.sample_rate_hz, 28636363.0);
+  EXPECT_EQ(format.line_length, 2048u);
+  EXPECT_EQ(format.valid_samples, 1600u);
+  EXPECT_EQ(format.sample_format, VBISampleFormat::kU8);
+  EXPECT_EQ(format.field_lines, 16u);
+
+  // vbistart[0] is broadcast frame line 10, which is the head of the 525-line
+  // teletext list, so records 0-11 are the whole of it and records 12-15 are
+  // the start of the picture.
+  EXPECT_EQ(format.field_range.start, 0u);
+  EXPECT_EQ(format.field_range.end, 11u);
+  EXPECT_EQ(format.field_range.count(),
+            standard_teletext_lines_per_field(VBITVSystem::kNTSC,
+                                              VBITeletextSystem::kWST));
+
+  // The frame counter survives the change of norm: there is simply far more
+  // padding for it to sit in.
+  EXPECT_EQ(format.frame_trailer_bytes, 4u);
+  EXPECT_TRUE(format.frame_trailer_is_counter);
+  EXPECT_EQ(format.record_padding_bytes(), 448u);
+
+  EXPECT_EQ(format.first_field, 1u);
+  EXPECT_EQ(format.tv_system, VBITVSystem::kNTSC);
+  EXPECT_EQ(format.tt_system, VBITeletextSystem::kWST);
+  EXPECT_EQ(format.family, VBISourceFamily::kCardCapture);
+}
+
+// The same card and the same driver, so the record stride, the field stride
+// and the frame trailer carry over from the 625-line entry — and nothing else
+// does.  A preset that shared the sampling rate, the valid sample count or the
+// field range with PAL would be describing a container that does not exist.
+TEST(VBISourceFormat, Bt8x8NTSCPresetSharesOnlyTheCardsGeometryWithPAL) {
+  VBISourceFormat pal;
+  VBISourceFormat ntsc;
+  std::string error;
+
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", pal, error))
+      << error;
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCWSTPreset, ntsc, error))
+      << error;
+
+  EXPECT_EQ(ntsc.line_length, pal.line_length);
+  EXPECT_EQ(ntsc.field_lines, pal.field_lines);
+  EXPECT_EQ(ntsc.sample_format, pal.sample_format);
+  EXPECT_EQ(ntsc.frame_trailer_bytes, pal.frame_trailer_bytes);
+  EXPECT_EQ(ntsc.frame_trailer_is_counter, pal.frame_trailer_is_counter);
+  EXPECT_EQ(ntsc.first_field, pal.first_field);
+  EXPECT_EQ(ntsc.family, pal.family);
+
+  EXPECT_NE(ntsc.sample_rate_hz, pal.sample_rate_hz);
+  EXPECT_NE(ntsc.valid_samples, pal.valid_samples);
+  EXPECT_NE(ntsc.field_range.end, pal.field_range.end);
+  EXPECT_NE(ntsc.tv_system, pal.tv_system);
+
+  // A bt8x8 NTSC frame is the same 65 536 bytes as a PAL one, which is why
+  // the frame counter still lands on the last four of them.
+  EXPECT_EQ(ntsc.bytes_per_record(), 2048u);
+  EXPECT_EQ(ntsc.bytes_per_field(), 32768u);
+  EXPECT_EQ(ntsc.bytes_per_frame(), 65536u);
+}
+
+// The driver's VBI_OFFSET is one constant for every television norm and its
+// own source calls it experimental, so on this norm as on the 625-line one it
+// is a starting hint for the fit rather than a value to be used as configured.
+// The reference capture settles 5,1 samples away from it.
+TEST(VBISourceFormat, Bt8x8NTSCPresetCalibratesItsCaptureOffset) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCWSTPreset, format, error))
+      << error;
+
+  EXPECT_TRUE(format.capture_offset_is_auto);
+  EXPECT_DOUBLE_EQ(format.capture_offset_samples, 244.0);
+}
+
+// The two thresholds that cannot be inherited from the 625-line entry, and the
+// reasons they are the only two.  A US broadcaster carried its magazines on a
+// handful of the twelve lines where a 625-line one filled most of the list, so
+// the share of records that lock is far lower; and the spread limit is a
+// tolerance in time, so at a slower sampling clock it is a smaller count of
+// samples, not the same one.
+TEST(VBISourceFormat, Bt8x8NTSCPresetKeepsTheCardsToleranceInTimeNotInSamples) {
+  VBISourceFormat pal;
+  VBISourceFormat ntsc;
+  std::string error;
+  ASSERT_TRUE(
+      expand_vbi_source_preset("bt8x8 card dump, 8-bit (WST)", pal, error))
+      << error;
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCWSTPreset, ntsc, error))
+      << error;
+
+  const double pal_spread_ns =
+      pal.calibration.maximum_spread_samples / pal.sample_rate_hz * 1e9;
+  const double ntsc_spread_ns =
+      ntsc.calibration.maximum_spread_samples / ntsc.sample_rate_hz * 1e9;
+  EXPECT_NEAR(ntsc_spread_ns, pal_spread_ns, 10.0);
+  EXPECT_LT(ntsc.calibration.maximum_spread_samples,
+            pal.calibration.maximum_spread_samples);
+  EXPECT_DOUBLE_EQ(ntsc.calibration.maximum_drift_samples,
+                   ntsc.calibration.maximum_spread_samples);
+
+  // The reference capture scatters by 3,3 samples, so the limit has to sit
+  // above that and nowhere near far enough above it to admit a wrong rate.
+  EXPECT_GT(ntsc.calibration.maximum_spread_samples, 3.3);
+
+  // Five records of the first stored field and three of the second carry the
+  // service on the reference capture: a third of the twenty-four sampled per
+  // frame, which the 625-line quarter would only just admit.
+  EXPECT_LT(ntsc.calibration.minimum_acceptance_fraction,
+            pal.calibration.minimum_acceptance_fraction);
+  EXPECT_LT(ntsc.calibration.minimum_acceptance_fraction, 3.0 / 24.0);
+  EXPECT_GT(ntsc.calibration.minimum_acceptance_fraction, 0.0);
+
+  // Everything else is the 625-line entry's.
+  EXPECT_DOUBLE_EQ(ntsc.calibration.acceptance_correlation,
+                   pal.calibration.acceptance_correlation);
+  EXPECT_DOUBLE_EQ(ntsc.calibration.tight_spread_samples,
+                   pal.calibration.tight_spread_samples);
+  EXPECT_DOUBLE_EQ(ntsc.calibration.search_tolerance_samples,
+                   pal.calibration.search_tolerance_samples);
+}
+
+// The card knows nothing about what the lines carry, so the two 525-line
+// service entries may differ in the service and in nothing else.
+TEST(VBISourceFormat, Bt8x8NTSCServiceVariantsShareOneContainer) {
+  VBISourceFormat wst;
+  VBISourceFormat nabts;
+  std::string error;
+
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCWSTPreset, wst, error))
+      << error;
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCNABTSPreset, nabts, error))
+      << error;
+
+  EXPECT_DOUBLE_EQ(nabts.sample_rate_hz, wst.sample_rate_hz);
+  EXPECT_EQ(nabts.line_length, wst.line_length);
+  EXPECT_EQ(nabts.valid_samples, wst.valid_samples);
+  EXPECT_EQ(nabts.sample_format, wst.sample_format);
+  EXPECT_EQ(nabts.field_lines, wst.field_lines);
+  EXPECT_EQ(nabts.field_range.start, wst.field_range.start);
+  EXPECT_EQ(nabts.field_range.end, wst.field_range.end);
+  EXPECT_EQ(nabts.frame_trailer_bytes, wst.frame_trailer_bytes);
+  EXPECT_EQ(nabts.frame_trailer_is_counter, wst.frame_trailer_is_counter);
+  EXPECT_EQ(nabts.first_field, wst.first_field);
+  EXPECT_DOUBLE_EQ(nabts.capture_offset_samples, wst.capture_offset_samples);
+  EXPECT_EQ(nabts.capture_offset_is_auto, wst.capture_offset_is_auto);
+  EXPECT_EQ(nabts.family, wst.family);
+
+  EXPECT_EQ(wst.tt_system, VBITeletextSystem::kWST);
+  EXPECT_EQ(nabts.tt_system, VBITeletextSystem::kNABTS);
+}
+
+// The reference 525-line sample is 910 819 328 raw bytes, which must
+// factorise into exactly 13 898 whole bt8x8 NTSC frames.
+TEST(VBISourceFormat, Bt8x8NTSCFrameSizeFactorisesTheReferenceCaptureLength) {
+  VBISourceFormat format;
+  std::string error;
+  ASSERT_TRUE(expand_vbi_source_preset(kBt8x8NTSCWSTPreset, format, error))
+      << error;
+
+  constexpr uint64_t kReferenceRawBytes = 910819328ull;
+  EXPECT_EQ(kReferenceRawBytes % format.bytes_per_frame(), 0u);
+  EXPECT_EQ(kReferenceRawBytes / format.bytes_per_frame(), 13898u);
+}
+
 // A bt8x8 PAL frame is 65 536 bytes: sixteen 2048-byte records in each of two
 // fields, with the frame counter inside the final record's padding rather
 // than appended to the frame.
@@ -218,6 +406,8 @@ TEST(VBISourceFormat, PresetNamesAreTheWholeChoiceAndAllExpand) {
       (std::vector<std::string>{
           "bt8x8 card dump, 8-bit (WST)",
           "bt8x8 card dump, 8-bit (WST, SECAM source)",
+          "bt8x8 card dump, 8-bit (WST, NTSC source)",
+          "bt8x8 card dump, 8-bit (NABTS, NTSC source)",
           "cx23885 card dump, 8-bit (WST)", "cx23885 card dump, 8-bit (NABTS)",
           ".tbc VBI crop, 16-bit (WST)", ".tbc VBI crop, 16-bit (NABTS)"}));
 
@@ -246,15 +436,18 @@ TEST(VBISourceFormat, PresetNamesAreFilteredByTelevisionSystem) {
       vbi_source_preset_names(VBITVSystem::kNTSC);
 
   // A PAL project is offered the one card container in its two source
-  // flavours; an NTSC project is offered its two containers, each in the two
-  // services its captures might carry.
+  // flavours; an NTSC project is offered its two card containers and its .tbc
+  // crop, each in the two services its captures might carry.
   EXPECT_EQ(pal, (std::vector<std::string>{
                      "bt8x8 card dump, 8-bit (WST)",
                      "bt8x8 card dump, 8-bit (WST, SECAM source)"}));
-  EXPECT_EQ(ntsc, (std::vector<std::string>{"cx23885 card dump, 8-bit (WST)",
-                                            "cx23885 card dump, 8-bit (NABTS)",
-                                            ".tbc VBI crop, 16-bit (WST)",
-                                            ".tbc VBI crop, 16-bit (NABTS)"}));
+  EXPECT_EQ(
+      ntsc,
+      (std::vector<std::string>{
+          "bt8x8 card dump, 8-bit (WST, NTSC source)",
+          "bt8x8 card dump, 8-bit (NABTS, NTSC source)",
+          "cx23885 card dump, 8-bit (WST)", "cx23885 card dump, 8-bit (NABTS)",
+          ".tbc VBI crop, 16-bit (WST)", ".tbc VBI crop, 16-bit (NABTS)"}));
 
   // Between them the two lists are the whole table: no preset is unreachable.
   EXPECT_EQ(pal.size() + ntsc.size(), vbi_source_preset_names().size());

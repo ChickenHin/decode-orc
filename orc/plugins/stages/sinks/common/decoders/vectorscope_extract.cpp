@@ -101,12 +101,20 @@ VectorscopeData extract_vectorscope_from_component_frame(
       std::max(1.0, static_cast<double>(video_parameters.white_level -
                                         video_parameters.blanking_level));
 
+  // Row 0 of a cropped frame is first_active_frame_line of the uncropped one.
+  // UVSample::line_number is an interlaced frame-line index whichever way the
+  // decoder wrote the plane, so a cropped row is reported at the line it came
+  // from — and that line's parity, not the row's, says which field it is on.
+  const int32_t line_offset = video_parameters.active_area_cropping_applied
+                                  ? video_parameters.first_active_frame_line
+                                  : 0;
+
   // Process both fields separately
   // Field 0 (first/odd field): even lines (0, 2, 4, ...)
   // Field 1 (second/even field): odd lines (1, 3, 5, ...)
   for (uint8_t field_id = 0; field_id < 2; field_id++) {
     int32_t first_y = y_start;
-    if ((first_y & 1) != field_id) {
+    if (((first_y + line_offset) & 1) != field_id) {
       ++first_y;
     }
 
@@ -125,7 +133,7 @@ VectorscopeData extract_vectorscope_from_component_frame(
         // The line a sample came from: the renderer joins consecutive samples
         // into a trace and must break it at each line rather than striking a
         // chord back across the plot.
-        uv.line_number = static_cast<uint16_t>(y);
+        uv.line_number = static_cast<uint16_t>(y + line_offset);
         data.samples.push_back(uv);
       }
     }

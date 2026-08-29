@@ -195,8 +195,22 @@ class VectorscopePreviewView final : public IPreviewView {
     }
 
     const bool active_area_only = coordinate.vectorscope_active_area_only;
-    if (active_area_only && carrier_opt->vectorscope_data.has_value()) {
+    const bool whole_active_picture = active_area_only &&
+                                      coordinate.vectorscope_first_line == 0 &&
+                                      coordinate.vectorscope_last_line == 0;
+
+    // The stage already extracted the active picture on the way past, so the
+    // default request is answered from that rather than walked again.  Any
+    // narrower selection has to be taken from the planes.
+    if (whole_active_picture && carrier_opt->vectorscope_data.has_value()) {
       last_vectorscope_ = carrier_opt->vectorscope_data;
+      // The stage reports the extent it sampled but not where it started;
+      // for the active picture that is the carrier's own active line range.
+      last_vectorscope_->first_line = carrier_opt->active_y_start;
+      last_vectorscope_->last_line =
+          (carrier_opt->active_y_end > carrier_opt->active_y_start)
+              ? (carrier_opt->active_y_end - 1)
+              : carrier_opt->active_y_start;
     } else {
       const uint64_t field_number =
           carrier_opt->vectorscope_data.has_value()
@@ -205,7 +219,9 @@ class VectorscopePreviewView final : public IPreviewView {
 
       last_vectorscope_ =
           VectorscopeAnalysisTool::extractFromColourFrameCarrier(
-              *carrier_opt, field_number, 4, active_area_only);
+              *carrier_opt, field_number, 4, active_area_only,
+              coordinate.vectorscope_first_line,
+              coordinate.vectorscope_last_line);
     }
 
     if (!last_vectorscope_.has_value() || last_vectorscope_->samples.empty()) {
@@ -296,6 +312,7 @@ class VectorscopePreviewView final : public IPreviewView {
 
     CompositeVectorscopeOptions options;
     options.window = coordinate.vectorscope_window;
+    options.active_lines_only = coordinate.vectorscope_active_area_only;
     options.first_line = coordinate.vectorscope_first_line;
     options.last_line = coordinate.vectorscope_last_line;
 

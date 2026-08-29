@@ -71,6 +71,48 @@ constexpr double kBt8x8PALMinimumAcceptanceFraction = 0.25;
 // least one record of every other frame carried the data service.
 constexpr double kBt8x8SECAMMinimumAcceptanceFraction = 0.03;
 
+// Linux bttv driver, bttv_tvnorms[]: 525-line sampling clock.
+constexpr double kBt8x8NTSCSampleRateHz = 28636363.0;  // 8 x fsc NTSC
+
+// 1024 + vbipack * 4 again, this norm's vbipack being 144, which leaves 448
+// bytes of padding per record rather than the PAL entry's four.  Measured on
+// the reference capture as well as read off the driver: every record is flat
+// zero from sample 1600 to the end of its 2048-byte stride.
+constexpr uint32_t kBt8x8NTSCValidSamples = 1600;
+
+// Scatter allowed before a 525-line bt8x8 fit is rejected.  The PAL entry
+// allows 8 samples at 35,47 MHz, which is 226 ns; the same tolerance in time
+// is 6,5 samples at this norm's slower clock, and it is the tolerance that is
+// the measured quantity, not the count.  The reference capture sits at 3,3
+// samples, so this leaves rather better than the factor of two the PAL entry
+// has.
+constexpr double kBt8x8NTSCMaximumSpreadSamples = 6.5;
+
+// How far either side of the folkloric offset the run-in is looked for on a
+// 525-line dump.  The same count as the 625-line entry but not the same
+// reasoning, and not the same span in time: 48 samples is 1,68 us here.  A
+// fitted offset is the distance from the service table's nominal anchor to
+// where the run-in actually is, and the 525-line anchor is a measurement of
+// other captures that broadcasters disagree about by the better part of a
+// microsecond (see vbi_teletext_service.cpp).  The window has to cover that
+// disagreement as well as the card's own uncertainty; the reference capture
+// fits 5,1 samples from the configured offset, so nearly all of the window is
+// margin against material this one says nothing about.
+constexpr double kBt8x8NTSCSearchToleranceSamples = 48.0;
+
+// Fraction of the sampled records a 525-line capture must lock, and the one
+// threshold that cannot be shared with the 625-line entries — for exactly the
+// reason the cx23885 preset below needs its own figure.  A 625-line
+// broadcaster had the whole line list to fill and used most of it; a US
+// broadcaster carried its magazines on a handful of the twelve.  The reference
+// capture carries teletext on five records of the first stored field and three
+// of the second, which is a third of the twenty-four records sampled per
+// frame, and it locks on 33,1% of them.  One tenth is the bar: below what this
+// material carries even after a tape has lost some of it, and far above what a
+// wrong container, rate or system produces — that is a scatter the spread and
+// drift checks reject long before the count does.
+constexpr double kBt8x8NTSCMinimumAcceptanceFraction = 0.10;
+
 struct PresetEntry {
   const char* name;
   VBISourceFormat format;
@@ -144,6 +186,66 @@ VBISourceFormat make_bt8x8_secam() {
   VBISourceFormat format = make_bt8x8_pal();
   format.calibration.minimum_acceptance_fraction =
       kBt8x8SECAMMinimumAcceptanceFraction;
+  return format;
+}
+
+// A bt8x8 dump of a 525-line source.  The same card and the same driver, but
+// not the same container: bttv_tvnorms[] gives its NTSC entry a different
+// sampling clock (28 636 363 Hz, 8 x fsc NTSC), a different vbipack (144, so
+// 1600 real samples of the 2048-byte record rather than 2044) and a different
+// vbistart ({10, 273} rather than {7, 320}).  Only the record stride, the
+// sixteen records a field stores and the frame trailer survive from the 625-
+// line entry, so this is written out in full rather than derived from it.
+//
+// vbistart {10, 273} is broadcast frame lines 10 and 273, which is exactly
+// where the 525-line teletext list starts, so records 0 to 11 are the whole of
+// it (ITU-R BT.653 §2) and records 12 to 15 are the start of the picture.  The
+// four bytes of frame counter at the tail of each 65 536-byte frame land in
+// the last record's padding here as they do on PAL — there is simply a great
+// deal more padding for them to land in.
+//
+// The container was measured on the reference capture as well as read off the
+// driver: its records are flat zero from sample 1600 to the end of the stride,
+// its frame counter increments by one per frame across the file, and the fit
+// settles at 249,1 samples against the driver's folkloric 244 with no
+// significant drift, which is what says the sampling rate is right.
+//
+// As with the cx23885 entries below, the container says nothing about the
+// service the lines carry: the two 525-line teletext systems sit on the same
+// lines and differ in framing code and packet length, so the service is
+// configuration and the reader is the same either way.
+VBISourceFormat make_bt8x8_ntsc(VBITeletextSystem tt_system) {
+  VBISourceFormat format;
+  format.sample_rate_hz = kBt8x8NTSCSampleRateHz;
+  format.line_length = kBt8x8RecordStride;
+  format.valid_samples = kBt8x8NTSCValidSamples;
+  format.sample_format = VBISampleFormat::kU8;
+  format.field_lines = 16;
+  format.field_range = VBIFieldRange{0, 11};
+  format.frame_trailer_bytes = kBt8x8FrameCounterBytes;
+  format.frame_trailer_is_counter = true;
+  format.capture_offset_samples = kBt8x8CaptureOffsetSamples;
+  format.capture_offset_is_auto = true;
+
+  // The driver stores count[0] records from start[0] before count[1] from
+  // start[1], and start[0] is the field 1 line list.
+  format.first_field = 1;
+
+  format.tv_system = VBITVSystem::kNTSC;
+  format.tt_system = tt_system;
+  format.family = VBISourceFamily::kCardCapture;
+
+  // A bt8x8 card is how tape and off-air material is captured here too, so the
+  // spread limit is the 625-line entry's tolerance in time rather than its
+  // count of samples, and the tight figure is left where it is so that a
+  // genuinely clean capture is still reported as one.
+  format.calibration.search_tolerance_samples =
+      kBt8x8NTSCSearchToleranceSamples;
+  format.calibration.tight_spread_samples = 0.5;
+  format.calibration.maximum_spread_samples = kBt8x8NTSCMaximumSpreadSamples;
+  format.calibration.maximum_drift_samples = kBt8x8NTSCMaximumSpreadSamples;
+  format.calibration.minimum_acceptance_fraction =
+      kBt8x8NTSCMinimumAcceptanceFraction;
   return format;
 }
 
@@ -365,6 +467,10 @@ const std::vector<PresetEntry>& presets() {
   static const std::vector<PresetEntry> kPresets = {
       {"bt8x8 card dump, 8-bit (WST)", make_bt8x8_pal()},
       {"bt8x8 card dump, 8-bit (WST, SECAM source)", make_bt8x8_secam()},
+      {"bt8x8 card dump, 8-bit (WST, NTSC source)",
+       make_bt8x8_ntsc(VBITeletextSystem::kWST)},
+      {"bt8x8 card dump, 8-bit (NABTS, NTSC source)",
+       make_bt8x8_ntsc(VBITeletextSystem::kNABTS)},
       {"cx23885 card dump, 8-bit (WST)",
        make_cx23885_ntsc(VBITeletextSystem::kWST)},
       {"cx23885 card dump, 8-bit (NABTS)",

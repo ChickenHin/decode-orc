@@ -21,8 +21,13 @@ namespace gui_unit_test {
 // the transmitted parity bit already stripped (CTA-608-E Table 52, data
 // channel 1).
 constexpr int32_t kCcControlByte = 0x14;
+// The same miscellaneous control code on data channel 2: bit 3 of the first
+// byte is the channel, so 0x1C addresses CC2 and TEXT2 where 0x14 addresses
+// CC1 and TEXT1 (CTA-608-E §6.2).
+constexpr int32_t kCcControlByteChannel2 = 0x1C;
 constexpr int32_t kCcResumeCaptionLoading = 0x20;  // RCL - pop-on mode
 constexpr int32_t kCcRollUp2 = 0x25;               // RU2 - roll-up mode
+constexpr int32_t kCcTextRestart = 0x2A;           // TR - hand over to TEXTn
 constexpr int32_t kCcEraseDisplayedMemory = 0x2C;  // EDM
 constexpr int32_t kCcCarriageReturn = 0x2D;        // CR
 constexpr int32_t kCcEndOfCaption = 0x2F;          // EOC - display the caption

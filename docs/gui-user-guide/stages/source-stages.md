@@ -131,7 +131,7 @@ The file-path parameters offered match the project's source type: a composite pr
 
 **Use this stage when:**
 
-* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL or a SECAM source, a cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc`
+* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc`
 
 **What it does**
 
@@ -155,10 +155,19 @@ Everything about a capture — its geometry, its sampling rate, the data service
 |--------|----------|------------|
 | `bt8x8 card dump, 8-bit (WST)` | PAL | A 625-line capture-card dump: 2048 samples per record of which 2044 are real, unsigned 8-bit, at 8×fsc (35 468 950 Hz); 16 records per field carrying field lines 7–22, the whole of the WST line list |
 | `bt8x8 card dump, 8-bit (WST, SECAM source)` | PAL | The same container, byte for byte, from a SECAM source — see below |
+| `bt8x8 card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` | NTSC | The same card on the driver's other television norm, which is not the same container: 2048 samples per record of which 1600 are real, unsigned 8-bit, at 8×fsc NTSC (28 636 363 Hz); 16 records per field of which the first 12 carry field lines 10–21, the whole of the 525-line teletext list — see below |
 | `cx23885 card dump, 8-bit (WST)` and `(NABTS)` | NTSC | A 525-line capture-card dump from a Hauppauge HVR-1250 or sibling: 1440 samples per record with no padding, unsigned 8-bit, at 27 MHz; 12 records per field carrying field lines 10–21, the whole of the 525-line teletext list — see below |
 | `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21 |
 
 There is deliberately no "custom" entry. Every fact behind these formats had to be measured off real captures — none of it is recoverable from the file, and guessing at it produces output that looks right and is not.
+
+**bt8x8 dumps of a 525-line source**
+
+The same card and the same driver as the PAL entries, and not the same container. The `bttv` driver's NTSC television norm has its own sampling clock (28 636 363 Hz, 8×fsc NTSC), its own `vbipack` of 144 — so 1600 of the 2048 samples per record are real rather than 2044 — and its own `vbistart` of `{10, 273}` rather than `{7, 320}`. What carries over is the card's geometry: the 2048-byte record stride, the sixteen records a field stores, the 65 536-byte frame and the driver's frame counter at the tail of it, which lands in the last record's padding here as it does on PAL. Unlike the other two 525-line containers, then, **a bt8x8 dump of a 525-line source can report dropped frames**.
+
+`vbistart` opening at field line 10 is exactly where the 525-line teletext list starts, so records 0–11 carry field lines 10–21 and 273–284 and records 12–15 are the start of the picture. Two calibration thresholds differ from the PAL entries and no others: this entry expects the run-in on a tenth of the sampled records rather than a quarter, for the same reason the cx23885 entry does, and its spread limit is the PAL entry's 226 ns expressed at this norm's slower clock — 6,5 samples rather than 8. The reference capture, a 1984 off-air recording of TBS Keyfax, locks on 33,1% of its records with a spread of 3,3 samples and fits its offset at 249,1 samples against the driver's folkloric 244.
+
+Choose the service to match the broadcast, as on any card capture: the offset is fitted against the service's own run-in template, so the wrong choice fails the calibration rather than quietly mis-slicing the data.
 
 **cx23885 card dumps**
 
