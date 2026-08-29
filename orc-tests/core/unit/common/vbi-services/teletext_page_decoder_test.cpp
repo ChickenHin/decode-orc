@@ -348,16 +348,23 @@ TEST_F(TeletextPageDecoderTest, EraseControlBit_ClearsStoredRows) {
   EXPECT_EQ(row_text(snapshots_[1], 2), "");
 }
 
-TEST_F(TeletextPageDecoderTest, Hamming_SingleBitErrorInMragIsCorrected) {
-  auto row = make_row(1, 1, "CORRECTED");
-  row[0] ^= 0x10;  // single-bit error in the first MRAG byte (§8.2)
+// A header's own MRAG may be corrected: the identity it opens the page under
+// travels with the snapshot for the catalogue to reconcile afterwards (see
+// TeletextPageSnapshot::identity_attested), so a page opened at a mis-corrected
+// address is recoverable in a way a row filed against the wrong page is not.
+TEST_F(TeletextPageDecoderTest,
+       Hamming_SingleBitErrorInAHeaderMragIsCorrected) {
+  auto header = make_header(1, 0x00, 0, {});
+  header[0] ^= 0x10;  // single-bit error in the first MRAG byte (§8.2)
 
-  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
-  decoder_.process_packet(row, 1);
+  decoder_.process_packet(header, 0);
+  decoder_.process_packet(make_row(1, 1, "OPENED ANYWAY"), 1);
   decoder_.process_packet(make_time_filling_header(1), 2);
 
   ASSERT_EQ(snapshots_.size(), 1u);
-  EXPECT_EQ(row_text(snapshots_[0], 1), "CORRECTED");
+  EXPECT_EQ(snapshots_[0].page_number, 0x00);
+  EXPECT_EQ(row_text(snapshots_[0], 1), "OPENED ANYWAY");
+  EXPECT_FALSE(snapshots_[0].identity_attested);
 }
 
 TEST_F(TeletextPageDecoderTest, Hamming_DoubleBitErrorDropsPacket) {
@@ -422,20 +429,35 @@ TEST_F(TeletextPageDecoderTest, LastDisplayRow_KeepsAnUncorrectedAddress) {
   EXPECT_TRUE(snapshots_[0].row_received[24]);
 }
 
-// The rule is only for the last row: rows 1 to 23 are re-sent with every cycle
-// of the page, so a mis-correction among them is voted down by the copies that
-// follow, and refusing corrected addresses there would throw away a fifth of a
-// noisy recovery for nothing.
-TEST_F(TeletextPageDecoderTest, OrdinaryRows_StillTakeACorrectedAddress) {
+// The rule is not only for the last row. Combining repeated rows votes across
+// the copies of one row, and it cannot tell a copy of the row from a copy of
+// something a mis-corrected address moved here — enough of those and the page
+// is a blend of every page mis-addressed into it, which is worse the more
+// copies are combined. Over the 525-line reference capture, the magazines that
+// service never transmits a row on receive 531 display packets, 530 of them
+// with a corrected address.
+TEST_F(TeletextPageDecoderTest, OrdinaryRows_RejectACorrectedAddress) {
   auto row = make_row(1, 23, "CORRECTED");
   row[1] ^= 0x10;
 
   decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
-  decoder_.process_packet(row, 1);
+  decoder_.process_packet(make_row(1, 1, "REAL CONTENT"), 1);
+  decoder_.process_packet(row, 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_[0], 1), "REAL CONTENT");
+  EXPECT_EQ(row_text(snapshots_[0], 23), "");
+  EXPECT_FALSE(snapshots_[0].row_received[23]);
+}
+
+TEST_F(TeletextPageDecoderTest, OrdinaryRows_KeepAnUncorrectedAddress) {
+  decoder_.process_packet(make_header(1, 0x00, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 23, "AS TRANSMITTED"), 1);
   decoder_.process_packet(make_time_filling_header(1), 2);
 
   ASSERT_EQ(snapshots_.size(), 1u);
-  EXPECT_EQ(row_text(snapshots_[0], 23), "CORRECTED");
+  EXPECT_EQ(row_text(snapshots_[0], 23), "AS TRANSMITTED");
 }
 
 TEST_F(TeletextPageDecoderTest, ParityError_FlagsCellWithoutCorruptingPage) {
@@ -1467,6 +1489,24 @@ TEST_F(Teletext525PageDecoderTest, RowExtensionPacketsCompleteTheFortyColumns) {
   EXPECT_EQ(page.columns, TeletextPageSnapshot::kColumns);
   EXPECT_EQ(row_text(page, 4), "The San Francisco 49ers have won the");
   EXPECT_EQ(row_text(page, 5), "NFL title game 28-3 over the Chicago");
+}
+
+// An extension packet is addressed the same way a display row is, so it is
+// refused on the same terms: a mis-corrected address puts eight columns of some
+// other page across four rows of this one, and nothing downstream can tell.
+TEST_F(Teletext525PageDecoderTest, ARowExtensionRejectsACorrectedAddress) {
+  settle_extension_carrier(1);
+  feed(make_525_header(1, 0x00, 0), 0);
+  feed(make_525_row(1, 4, "The San Francisco 49ers have won"), 1);
+  auto extension = make_525_extension(1, 4, {" the", "cago"});
+  extension[1] ^= 0x10;  // single-bit error in the packet-number MRAG byte
+  feed(extension, 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(row_text(page, 4), "The San Francisco 49ers have won");
 }
 
 TEST_F(Teletext525PageDecoderTest, TheFirstBlockIsNumberedOneAndServesRowZero) {

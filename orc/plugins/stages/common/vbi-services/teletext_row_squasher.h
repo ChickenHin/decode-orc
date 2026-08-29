@@ -111,6 +111,16 @@ struct TeletextPageKey {
  * confidently it was recovered, and among values that might be right the one
  * the detector nearly misread does not outvote the one it read cleanly.
  *
+ * Not every copy filed under a row is a copy of that row: the MRAG is Hamming
+ * 8/4 and mis-corrects on a burst, and a page whose header was lost leaves the
+ * one before it open, so packets of other pages arrive here looking like
+ * content. Combining them is worse than not combining at all — the row becomes
+ * a per-character blend of every page mis-addressed into it, and the blend gets
+ * worse the more copies are combined. So the vote is taken twice: once to find
+ * what the copies mostly say, and again without the copies that agree with
+ * less than half of it. Only a minority may be dropped this way, since where
+ * most copies disagree there is no row for the rest to be outliers of.
+ *
  * Copies are keyed by an opaque source id so a consumer that re-reads the
  * same recovered line — as a sliding-window previewer does every time its
  * window is rebuilt — replaces its earlier copy instead of stuffing the
@@ -173,7 +183,9 @@ class TeletextRowSquasher {
    * @param covered When non-null, receives which byte positions any copy spoke
    *                for. Positions no copy covered hold zero in the returned row
    *                and false here; a caller that mixes column ranges must read
-   *                this rather than treat the zero as a recovered byte.
+   *                this rather than treat the zero as a recovered byte. A
+   *                position only outlying copies covered is not covered: they
+   *                are not copies of this row, so nothing spoke for it.
    */
   std::optional<TeletextRowBytes> squashed_row(
       const TeletextPageKey& key, int row,
@@ -224,6 +236,12 @@ class TeletextRowSquasher {
     // Monotonic counter of the last update, for the max_pages bound.
     uint64_t last_touched = 0;
   };
+
+  // One pass of the vote over |copies|. |included| is either null — every copy
+  // votes — or one flag per copy, zero for the copies the outlier pass ruled
+  // out. Both outputs are overwritten in full.
+  static void vote_row(const RowCopies& copies, const uint8_t* included,
+                       TeletextRowBytes& result, TeletextRowCoverage& covered);
 
   void enforce_page_bound();
 

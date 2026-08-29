@@ -146,6 +146,23 @@ std::string TeletextSquashStats::summary() const {
         "back to the plain majority";
   }
 
+  if (rows_ > rows_attributed_) {
+    // What the vote never saw, which is the other half of reading the parity
+    // figures: a packet no page could be held responsible for is written as it
+    // was recovered, damage and all. Either no page of its magazine was open
+    // when it arrived, or its address had been corrected — the MRAG is Hamming
+    // 8/4 and mis-corrects on a burst, and a packet moved onto another page's
+    // row is not a copy of that row (see teletext_page_decoder.cpp's
+    // address_attested()).
+    text += fmt::format(
+        "\n  {} row packet{} reached no page and could not be voted on "
+        "({:.1f}%): no page of the magazine was open, or the packet's address "
+        "had been corrected and was not evidence of where it belonged",
+        grouped(rows_ - rows_attributed_),
+        rows_ - rows_attributed_ == 1 ? "" : "s",
+        percent(rows_ - rows_attributed_, rows_));
+  }
+
   // Empty buckets are left out: the distribution is read for its shape, and
   // three "0 (0.0%)" entries bury the one that carries it. Rows that belonged
   // to no open page are not in it at all — no vote could reach them.

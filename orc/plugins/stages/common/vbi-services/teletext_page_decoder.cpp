@@ -315,11 +315,6 @@ constexpr int kDesignationCodeFour = 4;
 // the page is a basic Level 1 teletext page (§9.4.2.1 Table 3, code 0000).
 constexpr int kPageFunctionBasicLevel1 = 0;
 
-// The last displayable row, X/24 — the FLOF label row of §9.6.1, which sits at
-// the boundary between the display rows and the non-display packets X/25 to
-// X/31 and so collects their mis-corrections (see accept_last_display_row()).
-constexpr int kLastDisplayRow = TeletextPageSnapshot::kRows - 1;
-
 // Whether a Hamming 8/4 byte arrived as a codeword rather than being corrected
 // into one. §8.2 gives the code minimum distance 4: one error is corrected and
 // two are detected, so a byte that needed correction is one channel error away
@@ -344,33 +339,44 @@ bool header_identity_attested(
          teletext_hamming84_clean(packet[3]);
 }
 
-// Whether a packet addressed to the last display row may be believed.
+// Whether a packet may be believed at the address it arrived under.
 //
-// Row 24 is the one display address a corrected MRAG must not be trusted for.
-// Its neighbours X/25 to X/31 are non-display packets that carry no odd parity
-// and are transmitted continuously, and the MRAG is Hamming 8/4 — distance 4,
-// so a two-bit burst is not detected but silently resolved to the neighbouring
-// codeword. Row 24 is where those land.
+// The MRAG is two Hamming 8/4 bytes and §8.2 gives that code minimum distance
+// 4: a two-bit burst — the ordinary error on a band-limited recording rather
+// than the exotic one — is not detected but silently resolved to a neighbouring
+// codeword. A packet that reaches this decoder with a corrected MRAG is one
+// channel error away from having been mis-corrected instead, and a
+// mis-corrected MRAG does not damage the packet: it *moves* it, onto another
+// magazine's open page or onto another row of this one, where it arrives
+// looking exactly like content.
 //
-// What makes it show is that almost no page uses row 24. A service transmits
-// FLOF labels on a handful of pages and leaves the row empty on the rest
-// (the reference SECAM capture: 7 pages of 89). Rows 1-23 are re-sent with
-// every cycle of the page and the squasher votes an intruder down among five
-// hundred copies; row 24 has nothing to vote with, so the single packet that
-// arrives is the row, and the slicer's parity repair hands it over with no
-// damage to report.
+// Combining repeated rows is what makes that intolerable. A squashed row is a
+// vote across the copies of one row, and the vote has no way to tell a copy of
+// the row from a copy of something else: enough intruders and the page becomes
+// a per-character blend of every page that was mis-addressed into it, which is
+// worse the more copies are combined. So the address has to be evidence in its
+// own right, and the only address that is evidence is one that arrived as
+// transmitted.
 //
-// The measurement that sets the rule, over that capture's 228 839 packets:
-// rows X/1-23 arrive with both MRAG bytes uncorrected 78.4% of the time, and
-// X/24 on the pages that really carry FLOF labels 82.8% — but X/24 on every
-// other page only 29.8%. Genuine traffic sits at the baseline; the deficit is
-// packets that could only ever reach row 24 by being corrected into it.
-// Requiring both bytes as transmitted costs about one row 24 in six on the
-// pages that have one — a row re-sent tens of times, so nothing is lost — and
-// removes about seven in ten of the intruders.
-bool accept_last_display_row(
-    const std::array<uint8_t, kTeletextPacketBytes>& packet, int mrag_low,
-    int mrag_high) {
+// Two measurements set the rule. Over the reference SECAM capture's 228 839
+// packets, rows X/1-23 arrive with both MRAG bytes uncorrected 78.4% of the
+// time and X/24 on the pages that really carry FLOF labels 82.8% — but X/24 on
+// every other page only 29.8%. Genuine traffic sits at the baseline; the
+// deficit is packets that could only ever reach that row by being corrected
+// into it. Over the 525-line reference capture's 102 685 packets, magazines 0
+// and 2 — which that service never transmits a row on — receive 531 display
+// packets between them, of which 530 have a corrected MRAG; they build
+// catalogue pages holding nothing but other pages' rows, and a quarter of the
+// identities that capture catalogues are pages of that kind.
+//
+// The cost is the genuine packets that arrived with a single-bit address
+// error: about one row in twenty on that capture and about one in five on the
+// noisier SECAM one. A page is re-sent for the length of a recording, so a
+// refused row comes round again with it — and the packet is still written to
+// the exported stream, which is a record of what was recovered rather than of
+// what could be attributed.
+bool address_attested(const std::array<uint8_t, kTeletextPacketBytes>& packet,
+                      int mrag_low, int mrag_high) {
   return hamming84_uncorrected(packet[0], mrag_low) &&
          hamming84_uncorrected(packet[1], mrag_high);
 }
@@ -530,6 +536,15 @@ void TeletextPageDecoder::process_packet(
   const int magazine = mrag_low & 0x7;
   const int packet_number = ((mrag_low >> 3) & 0x1) | (mrag_high << 1);
 
+  // Everything but a header has to have arrived at the address it claims (see
+  // address_attested()). A header is exempt because its own identity is
+  // checked further on and travels with the snapshot for the catalogue to
+  // reconcile — a page opened at a mis-corrected number is recoverable
+  // afterwards, where a row filed against the wrong page is not.
+  if (packet_number != 0 && !address_attested(packet, mrag_low, mrag_high)) {
+    return;
+  }
+
   if (head_columns_ < TeletextPageSnapshot::kColumns &&
       (magazine & kExtensionMagazineFlag) != 0) {
     // A magazine 4-7 either carries pages of its own or carries the row
@@ -590,10 +605,6 @@ void TeletextPageDecoder::process_packet(
     // (key-word search labels) and X/26, X/27 and X/30-X/31 (enhancement,
     // editorial linking and independent data, §9.4-§9.8) are outside the
     // Level 1 grid and are ignored.
-    if (packet_number == kLastDisplayRow &&
-        !accept_last_display_row(packet, mrag_low, mrag_high)) {
-      return;
-    }
     handle_display_packet(magazine, packet_number, packet, field_index,
                           source == kAutoSource ? next_source_++ : source,
                           confidence);
