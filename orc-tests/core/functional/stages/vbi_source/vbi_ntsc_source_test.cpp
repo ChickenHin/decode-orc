@@ -53,6 +53,14 @@ const char* kExtraVisionCapture = ORC_VBI_TEST_DATA_DIR
     "/teletext/NTSC NABTS Teletext samples/"
     "CBS_1985-12-10_ExtraVision_teletext_NTSC_SP_vbi_only_part4_u16.flac";
 
+// A real 525-line bt8x8 card dump: the same card as the PAL reference capture,
+// on the driver's other television norm — a different sampling clock, a
+// different valid sample count and a different first stored line, in the same
+// 2048-byte record and 65 536-byte frame.  This one carries 525-line WST.
+const char* kKeyfaxCapture = ORC_VBI_TEST_DATA_DIR
+    "/teletext/bt8x8 NTSC sample/"
+    "TBS_1984-02-01_Keyfax_teletext_NTSC_WST_bt8x8.vbi";
+
 // Stored frame lines a 525-line capture carries data on: broadcast frame lines
 // 10-21 and 273-284 (design §5.1).
 const std::vector<size_t> kTeletextFrameLines = [] {
@@ -92,6 +100,22 @@ std::shared_ptr<VideoFrameRepresentation> load_electra_capture(
     VBISourceStage& stage, ObservationContext& observations) {
   const std::vector<ArtifactPtr> outputs =
       stage.execute({}, electra_parameters(), observations);
+  if (outputs.empty()) return nullptr;
+  return std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
+}
+
+bool keyfax_capture_available() {
+  return std::filesystem::exists(kKeyfaxCapture);
+}
+
+std::shared_ptr<VideoFrameRepresentation> load_keyfax_capture(
+    VBISourceStage& stage, ObservationContext& observations) {
+  const std::map<std::string, ParameterValue> parameters = {
+      {"input_path", std::string(kKeyfaxCapture)},
+      {"format", std::string("bt8x8 card dump, 8-bit (WST, NTSC source)")},
+  };
+  const std::vector<ArtifactPtr> outputs =
+      stage.execute({}, parameters, observations);
   if (outputs.empty()) return nullptr;
   return std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
 }
@@ -246,6 +270,89 @@ TEST(VBINTSCSource, TheWSTRunInLandsAtItsConfiguredPositionOnTheOutputLines) {
   // a tape does not deliver every one of those cleanly, so the bar is set for
   // what such material really carries — well above what a mis-placed or
   // mis-scaled output could reach by accident.
+  ASSERT_GT(survey.detected, survey.candidate_lines / 8)
+      << survey.detected << " of " << survey.candidate_lines << " located";
+  EXPECT_NEAR(survey.median_position, survey.expected_position, 3.0);
+}
+
+// ---------------------------------------------------------------------------
+// bt8x8 card dumps of a 525-line source
+//
+// The other way 525-line teletext reaches this stage, and the one the stage
+// has to do real work for: unlike the .tbc crops above, a card dump's records
+// do not start at 0H, so where they start has to be fitted from the clock
+// run-in before anything can be placed.
+// ---------------------------------------------------------------------------
+
+TEST(VBINTSCSource, ABt8x8CardDumpOfA525LineSourceLoadsAsNTSCFrames) {
+  if (!keyfax_capture_available()) {
+    GTEST_SKIP() << "525-line bt8x8 capture not present: " << kKeyfaxCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_keyfax_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  // 910 819 328 bytes at 2048 x 16 x 2 bytes per frame: 13 898 whole frames
+  // and nothing over.
+  EXPECT_EQ(representation->frame_count(), 13898u);
+
+  const auto parameters = representation->get_video_parameters();
+  ASSERT_TRUE(parameters.has_value());
+  EXPECT_EQ(parameters->system, VideoSystem::NTSC);
+  EXPECT_EQ(parameters->frame_width_nominal, kNtscSamplesPerLine);
+  EXPECT_EQ(parameters->frame_height, kNtscFrameLines);
+
+  const auto descriptor = representation->get_frame_descriptor(0);
+  ASSERT_TRUE(descriptor.has_value());
+  EXPECT_EQ(descriptor->samples_total, static_cast<size_t>(kNtscFrameSamples));
+
+  const auto service =
+      observations.get(FieldID(0), "vbi_source", "teletext_system");
+  ASSERT_TRUE(service.has_value());
+  EXPECT_EQ(std::get<std::string>(*service), "WST");
+}
+
+// A card capture is calibrated, and this is the check that the container is
+// described correctly: a wrong stride, sampling rate or television system
+// scatters the run-in far beyond the spread limit and stops the run.  The fit
+// settles 5,1 samples from the driver's folkloric 244, which is as close as
+// that constant gets on either of its norms.
+TEST(VBINTSCSource, ABt8x8CardDumpFitsItsCaptureOffsetFromTheRunIn) {
+  if (!keyfax_capture_available()) {
+    GTEST_SKIP() << "525-line bt8x8 capture not present: " << kKeyfaxCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_keyfax_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const auto offset =
+      observations.get(FieldID(0), "vbi_source", "capture_offset");
+  ASSERT_TRUE(offset.has_value())
+      << "a card capture's offset must be fitted, not taken from the preset";
+  EXPECT_NEAR(std::get<double>(*offset), 249.1, 2.0);
+}
+
+TEST(VBINTSCSource, TheRunInOfABt8x8CardDumpLandsAtItsConfiguredPosition) {
+  if (!keyfax_capture_available()) {
+    GTEST_SKIP() << "525-line bt8x8 capture not present: " << kKeyfaxCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_keyfax_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const RunInSurvey survey =
+      survey_run_in(*representation, VBITeletextSystem::kWST);
+  report("Keyfax (bt8x8, WST)", survey);
+
+  // This broadcast uses five of the twelve lines in one field and three in the
+  // other, and a tape does not deliver every one of those cleanly, so the bar
+  // is what such material really carries rather than what the standard allows.
   ASSERT_GT(survey.detected, survey.candidate_lines / 8)
       << survey.detected << " of " << survey.candidate_lines << " located";
   EXPECT_NEAR(survey.median_position, survey.expected_position, 3.0);
@@ -486,6 +593,69 @@ TEST(VBINTSCSource, TheObserverRecoversPacketsAtTheServicesOwnLength) {
   std::cout << "Electra: " << survey.packets << " packets, median parity "
             << median << ", " << survey.pages.size() << " pages\n";
   EXPECT_GT(median, 0.9);
+}
+
+// The same recovery chain against the bt8x8 card dump, which is where the
+// whole of this preset's work shows up: the records were resampled from the
+// card's 8 x fsc clock onto the output lattice and placed at a fitted offset,
+// and if any part of that were wrong the slicer would read noise.
+TEST(VBINTSCSource, TheObserverRecoversPacketsFromABt8x8CardDump) {
+  if (!keyfax_capture_available()) {
+    GTEST_SKIP() << "525-line bt8x8 capture not present: " << kKeyfaxCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_keyfax_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const RecoverySurvey survey = survey_recovery(*representation);
+  ASSERT_GT(survey.packets, 0)
+      << "the observer recovered nothing from a capture the stage placed "
+         "teletext on";
+
+  // 34-byte packets throughout: a 42-byte string would mean the 625-line
+  // service had been read off a 525-line capture.
+  EXPECT_EQ(survey.packets_at_525_length, survey.packets);
+
+  auto fractions = survey.parity_fractions;
+  std::sort(fractions.begin(), fractions.end());
+  const double median = fractions[fractions.size() / 2];
+  std::cout << "Keyfax (bt8x8): " << survey.packets
+            << " packets, median parity " << median << ", "
+            << survey.pages.size() << " pages\n";
+  EXPECT_GT(median, 0.9);
+}
+
+TEST(VBINTSCSource, ThePageDecoderAssemblesReadablePagesFromABt8x8CardDump) {
+  if (!keyfax_capture_available()) {
+    GTEST_SKIP() << "525-line bt8x8 capture not present: " << kKeyfaxCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_keyfax_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const RecoverySurvey survey = survey_recovery(*representation);
+  ASSERT_FALSE(survey.pages.empty())
+      << "no page completed over " << kPageFrames << " frames";
+
+  const TeletextPageSnapshot* best = nullptr;
+  for (const auto& page : survey.pages) {
+    ASSERT_EQ(page.columns, TeletextPageSnapshot::kColumns)
+        << "page assembled at the wrong width";
+    if (best == nullptr || word_count(page) > word_count(*best)) best = &page;
+  }
+  ASSERT_NE(best, nullptr);
+
+  std::cout << "Keyfax (bt8x8): best page is " << best->magazine << std::hex
+            << best->page_number << std::dec << " with " << word_count(*best)
+            << " word-shaped tokens over " << survey.pages.size() << " pages\n";
+
+  // Noise decoded as characters gives long runs of one letter and very few
+  // word-shaped tokens; a recovered broadcast page gives many.
+  EXPECT_GT(word_count(*best), 20u);
 }
 
 TEST(VBINTSCSource, ThePageDecoderAssemblesReadable40ColumnPages) {
