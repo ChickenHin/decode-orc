@@ -369,6 +369,18 @@ history:
     contracts:
       - orc/stage/preview/orc_vectorscope.h
       - orc/stage/preview/orc_preview_types.h
+    notes: >-
+      ABI-neutral while abi 16 is current: the comments on
+      `orc/stage/preview/orc_preview_types.h` and
+      `orc/stage/preview/orc_vectorscope.h` were corrected when the two
+      acquisitions were brought to parity. `vectorscope_active_area_only`,
+      `vectorscope_first_line` and `vectorscope_last_line` describe the line
+      select for both acquisitions rather than for `CompositeCarrier` alone,
+      and `UVSample::line_number` and `VectorscopeData::first_line`/`last_line`
+      are stated as interlaced frame-line indices — line 0 the top line of the
+      frame, consecutive numbers alternating fields — so a line number means
+      the same thing whichever acquisition produced it. Comments only; no
+      member changes type, size or position.
     summary: >-
       The vectorscope contract grows a second acquisition mode. `UVSample`
       carried a field index and nothing else, which is all a grading scope
