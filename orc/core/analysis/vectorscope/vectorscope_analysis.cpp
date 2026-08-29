@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <utility>
 
 #include "../analysis_registry.h"
 
@@ -112,7 +113,8 @@ int VectorscopeAnalysisTool::estimateDurationSeconds(
 
 VectorscopeData VectorscopeAnalysisTool::extractFromColourFrameCarrier(
     const ColourFrameCarrier& carrier, uint64_t field_number,
-    uint32_t subsample, bool active_area_only) {
+    uint32_t subsample, bool active_area_only, uint32_t first_line,
+    uint32_t last_line) {
   VectorscopeData data;
   data.field_number = field_number;
   data.system = carrier.system;
@@ -143,8 +145,25 @@ VectorscopeData VectorscopeAnalysisTool::extractFromColourFrameCarrier(
     }
   }
 
+  // Explicit line range, in the interlaced frame-line numbering both
+  // acquisitions use.  It narrows whatever the active-picture restriction
+  // left rather than replacing it, so the two controls compose.
+  {
+    uint32_t range_first = first_line;
+    uint32_t range_last = (last_line == 0) ? (carrier.height - 1) : last_line;
+    if (range_first > range_last) std::swap(range_first, range_last);
+    y_start = std::max(y_start, range_first);
+    y_end = std::min(y_end, range_last + 1);
+  }
+
+  if (y_end <= y_start || x_end <= x_start) {
+    return data;
+  }
+
   data.width = x_end - x_start;
   data.height = y_end - y_start;
+  data.first_line = y_start;
+  data.last_line = y_end - 1;
 
   const size_t sample_width = static_cast<size_t>(x_end - x_start);
   const size_t sample_height = static_cast<size_t>(y_end - y_start);
@@ -185,9 +204,10 @@ VectorscopeData VectorscopeAnalysisTool::extractFromColourFrameCarrier(
 
   ORC_LOG_DEBUG(
       "Extracted {} U/V samples from colour preview carrier field {} ({} area "
-      "{}x{} within {}x{}, subsample={}, both fields)",
+      "{}x{} within {}x{}, lines {}..{}, subsample={}, both fields)",
       data.samples.size(), field_number, active_area_only ? "active" : "full",
-      data.width, data.height, carrier.width, carrier.height, subsample);
+      data.width, data.height, carrier.width, carrier.height, data.first_line,
+      data.last_line, subsample);
 
   return data;
 }

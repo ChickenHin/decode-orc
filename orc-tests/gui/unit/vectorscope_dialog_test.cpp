@@ -49,6 +49,28 @@ QRadioButton* findRadio(QWidget& parent, const QString& text) {
   return nullptr;
 }
 
+QCheckBox* findCheckBox(QWidget& parent, const QString& text) {
+  for (QCheckBox* box : parent.findChildren<QCheckBox*>()) {
+    if (box->text() == text) return box;
+  }
+  return nullptr;
+}
+
+// The First and Last spin boxes are the only ones with a 1..625 range; the
+// gain spin box uses 1..10.
+void findLineSpinBoxes(QWidget& parent, QSpinBox*& first, QSpinBox*& last) {
+  first = nullptr;
+  last = nullptr;
+  for (QSpinBox* box : parent.findChildren<QSpinBox*>()) {
+    if (box->maximum() != 625) continue;
+    if (first == nullptr) {
+      first = box;
+    } else if (last == nullptr) {
+      last = box;
+    }
+  }
+}
+
 }  // namespace
 
 TEST(VectorscopeDialogTest, CanShowAndClose) {
@@ -103,7 +125,7 @@ TEST(VectorscopeDialogTest, SamplingControls_RoundTripIntoACoordinate) {
   EXPECT_EQ(coordinate.vectorscope_last_line, 0u);
 }
 
-TEST(VectorscopeDialogTest, SamplingControls_AreHiddenForTheDecodedPlot) {
+TEST(VectorscopeDialogTest, LineSelect_IsOfferedForBothAcquisitions) {
   (void)ensureApplication();
 
   VectorscopeDialog dialog;
@@ -119,20 +141,62 @@ TEST(VectorscopeDialogTest, SamplingControls_AreHiddenForTheDecodedPlot) {
   ASSERT_NE(sampling, nullptr);
   ASSERT_NE(measurements, nullptr);
 
-  // The sampling window, line select and burst readouts only describe a
-  // composite acquisition; on the decoded plot they would be controls with
-  // nothing to act on.
-  EXPECT_FALSE(sampling->isVisible());
+  QCheckBox* all_lines = findCheckBox(dialog, "All lines");
+  QCheckBox* active_only = findCheckBox(dialog, "Active picture only");
+  QRadioButton* burst_only = findRadio(dialog, "Burst only");
+  ASSERT_NE(all_lines, nullptr);
+  ASSERT_NE(active_only, nullptr);
+  ASSERT_NE(burst_only, nullptr);
+
+  // The line select governs which lines of the frame either scope plots, so
+  // it is offered on both — that is what lets one be pointed at the same
+  // lines as the other.  The window radios pick a region of the line and only
+  // a composite acquisition has one; the burst readouts likewise.
+  EXPECT_TRUE(sampling->isVisible());
+  EXPECT_TRUE(all_lines->isVisible());
+  EXPECT_TRUE(active_only->isVisible());
+  EXPECT_FALSE(burst_only->isVisible());
   EXPECT_FALSE(measurements->isVisible());
 
   dialog.setAcquisitionMode(orc::VectorscopeAcquisitionMode::CompositeCarrier);
   QCoreApplication::processEvents();
 
   EXPECT_TRUE(sampling->isVisible());
+  EXPECT_TRUE(all_lines->isVisible());
+  EXPECT_TRUE(active_only->isVisible());
+  EXPECT_TRUE(burst_only->isVisible());
   EXPECT_TRUE(measurements->isVisible());
 
   dialog.close();
   QCoreApplication::processEvents();
+}
+
+TEST(VectorscopeDialogTest, DecodedPlot_CarriesTheLineRangeIntoACoordinate) {
+  (void)ensureApplication();
+
+  VectorscopeDialog dialog;
+  ASSERT_EQ(dialog.acquisitionMode(),
+            orc::VectorscopeAcquisitionMode::DecodedComponent);
+
+  QCheckBox* all_lines = findCheckBox(dialog, "All lines");
+  ASSERT_NE(all_lines, nullptr);
+  all_lines->setChecked(false);
+
+  QSpinBox* first = nullptr;
+  QSpinBox* last = nullptr;
+  findLineSpinBoxes(dialog, first, last);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(last, nullptr);
+
+  first->setValue(41);
+  last->setValue(60);
+  QCoreApplication::processEvents();
+
+  orc::PreviewCoordinate coordinate;
+  dialog.applyAcquisitionTo(coordinate);
+  EXPECT_EQ(coordinate.vectorscope_first_line, 40u);
+  EXPECT_EQ(coordinate.vectorscope_last_line, 59u);
+  EXPECT_TRUE(coordinate.vectorscope_active_area_only);
 }
 
 TEST(VectorscopeDialogTest, LineRange_IsReportedZeroBased) {
@@ -141,30 +205,15 @@ TEST(VectorscopeDialogTest, LineRange_IsReportedZeroBased) {
   VectorscopeDialog dialog;
   dialog.setAcquisitionMode(orc::VectorscopeAcquisitionMode::CompositeCarrier);
 
-  QCheckBox* all_lines = nullptr;
-  for (QCheckBox* box : dialog.findChildren<QCheckBox*>()) {
-    if (box->text() == "All lines") all_lines = box;
-  }
+  QCheckBox* all_lines = findCheckBox(dialog, "All lines");
   ASSERT_NE(all_lines, nullptr);
-
-  auto spin_boxes = dialog.findChildren<QSpinBox*>();
-  ASSERT_GE(spin_boxes.size(), 3);
 
   all_lines->setChecked(false);
   QCoreApplication::processEvents();
 
-  // The spin boxes are the only ones with a 1..625 range; the gain spin box
-  // uses 1..10.
   QSpinBox* first = nullptr;
   QSpinBox* last = nullptr;
-  for (QSpinBox* box : spin_boxes) {
-    if (box->maximum() != 625) continue;
-    if (first == nullptr) {
-      first = box;
-    } else if (last == nullptr) {
-      last = box;
-    }
-  }
+  findLineSpinBoxes(dialog, first, last);
   ASSERT_NE(first, nullptr);
   ASSERT_NE(last, nullptr);
 
@@ -183,23 +232,13 @@ TEST(VectorscopeDialogTest, LineRange_IsNormalisedWhenInverted) {
   VectorscopeDialog dialog;
   dialog.setAcquisitionMode(orc::VectorscopeAcquisitionMode::CompositeCarrier);
 
-  QCheckBox* all_lines = nullptr;
-  for (QCheckBox* box : dialog.findChildren<QCheckBox*>()) {
-    if (box->text() == "All lines") all_lines = box;
-  }
+  QCheckBox* all_lines = findCheckBox(dialog, "All lines");
   ASSERT_NE(all_lines, nullptr);
   all_lines->setChecked(false);
 
   QSpinBox* first = nullptr;
   QSpinBox* last = nullptr;
-  for (QSpinBox* box : dialog.findChildren<QSpinBox*>()) {
-    if (box->maximum() != 625) continue;
-    if (first == nullptr) {
-      first = box;
-    } else if (last == nullptr) {
-      last = box;
-    }
-  }
+  findLineSpinBoxes(dialog, first, last);
   ASSERT_NE(first, nullptr);
   ASSERT_NE(last, nullptr);
 

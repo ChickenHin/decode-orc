@@ -51,8 +51,19 @@ struct CompositeVectorscopeOptions {
   /// Portion of each line to sample.
   VectorscopeSampleWindow window = VectorscopeSampleWindow::WholeLine;
 
-  /// Inclusive frame-flat line range (0-based).  |last_line| == 0 means "to
-  /// the last line of the frame".
+  /// Restrict the emitted lines to the active picture
+  /// (SourceParameters::first_active_frame_line ..
+  /// last_active_frame_line - 1), which is what the decoded acquisition plots.
+  /// Applied on top of |first_line| / |last_line| — the two intersect.
+  /// The burst survey and the instrument readouts are unaffected: they always
+  /// run over every line of the frame that carries a burst.
+  bool active_lines_only = false;
+
+  /// Inclusive interlaced frame-line range (0-based), the numbering both
+  /// acquisitions use — line 0 is the top line of the frame and consecutive
+  /// numbers alternate fields.  |last_line| == 0 means "to the last line of
+  /// the frame".  A range is contiguous in the picture, which a range in the
+  /// flat buffer's sequential-field order would not be.
   uint32_t first_line = 0;
   uint32_t last_line = 0;
 

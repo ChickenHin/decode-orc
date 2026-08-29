@@ -794,4 +794,37 @@ TEST(PreviewViewRegistryTest,
   EXPECT_EQ(result.vectorscope->samples.size(), 2u);
 }
 
+TEST(PreviewViewRegistryTest, DecodedVectorscopeRequest_HonoursTheLineRange) {
+  // The line select reaches the decoded acquisition as well as the composite
+  // one, so the two scopes can be pointed at the same lines of a frame.  A
+  // narrower request than the whole active picture also bypasses the payload
+  // the stage extracted on the way past, which only covers the whole of it.
+  orc::PreviewViewRegistry registry;
+
+  auto stage = std::make_shared<TestColourPreviewStage>();
+  auto dag = std::make_shared<orc::DAG>(build_test_dag_with_stage(stage));
+
+  orc::PreviewViewRegistry::register_default_views(registry, dag, nullptr);
+
+  orc::PreviewCoordinate coordinate{};
+  coordinate.data_type_context = orc::VideoDataType::ColourNTSC;
+  coordinate.vectorscope_first_line = 1;
+  coordinate.vectorscope_last_line = 1;
+
+  const auto result =
+      registry.request_data(*dag, orc::NodeID(1), "preview.vectorscope",
+                            orc::VideoDataType::ColourNTSC, coordinate);
+
+  ASSERT_TRUE(result.success);
+  ASSERT_TRUE(result.vectorscope.has_value());
+  EXPECT_EQ(result.vectorscope->acquisition_mode,
+            orc::VectorscopeAcquisitionMode::DecodedComponent);
+  EXPECT_EQ(result.vectorscope->first_line, 1u);
+  EXPECT_EQ(result.vectorscope->last_line, 1u);
+  EXPECT_EQ(result.vectorscope->height, 1u);
+  for (const auto& sample : result.vectorscope->samples) {
+    EXPECT_EQ(sample.line_number, 1);
+  }
+}
+
 }  // namespace orc_unit_test

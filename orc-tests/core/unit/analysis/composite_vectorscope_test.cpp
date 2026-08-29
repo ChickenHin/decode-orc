@@ -221,8 +221,9 @@ TEST(CompositeVectorscopeTest, Pal_RecoversBothLinePhasesWithoutVSwitchFix) {
 
   orc::CompositeVectorscopeOptions options;
   options.window = orc::VectorscopeSampleWindow::ActiveLine;
-  // Lines wholly inside field 1's active picture, so every sampled line
-  // carries the bar rather than blanking.
+  // Interlaced frame lines wholly inside the active picture (PAL: 44..619),
+  // so every sampled line carries the bar rather than blanking.  The range
+  // spans both fields, which is what an interlaced range means.
   options.first_line = 100;
   options.last_line = 200;
 
@@ -316,12 +317,14 @@ TEST(CompositeVectorscopeTest,
   // next, which a per-line mean shows directly.
   std::map<uint16_t, Uv> line_sum;
   std::map<uint16_t, size_t> line_count;
+  std::map<uint16_t, orc::VectorscopeLinePhase> line_switch;
   for (const auto& sample : data->samples) {
     if (sample.sample_class != orc::VectorscopeSampleClass::Picture) continue;
     Uv& sum = line_sum[sample.line_number];
     sum.u += sample.u;
     sum.v += sample.v;
     ++line_count[sample.line_number];
+    line_switch[sample.line_number] = sample.line_phase;
   }
   ASSERT_GE(line_sum.size(), 100u);
 
@@ -329,7 +332,12 @@ TEST(CompositeVectorscopeTest,
   for (const auto& [line, sum] : line_sum) {
     const double n = static_cast<double>(line_count[line]);
     // The V-switch mirrors the target about the U axis on alternate lines.
-    const double reference_v = ((line % 2) == 0) ? expected_v : -expected_v;
+    // Which way a given line went is the state recovered from its own burst;
+    // interlaced line numbers alternate fields, not switch states.
+    const double reference_v =
+        (line_switch[line] == orc::VectorscopeLinePhase::VNegative)
+            ? -expected_v
+            : expected_v;
     worst = std::max(
         worst, std::hypot((sum.u / n) - expected_u, (sum.v / n) - reference_v));
   }
@@ -499,8 +507,8 @@ TEST(CompositeVectorscopeTest, PalM_SwingsWithPalRatherThanNtsc) {
 
   orc::CompositeVectorscopeOptions options;
   options.window = orc::VectorscopeSampleWindow::ActiveLine;
-  // Lines wholly inside field 1's active picture (frame-flat 40..260 for the
-  // 525-line raster), so every sampled line carries the bar.
+  // Interlaced frame lines wholly inside the 525-line active picture
+  // (40..522), so every sampled line carries the bar.
   options.first_line = 60;
   options.last_line = 160;
 
@@ -526,13 +534,24 @@ TEST(CompositeVectorscopeTest, PalM_SwingsWithPalRatherThanNtsc) {
 
   const double expected_u = bar.u * kDisplayFullScale;
   const double expected_v = bar.v * kDisplayFullScale;
+  const double expected_magnitude = std::hypot(expected_u, expected_v);
+  const double expected_degrees =
+      std::atan2(expected_v, expected_u) * 180.0 / M_PI;
 
   // The V-switch is deliberately not undone, so the −V lines plot as the
-  // mirror image of the +V lines about the U axis.
-  EXPECT_NEAR(positive.u, expected_u, 150.0);
-  EXPECT_NEAR(positive.v, expected_v, 150.0);
-  EXPECT_NEAR(negative.u, expected_u, 150.0);
-  EXPECT_NEAR(negative.v, -expected_v, 150.0);
+  // mirror image of the +V lines about the U axis.  Both groups land on the
+  // target, each rotated by the half of the residual burst split error that
+  // falls its way — about 0.6° on the 909-sample raster, which the split-error
+  // readout reports and the sibling test bounds.
+  constexpr double kAngleToleranceDegrees = 1.5;
+  EXPECT_NEAR(std::hypot(positive.u, positive.v), expected_magnitude,
+              expected_magnitude * 0.02);
+  EXPECT_NEAR(std::atan2(positive.v, positive.u) * 180.0 / M_PI,
+              expected_degrees, kAngleToleranceDegrees);
+  EXPECT_NEAR(std::hypot(negative.u, negative.v), expected_magnitude,
+              expected_magnitude * 0.02);
+  EXPECT_NEAR(std::atan2(-negative.v, negative.u) * 180.0 / M_PI,
+              expected_degrees, kAngleToleranceDegrees);
 }
 
 TEST(CompositeVectorscopeTest, PalM_BurstPlotsAtPlusMinus135AtNtscAmplitude) {
@@ -689,6 +708,104 @@ TEST(CompositeVectorscopeTest, LineRange_RestrictsSampledLines) {
     EXPECT_GE(sample.line_number, 100);
     EXPECT_LE(sample.line_number, 103);
   }
+}
+
+TEST(CompositeVectorscopeTest, LineRange_SelectsInterlacedFrameLines) {
+  // Lines are selected in interlaced frame-line numbering — the numbering the
+  // decoded acquisition uses — not in the sequential-field order the flat
+  // buffer is laid out in.  Two consecutive line numbers are therefore one
+  // line from each field, and a picture range is contiguous.
+  const orc::SourceParameters parameters = pal_parameters();
+  const Uv bar = rgb_to_uv(0.75, 0.0, 0.0);
+  const std::vector<int16_t> frame =
+      synthesise_frame(parameters, bar, 0.299 * 0.75, /*switched_v=*/true);
+
+  orc::CompositeVectorscopeOptions options;
+  options.window = orc::VectorscopeSampleWindow::ActiveLine;
+  options.first_line = 100;
+  options.last_line = 101;
+
+  const auto data = orc::extract_composite_vectorscope(
+      frame.data(), frame.size(), parameters, 0, options);
+  ASSERT_TRUE(data.has_value());
+  EXPECT_EQ(data->first_line, 100u);
+  EXPECT_EQ(data->last_line, 101u);
+  EXPECT_EQ(data->height, 2u);
+
+  // One line from each field, and the field a line belongs to is its parity.
+  bool saw_first_field = false;
+  bool saw_second_field = false;
+  for (const auto& sample : data->samples) {
+    ASSERT_GE(sample.line_number, 100);
+    ASSERT_LE(sample.line_number, 101);
+    EXPECT_EQ(sample.field_id, sample.line_number & 1u);
+    if (sample.field_id == 0) saw_first_field = true;
+    if (sample.field_id == 1) saw_second_field = true;
+  }
+  EXPECT_TRUE(saw_first_field);
+  EXPECT_TRUE(saw_second_field);
+}
+
+TEST(CompositeVectorscopeTest, ActiveLinesOnly_DropsTheVerticalInterval) {
+  // The decoded acquisition plots the active picture; without this the
+  // measurement acquisition always carried the vertical interval as well, so
+  // the same frame produced two plots that could not be compared.
+  const orc::SourceParameters parameters = pal_parameters();
+  const Uv bar = rgb_to_uv(0.75, 0.0, 0.0);
+  const std::vector<int16_t> frame =
+      synthesise_frame(parameters, bar, 0.299 * 0.75, /*switched_v=*/true);
+
+  orc::CompositeVectorscopeOptions options;
+  options.window = orc::VectorscopeSampleWindow::ActiveLine;
+  options.active_lines_only = true;
+
+  const auto data = orc::extract_composite_vectorscope(
+      frame.data(), frame.size(), parameters, 0, options);
+  ASSERT_TRUE(data.has_value());
+
+  EXPECT_EQ(data->first_line,
+            static_cast<uint32_t>(parameters.first_active_frame_line));
+  EXPECT_EQ(data->last_line,
+            static_cast<uint32_t>(parameters.last_active_frame_line - 1));
+  for (const auto& sample : data->samples) {
+    EXPECT_GE(sample.line_number, parameters.first_active_frame_line);
+    EXPECT_LT(sample.line_number, parameters.last_active_frame_line);
+  }
+
+  // The readouts are measured over every burst-carrying line of the frame,
+  // so restricting what is plotted does not move them.
+  orc::CompositeVectorscopeOptions all_lines = options;
+  all_lines.active_lines_only = false;
+  const auto whole_frame = orc::extract_composite_vectorscope(
+      frame.data(), frame.size(), parameters, 0, all_lines);
+  ASSERT_TRUE(whole_frame.has_value());
+  EXPECT_EQ(data->measurements.burst_line_count,
+            whole_frame->measurements.burst_line_count);
+  EXPECT_NEAR(data->measurements.burst_amplitude_ire,
+              whole_frame->measurements.burst_amplitude_ire, 1e-9);
+  EXPECT_LT(data->samples.size(), whole_frame->samples.size());
+}
+
+TEST(CompositeVectorscopeTest, ActiveLinesOnly_IntersectsWithAnExplicitRange) {
+  const orc::SourceParameters parameters = pal_parameters();
+  const Uv bar = rgb_to_uv(0.75, 0.0, 0.0);
+  const std::vector<int16_t> frame =
+      synthesise_frame(parameters, bar, 0.299 * 0.75, /*switched_v=*/true);
+
+  orc::CompositeVectorscopeOptions options;
+  options.window = orc::VectorscopeSampleWindow::ActiveLine;
+  options.active_lines_only = true;
+  // Starts in the vertical interval and ends inside the picture; only the
+  // overlap survives.
+  options.first_line = 0;
+  options.last_line = 100;
+
+  const auto data = orc::extract_composite_vectorscope(
+      frame.data(), frame.size(), parameters, 0, options);
+  ASSERT_TRUE(data.has_value());
+  EXPECT_EQ(data->first_line,
+            static_cast<uint32_t>(parameters.first_active_frame_line));
+  EXPECT_EQ(data->last_line, 100u);
 }
 
 TEST(CompositeVectorscopeTest, MaxSamples_SubsamplesAndReportsStride) {
