@@ -145,8 +145,11 @@ stages re-acquires; the two are different data sets, not two renderings of one.
 The composite acquisition's display is not delay-line compensated, so a PAL
 graticule carries **two** sets of colour-bar targets — upper case for the +V
 line phase, lower case for the −V phase — and **two** burst boxes at 135° and
-225° (ITU-R BT.470-6 Table 2 item 2.16). NTSC has a single set of targets and a
-single burst box on the −U axis at 180° (SMPTE 170M-2004 §8.4).
+225° (ITU-R BT.470-6 Table 2 item 2.16). PAL-M is drawn the same way: ITU-R
+BT.1700-1 Annex 1 Part B gives it PAL colour encoding, V-switch included, on
+the 525-line raster, so only its burst amplitude follows the NTSC levels. NTSC
+has a single set of targets and a single burst box on the −U axis at 180°
+(SMPTE 170M-2004 §8.4).
 
 Controls that describe only one of the acquisitions are shown only for it.
 
@@ -173,7 +176,7 @@ line of the frame:
 | Burst | Mean burst peak amplitude in IRE, and as a percentage of the nominal for the system (EBU Tech. 3280-E §1.2: PAL 300 mV p-p; SMPTE 170M-2004 §8.4: NTSC 40 IRE p-p). 100 % means the burst is at its specified amplitude. |
 | Jitter | RMS deviation of the per-line burst phase from the mean phase of its own V-switch group — subcarrier phase jitter. |
 | Lines | Number of lines that contributed to the burst reference. |
-| V-switch split err | PAL only. Departure of the two burst vectors from their nominal 90° separation. |
+| V-switch split err | PAL and PAL-M only. Departure of the two burst vectors from their nominal 90° separation. |
 | Chroma/burst | Mean active-picture chroma amplitude divided by the mean burst amplitude. |
 
 The subcarrier reference is measured from the burst rather than assumed from

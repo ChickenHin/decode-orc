@@ -700,7 +700,7 @@ void VectorscopeDialog::updateMeasurementReadout() {
                      .arg(m.burst_phase_jitter_degrees, 0, 'f', 2)
                      .arg(m.burst_line_count);
 
-  if (d_->last_data->system == orc::VideoSystem::PAL) {
+  if (orc::gui::hasSwitchedVAxis(d_->last_data->system)) {
     text += QString("\nV-switch split err: %1°")
                 .arg(m.burst_phase_split_error_degrees, 0, 'f', 2);
   }

@@ -179,35 +179,40 @@ TEST(VectorscopeGeometryTest, MeasurementBurstMagnitude_MatchesSpecLevels) {
       0.20 * orc::gui::kVectorscopeSignedFullScale);
 }
 
-TEST(VectorscopeGeometryTest, OnlyPalNeedsTwoTargetSets) {
-  // ITU-R BT.470-6 Table 2 item 2.16: only PAL swings V line by line, so only
-  // a PAL measurement graticule carries mirrored target sets.
+TEST(VectorscopeGeometryTest, OnlyTheVSwitchedSystemsNeedTwoTargetSets) {
+  // ITU-R BT.470-6 Table 2 item 2.16: PAL swings V line by line, so a PAL
+  // measurement graticule carries mirrored target sets.
   EXPECT_TRUE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::PAL));
+  // ITU-R BT.1700-1 Annex 1 Part B: PAL-M is PAL colour encoding on the
+  // 525-line raster, V-switch included — only its signal levels come from
+  // NTSC — so it needs the mirrored sets too.
+  EXPECT_TRUE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::PAL_M));
+  // SMPTE 170M-2004 §8.4: NTSC does not swing.
   EXPECT_FALSE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::NTSC));
-  EXPECT_FALSE(orc::gui::hasSwitchedVAxis(orc::VideoSystem::PAL_M));
 }
 
 TEST(VectorscopeGeometryTest, MeasurementTargets_MirrorAboutTheUAxis) {
   constexpr double kIreRange = orc::gui::kVectorscopeSignedFullScale;
 
-  for (int rgb = 1; rgb <= 6; ++rgb) {
-    const orc::UVSample positive = orc::gui::measurementTargetUv(
-        rgb, 0.75, kIreRange, orc::VideoSystem::PAL,
-        orc::VectorscopeLinePhase::VPositive);
-    const orc::UVSample negative = orc::gui::measurementTargetUv(
-        rgb, 0.75, kIreRange, orc::VideoSystem::PAL,
-        orc::VectorscopeLinePhase::VNegative);
-    const orc::UVSample reference = orc::gui::vectorscopeTargetUv(
-        rgb, 0.75, kIreRange, orc::VideoSystem::PAL);
+  for (const orc::VideoSystem system :
+       {orc::VideoSystem::PAL, orc::VideoSystem::PAL_M}) {
+    for (int rgb = 1; rgb <= 6; ++rgb) {
+      const orc::UVSample positive = orc::gui::measurementTargetUv(
+          rgb, 0.75, kIreRange, system, orc::VectorscopeLinePhase::VPositive);
+      const orc::UVSample negative = orc::gui::measurementTargetUv(
+          rgb, 0.75, kIreRange, system, orc::VectorscopeLinePhase::VNegative);
+      const orc::UVSample reference =
+          orc::gui::vectorscopeTargetUv(rgb, 0.75, kIreRange, system);
 
-    // The +V phase is the ordinary target set.
-    EXPECT_DOUBLE_EQ(positive.u, reference.u);
-    EXPECT_DOUBLE_EQ(positive.v, reference.v);
+      // The +V phase is the ordinary target set.
+      EXPECT_DOUBLE_EQ(positive.u, reference.u);
+      EXPECT_DOUBLE_EQ(positive.v, reference.v);
 
-    // A −V line inverts V only, which is exactly what an undelayed composite
-    // display shows.
-    EXPECT_DOUBLE_EQ(negative.u, reference.u);
-    EXPECT_DOUBLE_EQ(negative.v, -reference.v);
+      // A −V line inverts V only, which is exactly what an undelayed composite
+      // display shows.
+      EXPECT_DOUBLE_EQ(negative.u, reference.u);
+      EXPECT_DOUBLE_EQ(negative.v, -reference.v);
+    }
   }
 }
 

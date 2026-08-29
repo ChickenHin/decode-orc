@@ -414,6 +414,14 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
   // two states appear equally often.  NTSC has no swing and the burst angle is
   // the reference directly.
   //
+  // PAL_M swings with PAL, not with NTSC: ITU-R BT.1700-1 Annex 1 Part B
+  // gives it PAL colour encoding — V-axis switch and ±45° burst swing — on
+  // the 525-line raster whose signal levels it borrows from NTSC.  Left out
+  // of the swing, its two burst states are read as ±45° of phase noise: the
+  // fit is pulled about by the square wave, no line is classified +V or −V,
+  // and the jitter readout reports the swing itself (≈45° rms) instead of the
+  // timebase error it is there to measure.
+  //
   // The two fields are tracked independently, so a phase step at the field
   // boundary that the predictor does not model is absorbed rather than smeared
   // across the join.
@@ -427,7 +435,8 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
           ? static_cast<size_t>(parameters.last_active_frame_line / 2)
           : f1_lines;
 
-  const bool is_pal_switched = (system == VideoSystem::PAL);
+  const bool is_pal_switched =
+      (system == VideoSystem::PAL || system == VideoSystem::PAL_M);
   const double swing = is_pal_switched ? (M_PI / 4.0) : 0.0;
 
   // Per-line −U axis direction in the unrotated demodulated frame.  Left

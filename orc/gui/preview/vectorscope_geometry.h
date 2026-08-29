@@ -198,8 +198,11 @@ inline double nominalBurstMagnitudeUv(orc::VideoSystem system,
 // True when |system| swings the V component line by line, so a measurement
 // graticule needs two mirrored sets of colour-bar targets and two burst
 // vectors rather than one of each.
+// ITU-R BT.1700-1 Annex 1 Part B: PAL_M carries PAL colour encoding — V-axis
+// switch included — on the 525-line raster, so it swings with PAL even though
+// it takes its signal levels and burst amplitude from NTSC.
 inline bool hasSwitchedVAxis(orc::VideoSystem system) {
-  return system == orc::VideoSystem::PAL;
+  return system == orc::VideoSystem::PAL || system == orc::VideoSystem::PAL_M;
 }
 
 // Colour-bar target for one V-switch line phase.  A −V line inverts the V

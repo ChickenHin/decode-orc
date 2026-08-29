@@ -67,6 +67,17 @@ orc::SourceParameters ntsc_parameters() {
   return parameters;
 }
 
+// ITU-R BT.1700-1 Annex 1 Part B: PAL_M is PAL colour encoding — V-switch
+// included — on the 525-line raster, and it takes the 525-line signal levels
+// and active geometry from NTSC.
+orc::SourceParameters pal_m_parameters() {
+  orc::SourceParameters parameters = ntsc_parameters();
+  parameters.system = orc::VideoSystem::PAL_M;
+  parameters.frame_width_nominal = orc::kPalMSamplesPerLine;
+  parameters.frame_height = orc::kPalMFrameLines;
+  return parameters;
+}
+
 // Where a synthesised line places the subcarrier at its first sample.
 enum class LineGrid {
   // The subcarrier advances by the nominal cycles per line (PAL 283.7516), so
@@ -472,6 +483,91 @@ TEST(CompositeVectorscopeTest, Ntsc_SingleBurstPhaseAndNoLinePhase) {
   // SMPTE 170M-2004 §8.4: the NTSC burst sits on the −U axis, i.e. 180°.
   EXPECT_NEAR(std::abs(std::atan2(burst.v, burst.u) * 180.0 / M_PI), 180.0,
               2.0);
+}
+
+TEST(CompositeVectorscopeTest, PalM_SwingsWithPalRatherThanNtsc) {
+  // ITU-R BT.1700-1 Annex 1 Part B: PAL_M carries PAL colour encoding on the
+  // 525-line raster, so its burst swings ±45° about the −U axis exactly as
+  // 625-line PAL's does.  Treated as NTSC instead, the swing is read as phase
+  // noise: the burst-reference fit is pulled about by the square wave, no line
+  // is classified +V or −V, and the jitter readout reports the swing itself
+  // (≈45° rms) rather than the timebase error it exists to measure.
+  const orc::SourceParameters parameters = pal_m_parameters();
+  const Uv bar = rgb_to_uv(0.75, 0.0, 0.0);
+  const std::vector<int16_t> frame =
+      synthesise_frame(parameters, bar, 0.299 * 0.75, /*switched_v=*/true);
+
+  orc::CompositeVectorscopeOptions options;
+  options.window = orc::VectorscopeSampleWindow::ActiveLine;
+  // Lines wholly inside field 1's active picture (frame-flat 40..260 for the
+  // 525-line raster), so every sampled line carries the bar.
+  options.first_line = 60;
+  options.last_line = 160;
+
+  const auto data = orc::extract_composite_vectorscope(
+      frame.data(), frame.size(), parameters, 0, options);
+  ASSERT_TRUE(data.has_value());
+  ASSERT_TRUE(data->measurements.valid);
+
+  // A synthetic burst has no jitter of its own and an exact 90° split.
+  EXPECT_LT(data->measurements.burst_phase_jitter_degrees, 1.0);
+  EXPECT_NEAR(data->measurements.burst_phase_split_error_degrees, 0.0, 1.0);
+
+  size_t positive_count = 0;
+  size_t negative_count = 0;
+  const Uv positive =
+      mean_of(*data, orc::VectorscopeSampleClass::Picture,
+              orc::VectorscopeLinePhase::VPositive, &positive_count);
+  const Uv negative =
+      mean_of(*data, orc::VectorscopeSampleClass::Picture,
+              orc::VectorscopeLinePhase::VNegative, &negative_count);
+  ASSERT_GT(positive_count, 0u);
+  ASSERT_GT(negative_count, 0u);
+
+  const double expected_u = bar.u * kDisplayFullScale;
+  const double expected_v = bar.v * kDisplayFullScale;
+
+  // The V-switch is deliberately not undone, so the −V lines plot as the
+  // mirror image of the +V lines about the U axis.
+  EXPECT_NEAR(positive.u, expected_u, 150.0);
+  EXPECT_NEAR(positive.v, expected_v, 150.0);
+  EXPECT_NEAR(negative.u, expected_u, 150.0);
+  EXPECT_NEAR(negative.v, -expected_v, 150.0);
+}
+
+TEST(CompositeVectorscopeTest, PalM_BurstPlotsAtPlusMinus135AtNtscAmplitude) {
+  const orc::SourceParameters parameters = pal_m_parameters();
+  const Uv bar = rgb_to_uv(0.75, 0.0, 0.0);
+  const std::vector<int16_t> frame =
+      synthesise_frame(parameters, bar, 0.299 * 0.75, /*switched_v=*/true);
+
+  orc::CompositeVectorscopeOptions options;
+  options.window = orc::VectorscopeSampleWindow::BurstOnly;
+
+  const auto data = orc::extract_composite_vectorscope(
+      frame.data(), frame.size(), parameters, 0, options);
+  ASSERT_TRUE(data.has_value());
+  ASSERT_TRUE(data->measurements.valid);
+
+  size_t positive_count = 0;
+  size_t negative_count = 0;
+  const Uv positive =
+      mean_of(*data, orc::VectorscopeSampleClass::Burst,
+              orc::VectorscopeLinePhase::VPositive, &positive_count);
+  const Uv negative =
+      mean_of(*data, orc::VectorscopeSampleClass::Burst,
+              orc::VectorscopeLinePhase::VNegative, &negative_count);
+  ASSERT_GT(positive_count, 0u);
+  ASSERT_GT(negative_count, 0u);
+
+  // The two burst vectors sit ±45° about the −U axis, as PAL's do.
+  EXPECT_NEAR(std::atan2(positive.v, positive.u) * 180.0 / M_PI, 135.0, 2.0);
+  EXPECT_NEAR(std::atan2(negative.v, negative.u) * 180.0 / M_PI, -135.0, 2.0);
+
+  // Only the amplitude follows the 525-line levels: SMPTE 170M-2004 §8.4's
+  // 40 IRE p-p burst, not EBU Tech. 3280-E's 300 mV on 700 mV.
+  EXPECT_NEAR(data->measurements.burst_amplitude_ire, 20.0, 0.5);
+  EXPECT_NEAR(data->measurements.burst_amplitude_percent, 100.0, 3.0);
 }
 
 TEST(CompositeVectorscopeTest, SharpLumaEdge_DoesNotThrowAChromaVector) {
