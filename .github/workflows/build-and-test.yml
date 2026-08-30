@@ -2,6 +2,7 @@ name: Build and Test (Nix)
 
 on:
   workflow_call:
+  workflow_dispatch: 
 
 # Three independent jobs run concurrently rather than one serial 48-minute step.
 #
@@ -326,28 +327,3 @@ jobs:
             # the compiler identity moved.
             ccache --show-stats
           "
-
-      - name: Upload Unit Gate Artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ctest-artifacts-unit
-          if-no-files-found: warn
-          path: |
-            build/ctest-results-unit.xml
-            build/ctest-results-functional.xml
-            build/ctest-results-unit-summary.md
-            build/Testing/Temporary/LastTest.log
-            build/Testing/Temporary/CTestCostData.txt
-
-      # Standalone plugin-SDK package (headers + orc-sdk-support static lib +
-      # CMake config + enforcement scripts). Third-party plugin authors consume
-      # this instead of the host source tree; the release workflow can attach it
-      # to host releases (release-from-artifact.yml, artifact_pattern glob).
-      - name: Upload Plugin SDK Package
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: decode-orc-plugin-sdk
-          if-no-files-found: warn
-          path: build/decode-orc-plugin-sdk-*-linux-x86_64.tar.gz
