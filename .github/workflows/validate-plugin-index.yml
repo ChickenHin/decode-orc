@@ -8,15 +8,15 @@ name: Validate Plugin Index
 # repository, this workflow moves with it unchanged.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'orc-plugin-registry/**'
-      - '.github/workflows/validate-plugin-index.yml'
-  pull_request:
-    paths:
-      - 'orc-plugin-registry/**'
-      - '.github/workflows/validate-plugin-index.yml'
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - 'orc-plugin-registry/**'
+  #     - '.github/workflows/validate-plugin-index.yml'
+  # pull_request:
+  #   paths:
+  #     - 'orc-plugin-registry/**'
+  #     - '.github/workflows/validate-plugin-index.yml'
 
 jobs:
   validate:
