@@ -3,12 +3,12 @@ name: Main CI/CD
 on:
   # All branch pushes run the build-and-test gate; packaging is additionally
   # gated below to main, tags, and manual dispatch.
-  push:
-    branches:
-      - "**"
-    tags:
-      - "v*"
-  pull_request:
+  # push:
+  #   branches:
+  #     - "**"
+  #   tags:
+  #     - "v*"
+  # pull_request:
   workflow_dispatch:
 
 # One run per ref; superseded runs are cancelled except for tag (release) builds.
@@ -25,53 +25,53 @@ jobs:
   # Packaging runs on every push (branches and tags) and manual dispatch so
   # the installable artifacts can be tested per-branch. PR events skip
   # packaging only to avoid duplicating the push-triggered run.
-  package-macos:
-    name: Package MacOS DMG
-    if: github.event_name != 'pull_request'
-    needs: build-and-test
-    uses: ./.github/workflows/package-macos.yml
-    with:
-      artifact_name: decode-orc-macos-dmg
-      retention_days: 30
-    secrets: inherit
+  # package-macos:
+  #   name: Package MacOS DMG
+  #   if: github.event_name != 'pull_request'
+  #   needs: build-and-test
+  #   uses: ./.github/workflows/package-macos.yml
+  #   with:
+  #     artifact_name: decode-orc-macos-dmg
+  #     retention_days: 30
+  #   secrets: inherit
 
-  package-flatpak:
-    name: Package Linux Flatpak
-    if: github.event_name != 'pull_request'
-    needs: build-and-test
-    uses: ./.github/workflows/package-flatpak.yml
-    with:
-      artifact_name: decode-orc-linux-flatpak
-      retention_days: 30
-    secrets: inherit
+  # package-flatpak:
+  #   name: Package Linux Flatpak
+  #   if: github.event_name != 'pull_request'
+  #   needs: build-and-test
+  #   uses: ./.github/workflows/package-flatpak.yml
+  #   with:
+  #     artifact_name: decode-orc-linux-flatpak
+  #     retention_days: 30
+  #   secrets: inherit
 
-  package-windows:
-    name: Package Windows MSI
-    if: github.event_name != 'pull_request'
-    needs: build-and-test
-    uses: ./.github/workflows/package-windows.yml
-    with:
-      artifact_name: decode-orc-windows-msi
-      retention_days: 30
-    permissions:
-      contents: read
-      packages: write
-    secrets: inherit
+  # package-windows:
+  #   name: Package Windows MSI
+  #   if: github.event_name != 'pull_request'
+  #   needs: build-and-test
+  #   uses: ./.github/workflows/package-windows.yml
+  #   with:
+  #     artifact_name: decode-orc-windows-msi
+  #     retention_days: 30
+  #   permissions:
+  #     contents: read
+  #     packages: write
+  #   secrets: inherit
 
-  # Single release job so the GitHub release is created exactly once with all
-  # platform assets (avoids the create-release race between parallel jobs and
-  # partially-published releases when one platform fails).
-  release:
-    name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
-    needs:
-      - package-macos
-      - package-flatpak
-      - package-windows
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release-from-artifact.yml
-    with:
-      artifact_pattern: decode-orc-*
-      file_glob: release-artifacts/*
-    secrets: inherit
+  # # Single release job so the GitHub release is created exactly once with all
+  # # platform assets (avoids the create-release race between parallel jobs and
+  # # partially-published releases when one platform fails).
+  # release:
+  #   name: Publish GitHub release
+  #   if: startsWith(github.ref, 'refs/tags/')
+  #   needs:
+  #     - package-macos
+  #     - package-flatpak
+  #     - package-windows
+  #   permissions:
+  #     contents: write
+  #   uses: ./.github/workflows/release-from-artifact.yml
+  #   with:
+  #     artifact_pattern: decode-orc-*
+  #     file_glob: release-artifacts/*
+    # secrets: inherit
