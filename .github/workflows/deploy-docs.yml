@@ -1,15 +1,15 @@
 name: Deploy MkDocs to GitHub Pages
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - docs/**
-      - mkdocs.yml
-      - flake.nix
-      - .github/workflows/deploy-docs.yml
-  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - docs/**
+  #     - mkdocs.yml
+  #     - flake.nix
+  #     - .github/workflows/deploy-docs.yml
+  # workflow_dispatch:
 
 permissions:
   contents: read
