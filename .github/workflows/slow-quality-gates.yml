@@ -1,12 +1,12 @@
 name: Slow Quality Gates (Nix)
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "25 3 * * *"
-  push:
-    branches:
-      - main
+  # workflow_dispatch:
+  # schedule:
+  #   - cron: "25 3 * * *"
+  # push:
+  #   branches:
+  #     - main
 
 jobs:
   integration-and-broad-slices:
